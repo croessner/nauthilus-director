@@ -47,7 +47,7 @@ func (s *StartTLSCommand) Execute(session iface.IMAPSession) error {
 	session.SetClientConn(tlsConn)
 	session.SetReader(bufio.NewReader(tlsConn)) // Aktualisiere den Reader für die verschlüsselte Verbindung
 
-	fmt.Println("TLS-connection established")
+	fmt.Println("TLS-connection established with client", tlsConn.RemoteAddr())
 
 	return nil
 }

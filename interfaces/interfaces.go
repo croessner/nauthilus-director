@@ -16,7 +16,7 @@ type IMAPCommand interface {
 type IMAPSession interface {
 	WriteResponse(response string)
 	ReadLine() (string, error)
-	ConnectToIMAPBackend(masterUser, masterPass string) error
+	ConnectToIMAPBackend(tag, masterUser, masterPass string) error
 	ForwardToIMAPServer(data string)
 	Close()
 	GetAuthenticator() Authenticator
@@ -25,4 +25,5 @@ type IMAPSession interface {
 	SetClientConn(conn net.Conn)
 	GetClientConn() net.Conn
 	SetReader(reader *bufio.Reader)
+	GetBackendGreeting() string
 }

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -13,26 +14,40 @@ import (
 )
 
 type SessionImpl struct {
-	clientConn     net.Conn
-	serverConn     net.Conn
-	reader         *bufio.Reader
-	authenticator  iface.Authenticator
-	clientUsername string
-	tlsConfig      *tls.Config
-	ctx            context.Context
+	clientConn      net.Conn
+	serverCtx       context.Context
+	serverConn      net.Conn
+	clientCtx       context.Context
+	reader          *bufio.Reader
+	authenticator   iface.Authenticator
+	clientUsername  string
+	backendGreeting string
+	tlsConfig       *tls.Config
 }
 
 func (s *SessionImpl) WriteResponse(response string) {
+	if s.clientConn == nil {
+		return
+	}
+
 	_, err := s.clientConn.Write([]byte(response))
 	if err != nil {
-		fmt.Println("Fehler beim Senden der Antwort:", err)
+		fmt.Println("Error while sending the response:", err)
 	}
 }
 
 func (s *SessionImpl) ReadLine() (string, error) {
-	line, err := s.reader.ReadString('\n')
+	if s.clientConn == nil {
+		return "", io.EOF
+	}
+
+	line, err := s.reader.ReadString('\n') // Lesen einer Zeile
 	if err != nil {
-		fmt.Println("Fehler beim Lesen der Client-Daten:", err)
+		var opErr *net.OpError
+
+		if errors.As(err, &opErr) && opErr.Err.Error() == "use of closed network connection" {
+			return "", io.EOF
+		}
 
 		return "", err
 	}
@@ -56,8 +71,7 @@ func (s *SessionImpl) initializeIMAPConnection() error {
 	s.serverConn = conn
 
 	// TODO: Support ctx with cancel to interrupt connections on behalf
-	go copyWithContext(s.ctx, s.serverConn, s.clientConn) // Data transfer client -> server
-	go copyWithContext(s.ctx, s.clientConn, s.serverConn) // Data transfer server -> client
+	go s.copyWithContext()
 
 	return nil
 }
@@ -71,29 +85,47 @@ func (s *SessionImpl) ForwardToIMAPServer(data string) {
 	_, _ = s.serverConn.Write([]byte(data)) // Weiterleitung der Anfrage
 }
 
-func (s *SessionImpl) ConnectToIMAPBackend(username, password string) error {
-	// Initialisiere Verbindung, falls nicht vorhanden
+func (s *SessionImpl) ConnectToIMAPBackend(tag, username, password string) error {
+	// TODO: Add master user later...
+	_ = username
+
 	if err := s.initializeIMAPConnection(); err != nil {
 		return err
 	}
 
-	// Sende das Master-Login an das Backend
-	backendLogin := fmt.Sprintf("A0 LOGIN %s*%s %s\r\n", s.GetUser(), username, password)
-	if _, err := s.serverConn.Write([]byte(backendLogin)); err != nil {
-		fmt.Println("Fehler beim Senden des Backend-Logins:", err)
+	reader := bufio.NewReader(s.serverConn)
+	greeting, err := reader.ReadString('\n')
+
+	if err != nil {
+		return fmt.Errorf("error reading IMAP server greeting: %w", err)
+	}
+
+	if !strings.Contains(greeting, "OK") {
+		return fmt.Errorf("backend server did not send expected OK greeting: %s", greeting)
+	}
+
+	backendLogin := fmt.Sprintf("%s LOGIN %s %s\r\n", tag, s.GetUser(), password)
+
+	if _, err = s.serverConn.Write([]byte(backendLogin)); err != nil {
+		fmt.Println("Error when sending the login to the backend server:", err)
 
 		return err
 	}
 
-	// Warte auf die Antwort des Backends
-	reader := bufio.NewReader(s.serverConn)
-	response, _ := reader.ReadString('\n')
+	response, err := reader.ReadString('\n')
+	if err != nil {
+		if err == io.EOF {
+			return io.EOF
+		}
 
-	fmt.Println("IMAP-Backend Antwort:", response)
+		return fmt.Errorf("error reading IMAP login response: %w", err)
+	}
 
 	if !strings.Contains(response, "OK") {
-		return fmt.Errorf("backend login failed")
+		return fmt.Errorf("backend login failed: %s", response)
 	}
+
+	s.backendGreeting = response
 
 	return nil
 }
@@ -113,9 +145,6 @@ func (s *SessionImpl) handleCommand(line string) {
 	}
 
 	tag, cmd := parts[0], strings.ToUpper(parts[1])
-
-	fmt.Println("Tag:", tag)
-	fmt.Println("Command:", cmd)
 
 	switch cmd {
 	case "LOGIN":
@@ -148,7 +177,7 @@ func (s *SessionImpl) handleCommand(line string) {
 	case "STARTTLS":
 		command = &StartTLSCommand{
 			Tag:       tag,
-			TLSConfig: s.tlsConfig, // TLS-Konfiguration aus dem Proxy
+			TLSConfig: s.tlsConfig, // TLS-config from the proxy
 		}
 
 	default:
@@ -192,27 +221,36 @@ func (s *SessionImpl) SetReader(reader *bufio.Reader) {
 	s.reader = reader
 }
 
-func copyWithContext(ctx context.Context, dst net.Conn, src net.Conn) {
-	done := make(chan struct{})
+func (s *SessionImpl) GetBackendGreeting() string {
+	return s.backendGreeting
+}
+
+func (s *SessionImpl) copyWithContext() {
+	clientDone := make(chan struct{})
+	backendDone := make(chan struct{})
 
 	go func() {
-		_, err := io.Copy(dst, src)
-		if err != nil {
-			fmt.Println("Error:", err)
-		}
+		_, _ = io.Copy(s.serverConn, s.clientConn)
+		fmt.Println("Connection closed by client")
 
-		close(done)
+		close(clientDone)
+	}()
+
+	go func() {
+		_, _ = io.Copy(s.clientConn, s.serverConn)
+		fmt.Println("Connection closed by backend")
+
+		close(backendDone)
 	}()
 
 	select {
-	case <-ctx.Done(): // Kontext wurde abgebrochen
-		fmt.Println("Copy aborted")
-
-		// Verbindungen explizit schließen
-		_ = dst.Close()
-		_ = src.Close()
-
-	case <-done: // Kopieren beendet
-		fmt.Println("Copy aborted")
+	case <-s.serverCtx.Done():
+		s.Close()
+	case <-s.clientCtx.Done():
+		s.Close()
+	case <-clientDone:
+		s.Close()
+	case <-backendDone:
+		s.Close()
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"io"
 	"net"
 
 	"github.com/croessner/nauthilus-director/interfaces"
@@ -67,16 +68,23 @@ func (p *Proxy) handleConnection(clientConn net.Conn) {
 		reader:        bufio.NewReader(clientConn),
 		authenticator: p.authenticator,
 		tlsConfig:     p.tlsConfig,
-		ctx:           p.ctx,
+		serverCtx:     p.ctx,
+		clientCtx:     p.ctx,
 	}
 
 	// TODO: config greeting
 	session.WriteResponse("* OK IMAP Proxy Ready\r\n")
 
+	fmt.Println("New connection: ", clientConn.RemoteAddr())
+
 	for {
 		line, err := session.ReadLine()
 		if err != nil {
-			fmt.Println("Client disconnected:", err)
+			if err != io.EOF {
+				fmt.Println("Error reading IMAP command:", err)
+			} else {
+				fmt.Println("Client disconnected: ", clientConn.RemoteAddr())
+			}
 
 			return
 		}

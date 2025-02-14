@@ -2,6 +2,7 @@ package imap
 
 import (
 	"fmt"
+	"io"
 
 	"github.com/croessner/nauthilus-director/interfaces"
 )
@@ -25,16 +26,22 @@ func (c *LoginCommand) Execute(session iface.IMAPSession) error {
 
 	// TODO: config master user
 	masterUser := "masteruser"
-	masterPass := "masterpass"
+	masterPass := "password" // Dovecot docker image accepts all users with the password "password"
 
-	err := session.ConnectToIMAPBackend(masterUser, masterPass)
+	err := session.ConnectToIMAPBackend(c.Tag, masterUser, masterPass)
 	if err != nil {
+		if err == io.EOF {
+			session.Close()
+
+			return io.EOF
+		}
+
 		session.WriteResponse(c.Tag + " NO Backend authentication failed\r\n")
-		session.Close()
 
 		return fmt.Errorf("backend auth failed")
 	}
 
+	session.WriteResponse(session.GetBackendGreeting())
 	session.WriteResponse(c.Tag + " OK LOGIN completed\r\n")
 
 	return nil
