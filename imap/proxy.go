@@ -18,6 +18,7 @@ import (
 	"github.com/croessner/nauthilus-director/enc"
 	"github.com/croessner/nauthilus-director/interfaces"
 	"github.com/croessner/nauthilus-director/log"
+	"github.com/segmentio/ksuid"
 )
 
 type Proxy struct {
@@ -152,22 +153,23 @@ func (p *Proxy) handleConnection(clientConn net.Conn) {
 		reader:        bufio.NewReader(clientConn),
 		authenticator: p.authenticator,
 		tlsConfig:     p.tlsConfig,
-		serverCtx:     p.ctx,
-		clientCtx:     p.ctx,
+		serverCtx:     p.ctx.Copy(),
+		clientCtx:     p.ctx.Copy(),
 		startTLS:      p.startTLS,
+		session:       ksuid.New().String(),
 	}
 
 	session.WriteResponse("* OK IMAP Ready\r\n")
 
-	logger.Info("New connection", slog.String("client", clientConn.RemoteAddr().String()))
+	logger.Info("New connection", slog.String("client", clientConn.RemoteAddr().String()), session.Session())
 
 	for {
 		line, err := session.ReadLine()
 		if err != nil {
 			if err != io.EOF {
-				logger.Error("Error reading IMAP command", slog.String(log.Error, err.Error()))
+				logger.Error("Error reading IMAP command", slog.String(log.Error, err.Error()), session.Session())
 			} else {
-				logger.Info("Client disconnected", slog.String("client", clientConn.RemoteAddr().String()))
+				logger.Info("Client disconnected", slog.String("client", clientConn.RemoteAddr().String()), session.Session())
 			}
 
 			return

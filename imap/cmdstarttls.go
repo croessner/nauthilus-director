@@ -20,7 +20,7 @@ func (s *StartTLSCommand) Execute(session iface.IMAPSession) error {
 
 	if s.TLSConfig == nil {
 		session.WriteResponse(s.Tag + " NO TLS configuration not available\r\n")
-		logger.Error("TLS config is nil")
+		logger.Error("TLS config is nil", session.Session())
 
 		return fmt.Errorf("tls config is nil")
 	}
@@ -30,7 +30,7 @@ func (s *StartTLSCommand) Execute(session iface.IMAPSession) error {
 	tlsConn := tls.Server(session.GetClientConn(), s.TLSConfig)
 	err := tlsConn.Handshake()
 	if err != nil {
-		logger.Error("TLS-Handshake failed", slog.String(log.Error, err.Error()))
+		logger.Error("TLS-Handshake failed", slog.String(log.Error, err.Error()), session.Session())
 		session.Close()
 
 		return err
@@ -39,7 +39,7 @@ func (s *StartTLSCommand) Execute(session iface.IMAPSession) error {
 	session.SetClientConn(tlsConn)
 	session.SetReader(bufio.NewReader(tlsConn))
 
-	logger.Info("TLS-connection established with client", slog.String("client", tlsConn.RemoteAddr().String()))
+	logger.Info("TLS-connection established", slog.String("client", tlsConn.RemoteAddr().String()), session.Session())
 
 	return nil
 }

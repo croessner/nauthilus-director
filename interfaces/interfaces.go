@@ -2,6 +2,7 @@ package iface
 
 import (
 	"bufio"
+	"log/slog"
 	"net"
 
 	"github.com/croessner/nauthilus-director/config"
@@ -35,6 +36,7 @@ type IMAPSession interface {
 	GetClientConn() net.Conn
 	SetReader(reader *bufio.Reader)
 	GetBackendGreeting() string
+	Session() slog.Attr
 }
 
 type IMAPCommandFilter interface {

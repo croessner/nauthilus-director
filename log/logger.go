@@ -1,6 +1,7 @@
 package log
 
 import (
+	stdcontext "context"
 	"log/slog"
 	"os"
 
@@ -12,7 +13,39 @@ const loggerKey context.CtxKey = "logging"
 
 const Error = "error"
 
+type WrappedHandler struct {
+	handler slog.Handler
+	fields  []slog.Attr
+}
+
+func (w *WrappedHandler) Enabled(ctx stdcontext.Context, level slog.Level) bool {
+	return w.handler.Enabled(ctx, level)
+}
+
+func (w *WrappedHandler) Handle(ctx stdcontext.Context, record slog.Record) error {
+	record.AddAttrs(w.fields...)
+
+	return w.handler.Handle(ctx, record)
+}
+
+func (w *WrappedHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return &WrappedHandler{
+		handler: w.handler.WithAttrs(attrs),
+		fields:  w.fields,
+	}
+}
+
+// WithGroup ermöglicht die Gruppierung von Logs.
+func (w *WrappedHandler) WithGroup(name string) slog.Handler {
+	return &WrappedHandler{
+		handler: w.handler.WithGroup(name),
+		fields:  w.fields,
+	}
+}
+
 func SetupLogging(ctx *context.Context, cfg *config.Config) {
+	var baseHandler slog.Handler
+
 	handlerOpts := &slog.HandlerOptions{
 		AddSource: false,
 		Level:     slog.LevelInfo,
@@ -34,13 +67,26 @@ func SetupLogging(ctx *context.Context, cfg *config.Config) {
 		}
 
 		if cfg.Server.Logging.JSON {
-			ctx.Set(loggerKey, slog.New(slog.NewJSONHandler(os.Stdout, handlerOpts)))
-
-			return
+			baseHandler = slog.NewJSONHandler(os.Stdout, handlerOpts)
+		} else {
+			baseHandler = slog.NewTextHandler(os.Stdout, handlerOpts)
 		}
-	}
 
-	ctx.Set(loggerKey, slog.New(slog.NewTextHandler(os.Stdout, handlerOpts)))
+		if cfg.Server.InstanceID == "" {
+			cfg.Server.InstanceID = "default"
+		}
+
+		defaultFields := []slog.Attr{
+			slog.String("instance", cfg.Server.InstanceID),
+		}
+
+		wrappedHandler := &WrappedHandler{
+			handler: baseHandler,
+			fields:  defaultFields,
+		}
+
+		ctx.Set(loggerKey, slog.New(wrappedHandler))
+	}
 }
 
 func GetLogger(ctx *context.Context) *slog.Logger {

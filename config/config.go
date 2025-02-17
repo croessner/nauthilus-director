@@ -16,6 +16,7 @@ type Server struct {
 	Listen     []Listen   `mapstructure:"listen"`
 	Logging    Logging    `mapstructure:"logging"`
 	HTTPClient HTTPClient `mapstructure:"http_client"`
+	InstanceID string     `mapstructure:"instance_id"`
 }
 
 type Listen struct {

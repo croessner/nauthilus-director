@@ -26,6 +26,7 @@ type SessionImpl struct {
 	backendGreeting string
 	startTLS        bool
 	tlsConfig       *tls.Config
+	session         string
 }
 
 func (s *SessionImpl) WriteResponse(response string) {
@@ -37,7 +38,7 @@ func (s *SessionImpl) WriteResponse(response string) {
 
 	_, err := s.clientConn.Write([]byte(response))
 	if err != nil {
-		logger.Error("Error while sending the response:", slog.String(log.Error, err.Error()))
+		logger.Error("Error while sending the response:", slog.String(log.Error, err.Error()), s.Session())
 	}
 }
 
@@ -116,7 +117,7 @@ func (s *SessionImpl) ConnectToIMAPBackend(tag, username, password string) error
 	backendLogin := fmt.Sprintf("%s LOGIN %s %s\r\n", tag, s.GetUser(), password)
 
 	if _, err = s.serverConn.Write([]byte(backendLogin)); err != nil {
-		logger.Error("Error when sending the login to the backend server:", slog.String(log.Error, err.Error()))
+		logger.Error("Error when sending the login to the backend server:", slog.String(log.Error, err.Error()), s.Session())
 
 		return err
 	}
@@ -255,14 +256,14 @@ func (s *SessionImpl) copyWithContext() {
 
 	go func() {
 		_, _ = io.Copy(s.serverConn, s.clientConn)
-		logger.Debug("Connection closed by client")
+		logger.Debug("Connection closed by client", s.Session())
 
 		close(clientDone)
 	}()
 
 	go func() {
 		_, _ = io.Copy(s.clientConn, s.serverConn)
-		logger.Debug("Connection closed by backend")
+		logger.Debug("Connection closed by backend", s.Session())
 
 		close(backendDone)
 	}()
@@ -277,4 +278,8 @@ func (s *SessionImpl) copyWithContext() {
 	case <-backendDone:
 		s.Close()
 	}
+}
+
+func (s *SessionImpl) Session() slog.Attr {
+	return slog.String("session", s.session)
 }

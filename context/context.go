@@ -42,6 +42,22 @@ func (c *Context) Value(key any) any {
 	return c.data[key]
 }
 
+func (c *Context) Copy() *Context {
+	c.mu.RLock()
+
+	defer c.mu.RUnlock()
+
+	newData := make(map[any]any, len(c.data))
+	for key, value := range c.data {
+		newData[key] = value
+	}
+
+	return &Context{
+		data: newData,
+		ctx:  c.ctx,
+	}
+}
+
 // NewContext creates and initializes a new Context instance with an empty data map and a background context.
 func NewContext() *Context {
 	return &Context{

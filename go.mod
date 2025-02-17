@@ -3,6 +3,7 @@ module github.com/croessner/nauthilus-director
 go 1.23
 
 require (
+	github.com/segmentio/ksuid v1.0.4
 	github.com/spf13/pflag v1.0.6
 	github.com/spf13/viper v1.19.0
 )
