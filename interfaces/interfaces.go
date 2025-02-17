@@ -5,6 +5,7 @@ import (
 	"net"
 
 	"github.com/croessner/nauthilus-director/config"
+	"github.com/croessner/nauthilus-director/context"
 )
 
 type Authenticator interface {
@@ -20,6 +21,8 @@ type IMAPCommand interface {
 }
 
 type IMAPSession interface {
+	GetClientContext() *context.Context
+	GetServerContext() *context.Context
 	WriteResponse(response string)
 	ReadLine() (string, error)
 	ConnectToIMAPBackend(tag, masterUser, masterPass string) error

@@ -22,7 +22,6 @@ func (c *AuthenticateCommand) Execute(session iface.IMAPSession) error {
 
 	session.WriteResponse("+ \r\n")
 
-	// Lies Base64-kodierte Antwort
 	line, err := session.ReadLine()
 	if err != nil {
 		return err

@@ -2,22 +2,24 @@ package imap
 
 import (
 	"bufio"
-	"context"
 	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"strings"
 
+	"github.com/croessner/nauthilus-director/context"
 	"github.com/croessner/nauthilus-director/interfaces"
+	"github.com/croessner/nauthilus-director/log"
 )
 
 type SessionImpl struct {
 	clientConn      net.Conn
-	serverCtx       context.Context
+	serverCtx       *context.Context
 	serverConn      net.Conn
-	clientCtx       context.Context
+	clientCtx       *context.Context
 	reader          *bufio.Reader
 	authenticator   iface.Authenticator
 	clientUsername  string
@@ -27,13 +29,15 @@ type SessionImpl struct {
 }
 
 func (s *SessionImpl) WriteResponse(response string) {
+	logger := log.GetLogger(s.serverCtx)
+
 	if s.clientConn == nil {
 		return
 	}
 
 	_, err := s.clientConn.Write([]byte(response))
 	if err != nil {
-		fmt.Println("Error while sending the response:", err)
+		logger.Error("Error while sending the response:", slog.String(log.Error, err.Error()))
 	}
 }
 
@@ -57,6 +61,8 @@ func (s *SessionImpl) ReadLine() (string, error) {
 }
 
 func (s *SessionImpl) initializeIMAPConnection() error {
+	logger := log.GetLogger(s.serverCtx)
+
 	if s.serverConn != nil {
 		return nil // Verbindung existiert bereits
 	}
@@ -64,7 +70,7 @@ func (s *SessionImpl) initializeIMAPConnection() error {
 	conn, err := net.Dial("tcp", "127.0.0.1:1143")
 	if err != nil {
 		s.WriteResponse("* BYE Internal server error\r\n")
-		fmt.Println("Error while connecting to the backend server:", err)
+		logger.Error("Error while connecting to the backend server:", slog.String(log.Error, err.Error()))
 
 		return err
 	}
@@ -87,6 +93,8 @@ func (s *SessionImpl) ForwardToIMAPServer(data string) {
 }
 
 func (s *SessionImpl) ConnectToIMAPBackend(tag, username, password string) error {
+	logger := log.GetLogger(s.serverCtx)
+
 	// TODO: Add master user later...
 	_ = username
 
@@ -108,7 +116,7 @@ func (s *SessionImpl) ConnectToIMAPBackend(tag, username, password string) error
 	backendLogin := fmt.Sprintf("%s LOGIN %s %s\r\n", tag, s.GetUser(), password)
 
 	if _, err = s.serverConn.Write([]byte(backendLogin)); err != nil {
-		fmt.Println("Error when sending the login to the backend server:", err)
+		logger.Error("Error when sending the login to the backend server:", slog.String(log.Error, err.Error()))
 
 		return err
 	}
@@ -231,20 +239,30 @@ func (s *SessionImpl) GetBackendGreeting() string {
 	return s.backendGreeting
 }
 
+func (s *SessionImpl) GetClientContext() *context.Context {
+	return s.clientCtx
+}
+
+func (s *SessionImpl) GetServerContext() *context.Context {
+	return s.serverCtx
+}
+
 func (s *SessionImpl) copyWithContext() {
+	logger := log.GetLogger(s.serverCtx)
+
 	clientDone := make(chan struct{})
 	backendDone := make(chan struct{})
 
 	go func() {
 		_, _ = io.Copy(s.serverConn, s.clientConn)
-		fmt.Println("Connection closed by client")
+		logger.Debug("Connection closed by client")
 
 		close(clientDone)
 	}()
 
 	go func() {
 		_, _ = io.Copy(s.clientConn, s.serverConn)
-		fmt.Println("Connection closed by backend")
+		logger.Debug("Connection closed by backend")
 
 		close(backendDone)
 	}()

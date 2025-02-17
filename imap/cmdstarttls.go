@@ -4,8 +4,10 @@ import (
 	"bufio"
 	"crypto/tls"
 	"fmt"
+	"log/slog"
 
 	"github.com/croessner/nauthilus-director/interfaces"
+	"github.com/croessner/nauthilus-director/log"
 )
 
 type StartTLSCommand struct {
@@ -14,9 +16,11 @@ type StartTLSCommand struct {
 }
 
 func (s *StartTLSCommand) Execute(session iface.IMAPSession) error {
+	logger := log.GetLogger(session.GetServerContext())
+
 	if s.TLSConfig == nil {
 		session.WriteResponse(s.Tag + " NO TLS configuration not available\r\n")
-		fmt.Println("TLS config is nil")
+		logger.Error("TLS config is nil")
 
 		return fmt.Errorf("tls config is nil")
 	}
@@ -26,16 +30,16 @@ func (s *StartTLSCommand) Execute(session iface.IMAPSession) error {
 	tlsConn := tls.Server(session.GetClientConn(), s.TLSConfig)
 	err := tlsConn.Handshake()
 	if err != nil {
-		fmt.Println("TLS-Handshake failed:", err)
+		logger.Error("TLS-Handshake failed", slog.String(log.Error, err.Error()))
 		session.Close()
 
 		return err
 	}
 
 	session.SetClientConn(tlsConn)
-	session.SetReader(bufio.NewReader(tlsConn)) // Aktualisiere den Reader für die verschlüsselte Verbindung
+	session.SetReader(bufio.NewReader(tlsConn))
 
-	fmt.Println("TLS-connection established with client", tlsConn.RemoteAddr())
+	logger.Info("TLS-connection established with client", slog.String("client", tlsConn.RemoteAddr().String()))
 
 	return nil
 }
