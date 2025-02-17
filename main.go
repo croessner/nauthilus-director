@@ -1,27 +1,27 @@
 package main
 
 import (
-	"context"
-	"fmt"
+	"log/slog"
 	"os"
 
-	"github.com/croessner/nauthilus-director/auth"
-	"github.com/croessner/nauthilus-director/imap"
+	"github.com/croessner/nauthilus-director/config"
+	"github.com/croessner/nauthilus-director/context"
+	"github.com/croessner/nauthilus-director/log"
 )
 
+var version = "dev"
+
 func main() {
-	authenticator := &auth.MockAuthenticator{} // TODO: Replace with Nauthilus authenticator
+	ctx := context.NewContext()
+	cfg, err := config.NewConfig()
 
-	proxy := imap.NewProxy(context.Background(), ":10143", authenticator) // Proxy lauscht auf Port 10143
+	log.SetupLogging(ctx, cfg)
 
-	if proxy == nil {
-		fmt.Println("Error creating proxy")
+	if err != nil {
+		log.GetLogger(ctx).Error("Could not load config", slog.String(log.Error, err.Error()))
 
 		os.Exit(1)
 	}
 
-	if err := proxy.Start(); err != nil {
-		fmt.Println("Error:", err)
-		os.Exit(1)
-	}
+	runServer(ctx, cfg)
 }

@@ -41,7 +41,13 @@ func (c *LoginCommand) Execute(session iface.IMAPSession) error {
 		return fmt.Errorf("backend auth failed")
 	}
 
-	session.WriteResponse(session.GetBackendGreeting())
+	responseFilter := &GenericResponseFilter{}
+	responseFilter.AddResponseFilter(&StartTLSResponseFilter{})
+
+	backendGreeting := session.GetBackendGreeting()
+	filteredGreeting := responseFilter.ApplyFilters(backendGreeting)
+
+	session.WriteResponse(filteredGreeting)
 	session.WriteResponse(c.Tag + " OK LOGIN completed\r\n")
 
 	return nil

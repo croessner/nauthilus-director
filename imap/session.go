@@ -22,6 +22,7 @@ type SessionImpl struct {
 	authenticator   iface.Authenticator
 	clientUsername  string
 	backendGreeting string
+	startTLS        bool
 	tlsConfig       *tls.Config
 }
 
@@ -171,15 +172,20 @@ func (s *SessionImpl) handleCommand(line string) {
 			return
 		}
 	case "CAPABILITY":
-		command = &CapabilityCommand{Tag: tag}
+		command = &CapabilityCommand{Tag: tag, UseStartTLS: s.startTLS}
 	case "ID":
 		command = &IDCommand{Tag: tag}
 	case "STARTTLS":
-		command = &StartTLSCommand{
-			Tag:       tag,
-			TLSConfig: s.tlsConfig, // TLS-config from the proxy
+		if !s.startTLS {
+			s.WriteResponse(tag + " NO STARTTLS is not supported\r\n")
+
+			return
 		}
 
+		command = &StartTLSCommand{
+			Tag:       tag,
+			TLSConfig: s.tlsConfig,
+		}
 	default:
 		s.ForwardToIMAPServer(line)
 

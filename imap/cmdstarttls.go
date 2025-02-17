@@ -8,18 +8,6 @@ import (
 	"github.com/croessner/nauthilus-director/interfaces"
 )
 
-func getTLSConfig() (*tls.Config, error) {
-	cert, err := tls.LoadX509KeyPair("server.crt", "server.key")
-	if err != nil {
-		return nil, fmt.Errorf("fehler beim Laden des Zertifikats oder Schlüssels: %v", err)
-	}
-
-	return &tls.Config{
-		Certificates: []tls.Certificate{cert},
-		MinVersion:   tls.VersionTLS12, // Sicherstellen, dass nur moderne Verschlüsselung verwendet wird
-	}, nil
-}
-
 type StartTLSCommand struct {
 	Tag       string
 	TLSConfig *tls.Config

@@ -2,59 +2,126 @@ package imap
 
 import (
 	"bufio"
-	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
+	"os"
+	"strconv"
+	"sync"
+	"time"
 
+	"github.com/croessner/nauthilus-director/config"
+	"github.com/croessner/nauthilus-director/context"
+	"github.com/croessner/nauthilus-director/enc"
 	"github.com/croessner/nauthilus-director/interfaces"
+	"github.com/croessner/nauthilus-director/log"
 )
 
 type Proxy struct {
+	name          string
 	listenAddr    string
+	listener      net.Listener
 	authenticator iface.Authenticator
+	startTLS      bool
 	tlsConfig     *tls.Config
-	ctx           context.Context
+	ctx           *context.Context
+	wg            *sync.WaitGroup
 }
 
-func NewProxy(ctx context.Context, addr string, auth iface.Authenticator) *Proxy {
-	tlsConfig, err := getTLSConfig() // TLS-Konfiguration einmal laden
+func NewProxy(ctx *context.Context, instance config.Listen, auth iface.Authenticator, wg *sync.WaitGroup) *Proxy {
+	logger := log.GetLogger(ctx)
+
+	tlsConfig, err := enc.GetTLSConfig(instance)
 	if err != nil {
-		fmt.Println("Fehler beim Laden der TLS-Konfiguration:", err)
+		logger.Error("Could not get TLS config", slog.String(log.Error, err.Error()))
 
 		return nil
 	}
 
 	return &Proxy{
-		listenAddr:    addr,
 		authenticator: auth,
 		tlsConfig:     tlsConfig,
 		ctx:           ctx,
+		wg:            wg,
+		startTLS:      instance.TLS.Enabled && instance.TLS.StartTLS,
 	}
 }
 
-func (p *Proxy) Start() error {
-	listener, err := net.Listen("tcp", p.listenAddr)
-	if err != nil {
-		return fmt.Errorf("fehler beim Start des IMAP-Proxys: %v", err)
+func (p *Proxy) Start(instance config.Listen) error {
+	var (
+		mode     int64
+		conn     net.Conn
+		fileInfo os.FileInfo
+		err      error
+	)
+
+	logger := log.GetLogger(p.ctx)
+
+	if instance.TLS.Enabled && p.tlsConfig != nil {
+		p.listener = tls.NewListener(p.listener, p.tlsConfig)
 	}
 
-	defer func(listener net.Listener) {
-		_ = listener.Close()
-	}(listener)
+	conn, err = net.DialTimeout(instance.Type, p.listenAddr, 1*time.Second)
+	if err == nil {
+		_ = conn.Close()
 
-	fmt.Println("IMAP Proxy läuft auf", p.listenAddr)
+		return fmt.Errorf("address %s is already in use", p.listener)
+	}
+
+	if instance.Type == "unix" {
+		p.listenAddr = instance.Address
+
+		if fileInfo, err = os.Stat(instance.Address); err == nil && fileInfo.Mode()&os.ModeSocket != 0 {
+			if err = os.Remove(instance.Address); err != nil {
+				return err
+			}
+		}
+	} else {
+		p.listenAddr = fmt.Sprintf("%s:%d", instance.Address, instance.Port)
+	}
+
+	if instance.Name != "" {
+		p.name = instance.Name
+	}
+
+	p.listener, err = net.Listen(instance.Type, p.listenAddr)
+	if err != nil {
+		return fmt.Errorf("could not start server: %w", err)
+	}
+
+	if instance.Type == "unix" && instance.Mode != "" {
+		mode, err = strconv.ParseInt(instance.Mode, 8, 64)
+		if err != nil {
+			logger.Error("Could not parse socket mode", slog.String("error", err.Error()))
+		}
+
+		if err = os.Chmod(instance.Address, os.FileMode(mode)); err != nil {
+			logger.Error("Could not set permissions on socket", slog.String("error", err.Error()))
+		}
+	}
+
+	logger.Info("Server is listening", slog.String("type", instance.Type), slog.String("address", p.listenAddr), slog.String("name", p.name), slog.String("kind", instance.Kind))
 
 	for {
-		clientConn, err := listener.Accept()
+		conn, err = p.listener.Accept()
+		if errors.Is(err, net.ErrClosed) {
+			logger.Info("Server is shutting down", slog.String("address", p.listenAddr), slog.String("name", p.name))
+
+			return nil
+		}
+
 		if err != nil {
-			fmt.Println("Fehler beim Annehmen einer Verbindung:", err)
+			logger.Error("Error accepting connection", slog.String("error", err.Error()))
 
 			continue
 		}
 
-		go p.handleConnection(clientConn) // Neue Verbindung in Goroutine
+		p.wg.Add(1)
+
+		go p.handleConnection(conn)
 	}
 }
 
@@ -63,6 +130,23 @@ func (p *Proxy) handleConnection(clientConn net.Conn) {
 		_ = clientConn.Close()
 	}(clientConn)
 
+	logger := log.GetLogger(p.ctx)
+
+	if p.tlsConfig != nil && !p.startTLS {
+		tlsConn, ok := clientConn.(*tls.Conn)
+		if !ok {
+			tlsConn = tls.Server(clientConn, p.tlsConfig)
+
+			if err := tlsConn.Handshake(); err != nil {
+				logger.Error("Could not handshake with client", slog.String(log.Error, err.Error()))
+
+				return
+			}
+
+			clientConn = tlsConn
+		}
+	}
+
 	session := &SessionImpl{
 		clientConn:    clientConn,
 		reader:        bufio.NewReader(clientConn),
@@ -70,20 +154,20 @@ func (p *Proxy) handleConnection(clientConn net.Conn) {
 		tlsConfig:     p.tlsConfig,
 		serverCtx:     p.ctx,
 		clientCtx:     p.ctx,
+		startTLS:      p.startTLS,
 	}
 
-	// TODO: config greeting
-	session.WriteResponse("* OK IMAP Proxy Ready\r\n")
+	session.WriteResponse("* OK IMAP Ready\r\n")
 
-	fmt.Println("New connection: ", clientConn.RemoteAddr())
+	logger.Info("New connection", slog.String("client", clientConn.RemoteAddr().String()))
 
 	for {
 		line, err := session.ReadLine()
 		if err != nil {
 			if err != io.EOF {
-				fmt.Println("Error reading IMAP command:", err)
+				logger.Error("Error reading IMAP command", slog.String(log.Error, err.Error()))
 			} else {
-				fmt.Println("Client disconnected: ", clientConn.RemoteAddr())
+				logger.Info("Client disconnected", slog.String("client", clientConn.RemoteAddr().String()))
 			}
 
 			return

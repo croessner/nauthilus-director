@@ -3,10 +3,16 @@ package iface
 import (
 	"bufio"
 	"net"
+
+	"github.com/croessner/nauthilus-director/config"
 )
 
 type Authenticator interface {
 	Authenticate(username, password string) bool
+}
+
+type Proxy interface {
+	Start(instance config.Listen) error
 }
 
 type IMAPCommand interface {
@@ -26,4 +32,12 @@ type IMAPSession interface {
 	GetClientConn() net.Conn
 	SetReader(reader *bufio.Reader)
 	GetBackendGreeting() string
+}
+
+type IMAPCommandFilter interface {
+	Filter(command string) bool
+}
+
+type IMAPResponseFilter interface {
+	FilterResponse(response string) string
 }
