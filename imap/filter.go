@@ -3,54 +3,80 @@ package imap
 import (
 	"strings"
 
+	"github.com/croessner/nauthilus-director/imap/proto"
 	"github.com/croessner/nauthilus-director/interfaces"
 )
 
-type StartTLSResponseFilter struct{}
-
-func (f *StartTLSResponseFilter) FilterResponse(response string) string {
-	response = strings.ReplaceAll(response, "STARTTLS", "")
-	response = strings.Join(strings.Fields(response), " ")
-
-	return response
-}
-
-type GenericResponseFilter struct {
+type ResponseFilterManager struct {
 	responseFilters []iface.IMAPResponseFilter
 }
 
-func (g *GenericResponseFilter) AddResponseFilter(filter iface.IMAPResponseFilter) {
-	g.responseFilters = append(g.responseFilters, filter)
+func NewResponseFilterManager() *ResponseFilterManager {
+	return &ResponseFilterManager{}
 }
 
-func (g *GenericResponseFilter) ApplyFilters(response string) string {
-	for _, filter := range g.responseFilters {
+func (r *ResponseFilterManager) AddFilter(filter iface.IMAPResponseFilter) {
+	r.responseFilters = append(r.responseFilters, filter)
+}
+
+func (r *ResponseFilterManager) ApplyFilters(response string) string {
+	for _, filter := range r.responseFilters {
 		response = filter.FilterResponse(response)
 	}
-
 	return response
 }
 
-type StartTLSFilter struct{}
-
-func (f *StartTLSFilter) Filter(command string) bool {
-	return strings.EqualFold(strings.TrimSpace(command), "STARTTLS")
+type CommandFilterManager struct {
+	commandFilters []iface.IMAPCommandFilter
 }
 
-type GenericCommandFilter struct {
-	filters []iface.IMAPCommandFilter
+func NewCommandFilterManager() *CommandFilterManager {
+	return &CommandFilterManager{}
 }
 
-func (g *GenericCommandFilter) AddFilter(filter iface.IMAPCommandFilter) {
-	g.filters = append(g.filters, filter)
+func (c *CommandFilterManager) AddFilter(filter iface.IMAPCommandFilter) {
+	c.commandFilters = append(c.commandFilters, filter)
 }
 
-func (g *GenericCommandFilter) ShouldBlock(command string) bool {
-	for _, filter := range g.filters {
+func (c *CommandFilterManager) ShouldBlock(command string) bool {
+	for _, filter := range c.commandFilters {
 		if filter.Filter(command) {
 			return true
 		}
 	}
 
 	return false
+}
+
+type StartTLSResponseFilter struct{}
+
+func NewStartTLSResponseFilter() *StartTLSResponseFilter {
+	return &StartTLSResponseFilter{}
+}
+
+func (f *StartTLSResponseFilter) FilterResponse(response string) string {
+	response = strings.ReplaceAll(response, proto.STARTTLS, "")
+	response = strings.Join(strings.Fields(response), " ")
+
+	return response
+}
+
+type StartTLSFilter struct{}
+
+func NewStartTLSFilter() *StartTLSFilter {
+	return &StartTLSFilter{}
+}
+
+func (f *StartTLSFilter) Filter(command string) bool {
+	return strings.EqualFold(strings.TrimSpace(command), proto.STARTTLS)
+}
+
+type IDFilter struct{}
+
+func NewIDFilter() *IDFilter {
+	return &IDFilter{}
+}
+
+func (f *IDFilter) Filter(command string) bool {
+	return strings.EqualFold(strings.TrimSpace(command), proto.ID)
 }

@@ -10,27 +10,30 @@ import (
 	"net"
 	"strings"
 
+	"github.com/croessner/nauthilus-director/config"
 	"github.com/croessner/nauthilus-director/context"
+	"github.com/croessner/nauthilus-director/imap/proto"
 	"github.com/croessner/nauthilus-director/interfaces"
 	"github.com/croessner/nauthilus-director/log"
 )
 
 type SessionImpl struct {
-	clientConn      net.Conn
-	serverConn      net.Conn
+	tlsFlag         bool
 	reader          *bufio.Reader
+	clientConn      net.Conn
+	backendConn     net.Conn
 	authenticator   iface.Authenticator
 	tlsConfig       *tls.Config
-	serverCtx       *context.Context
+	backendCtx      *context.Context
 	clientCtx       *context.Context
 	clientUsername  string
 	backendGreeting string
 	session         string
-	startTLS        bool
+	instance        config.Listen
 }
 
 func (s *SessionImpl) WriteResponse(response string) {
-	logger := log.GetLogger(s.serverCtx)
+	logger := log.GetLogger(s.backendCtx)
 
 	if s.clientConn == nil {
 		return
@@ -62,9 +65,9 @@ func (s *SessionImpl) ReadLine() (string, error) {
 }
 
 func (s *SessionImpl) initializeIMAPConnection() error {
-	logger := log.GetLogger(s.serverCtx)
+	logger := log.GetLogger(s.backendCtx)
 
-	if s.serverConn != nil {
+	if s.backendConn != nil {
 		return nil
 	}
 
@@ -76,7 +79,7 @@ func (s *SessionImpl) initializeIMAPConnection() error {
 		return err
 	}
 
-	s.serverConn = conn
+	s.backendConn = conn
 
 	// TODO: Support ctx with cancel to interrupt connections on behalf
 	go s.copyWithContext()
@@ -89,11 +92,11 @@ func (s *SessionImpl) ForwardToIMAPServer(data string) {
 		return
 	}
 
-	_, _ = s.serverConn.Write([]byte(data))
+	_, _ = s.backendConn.Write([]byte(data))
 }
 
 func (s *SessionImpl) ConnectToIMAPBackend(tag, username, password string) error {
-	logger := log.GetLogger(s.serverCtx)
+	logger := log.GetLogger(s.backendCtx)
 
 	// TODO: Add master user later...
 	_ = username
@@ -102,7 +105,7 @@ func (s *SessionImpl) ConnectToIMAPBackend(tag, username, password string) error
 		return err
 	}
 
-	reader := bufio.NewReader(s.serverConn)
+	reader := bufio.NewReader(s.backendConn)
 	greeting, err := reader.ReadString('\n')
 
 	if err != nil {
@@ -115,7 +118,7 @@ func (s *SessionImpl) ConnectToIMAPBackend(tag, username, password string) error
 
 	backendLogin := fmt.Sprintf("%s LOGIN %s %s\r\n", tag, s.GetUser(), password)
 
-	if _, err = s.serverConn.Write([]byte(backendLogin)); err != nil {
+	if _, err = s.backendConn.Write([]byte(backendLogin)); err != nil {
 		logger.Error("Error when sending the login to the backend server:", slog.String(log.Error, err.Error()), s.Session())
 
 		return err
@@ -154,13 +157,20 @@ func (s *SessionImpl) handleCommand(line string) {
 	}
 
 	tag, cmd := parts[0], strings.ToUpper(parts[1])
+	commandFilter := s.setupCommandFilters()
+
+	if commandFilter.ShouldBlock(cmd) {
+		s.WriteResponse(tag + " NO Command is not allowed\r\n")
+
+		return
+	}
 
 	switch cmd {
-	case "LOGIN":
+	case proto.LOGIN:
 		command = &LoginCommand{Tag: tag, Username: parts[2], Password: parts[3]}
-	case "LOGOUT":
+	case proto.LOGOUT:
 		command = &LogoutCommand{Tag: tag}
-	case "AUTHENTICATE":
+	case proto.AUTHENTICATE:
 		// TODO: Lot of things are pending...
 
 		if len(parts) < 3 {
@@ -170,30 +180,21 @@ func (s *SessionImpl) handleCommand(line string) {
 		}
 
 		switch strings.ToUpper(parts[2]) {
-		case "PLAIN":
-			command = &AuthenticateCommand{Tag: tag, Method: "PLAIN"}
-		case "XOAUTH2":
+		case proto.PLAIN:
+			command = &AuthenticateCommand{Tag: tag, Method: proto.PLAIN}
+		case proto.XOAUTH2:
 			command = &XOAUTH2Command{Tag: tag}
 		default:
 			s.WriteResponse(tag + " NO Unsupported auth method\r\n")
 
 			return
 		}
-	case "CAPABILITY":
-		command = &CapabilityCommand{Tag: tag, UseStartTLS: s.startTLS}
-	case "ID":
+	case proto.CAPABILITY:
+		command = &CapabilityCommand{Tag: tag, UseStartTLS: s.instance.TLS.Enabled && s.instance.TLS.StartTLS}
+	case proto.ID:
 		command = &IDCommand{Tag: tag}
-	case "STARTTLS":
-		if !s.startTLS {
-			s.WriteResponse(tag + " NO STARTTLS is not supported\r\n")
-
-			return
-		}
-
-		command = &StartTLSCommand{
-			Tag:       tag,
-			TLSConfig: s.tlsConfig,
-		}
+	case proto.STARTTLS:
+		command = &StartTLSCommand{Tag: tag, TLSConfig: s.tlsConfig}
 	default:
 		s.ForwardToIMAPServer(line)
 
@@ -204,15 +205,65 @@ func (s *SessionImpl) handleCommand(line string) {
 }
 
 func (s *SessionImpl) Close() {
-	if s.serverConn != nil {
-		_ = s.serverConn.Close()
-		s.serverConn = nil
+	if s.backendConn != nil {
+		_ = s.backendConn.Close()
+		s.backendConn = nil
 	}
 
 	if s.clientConn != nil {
 		_ = s.clientConn.Close()
 		s.clientConn = nil
 	}
+}
+
+func (s *SessionImpl) copyWithContext() {
+	logger := log.GetLogger(s.backendCtx)
+
+	clientDone := make(chan struct{})
+	backendDone := make(chan struct{})
+
+	go func() {
+		_, _ = io.Copy(s.backendConn, s.clientConn)
+		logger.Debug("Connection closed by client", s.Session())
+
+		close(clientDone)
+	}()
+
+	go func() {
+		_, _ = io.Copy(s.clientConn, s.backendConn)
+		logger.Debug("Connection closed by backend", s.Session())
+
+		close(backendDone)
+	}()
+
+	select {
+	case <-s.backendCtx.Done():
+		s.Close()
+	case <-s.clientCtx.Done():
+		s.Close()
+	case <-clientDone:
+		s.Close()
+	case <-backendDone:
+		s.Close()
+	}
+}
+
+func (s *SessionImpl) Session() slog.Attr {
+	return slog.String("session", s.session)
+}
+
+func (s *SessionImpl) setupCommandFilters() *CommandFilterManager {
+	commandFilter := NewCommandFilterManager()
+
+	if !(s.instance.TLS.Enabled && s.instance.TLS.StartTLS) || s.tlsFlag {
+		commandFilter.AddFilter(NewStartTLSFilter())
+	}
+
+	if s.backendConn == nil {
+		commandFilter.AddFilter(NewIDFilter())
+	}
+
+	return commandFilter
 }
 
 func (s *SessionImpl) SetUser(username string) {
@@ -244,41 +295,13 @@ func (s *SessionImpl) GetClientContext() *context.Context {
 }
 
 func (s *SessionImpl) GetServerContext() *context.Context {
-	return s.serverCtx
+	return s.backendCtx
 }
 
-func (s *SessionImpl) copyWithContext() {
-	logger := log.GetLogger(s.serverCtx)
-
-	clientDone := make(chan struct{})
-	backendDone := make(chan struct{})
-
-	go func() {
-		_, _ = io.Copy(s.serverConn, s.clientConn)
-		logger.Debug("Connection closed by client", s.Session())
-
-		close(clientDone)
-	}()
-
-	go func() {
-		_, _ = io.Copy(s.clientConn, s.serverConn)
-		logger.Debug("Connection closed by backend", s.Session())
-
-		close(backendDone)
-	}()
-
-	select {
-	case <-s.serverCtx.Done():
-		s.Close()
-	case <-s.clientCtx.Done():
-		s.Close()
-	case <-clientDone:
-		s.Close()
-	case <-backendDone:
-		s.Close()
-	}
+func (s *SessionImpl) GetTLSFlag() bool {
+	return s.tlsFlag
 }
 
-func (s *SessionImpl) Session() slog.Attr {
-	return slog.String("session", s.session)
+func (s *SessionImpl) SetTLSFlag(flag bool) {
+	s.tlsFlag = flag
 }

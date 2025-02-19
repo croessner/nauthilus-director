@@ -20,14 +20,15 @@ type Server struct {
 }
 
 type Listen struct {
-	UseHAProxy bool   `mapstructure:"use_haproxy"`
-	Port       int    `mapstructure:"port"`
-	Kind       string `mapstructure:"kind"`
-	Name       string `mapstructure:"name"`
-	Type       string `mapstructure:"type"`
-	Address    string `mapstructure:"address"`
-	Mode       string `mapstructure:"mode"`
-	TLS        TLS    `mapstructure:"tls"`
+	Port       int      `mapstructure:"port"`
+	UseHAProxy bool     `mapstructure:"use_haproxy"`
+	TLS        TLS      `mapstructure:"tls"`
+	AuthMechs  []string `mapstructure:"auth_mechanisms"`
+	Kind       string   `mapstructure:"kind"`
+	Name       string   `mapstructure:"name"`
+	Type       string   `mapstructure:"type"`
+	Address    string   `mapstructure:"address"`
+	Mode       string   `mapstructure:"mode"`
 }
 
 type Logging struct {

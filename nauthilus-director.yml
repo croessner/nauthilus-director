@@ -9,6 +9,7 @@ server:
       type: "tcp"
       address: "127.0.0.1"
       port: 10143
+      auth_mechanisms: "login"
       tls:
         enabled: true
         starttls: true

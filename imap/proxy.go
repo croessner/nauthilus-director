@@ -22,14 +22,14 @@ import (
 )
 
 type Proxy struct {
+	listener      net.Listener
 	wg            *sync.WaitGroup
 	ctx           *context.Context
 	tlsConfig     *tls.Config
-	listener      net.Listener
 	authenticator iface.Authenticator
-	name          string
+	instance      config.Listen
 	listenAddr    string
-	startTLS      bool
+	name          string
 }
 
 func NewProxy(ctx *context.Context, instance config.Listen, auth iface.Authenticator, wg *sync.WaitGroup) *Proxy {
@@ -47,7 +47,7 @@ func NewProxy(ctx *context.Context, instance config.Listen, auth iface.Authentic
 		tlsConfig:     tlsConfig,
 		ctx:           ctx,
 		wg:            wg,
-		startTLS:      instance.TLS.Enabled && instance.TLS.StartTLS,
+		instance:      instance,
 	}
 }
 
@@ -133,7 +133,7 @@ func (p *Proxy) handleConnection(clientConn net.Conn) {
 
 	logger := log.GetLogger(p.ctx)
 
-	if p.tlsConfig != nil && !p.startTLS {
+	if p.tlsConfig != nil && !p.instance.TLS.StartTLS {
 		tlsConn, ok := clientConn.(*tls.Conn)
 		if !ok {
 			tlsConn = tls.Server(clientConn, p.tlsConfig)
@@ -153,10 +153,10 @@ func (p *Proxy) handleConnection(clientConn net.Conn) {
 		reader:        bufio.NewReader(clientConn),
 		authenticator: p.authenticator,
 		tlsConfig:     p.tlsConfig,
-		serverCtx:     p.ctx.Copy(),
+		backendCtx:    p.ctx.Copy(),
 		clientCtx:     p.ctx.Copy(),
-		startTLS:      p.startTLS,
 		session:       ksuid.New().String(),
+		instance:      p.instance,
 	}
 
 	session.WriteResponse("* OK IMAP Ready\r\n")

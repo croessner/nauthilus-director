@@ -41,5 +41,7 @@ func (s *StartTLSCommand) Execute(session iface.IMAPSession) error {
 
 	logger.Info("TLS-connection established", slog.String("client", tlsConn.RemoteAddr().String()), session.Session())
 
+	session.SetTLSFlag(true)
+
 	return nil
 }

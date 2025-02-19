@@ -41,6 +41,8 @@ type IMAPSession interface {
 	ReadLine() (string, error)
 	ForwardToIMAPServer(data string)
 	GetBackendGreeting() string
+	GetTLSFlag() bool
+	SetTLSFlag(flag bool)
 
 	/*
 		Connection and session management
