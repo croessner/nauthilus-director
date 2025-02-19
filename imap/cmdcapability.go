@@ -5,8 +5,8 @@ import (
 )
 
 type CapabilityCommand struct {
-	Tag         string
 	UseStartTLS bool
+	Tag         string
 }
 
 func (c *CapabilityCommand) Execute(session iface.IMAPSession) error {

@@ -22,14 +22,14 @@ import (
 )
 
 type Proxy struct {
-	name          string
-	listenAddr    string
+	wg            *sync.WaitGroup
+	ctx           *context.Context
+	tlsConfig     *tls.Config
 	listener      net.Listener
 	authenticator iface.Authenticator
+	name          string
+	listenAddr    string
 	startTLS      bool
-	tlsConfig     *tls.Config
-	ctx           *context.Context
-	wg            *sync.WaitGroup
 }
 
 func NewProxy(ctx *context.Context, instance config.Listen, auth iface.Authenticator, wg *sync.WaitGroup) *Proxy {

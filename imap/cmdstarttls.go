@@ -11,8 +11,8 @@ import (
 )
 
 type StartTLSCommand struct {
-	Tag       string
 	TLSConfig *tls.Config
+	Tag       string
 }
 
 func (s *StartTLSCommand) Execute(session iface.IMAPSession) error {

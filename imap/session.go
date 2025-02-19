@@ -17,16 +17,16 @@ import (
 
 type SessionImpl struct {
 	clientConn      net.Conn
-	serverCtx       *context.Context
 	serverConn      net.Conn
-	clientCtx       *context.Context
 	reader          *bufio.Reader
 	authenticator   iface.Authenticator
+	tlsConfig       *tls.Config
+	serverCtx       *context.Context
+	clientCtx       *context.Context
 	clientUsername  string
 	backendGreeting string
-	startTLS        bool
-	tlsConfig       *tls.Config
 	session         string
+	startTLS        bool
 }
 
 func (s *SessionImpl) WriteResponse(response string) {
@@ -47,7 +47,7 @@ func (s *SessionImpl) ReadLine() (string, error) {
 		return "", io.EOF
 	}
 
-	line, err := s.reader.ReadString('\n') // Lesen einer Zeile
+	line, err := s.reader.ReadString('\n')
 	if err != nil {
 		var opErr *net.OpError
 
@@ -65,7 +65,7 @@ func (s *SessionImpl) initializeIMAPConnection() error {
 	logger := log.GetLogger(s.serverCtx)
 
 	if s.serverConn != nil {
-		return nil // Verbindung existiert bereits
+		return nil
 	}
 
 	conn, err := net.Dial("tcp", "127.0.0.1:1143")
@@ -85,12 +85,11 @@ func (s *SessionImpl) initializeIMAPConnection() error {
 }
 
 func (s *SessionImpl) ForwardToIMAPServer(data string) {
-	// Initialisiere Verbindung, falls nicht vorhanden
 	if err := s.initializeIMAPConnection(); err != nil {
 		return
 	}
 
-	_, _ = s.serverConn.Write([]byte(data)) // Weiterleitung der Anfrage
+	_, _ = s.serverConn.Write([]byte(data))
 }
 
 func (s *SessionImpl) ConnectToIMAPBackend(tag, username, password string) error {

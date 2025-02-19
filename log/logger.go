@@ -14,8 +14,8 @@ const loggerKey context.CtxKey = "logging"
 const Error = "error"
 
 type WrappedHandler struct {
-	handler slog.Handler
 	fields  []slog.Attr
+	handler slog.Handler
 }
 
 func (w *WrappedHandler) Enabled(ctx stdcontext.Context, level slog.Level) bool {

@@ -9,9 +9,9 @@ import (
 type CtxKey string
 
 type Context struct {
-	data map[any]any
-	ctx  context.Context
 	mu   sync.RWMutex
+	ctx  context.Context
+	data map[any]any
 }
 
 func (c *Context) Set(key any, value any) {

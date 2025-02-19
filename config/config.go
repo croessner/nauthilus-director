@@ -13,21 +13,21 @@ type Config struct {
 }
 
 type Server struct {
-	Listen     []Listen   `mapstructure:"listen"`
-	Logging    Logging    `mapstructure:"logging"`
-	HTTPClient HTTPClient `mapstructure:"http_client"`
 	InstanceID string     `mapstructure:"instance_id"`
+	Listen     []Listen   `mapstructure:"listen"`
+	HTTPClient HTTPClient `mapstructure:"http_client"`
+	Logging    Logging    `mapstructure:"logging"`
 }
 
 type Listen struct {
+	UseHAProxy bool   `mapstructure:"use_haproxy"`
+	Port       int    `mapstructure:"port"`
 	Kind       string `mapstructure:"kind"`
 	Name       string `mapstructure:"name"`
 	Type       string `mapstructure:"type"`
 	Address    string `mapstructure:"address"`
-	Port       int    `mapstructure:"port"`
 	Mode       string `mapstructure:"mode"`
 	TLS        TLS    `mapstructure:"tls"`
-	UseHAProxy bool   `mapstructure:"use_haproxy"`
 }
 
 type Logging struct {
@@ -36,19 +36,19 @@ type Logging struct {
 }
 
 type HTTPClient struct {
+	Proxy               string        `mapstructure:"proxy"`
+	IdleConnTimeout     time.Duration `mapstructure:"idle_connection_timeout"`
 	MaxConnsPerHost     int           `mapstructure:"max_connections_per_host"`
 	MaxIdleConns        int           `mapstructure:"max_idle_connections"`
 	MaxIdleConnsPerHost int           `mapstructure:"max_idle_connections_per_host"`
-	IdleConnTimeout     time.Duration `mapstructure:"idle_connection_timeout"`
-	Proxy               string        `mapstructure:"proxy"`
 }
 
 type TLS struct {
 	Enabled    bool   `mapstructure:"enabled"`
 	StartTLS   bool   `mapstructure:"starttls"`
+	SkipVerify bool   `mapstructure:"http_client_skip_verify"`
 	Cert       string `mapstructure:"cert"`
 	Key        string `mapstructure:"key"`
-	SkipVerify bool   `mapstructure:"http_client_skip_verify"`
 }
 
 func (cfg *Config) HandleConfig() error {
