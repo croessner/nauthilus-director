@@ -22,7 +22,6 @@ import (
 )
 
 type SessionImpl struct {
-	tlsFlag         bool
 	reader          *bufio.Reader
 	clientConn      net.Conn
 	backendConn     net.Conn
@@ -35,6 +34,8 @@ type SessionImpl struct {
 	backendGreeting string
 	session         string
 	instance        config.Listen
+	tlsFlag         bool
+	errorCounter    uint8
 }
 
 func (s *SessionImpl) WriteResponse(response string) {
@@ -58,6 +59,11 @@ func (s *SessionImpl) ReadLine() (string, error) {
 	tpReader := textproto.NewReader(s.reader)
 
 	line, err := tpReader.ReadLine()
+
+	if line == "" {
+		return "", io.EOF
+	}
+
 	if err != nil {
 		var opErr *net.OpError
 
@@ -103,6 +109,10 @@ func (s *SessionImpl) startResponseReader(ctx stdcontext.Context, reader *bufio.
 			default:
 				line, err := tpReader.ReadLine()
 				logger.Debug("Received line from backend server", slog.String("line", line))
+
+				if line == "" {
+					return
+				}
 
 				if err != nil {
 					if err == io.EOF {
@@ -281,9 +291,17 @@ func (s *SessionImpl) handleCommand(line string) {
 
 	logger := log.GetLogger(s.backendCtx)
 
+	if s.errorCounter >= 5 {
+		s.WriteResponse("* BAD Too many errors\r\n")
+		s.Close()
+
+		return
+	}
+
 	parts := strings.Fields(line)
 	if len(parts) < 2 {
 		s.WriteResponse("* BAD Invalid command\r\n")
+		s.errorCounter++
 
 		return
 	}
@@ -293,18 +311,27 @@ func (s *SessionImpl) handleCommand(line string) {
 
 	if commandFilter.ShouldBlock(cmd) {
 		s.WriteResponse(tag + " NO Command is not allowed\r\n")
+		s.errorCounter++
 
 		return
 	}
 
 	switch cmd {
 	case proto.LOGIN:
+		if len(parts) < 4 {
+			s.WriteResponse(tag + " BAD Syntax error\r\n")
+			s.errorCounter++
+
+			return
+		}
+
 		command = &LoginCommand{Tag: tag, Username: parts[2], Password: parts[3]}
 	case proto.LOGOUT:
 		command = &LogoutCommand{Tag: tag}
 	case proto.AUTHENTICATE:
 		if len(parts) < 3 {
 			s.WriteResponse(tag + " BAD Syntax error\r\n")
+			s.errorCounter++
 
 			return
 		}
@@ -332,6 +359,7 @@ func (s *SessionImpl) handleCommand(line string) {
 		command = &StartTLSCommand{Tag: tag, TLSConfig: s.tlsConfig}
 	default:
 		s.WriteResponse(tag + " BAD Unsupported command\r\n")
+		s.errorCounter++
 
 		return
 	}

@@ -47,7 +47,7 @@ func (c *LoginCommand) Execute(session iface.IMAPSession) error {
 
 	logger.Debug("link client and backend", session.Session())
 
-	go session.LinkClientAndBackend()
+	session.LinkClientAndBackend()
 
 	return nil
 }
