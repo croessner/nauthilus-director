@@ -159,7 +159,13 @@ func (p *Proxy) handleConnection(clientConn net.Conn) {
 		instance:      p.instance,
 	}
 
-	session.WriteResponse("* OK IMAP Ready\r\n")
+	filteredCapabilities := generateCapabilities(
+		p.instance.TLS.Enabled && p.instance.TLS.StartTLS,
+		session.tlsFlag,
+		p.instance.AuthMechs,
+	)
+
+	session.WriteResponse("* OK [CAPABILITY " + filteredCapabilities + "] IMAP Ready\r\n")
 
 	logger.Info("New connection", slog.String("client", clientConn.RemoteAddr().String()), session.Session())
 

@@ -5,6 +5,7 @@ import (
 	"io"
 
 	"github.com/croessner/nauthilus-director/interfaces"
+	"github.com/croessner/nauthilus-director/log"
 )
 
 type LoginCommand struct {
@@ -15,6 +16,7 @@ type LoginCommand struct {
 
 func (c *LoginCommand) Execute(session iface.IMAPSession) error {
 	auth := session.GetAuthenticator()
+	logger := log.GetLogger(session.GetServerContext())
 
 	if !auth.Authenticate(c.Username, c.Password) {
 		session.WriteResponse(c.Tag + " NO Authentication failed\r\n")
@@ -25,10 +27,10 @@ func (c *LoginCommand) Execute(session iface.IMAPSession) error {
 	session.SetUser(c.Username)
 
 	// TODO: config master user
-	masterUser := "masteruser"
-	masterPass := "password" // Dovecot docker image accepts all users with the password "password"
+	_ = "masteruser"
+	masterPass := "password"
 
-	err := session.ConnectToIMAPBackend(c.Tag, masterUser, masterPass)
+	err := session.ConnectToIMAPBackend(c.Tag, session.GetUser(), masterPass)
 	if err != nil {
 		if err == io.EOF {
 			session.Close()
@@ -38,17 +40,14 @@ func (c *LoginCommand) Execute(session iface.IMAPSession) error {
 
 		session.WriteResponse(c.Tag + " NO Backend authentication failed\r\n")
 
-		return fmt.Errorf("backend auth failed")
+		return err
 	}
 
-	responseFilter := NewResponseFilterManager()
-	responseFilter.AddFilter(NewStartTLSResponseFilter())
+	session.WriteResponse(session.GetBackendGreeting())
 
-	backendGreeting := session.GetBackendGreeting()
-	filteredGreeting := responseFilter.ApplyFilters(backendGreeting)
+	logger.Debug("link client and backend", session.Session())
 
-	session.WriteResponse(filteredGreeting)
-	session.WriteResponse(c.Tag + " OK LOGIN completed\r\n")
+	go session.LinkClientAndBackend()
 
 	return nil
 }

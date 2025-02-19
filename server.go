@@ -8,6 +8,7 @@ import (
 	"github.com/croessner/nauthilus-director/context"
 	"github.com/croessner/nauthilus-director/imap"
 	"github.com/croessner/nauthilus-director/log"
+	"github.com/croessner/nauthilus-director/version"
 )
 
 func runServer(ctx *context.Context, cfg *config.Config) {
@@ -16,7 +17,7 @@ func runServer(ctx *context.Context, cfg *config.Config) {
 	taskCount := 0
 	logger := log.GetLogger(ctx)
 
-	logger.Info("Starting server", slog.String("version", version))
+	logger.Info("Starting server", slog.String("version", version.Version))
 
 	for _, instance := range cfg.Server.Listen {
 		switch instance.Kind {
@@ -37,7 +38,7 @@ func runServer(ctx *context.Context, cfg *config.Config) {
 
 	if taskCount > 0 {
 		wg.Wait()
-		logger.Info("Server stopped", slog.String("version", version))
+		logger.Info("Server stopped", slog.String("version", version.Version))
 	} else {
 		logger.Error("No listen instances configured")
 	}

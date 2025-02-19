@@ -61,6 +61,39 @@ func (f *StartTLSResponseFilter) FilterResponse(response string) string {
 	return response
 }
 
+type AuthMechanismResponseFilter struct {
+	mechanisms []string
+}
+
+func NewAuthMechanismResponseFilter(mechanisms []string) *AuthMechanismResponseFilter {
+	return &AuthMechanismResponseFilter{
+		mechanisms: mechanisms,
+	}
+}
+
+func (a *AuthMechanismResponseFilter) FilterResponse(response string) string {
+	fields := strings.Fields(response)
+	remainingFields := make([]string, 0)
+
+	for _, field := range fields {
+		forbidden := false
+
+		for _, mechanism := range a.mechanisms {
+			if strings.EqualFold(field, "AUTH="+strings.ToUpper(mechanism)) {
+				forbidden = true
+
+				break
+			}
+		}
+
+		if !forbidden {
+			remainingFields = append(remainingFields, field)
+		}
+	}
+
+	return strings.Join(remainingFields, " ")
+}
+
 type StartTLSFilter struct{}
 
 func NewStartTLSFilter() *StartTLSFilter {
@@ -79,4 +112,27 @@ func NewIDFilter() *IDFilter {
 
 func (f *IDFilter) Filter(command string) bool {
 	return strings.EqualFold(strings.TrimSpace(command), proto.ID)
+}
+
+type AuthMechanismFilter struct {
+	mechanisms []string
+}
+
+func NewAuthMechanismFilter(mechanisms []string) *AuthMechanismFilter {
+	return &AuthMechanismFilter{
+		mechanisms: mechanisms,
+	}
+}
+
+func (a *AuthMechanismFilter) Filter(command string) bool {
+	trimmedCommand := strings.ToUpper(strings.TrimSpace(command))
+
+	for _, mechanism := range a.mechanisms {
+		expectedPrefix := "AUTHENTICATE " + strings.ToUpper(mechanism)
+		if strings.HasPrefix(trimmedCommand, expectedPrefix) {
+			return true
+		}
+	}
+
+	return false
 }

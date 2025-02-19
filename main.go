@@ -9,8 +9,6 @@ import (
 	"github.com/croessner/nauthilus-director/log"
 )
 
-var version = "dev"
-
 func main() {
 	ctx := context.NewContext()
 	cfg, err := config.NewConfig()

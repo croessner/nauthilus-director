@@ -4,15 +4,19 @@ server:
 
   listen:
 
-    - name: "IMAP+StartTLS"
-      kind: "imap"
-      type: "tcp"
-      address: "127.0.0.1"
+    - name: IMAP
+      kind: imap
+      type: tcp
+      address: 127.0.0.1
       port: 10143
-      auth_mechanisms: "login"
+      auth_mechanisms: plain
       tls:
         enabled: true
         starttls: true
         haproxy: false # TODO: Not yet implemented
-        cert: "server.crt"
-        key: "server.key"
+        cert: server.crt
+        key: server.key
+
+  logging:
+    level: debug
+    

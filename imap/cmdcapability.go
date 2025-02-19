@@ -1,8 +1,11 @@
 package imap
 
 import (
+	"github.com/croessner/nauthilus-director/imap/proto"
 	"github.com/croessner/nauthilus-director/interfaces"
 )
+
+const DefaultCapabilities = "IMAP4rev1 LOGIN-REFERRALS ID ENABLE IDLE SASL-IR LITERAL+ STARTTLS AUTH=PLAIN AUTH=LOGIN AUTH=XOAUTH2"
 
 type CapabilityCommand struct {
 	UseStartTLS bool
@@ -10,17 +13,26 @@ type CapabilityCommand struct {
 }
 
 func (c *CapabilityCommand) Execute(session iface.IMAPSession) error {
-	rawCapabilities := "IMAP4rev1 STARTTLS AUTH=LOGIN AUTH=PLAIN AUTH=XOAUTH2 ID"
-
-	capabilityFilter := NewResponseFilterManager()
-	if !c.UseStartTLS || session.GetTLSFlag() {
-		capabilityFilter.AddFilter(NewStartTLSResponseFilter())
-	}
-
-	filteredCapabilities := capabilityFilter.ApplyFilters(rawCapabilities)
+	filteredCapabilities := generateCapabilities(c.UseStartTLS, session.GetTLSFlag(), session.GetAuthMechs())
 
 	session.WriteResponse("* CAPABILITY " + filteredCapabilities + "\r\n")
 	session.WriteResponse(c.Tag + " OK CAPABILITY completed\r\n")
 
 	return nil
+}
+
+func generateCapabilities(useStartTLS, tlsFlag bool, mechanisms []string) string {
+	capabilityFilter := NewResponseFilterManager()
+	if !useStartTLS || tlsFlag {
+		capabilityFilter.AddFilter(NewStartTLSResponseFilter())
+	}
+
+	allMechanisms := []string{proto.LOGIN, proto.PLAIN, proto.XOAUTH2}
+	disallowedMechanisms := calculateDisallowedMechanisms(allMechanisms, mechanisms)
+
+	capabilityFilter.AddFilter(NewAuthMechanismResponseFilter(disallowedMechanisms))
+
+	filteredCapabilities := capabilityFilter.ApplyFilters(DefaultCapabilities)
+
+	return filteredCapabilities
 }

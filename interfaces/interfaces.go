@@ -39,10 +39,13 @@ type IMAPSession interface {
 	*/
 	WriteResponse(response string)
 	ReadLine() (string, error)
-	ForwardToIMAPServer(data string)
 	GetBackendGreeting() string
 	GetTLSFlag() bool
 	SetTLSFlag(flag bool)
+	GetAuthMechs() []string
+	SetClientID(id string)
+	GetBackendConn() net.Conn
+	LinkClientAndBackend()
 
 	/*
 		Connection and session management

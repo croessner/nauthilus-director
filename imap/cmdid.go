@@ -1,6 +1,9 @@
 package imap
 
-import "github.com/croessner/nauthilus-director/interfaces"
+import (
+	"github.com/croessner/nauthilus-director/interfaces"
+	"github.com/croessner/nauthilus-director/version"
+)
 
 type IDCommand struct {
 	Tag  string
@@ -8,8 +11,10 @@ type IDCommand struct {
 }
 
 func (id *IDCommand) Execute(session iface.IMAPSession) error {
-	session.WriteResponse("* ID (\"name\" \"IMAPProxy\" \"version\" \"1.0\")\r\n")
+	session.WriteResponse("* ID (\"name\" \"Nauthilus director\" \"version\" \"" + version.Version + "\")\r\n")
 	session.WriteResponse(id.Tag + " OK ID completed\r\n")
+
+	session.SetClientID(id.Data)
 
 	return nil
 }
