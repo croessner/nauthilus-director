@@ -163,6 +163,7 @@ func (p *Proxy) handleConnection(clientConn net.Conn) {
 		p.instance.TLS.Enabled && p.instance.TLS.StartTLS,
 		session.tlsFlag,
 		p.instance.AuthMechs,
+		p.instance.Capability,
 	)
 
 	session.WriteResponse("* OK [CAPABILITY " + filteredCapabilities + "] IMAP Ready\r\n")
@@ -170,6 +171,7 @@ func (p *Proxy) handleConnection(clientConn net.Conn) {
 	logger.Info("New connection", slog.String("client", clientConn.RemoteAddr().String()), session.Session())
 
 	for {
+		// TODO: Terminate connection after 60 seconds without receiving new commands
 		line, err := session.ReadLine()
 		if err != nil {
 			if err != io.EOF {

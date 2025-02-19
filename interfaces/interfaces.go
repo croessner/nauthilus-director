@@ -43,6 +43,7 @@ type IMAPSession interface {
 	GetTLSFlag() bool
 	SetTLSFlag(flag bool)
 	GetAuthMechs() []string
+	GetCapability() string
 	SetClientID(id string)
 	GetBackendConn() net.Conn
 	LinkClientAndBackend()

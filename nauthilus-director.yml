@@ -10,6 +10,7 @@ server:
       address: 127.0.0.1
       port: 10143
       auth_mechanisms: plain
+      capability: "IMAP4rev1 STARTTLS AUTH=PLAIN"
       tls:
         enabled: true
         starttls: true
@@ -19,4 +20,3 @@ server:
 
   logging:
     level: debug
-    

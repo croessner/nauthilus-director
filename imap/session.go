@@ -488,6 +488,10 @@ func (s *SessionImpl) GetBackendConn() net.Conn {
 	return s.backendConn
 }
 
+func (s *SessionImpl) GetCapability() string {
+	return s.instance.Capability
+}
+
 func calculateDisallowedMechanisms(allMechanisms, allowedMechanisms []string) []string {
 	disallowed := make([]string, 0, len(allMechanisms))
 

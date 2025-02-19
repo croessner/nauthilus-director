@@ -5,7 +5,7 @@ import (
 	"github.com/croessner/nauthilus-director/interfaces"
 )
 
-const DefaultCapabilities = "IMAP4rev1 LOGIN-REFERRALS ID ENABLE IDLE SASL-IR LITERAL+ STARTTLS AUTH=PLAIN AUTH=LOGIN AUTH=XOAUTH2"
+const DefaultCapabilities = "IMAP4rev1 LOGIN-REFERRALS ENABLE IDLE SASL-IR LITERAL+ STARTTLS AUTH=PLAIN AUTH=LOGIN AUTH=XOAUTH2"
 
 type CapabilityCommand struct {
 	UseStartTLS bool
@@ -13,7 +13,7 @@ type CapabilityCommand struct {
 }
 
 func (c *CapabilityCommand) Execute(session iface.IMAPSession) error {
-	filteredCapabilities := generateCapabilities(c.UseStartTLS, session.GetTLSFlag(), session.GetAuthMechs())
+	filteredCapabilities := generateCapabilities(c.UseStartTLS, session.GetTLSFlag(), session.GetAuthMechs(), session.GetCapability())
 
 	session.WriteResponse("* CAPABILITY " + filteredCapabilities + "\r\n")
 	session.WriteResponse(c.Tag + " OK CAPABILITY completed\r\n")
@@ -21,7 +21,7 @@ func (c *CapabilityCommand) Execute(session iface.IMAPSession) error {
 	return nil
 }
 
-func generateCapabilities(useStartTLS, tlsFlag bool, mechanisms []string) string {
+func generateCapabilities(useStartTLS, tlsFlag bool, mechanisms []string, rawCapability string) string {
 	capabilityFilter := NewResponseFilterManager()
 	if !useStartTLS || tlsFlag {
 		capabilityFilter.AddFilter(NewStartTLSResponseFilter())
@@ -32,7 +32,11 @@ func generateCapabilities(useStartTLS, tlsFlag bool, mechanisms []string) string
 
 	capabilityFilter.AddFilter(NewAuthMechanismResponseFilter(disallowedMechanisms))
 
-	filteredCapabilities := capabilityFilter.ApplyFilters(DefaultCapabilities)
+	if rawCapability == "" {
+		rawCapability = DefaultCapabilities
+	}
+
+	filteredCapabilities := capabilityFilter.ApplyFilters(rawCapability)
 
 	return filteredCapabilities
 }

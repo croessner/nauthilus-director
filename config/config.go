@@ -29,6 +29,7 @@ type Listen struct {
 	Type       string   `mapstructure:"type"`
 	Address    string   `mapstructure:"address"`
 	Mode       string   `mapstructure:"mode"`
+	Capability string   `mapstructure:"capability"`
 }
 
 type Logging struct {
