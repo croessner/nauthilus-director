@@ -128,10 +128,6 @@ func (p *Proxy) Start(instance config.Listen) error {
 }
 
 func (p *Proxy) handleConnection(clientConn net.Conn) {
-	defer func(clientConn net.Conn) {
-		_ = clientConn.Close()
-	}(clientConn)
-
 	logger := log.GetLogger(p.ctx)
 
 	if p.tlsConfig != nil && !p.instance.TLS.StartTLS {
@@ -149,7 +145,13 @@ func (p *Proxy) handleConnection(clientConn net.Conn) {
 		}
 	}
 
+	inactivityTimeout := 60 * time.Second
+
+	lastActivity := make(chan struct{})
+	stopWatchdog := make(chan struct{})
+
 	session := &SessionImpl{
+		stopWatchDog:  stopWatchdog,
 		clientConn:    clientConn,
 		reader:        bufio.NewReader(clientConn),
 		authenticator: p.authenticator,
@@ -171,8 +173,24 @@ func (p *Proxy) handleConnection(clientConn net.Conn) {
 
 	logger.Info("New connection", slog.String("client", clientConn.RemoteAddr().String()), session.Session())
 
+	go func() {
+		for {
+			select {
+			case <-lastActivity:
+				continue
+			case <-time.After(inactivityTimeout):
+				session.WriteResponse("* BYE Timeout: closing connection\r\n")
+				logger.Warn("Session timed out due to inactivity", slog.String("client", clientConn.RemoteAddr().String()), session.Session())
+				session.Close()
+
+				return
+			case <-stopWatchdog:
+				return
+			}
+		}
+	}()
+
 	for {
-		// TODO: Terminate connection after 60 seconds without receiving new commands
 		line, err := session.ReadLine()
 		if err != nil {
 			if err != io.EOF {
@@ -181,8 +199,14 @@ func (p *Proxy) handleConnection(clientConn net.Conn) {
 				logger.Info("Client disconnected", slog.String("client", clientConn.RemoteAddr().String()), session.Session())
 			}
 
+			stopWatchdog <- struct{}{}
+
+			session.Close()
+
 			return
 		}
+
+		lastActivity <- struct{}{}
 
 		session.handleCommand(line)
 	}

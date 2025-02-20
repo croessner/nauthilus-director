@@ -25,6 +25,7 @@ import (
 )
 
 type SessionImpl struct {
+	stopWatchDog    chan struct{}
 	reader          *bufio.Reader
 	clientConn      net.Conn
 	backendConn     net.Conn
@@ -468,4 +469,8 @@ func (s *SessionImpl) GetBackendConn() net.Conn {
 
 func (s *SessionImpl) GetCapability() string {
 	return s.instance.Capability
+}
+
+func (s *SessionImpl) GetStopWatchDog() chan struct{} {
+	return s.stopWatchDog
 }
