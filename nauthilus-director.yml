@@ -1,38 +1,36 @@
 # nauthilus-director.yml
 ---
+x-baseTLS: &x-baseTLS
+  enabled: true
+  cert: server.crt
+  key: server.key
+
+x-baseIMAPSettings: &x-baseIMAPSettings
+  capability: "IMAP4rev1 ID ENABLE IDLE STARTTLS AUTH=PLAIN AUTH=LOGIN"
+  auth_mechanisms:
+    - plain
+    - login
+
 server:
-
   listen:
-
     - name: IMAP
       kind: imap
       type: tcp
       address: 127.0.0.1
       port: 10143
-      auth_mechanisms:
-      - plain
-      - login
-      capability: "IMAP4rev1 ID ENABLE IDLE STARTTLS AUTH=PLAIN AUTH=LOGIN"
+      <<: *x-baseIMAPSettings
       tls:
-        enabled: true
+        <<: *x-baseTLS
         starttls: true
-        cert: server.crt
-        key: server.key
 
     - name: IMAPS
       kind: imap
       type: tcp
       address: 127.0.0.1
       port: 10993
-      auth_mechanisms:
-        - plain
-        - login
-      capability: "IMAP4rev1 ID ENABLE IDLE STARTTLS AUTH=PLAIN AUTH=LOGIN"
+      <<: *x-baseIMAPSettings
       tls:
-        enabled: true
-        starttls: false
-        cert: server.crt
-        key: server.key
+        <<: *x-baseTLS
 
   logging:
     level: debug

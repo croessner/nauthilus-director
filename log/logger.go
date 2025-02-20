@@ -44,7 +44,10 @@ func (w *WrappedHandler) WithGroup(name string) slog.Handler {
 }
 
 func SetupLogging(ctx *context.Context, cfg *config.Config) {
-	var baseHandler slog.Handler
+	var (
+		baseHandler    slog.Handler
+		wrappedHandler slog.Handler
+	)
 
 	handlerOpts := &slog.HandlerOptions{
 		AddSource: false,
@@ -80,13 +83,21 @@ func SetupLogging(ctx *context.Context, cfg *config.Config) {
 			slog.String("instance", cfg.Server.InstanceID),
 		}
 
-		wrappedHandler := &WrappedHandler{
+		wrappedHandler = &WrappedHandler{
 			handler: baseHandler,
 			fields:  defaultFields,
 		}
-
-		ctx.Set(loggerKey, slog.New(wrappedHandler))
+	} else {
+		wrappedHandler = slog.NewTextHandler(
+			os.Stdout,
+			&slog.HandlerOptions{
+				AddSource: false,
+				Level:     slog.LevelInfo,
+			},
+		)
 	}
+
+	ctx.Set(loggerKey, slog.New(wrappedHandler))
 }
 
 func GetLogger(ctx *context.Context) *slog.Logger {
