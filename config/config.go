@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"strings"
 	"time"
 
@@ -32,6 +33,11 @@ type Listen struct {
 	Capability string   `mapstructure:"capability"`
 }
 
+func (l *Listen) String() string {
+	return fmt.Sprintf("{ Name: '%s' Kind: '%s' Type: '%s' Address:Port: '%s:%d' Mode: '%s' Capability: '%s' AuthMechs: '%v' TLS: '%s' }",
+		l.Name, l.Kind, l.Type, l.Address, l.Port, l.Mode, l.Capability, l.AuthMechs, l.TLS.String())
+}
+
 type Logging struct {
 	JSON  bool   `mapstructure:"json"`
 	Level string `mapstructure:"level"`
@@ -51,6 +57,11 @@ type TLS struct {
 	SkipVerify bool   `mapstructure:"http_client_skip_verify"`
 	Cert       string `mapstructure:"cert"`
 	Key        string `mapstructure:"key"`
+}
+
+func (t *TLS) String() string {
+	return fmt.Sprintf("{ Enabled: '%v' StartTLS: '%v' SkipVerify: '%v' Cert: '%s' Key: '%s' }",
+		t.Enabled, t.StartTLS, t.SkipVerify, t.Cert, t.Key)
 }
 
 func (cfg *Config) HandleConfig() error {

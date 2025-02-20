@@ -21,11 +21,12 @@ func runServer(ctx *context.Context, cfg *config.Config) {
 
 	for _, instance := range cfg.Server.Listen {
 		switch instance.Kind {
-
 		case "imap":
 			if instance.Name != "" {
 				wg.Add(1)
 				taskCount++
+
+				logger.Debug("Starting IMAP service", slog.String("instance", instance.String()))
 
 				go imap.NewInstance(ctx, instance, &wg)
 			} else {

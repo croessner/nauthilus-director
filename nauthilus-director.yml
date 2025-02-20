@@ -16,7 +16,21 @@ server:
       tls:
         enabled: true
         starttls: true
-        haproxy: false # TODO: Not yet implemented
+        cert: server.crt
+        key: server.key
+
+    - name: IMAPS
+      kind: imap
+      type: tcp
+      address: 127.0.0.1
+      port: 10993
+      auth_mechanisms:
+        - plain
+        - login
+      capability: "IMAP4rev1 ID ENABLE IDLE STARTTLS AUTH=PLAIN AUTH=LOGIN"
+      tls:
+        enabled: true
+        starttls: false
         cert: server.crt
         key: server.key
 
