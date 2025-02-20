@@ -16,8 +16,11 @@ import (
 
 	"github.com/croessner/nauthilus-director/config"
 	"github.com/croessner/nauthilus-director/context"
+	"github.com/croessner/nauthilus-director/imap/commands"
+	"github.com/croessner/nauthilus-director/imap/commands/filter"
 	"github.com/croessner/nauthilus-director/imap/proto"
 	"github.com/croessner/nauthilus-director/interfaces"
+	"github.com/croessner/nauthilus-director/link"
 	"github.com/croessner/nauthilus-director/log"
 )
 
@@ -37,6 +40,9 @@ type SessionImpl struct {
 	tlsFlag         bool
 	errorCounter    uint8
 }
+
+var _ iface.Session = (*SessionImpl)(nil)
+var _ iface.IMAPSession = (*SessionImpl)(nil)
 
 func (s *SessionImpl) WriteResponse(response string) {
 	logger := log.GetLogger(s.backendCtx)
@@ -325,9 +331,9 @@ func (s *SessionImpl) handleCommand(line string) {
 			return
 		}
 
-		command = &LoginCommand{Tag: tag, Username: parts[2], Password: parts[3]}
+		command = &commands.Login{Tag: tag, Username: parts[2], Password: parts[3]}
 	case proto.LOGOUT:
-		command = &LogoutCommand{Tag: tag}
+		command = &commands.Logout{Tag: tag}
 	case proto.AUTHENTICATE:
 		if len(parts) < 3 {
 			s.WriteResponse(tag + " BAD Syntax error\r\n")
@@ -339,24 +345,24 @@ func (s *SessionImpl) handleCommand(line string) {
 		switch strings.ToUpper(parts[2]) {
 		case proto.PLAIN:
 			// TODO: Lot of things are pending...
-			command = &AuthenticateCommand{Tag: tag, Method: proto.PLAIN}
+			command = &commands.Authenticate{Tag: tag, Method: proto.PLAIN}
 		case proto.LOGIN:
 			// TODO: Lot of things are pending...
-			command = &AuthenticateCommand{Tag: tag, Method: proto.LOGIN}
+			command = &commands.Authenticate{Tag: tag, Method: proto.LOGIN}
 		case proto.XOAUTH2:
 			// TODO: Lot of things are pending...
-			command = &XOAUTH2Command{Tag: tag}
+			command = &commands.XOAUTH2{Tag: tag}
 		default:
 			s.WriteResponse(tag + " NO Unsupported auth method\r\n")
 
 			return
 		}
 	case proto.CAPABILITY:
-		command = &CapabilityCommand{Tag: tag, UseStartTLS: s.instance.TLS.Enabled && s.instance.TLS.StartTLS}
+		command = &commands.Capability{Tag: tag, UseStartTLS: s.instance.TLS.Enabled && s.instance.TLS.StartTLS}
 	case proto.ID:
-		command = &IDCommand{Tag: tag}
+		command = &commands.ID{Tag: tag}
 	case proto.STARTTLS:
-		command = &StartTLSCommand{Tag: tag, TLSConfig: s.tlsConfig}
+		command = &commands.StartTLS{Tag: tag, TLSConfig: s.tlsConfig}
 	default:
 		s.WriteResponse(tag + " BAD Unsupported command\r\n")
 		s.errorCounter++
@@ -382,56 +388,28 @@ func (s *SessionImpl) Close() {
 }
 
 func (s *SessionImpl) LinkClientAndBackend() {
-	logger := log.GetLogger(s.backendCtx)
-
-	clientDone := make(chan struct{})
-	backendDone := make(chan struct{})
-
-	go func() {
-		_, _ = io.Copy(s.backendConn, s.clientConn)
-		logger.Debug("Connection closed by client", s.Session())
-
-		close(clientDone)
-	}()
-
-	go func() {
-		_, _ = io.Copy(s.clientConn, s.backendConn)
-		logger.Debug("Connection closed by backend", s.Session())
-
-		close(backendDone)
-	}()
-
-	select {
-	case <-s.backendCtx.Done():
-		s.Close()
-	case <-s.clientCtx.Done():
-		s.Close()
-	case <-clientDone:
-		s.Close()
-	case <-backendDone:
-		s.Close()
-	}
+	link.ConnectClientWithBackend(s)
 }
 
 func (s *SessionImpl) Session() slog.Attr {
 	return slog.String("session", s.session)
 }
 
-func (s *SessionImpl) setupCommandFilters() *CommandFilterManager {
-	commandFilter := NewCommandFilterManager()
+func (s *SessionImpl) setupCommandFilters() *filter.CommandFilterManager {
+	commandFilter := filter.NewCommandFilterManager()
 
 	if !(s.instance.TLS.Enabled && s.instance.TLS.StartTLS) || s.tlsFlag {
-		commandFilter.AddFilter(NewStartTLSFilter())
+		commandFilter.AddFilter(filter.NewStartTLSFilter())
 	}
 
 	if s.backendConn == nil {
-		commandFilter.AddFilter(NewIDFilter())
+		commandFilter.AddFilter(filter.NewIDFilter())
 	}
 
 	allMechanisms := []string{proto.LOGIN, proto.PLAIN, proto.XOAUTH2}
-	disallowedMechanisms := calculateDisallowedMechanisms(allMechanisms, s.instance.AuthMechs)
+	disallowedMechanisms := commands.CalculateDisallowedMechanisms(allMechanisms, s.instance.AuthMechs)
 
-	commandFilter.AddFilter(NewAuthMechanismFilter(disallowedMechanisms))
+	commandFilter.AddFilter(filter.NewAuthMechanismFilter(disallowedMechanisms))
 
 	return commandFilter
 }
@@ -464,7 +442,7 @@ func (s *SessionImpl) GetClientContext() *context.Context {
 	return s.clientCtx
 }
 
-func (s *SessionImpl) GetServerContext() *context.Context {
+func (s *SessionImpl) GetBackendContext() *context.Context {
 	return s.backendCtx
 }
 
@@ -490,26 +468,4 @@ func (s *SessionImpl) GetBackendConn() net.Conn {
 
 func (s *SessionImpl) GetCapability() string {
 	return s.instance.Capability
-}
-
-func calculateDisallowedMechanisms(allMechanisms, allowedMechanisms []string) []string {
-	disallowed := make([]string, 0, len(allMechanisms))
-
-	for _, mechanism := range allMechanisms {
-		found := false
-
-		for _, allowed := range allowedMechanisms {
-			if strings.EqualFold(mechanism, allowed) {
-				found = true
-
-				break
-			}
-		}
-
-		if !found {
-			disallowed = append(disallowed, mechanism)
-		}
-	}
-
-	return disallowed
 }

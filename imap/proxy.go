@@ -16,6 +16,7 @@ import (
 	"github.com/croessner/nauthilus-director/config"
 	"github.com/croessner/nauthilus-director/context"
 	"github.com/croessner/nauthilus-director/enc"
+	"github.com/croessner/nauthilus-director/imap/commands"
 	"github.com/croessner/nauthilus-director/interfaces"
 	"github.com/croessner/nauthilus-director/log"
 	"github.com/segmentio/ksuid"
@@ -159,7 +160,7 @@ func (p *Proxy) handleConnection(clientConn net.Conn) {
 		instance:      p.instance,
 	}
 
-	filteredCapabilities := generateCapabilities(
+	filteredCapabilities := commands.GenerateCapabilities(
 		p.instance.TLS.Enabled && p.instance.TLS.StartTLS,
 		session.tlsFlag,
 		p.instance.AuthMechs,

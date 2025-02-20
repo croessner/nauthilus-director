@@ -1,4 +1,4 @@
-package imap
+package commands
 
 import (
 	"fmt"
@@ -8,15 +8,15 @@ import (
 	"github.com/croessner/nauthilus-director/log"
 )
 
-type LoginCommand struct {
+type Login struct {
 	Tag      string
 	Username string
 	Password string
 }
 
-func (c *LoginCommand) Execute(session iface.IMAPSession) error {
+func (c *Login) Execute(session iface.IMAPSession) error {
 	auth := session.GetAuthenticator()
-	logger := log.GetLogger(session.GetServerContext())
+	logger := log.GetLogger(session.GetBackendContext())
 
 	if !auth.Authenticate(c.Username, c.Password) {
 		session.WriteResponse(c.Tag + " NO Authentication failed\r\n")

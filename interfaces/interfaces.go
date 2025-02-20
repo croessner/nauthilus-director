@@ -25,6 +25,17 @@ type IMAPCommand interface {
 	Execute(session IMAPSession) error
 }
 
+// Session represents an interface that provides a method for retrieving session-specific logging attributes.
+type Session interface {
+	GetClientContext() *context.Context
+	GetBackendContext() *context.Context
+	GetClientConn() net.Conn
+	GetBackendConn() net.Conn
+	Close()
+
+	Session() slog.Attr
+}
+
 // IMAPSession defines an interface for managing an IMAP session, including client communication and authentication.
 // It provides methods for handling context, connection management, reading and writing data, and logging/debugging.
 type IMAPSession interface {
@@ -32,7 +43,7 @@ type IMAPSession interface {
 		Context getters
 	*/
 	GetClientContext() *context.Context
-	GetServerContext() *context.Context
+	GetBackendContext() *context.Context
 
 	/*
 		Client and backend communication

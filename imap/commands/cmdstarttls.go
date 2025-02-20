@@ -1,4 +1,4 @@
-package imap
+package commands
 
 import (
 	"bufio"
@@ -10,13 +10,13 @@ import (
 	"github.com/croessner/nauthilus-director/log"
 )
 
-type StartTLSCommand struct {
+type StartTLS struct {
 	TLSConfig *tls.Config
 	Tag       string
 }
 
-func (s *StartTLSCommand) Execute(session iface.IMAPSession) error {
-	logger := log.GetLogger(session.GetServerContext())
+func (s *StartTLS) Execute(session iface.IMAPSession) error {
+	logger := log.GetLogger(session.GetBackendContext())
 
 	if s.TLSConfig == nil {
 		session.WriteResponse(s.Tag + " NO TLS configuration not available\r\n")
