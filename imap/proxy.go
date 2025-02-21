@@ -145,6 +145,9 @@ func (p *Proxy) handleConnection(clientConn net.Conn) {
 		}
 	}
 
+	_ = clientConn.(*net.TCPConn).SetKeepAlive(true)
+	_ = clientConn.(*net.TCPConn).SetKeepAlivePeriod(30 * time.Second)
+
 	inactivityTimeout := 60 * time.Second
 
 	lastActivity := make(chan struct{})

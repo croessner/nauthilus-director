@@ -99,6 +99,9 @@ func (s *SessionImpl) initializeIMAPConnection() error {
 		return err
 	}
 
+	_ = conn.(*net.TCPConn).SetKeepAlive(true)
+	_ = conn.(*net.TCPConn).SetKeepAlivePeriod(30 * time.Second)
+
 	s.backendConn = conn
 
 	return nil
@@ -389,6 +392,23 @@ func (s *SessionImpl) Close() {
 }
 
 func (s *SessionImpl) LinkClientAndBackend() {
+	logger := log.GetLogger(s.backendCtx)
+	reader := io.TeeReader(s.clientConn, s.backendConn) // Track client activity
+
+	go func() {
+		buf := make([]byte, 1024)
+
+		for {
+			n, err := reader.Read(buf)
+			if err != nil {
+				break
+			}
+
+			// TODO: Refresh Valkey data
+			logger.Debug("Client active", slog.String("data", string(buf[:n])), s.Session())
+		}
+	}()
+
 	link.ConnectClientWithBackend(s)
 }
 
