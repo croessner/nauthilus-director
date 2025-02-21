@@ -17,6 +17,8 @@ func runServer(ctx *context.Context, cfg *config.Config) {
 	taskCount := 0
 	logger := log.GetLogger(ctx)
 
+	logger.Debug("Registered backend servers", slog.String("backends", cfg.String()))
+
 	logger.Info("Starting server", slog.String("version", version.Version))
 
 	for _, instance := range cfg.Server.Listen {

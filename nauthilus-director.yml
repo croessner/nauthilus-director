@@ -1,36 +1,60 @@
 # nauthilus-director.yml
 ---
-x-baseTLS: &x-baseTLS
-  enabled: true
+x-defaultX509: &x-defaultX509
   cert: server.crt
   key: server.key
 
-x-baseIMAPSettings: &x-baseIMAPSettings
+x-defaultIMAPListener: &x-defaultIMAPListener
+  kind: imap
+  type: tcp
   capability: "IMAP4rev1 ID ENABLE IDLE STARTTLS AUTH=PLAIN AUTH=LOGIN"
   auth_mechanisms:
     - plain
     - login
+  tls:
+    enabled: true
+    <<: *x-defaultX509
 
 server:
-  listen:
-    - name: IMAP
-      kind: imap
-      type: tcp
-      address: 127.0.0.1
-      port: 10143
-      <<: *x-baseIMAPSettings
-      tls:
-        <<: *x-baseTLS
-        starttls: true
 
-    - name: IMAPS
-      kind: imap
-      type: tcp
-      address: 127.0.0.1
-      port: 10993
-      <<: *x-baseIMAPSettings
-      tls:
-        <<: *x-baseTLS
+  listen:
+
+  - name: IMAP
+    <<: *x-defaultIMAPListener
+    address: 127.0.0.1
+    port: 10143
+    tls:
+      starttls: true
+
+  - name: IMAPS
+    <<: *x-defaultIMAPListener
+    address: 127.0.0.1
+    port: 10993
 
   logging:
     level: debug
+
+x-defaultIMAPBackend: &x-defaultIMAPBackend
+  protocol: imap
+  weight: 100
+  max_connections: 1000
+  check_interval: 5s
+  deep_check: true
+  test_password: password
+  haproxy: false
+  tls:
+    enabled: true
+    starttls: true
+    skip_verify: true
+
+backend_server:
+
+- <<: *x-defaultIMAPBackend
+  host: 127.0.0.1
+  port: 1143
+  test_username: testuser1
+
+- <<: *x-defaultIMAPBackend
+  host: 127.0.0.1
+  port: 2143
+  test_username: testuser2

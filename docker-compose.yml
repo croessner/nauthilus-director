@@ -1,10 +1,19 @@
 services:
 
-  backend:
+  backend1:
     image: dovecot/dovecot:2.4-latest
     container_name: backend
     restart: unless-stopped
     ports:
       - "127.0.0.1:1143:31143/tcp"
     volumes:
-      - ./docker/local.conf:/etc/dovecot/conf.d/local.conf
+      - ./docker/local.conf:/etc/dovecot/conf.d/local.conf:ro
+
+  backend2:
+    image: dovecot/dovecot:2.4-latest
+    container_name: backend
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:2143:31143/tcp"
+    volumes:
+      - ./docker/local.conf:/etc/dovecot/conf.d/local.conf:ro
