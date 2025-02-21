@@ -50,11 +50,13 @@ x-defaultIMAPBackend: &x-defaultIMAPBackend
 backend_server:
 
 - <<: *x-defaultIMAPBackend
+  shard_tag: ""
   host: 127.0.0.1
   port: 1143
   test_username: testuser1
 
 - <<: *x-defaultIMAPBackend
+  shard_tag: ""
   host: 127.0.0.1
   port: 2143
   test_username: testuser2

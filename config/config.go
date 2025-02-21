@@ -130,6 +130,7 @@ func (t *TLS) String() string {
 }
 
 type BackendServer struct {
+	ShardTag       string        `mapstructure:"shard_tag"`
 	Host           string        `mapstructure:"host"`
 	Protocol       string        `mapstructure:"protocol"`
 	TestUsername   string        `mapstructure:"test_username"`
@@ -145,6 +146,6 @@ type BackendServer struct {
 }
 
 func (b *BackendServer) String() string {
-	return fmt.Sprintf("{ Host: '%s' Port: '%d' Protocol: '%s' Maintenance: '%v' DeepCheck: '%v' HAProxy: '%v' TLS: '%s' Weight: '%d' MaxConnections: '%d' CheckInterval: '%s' TestUsername: '%s' TestPassword: '%s' }",
-		b.Host, b.Port, b.Protocol, b.Maintenance, b.DeepCheck, b.HAProxy, b.TLS.String(), b.Weight, b.MaxConnections, b.CheckInterval, b.TestUsername, b.TestPassword)
+	return fmt.Sprintf("{ Host: '%s' Port: '%d' Protocol: '%s' ShardTag '%s'  Maintenance: '%v' DeepCheck: '%v' HAProxy: '%v' TLS: '%s' Weight: '%d' MaxConnections: '%d' CheckInterval: '%s' TestUsername: '%s' TestPassword: '%s' }",
+		b.Host, b.Port, b.Protocol, b.ShardTag, b.Maintenance, b.DeepCheck, b.HAProxy, b.TLS.String(), b.Weight, b.MaxConnections, b.CheckInterval, b.TestUsername, b.TestPassword)
 }
