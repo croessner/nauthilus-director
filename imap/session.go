@@ -1,7 +1,6 @@
 package imap
 
 import (
-	stdcontext "context"
 	"crypto/tls"
 	"encoding/base64"
 	"errors"
@@ -104,181 +103,217 @@ func (s *SessionImpl) initializeIMAPConnection() error {
 	return nil
 }
 
-func (s *SessionImpl) startResponseReader(ctx stdcontext.Context, conn *textproto.Conn, responseChan chan string, errorChan chan error) {
-	go func() {
-		logger := log.GetLogger(s.backendCtx)
-
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-				line, err := conn.ReadLine()
-				if err != nil {
-					if err == io.EOF {
-						return
-					}
-
-					errorChan <- err
-
-					return
-				}
-
-				logger.Debug("Received line from backend server", slog.String("line", line))
-
-				responseChan <- line
-			}
-		}
-	}()
-}
-
-func (s *SessionImpl) waitForResponse(tag string, responseChan chan string, errorChan chan error, expected string, timeout time.Duration, maxLoops int) (string, error) {
-	var fullResponse strings.Builder
-
-	loopCount := 0
-	timer := time.NewTimer(timeout)
-
-	defer timer.Stop()
-
-	for {
-		if loopCount >= maxLoops {
-			return "", fmt.Errorf("max loop iterations (%d) exceeded while waiting for response", maxLoops)
-		}
-
-		select {
-		case <-timer.C:
-			return "", fmt.Errorf("timeout (%s) reached while waiting for response", timeout)
-		case line := <-responseChan:
-			if line == "" {
-				return "", fmt.Errorf("response channel closed unexpectedly")
-			}
-
-			fullResponse.WriteString(line)
-
-			if strings.HasPrefix(line, tag) && strings.Contains(line, expected) {
-				return fullResponse.String(), nil
-			}
-		case err := <-errorChan:
-			if err != nil {
-				return "", fmt.Errorf("error reading response: %w", err)
-			}
-		}
-
-		loopCount++
-	}
-}
-
 func (s *SessionImpl) ConnectToIMAPBackend(tag, username, password string) error {
-	const timeout = 5 * time.Second
-	const maxLoops = 10
-
-	var backendLogin string
-
 	logger := log.GetLogger(s.backendCtx)
 
+	// Initialize the IMAP backend connection
 	if err := s.initializeIMAPConnection(); err != nil {
 		return err
 	}
 
-	responseChan := make(chan string)
-	errorChan := make(chan error)
-
-	ctx, cancel := stdcontext.WithCancel(s.backendCtx)
-
-	defer cancel()
-
-	s.startResponseReader(ctx, s.tpBackendConn, responseChan, errorChan)
-
-	greeting, err := s.waitForResponse("*", responseChan, errorChan, "OK", timeout, maxLoops)
+	greeting, err := s.tpBackendConn.ReadLine()
 	if err != nil {
-		return fmt.Errorf("error reading IMAP server greeting: %w", err)
+		return fmt.Errorf("error reading the server greeting: %w", err)
 	}
 
-	logger.Debug("Received greeting from server", slog.String("greeting", greeting))
+	logger.Debug("Received server greeting", slog.String("greeting", greeting))
 
-	if err = s.tpBackendConn.PrintfLine(fmt.Sprintf("%s CAPABILITY", tag)); err != nil {
-		logger.Error("Error when sending the CAPABILITY command", slog.String(log.Error, err.Error()), s.Session())
-
-		return err
+	// Send the CAPABILITY command
+	id, err := s.tpBackendConn.Cmd("%s CAPABILITY", tag)
+	if err != nil {
+		return fmt.Errorf("error sending CAPABILITY command: %w", err)
 	}
 
-	capabilityResponse, err := s.waitForResponse(tag, responseChan, errorChan, "OK", timeout, maxLoops)
+	// Read the response to the CAPABILITY command
+	// StartResponse() -> Allows controlled reading of the response
+	s.tpBackendConn.StartResponse(id)
+
+	capabilityResponse, err := s.tpBackendConn.ReadLine()
+
+	if err == nil && strings.HasPrefix(capabilityResponse, "*") {
+		_, err = s.tpBackendConn.ReadLine()
+	}
+
+	s.tpBackendConn.EndResponse(id)
+
 	if err != nil {
-		return fmt.Errorf("error reading CAPABILITY response: %w", err)
+		return fmt.Errorf("error reading the CAPABILITY response: %w", err)
 	}
 
 	logger.Debug("Received CAPABILITY response", slog.String("response", capabilityResponse))
 
+	// Check supported authentication mechanisms
 	authPlain := strings.Contains(capabilityResponse, "AUTH=PLAIN")
 	authLogin := strings.Contains(capabilityResponse, "AUTH=LOGIN")
 
+	// AUTH=PLAIN mechanism
 	if authPlain {
-		plainCredentials := fmt.Sprintf("\x00%s\x00%s", username, password)
-		base64PlainCredentials := base64.StdEncoding.EncodeToString([]byte(plainCredentials))
-		backendLogin = fmt.Sprintf("%s AUTHENTICATE PLAIN %s", tag, base64PlainCredentials)
-	} else if authLogin {
-		backendLogin = fmt.Sprintf("%s AUTHENTICATE LOGIN", tag)
-
-		if err = s.tpBackendConn.PrintfLine(backendLogin); err != nil {
-			logger.Error("Error when starting AUTH=LOGIN:", slog.String(log.Error, err.Error()), s.Session())
-
-			return err
+		if err = s.AuthPlain(tag, username, password); err != nil {
+			return fmt.Errorf("AUTH=PLAIN failed: %w", err)
 		}
-
-		loginPrompt, err := s.waitForResponse(tag, responseChan, errorChan, "+", timeout, maxLoops)
-		if err != nil || !strings.Contains(loginPrompt, "+") {
-			return fmt.Errorf("unexpected response during AUTH=LOGIN username step: %s", loginPrompt)
-		}
-
-		base64Username := base64.StdEncoding.EncodeToString([]byte(s.GetUser()))
-		if err = s.tpBackendConn.PrintfLine(base64Username); err != nil {
-			return fmt.Errorf("error sending username during AUTH=LOGIN: %w", err)
-		}
-
-		passwordPrompt, err := s.waitForResponse(tag, responseChan, errorChan, "+", timeout, maxLoops)
-		if err != nil || !strings.Contains(passwordPrompt, "+") {
-			return fmt.Errorf("unexpected response during AUTH=LOGIN password step: %s", passwordPrompt)
-		}
-
-		base64Password := base64.StdEncoding.EncodeToString([]byte(password))
-		if err = s.tpBackendConn.PrintfLine(base64Password); err != nil {
-			return fmt.Errorf("error sending password during AUTH=LOGIN: %w", err)
-		}
-
-		loginResponse, err := s.waitForResponse(tag, responseChan, errorChan, "OK", timeout, maxLoops)
-		if err != nil {
-			return fmt.Errorf("error reading AUTH=LOGIN response: %w", err)
-		}
-
-		if !strings.Contains(loginResponse, "OK") {
-			return fmt.Errorf("AUTH=LOGIN authentication failed: %s", loginResponse)
-		}
-
-		s.backendGreeting = loginResponse
 
 		return nil
-	} else {
-		backendLogin = fmt.Sprintf("%s LOGIN %s %s", tag, username, password)
 	}
 
-	if err = s.tpBackendConn.PrintfLine(backendLogin); err != nil {
-		logger.Error("Error when sending the login/authenticate command to the backend server:", slog.String(log.Error, err.Error()), s.Session())
+	// AUTH=LOGIN mechanism
+	if authLogin {
+		if err = s.AuthLogin(tag, username, password); err != nil {
+			return fmt.Errorf("AUTH=LOGIN failed: %w", err)
+		}
 
-		return err
+		return nil
 	}
 
-	response, err := s.waitForResponse(tag, responseChan, errorChan, "OK", timeout, maxLoops)
+	// Fallback to standard LOGIN command
+	if err = s.AuthLegacyLogin(tag, username, password); err != nil {
+		return fmt.Errorf("legacy LOGIN failed: %w", err)
+	}
+
+	return nil
+}
+
+func (s *SessionImpl) AuthLegacyLogin(tag, username, password string) error {
+	logger := log.GetLogger(s.backendCtx)
+
+	id, err := s.tpBackendConn.Cmd("%s LOGIN %s %s", tag, username, password)
 	if err != nil {
-		return fmt.Errorf("error reading IMAP authentication response: %w", err)
+		return fmt.Errorf("error sending LOGIN command: %w", err)
 	}
 
-	logger.Debug("Received IMAP authentication response", slog.String("response", response))
+	// Read the LOGIN command response
+	s.tpBackendConn.StartResponse(id)
+	loginResponse, err := s.tpBackendConn.ReadLine()
 
-	if !strings.Contains(response, "OK") {
-		return fmt.Errorf("backend authentication failed: %s", response)
+	if err == nil && strings.HasPrefix(loginResponse, "*") {
+		s.backendGreeting = loginResponse
+
+		loginResponse, err = s.tpBackendConn.ReadLine()
 	}
 
-	s.backendGreeting = response
+	s.tpBackendConn.EndResponse(id)
+
+	if err != nil {
+		return fmt.Errorf("error reading LOGIN response: %w", err)
+	}
+
+	if !strings.Contains(loginResponse, "OK") {
+		return fmt.Errorf("LOGIN failed: %s", loginResponse)
+	}
+
+	logger.Debug("Successful LOGIN authentication", slog.String("response", loginResponse))
+
+	return nil
+}
+
+func (s *SessionImpl) AuthPlain(tag, username, password string) error {
+	logger := log.GetLogger(s.backendCtx)
+
+	plainCredentials := fmt.Sprintf("\x00%s\x00%s", username, password)
+	base64PlainCredentials := base64.StdEncoding.EncodeToString([]byte(plainCredentials))
+
+	id, err := s.tpBackendConn.Cmd("%s AUTHENTICATE PLAIN %s", tag, base64PlainCredentials)
+	if err != nil {
+		return fmt.Errorf("error during AUTH=PLAIN: %w", err)
+	}
+
+	// Read the AUTH=PLAIN response
+	s.tpBackendConn.StartResponse(id)
+
+	plainAuthResponse, err := s.tpBackendConn.ReadLine()
+
+	if err == nil && strings.HasPrefix(plainAuthResponse, "*") {
+		s.backendGreeting = plainAuthResponse
+
+		plainAuthResponse, err = s.tpBackendConn.ReadLine()
+	}
+
+	s.tpBackendConn.EndResponse(id)
+
+	if err != nil {
+		return fmt.Errorf("error reading AUTH=PLAIN response: %w", err)
+	}
+
+	if !strings.Contains(plainAuthResponse, "OK") {
+		return fmt.Errorf("AUTH=PLAIN failed: %s", plainAuthResponse)
+	}
+
+	logger.Debug("Successful AUTH=PLAIN authentication", slog.String("response", plainAuthResponse))
+
+	return nil
+}
+
+func (s *SessionImpl) AuthLogin(tag, username, password string) error {
+	logger := log.GetLogger(s.backendCtx)
+
+	// Step 1: Start AUTH=LOGIN process
+	id, err := s.tpBackendConn.Cmd("%s AUTHENTICATE LOGIN", tag)
+	if err != nil {
+		return fmt.Errorf("error starting AUTH=LOGIN: %w", err)
+	}
+
+	// Read the initial response (expecting "+ Ready to accept username")
+	s.tpBackendConn.StartResponse(id)
+	line, err := s.tpBackendConn.ReadLine()
+	s.tpBackendConn.EndResponse(id)
+
+	if err != nil {
+		return fmt.Errorf("error reading response for AUTH=LOGIN step: %w", err)
+	}
+
+	if !strings.HasPrefix(line, "+") {
+		return fmt.Errorf("unexpected response for AUTH=LOGIN: %s", line)
+	}
+
+	// Step 2: Send the username (Base64 encoded)
+	base64Username := base64.StdEncoding.EncodeToString([]byte(username))
+
+	id, err = s.tpBackendConn.Cmd(base64Username)
+	if err != nil {
+		return fmt.Errorf("error sending username during AUTH=LOGIN: %w", err)
+	}
+
+	// Read the next response (expecting "+ Ready to accept password")
+	s.tpBackendConn.StartResponse(id)
+	line, err = s.tpBackendConn.ReadLine()
+	s.tpBackendConn.EndResponse(id)
+
+	if err != nil {
+		return fmt.Errorf("error reading response for username step: %w", err)
+	}
+
+	if !strings.HasPrefix(line, "+") {
+		return fmt.Errorf("unexpected response after sending username: %s", line)
+	}
+
+	// Step 3: Send the password (Base64 encoded)
+	base64Password := base64.StdEncoding.EncodeToString([]byte(password))
+
+	id, err = s.tpBackendConn.Cmd(base64Password)
+	if err != nil {
+		return fmt.Errorf("error sending password during AUTH=LOGIN: %w", err)
+	}
+
+	// Read the final response (expecting "OK" for successful login)
+	s.tpBackendConn.StartResponse(id)
+	line, err = s.tpBackendConn.ReadLine()
+
+	if err == nil && strings.HasPrefix(line, "*") {
+		s.backendGreeting = line
+
+		line, err = s.tpBackendConn.ReadLine()
+	}
+
+	s.tpBackendConn.EndResponse(id)
+
+	if err != nil {
+		return fmt.Errorf("error reading final AUTH=LOGIN response: %w", err)
+	}
+
+	if !strings.Contains(line, "OK") {
+		return fmt.Errorf("AUTH=LOGIN failed: %s", line)
+	}
+
+	logger.Debug("Successful AUTH=LOGIN authentication", slog.String("response", line))
 
 	return nil
 }
