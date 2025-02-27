@@ -16,8 +16,8 @@ type Capability struct {
 func (c *Capability) Execute(session iface.IMAPSession) error {
 	filteredCapabilities := GenerateCapabilities(c.UseStartTLS, session.GetTLSFlag(), session.GetAuthMechs(), session.GetCapability())
 
-	session.WriteResponse("* CAPABILITY " + filteredCapabilities + "\r\n")
-	session.WriteResponse(c.Tag + " OK CAPABILITY completed\r\n")
+	session.WriteResponse("* CAPABILITY " + filteredCapabilities)
+	session.WriteResponse(c.Tag + " OK CAPABILITY completed")
 
 	return nil
 }

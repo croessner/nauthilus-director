@@ -19,7 +19,7 @@ func (c *Login) Execute(session iface.IMAPSession) error {
 	logger := log.GetLogger(session.GetBackendContext())
 
 	if !auth.Authenticate(c.Username, c.Password) {
-		session.WriteResponse(c.Tag + " NO Authentication failed\r\n")
+		session.WriteResponse(c.Tag + " NO Authentication failed")
 
 		return fmt.Errorf("auth failed")
 	}
@@ -38,7 +38,7 @@ func (c *Login) Execute(session iface.IMAPSession) error {
 			return io.EOF
 		}
 
-		session.WriteResponse(c.Tag + " NO Backend authentication failed\r\n")
+		session.WriteResponse(c.Tag + " NO Backend authentication failed")
 
 		return err
 	}

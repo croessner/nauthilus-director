@@ -1,7 +1,6 @@
 package iface
 
 import (
-	"bufio"
 	"log/slog"
 	"net"
 
@@ -64,7 +63,6 @@ type IMAPSession interface {
 	*/
 	SetClientConn(conn net.Conn)
 	GetClientConn() net.Conn
-	SetReader(reader *bufio.Reader)
 	GetStopWatchDog() chan struct{}
 	Close()
 

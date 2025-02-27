@@ -11,8 +11,8 @@ type ID struct {
 }
 
 func (id *ID) Execute(session iface.IMAPSession) error {
-	session.WriteResponse("* ID (\"name\" \"Nauthilus director\" \"version\" \"" + version.Version + "\")\r\n")
-	session.WriteResponse(id.Tag + " OK ID completed\r\n")
+	session.WriteResponse("* ID (\"name\" \"Nauthilus director\" \"version\" \"" + version.Version + "\")")
+	session.WriteResponse(id.Tag + " OK ID completed")
 
 	session.SetClientID(id.Data)
 

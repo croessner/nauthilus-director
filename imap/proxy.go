@@ -1,13 +1,13 @@
 package imap
 
 import (
-	"bufio"
 	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
+	"net/textproto"
 	"os"
 	"strconv"
 	"sync"
@@ -127,13 +127,13 @@ func (p *Proxy) Start(instance config.Listen) error {
 	}
 }
 
-func (p *Proxy) handleConnection(clientConn net.Conn) {
+func (p *Proxy) handleConnection(rawClientConn net.Conn) {
 	logger := log.GetLogger(p.ctx)
 
 	if p.tlsConfig != nil && !p.instance.TLS.StartTLS {
-		tlsConn, ok := clientConn.(*tls.Conn)
+		tlsConn, ok := rawClientConn.(*tls.Conn)
 		if !ok {
-			tlsConn = tls.Server(clientConn, p.tlsConfig)
+			tlsConn = tls.Server(rawClientConn, p.tlsConfig)
 
 			if err := tlsConn.Handshake(); err != nil {
 				logger.Error("Could not handshake with client", slog.String(log.Error, err.Error()))
@@ -141,12 +141,19 @@ func (p *Proxy) handleConnection(clientConn net.Conn) {
 				return
 			}
 
-			clientConn = tlsConn
+			rawClientConn = tlsConn
 		}
 	}
 
-	_ = clientConn.(*net.TCPConn).SetKeepAlive(true)
-	_ = clientConn.(*net.TCPConn).SetKeepAlivePeriod(30 * time.Second)
+	if conn, ok := rawClientConn.(*net.TCPConn); ok {
+		_ = conn.SetNoDelay(true)
+		_ = conn.SetLinger(0)
+	}
+
+	if conn, ok := rawClientConn.(*tls.Conn); ok {
+		_ = conn.NetConn().(*net.TCPConn).SetNoDelay(true)
+		_ = conn.NetConn().(*net.TCPConn).SetLinger(0)
+	}
 
 	inactivityTimeout := 60 * time.Second
 
@@ -155,8 +162,8 @@ func (p *Proxy) handleConnection(clientConn net.Conn) {
 
 	session := &SessionImpl{
 		stopWatchDog:  stopWatchdog,
-		clientConn:    clientConn,
-		reader:        bufio.NewReader(clientConn),
+		tpClientConn:  textproto.NewConn(rawClientConn),
+		rawClientConn: rawClientConn,
 		authenticator: p.authenticator,
 		tlsConfig:     p.tlsConfig,
 		backendCtx:    p.ctx.Copy(),
@@ -172,9 +179,9 @@ func (p *Proxy) handleConnection(clientConn net.Conn) {
 		p.instance.Capability,
 	)
 
-	session.WriteResponse("* OK [CAPABILITY " + filteredCapabilities + "] IMAP Ready\r\n")
+	session.WriteResponse("* OK [CAPABILITY " + filteredCapabilities + "] IMAP Ready")
 
-	logger.Info("New connection", slog.String("client", clientConn.RemoteAddr().String()), session.Session())
+	logger.Info("New connection", slog.String("client", rawClientConn.RemoteAddr().String()), session.Session())
 
 	go func() {
 		for {
@@ -182,8 +189,8 @@ func (p *Proxy) handleConnection(clientConn net.Conn) {
 			case <-lastActivity:
 				continue
 			case <-time.After(inactivityTimeout):
-				session.WriteResponse("* BYE Timeout: closing connection\r\n")
-				logger.Warn("Session timed out due to inactivity", slog.String("client", clientConn.RemoteAddr().String()), session.Session())
+				session.WriteResponse("* BYE Timeout: closing connection")
+				logger.Warn("Session timed out due to inactivity", slog.String("client", rawClientConn.RemoteAddr().String()), session.Session())
 				session.Close()
 
 				return
@@ -199,7 +206,7 @@ func (p *Proxy) handleConnection(clientConn net.Conn) {
 			if err != io.EOF {
 				logger.Error("Error reading IMAP command", slog.String(log.Error, err.Error()), session.Session())
 			} else {
-				logger.Info("Client disconnected", slog.String("client", clientConn.RemoteAddr().String()), session.Session())
+				logger.Info("Client disconnected", slog.String("client", rawClientConn.RemoteAddr().String()), session.Session())
 			}
 
 			stopWatchdog <- struct{}{}

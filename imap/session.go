@@ -1,7 +1,6 @@
 package imap
 
 import (
-	"bufio"
 	stdcontext "context"
 	"crypto/tls"
 	"encoding/base64"
@@ -25,14 +24,15 @@ import (
 )
 
 type SessionImpl struct {
-	stopWatchDog    chan struct{}
-	reader          *bufio.Reader
-	clientConn      net.Conn
-	backendConn     net.Conn
 	authenticator   iface.Authenticator
-	tlsConfig       *tls.Config
 	backendCtx      *context.Context
 	clientCtx       *context.Context
+	tlsConfig       *tls.Config
+	tpBackendConn   *textproto.Conn
+	tpClientConn    *textproto.Conn
+	rawBackendConn  net.Conn
+	rawClientConn   net.Conn
+	stopWatchDog    chan struct{}
 	clientUsername  string
 	clientID        string
 	backendGreeting string
@@ -48,29 +48,21 @@ var _ iface.IMAPSession = (*SessionImpl)(nil)
 func (s *SessionImpl) WriteResponse(response string) {
 	logger := log.GetLogger(s.backendCtx)
 
-	if s.clientConn == nil {
+	if s.tpClientConn == nil {
 		return
 	}
 
-	_, err := s.clientConn.Write([]byte(response))
-	if err != nil {
+	if err := s.tpClientConn.PrintfLine(response); err != nil {
 		logger.Error("Error while sending the response:", slog.String(log.Error, err.Error()), s.Session())
 	}
 }
 
 func (s *SessionImpl) ReadLine() (string, error) {
-	if s.clientConn == nil {
+	if s.tpClientConn == nil {
 		return "", io.EOF
 	}
 
-	tpReader := textproto.NewReader(s.reader)
-
-	line, err := tpReader.ReadLine()
-
-	if line == "" {
-		return "", io.EOF
-	}
-
+	line, err := s.tpClientConn.ReadLine()
 	if err != nil {
 		var opErr *net.OpError
 
@@ -81,19 +73,23 @@ func (s *SessionImpl) ReadLine() (string, error) {
 		return "", err
 	}
 
+	if line == "" {
+		return "", io.EOF
+	}
+
 	return line, nil
 }
 
 func (s *SessionImpl) initializeIMAPConnection() error {
 	logger := log.GetLogger(s.backendCtx)
 
-	if s.backendConn != nil {
+	if s.tpBackendConn != nil {
 		return nil
 	}
 
 	conn, err := net.Dial("tcp", "127.0.0.1:1143")
 	if err != nil {
-		s.WriteResponse("* BYE Internal server error\r\n")
+		s.WriteResponse("* BYE Internal server error")
 		logger.Error("Error while connecting to the backend server:", slog.String(log.Error, err.Error()))
 
 		return err
@@ -102,28 +98,22 @@ func (s *SessionImpl) initializeIMAPConnection() error {
 	_ = conn.(*net.TCPConn).SetKeepAlive(true)
 	_ = conn.(*net.TCPConn).SetKeepAlivePeriod(30 * time.Second)
 
-	s.backendConn = conn
+	s.rawBackendConn = conn
+	s.tpBackendConn = textproto.NewConn(conn)
 
 	return nil
 }
 
-func (s *SessionImpl) startResponseReader(ctx stdcontext.Context, reader *bufio.Reader, responseChan chan string, errorChan chan error) {
+func (s *SessionImpl) startResponseReader(ctx stdcontext.Context, conn *textproto.Conn, responseChan chan string, errorChan chan error) {
 	go func() {
 		logger := log.GetLogger(s.backendCtx)
-		tpReader := textproto.NewReader(reader)
 
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			default:
-				line, err := tpReader.ReadLine()
-				logger.Debug("Received line from backend server", slog.String("line", line))
-
-				if line == "" {
-					return
-				}
-
+				line, err := conn.ReadLine()
 				if err != nil {
 					if err == io.EOF {
 						return
@@ -133,6 +123,8 @@ func (s *SessionImpl) startResponseReader(ctx stdcontext.Context, reader *bufio.
 
 					return
 				}
+
+				logger.Debug("Received line from backend server", slog.String("line", line))
 
 				responseChan <- line
 			}
@@ -161,7 +153,7 @@ func (s *SessionImpl) waitForResponse(tag string, responseChan chan string, erro
 				return "", fmt.Errorf("response channel closed unexpectedly")
 			}
 
-			fullResponse.WriteString(line + "\r\n")
+			fullResponse.WriteString(line)
 
 			if strings.HasPrefix(line, tag) && strings.Contains(line, expected) {
 				return fullResponse.String(), nil
@@ -195,7 +187,7 @@ func (s *SessionImpl) ConnectToIMAPBackend(tag, username, password string) error
 
 	defer cancel()
 
-	s.startResponseReader(ctx, bufio.NewReader(s.backendConn), responseChan, errorChan)
+	s.startResponseReader(ctx, s.tpBackendConn, responseChan, errorChan)
 
 	greeting, err := s.waitForResponse("*", responseChan, errorChan, "OK", timeout, maxLoops)
 	if err != nil {
@@ -204,8 +196,7 @@ func (s *SessionImpl) ConnectToIMAPBackend(tag, username, password string) error
 
 	logger.Debug("Received greeting from server", slog.String("greeting", greeting))
 
-	_, err = s.backendConn.Write([]byte(fmt.Sprintf("%s CAPABILITY\r\n", tag)))
-	if err != nil {
+	if err = s.tpBackendConn.PrintfLine(fmt.Sprintf("%s CAPABILITY", tag)); err != nil {
 		logger.Error("Error when sending the CAPABILITY command", slog.String(log.Error, err.Error()), s.Session())
 
 		return err
@@ -224,11 +215,11 @@ func (s *SessionImpl) ConnectToIMAPBackend(tag, username, password string) error
 	if authPlain {
 		plainCredentials := fmt.Sprintf("\x00%s\x00%s", username, password)
 		base64PlainCredentials := base64.StdEncoding.EncodeToString([]byte(plainCredentials))
-		backendLogin = fmt.Sprintf("%s AUTHENTICATE PLAIN %s\r\n", tag, base64PlainCredentials)
+		backendLogin = fmt.Sprintf("%s AUTHENTICATE PLAIN %s", tag, base64PlainCredentials)
 	} else if authLogin {
-		backendLogin = fmt.Sprintf("%s AUTHENTICATE LOGIN\r\n", tag)
+		backendLogin = fmt.Sprintf("%s AUTHENTICATE LOGIN", tag)
 
-		if _, err = s.backendConn.Write([]byte(backendLogin)); err != nil {
+		if err = s.tpBackendConn.PrintfLine(backendLogin); err != nil {
 			logger.Error("Error when starting AUTH=LOGIN:", slog.String(log.Error, err.Error()), s.Session())
 
 			return err
@@ -240,7 +231,7 @@ func (s *SessionImpl) ConnectToIMAPBackend(tag, username, password string) error
 		}
 
 		base64Username := base64.StdEncoding.EncodeToString([]byte(s.GetUser()))
-		if _, err = s.backendConn.Write([]byte(base64Username + "\r\n")); err != nil {
+		if err = s.tpBackendConn.PrintfLine(base64Username); err != nil {
 			return fmt.Errorf("error sending username during AUTH=LOGIN: %w", err)
 		}
 
@@ -250,7 +241,7 @@ func (s *SessionImpl) ConnectToIMAPBackend(tag, username, password string) error
 		}
 
 		base64Password := base64.StdEncoding.EncodeToString([]byte(password))
-		if _, err = s.backendConn.Write([]byte(base64Password + "\r\n")); err != nil {
+		if err = s.tpBackendConn.PrintfLine(base64Password); err != nil {
 			return fmt.Errorf("error sending password during AUTH=LOGIN: %w", err)
 		}
 
@@ -267,10 +258,10 @@ func (s *SessionImpl) ConnectToIMAPBackend(tag, username, password string) error
 
 		return nil
 	} else {
-		backendLogin = fmt.Sprintf("%s LOGIN %s %s\r\n", tag, username, password)
+		backendLogin = fmt.Sprintf("%s LOGIN %s %s", tag, username, password)
 	}
 
-	if _, err = s.backendConn.Write([]byte(backendLogin)); err != nil {
+	if err = s.tpBackendConn.PrintfLine(backendLogin); err != nil {
 		logger.Error("Error when sending the login/authenticate command to the backend server:", slog.String(log.Error, err.Error()), s.Session())
 
 		return err
@@ -302,7 +293,7 @@ func (s *SessionImpl) handleCommand(line string) {
 	logger := log.GetLogger(s.backendCtx)
 
 	if s.errorCounter >= 5 {
-		s.WriteResponse("* BAD Too many errors\r\n")
+		s.WriteResponse("* BAD Too many errors")
 		s.Close()
 
 		return
@@ -310,7 +301,7 @@ func (s *SessionImpl) handleCommand(line string) {
 
 	parts := strings.Fields(line)
 	if len(parts) < 2 {
-		s.WriteResponse("* BAD Invalid command\r\n")
+		s.WriteResponse("* BAD Invalid command")
 		s.errorCounter++
 
 		return
@@ -320,7 +311,7 @@ func (s *SessionImpl) handleCommand(line string) {
 	commandFilter := s.setupCommandFilters()
 
 	if commandFilter.ShouldBlock(cmd) {
-		s.WriteResponse(tag + " NO Command is not allowed\r\n")
+		s.WriteResponse(tag + " NO Command is not allowed")
 		s.errorCounter++
 
 		return
@@ -329,7 +320,7 @@ func (s *SessionImpl) handleCommand(line string) {
 	switch cmd {
 	case proto.LOGIN:
 		if len(parts) < 4 {
-			s.WriteResponse(tag + " BAD Syntax error\r\n")
+			s.WriteResponse(tag + " BAD Syntax error")
 			s.errorCounter++
 
 			return
@@ -340,7 +331,7 @@ func (s *SessionImpl) handleCommand(line string) {
 		command = &commands.Logout{Tag: tag}
 	case proto.AUTHENTICATE:
 		if len(parts) < 3 {
-			s.WriteResponse(tag + " BAD Syntax error\r\n")
+			s.WriteResponse(tag + " BAD Syntax error")
 			s.errorCounter++
 
 			return
@@ -357,7 +348,7 @@ func (s *SessionImpl) handleCommand(line string) {
 			// TODO: Lot of things are pending...
 			command = &commands.XOAUTH2{Tag: tag}
 		default:
-			s.WriteResponse(tag + " NO Unsupported auth method\r\n")
+			s.WriteResponse(tag + " NO Unsupported auth method")
 
 			return
 		}
@@ -368,7 +359,7 @@ func (s *SessionImpl) handleCommand(line string) {
 	case proto.STARTTLS:
 		command = &commands.StartTLS{Tag: tag, TLSConfig: s.tlsConfig}
 	default:
-		s.WriteResponse(tag + " BAD Unsupported command\r\n")
+		s.WriteResponse(tag + " BAD Unsupported command")
 		s.errorCounter++
 
 		return
@@ -380,20 +371,30 @@ func (s *SessionImpl) handleCommand(line string) {
 }
 
 func (s *SessionImpl) Close() {
-	if s.backendConn != nil {
-		_ = s.backendConn.Close()
-		s.backendConn = nil
+	if s.tpBackendConn != nil {
+		_ = s.tpBackendConn.Close()
+		s.tpBackendConn = nil
 	}
 
-	if s.clientConn != nil {
-		_ = s.clientConn.Close()
-		s.clientConn = nil
+	if s.rawBackendConn != nil {
+		_ = s.rawBackendConn.Close()
+		s.rawBackendConn = nil
+	}
+
+	if s.tpClientConn != nil {
+		_ = s.tpClientConn.Close()
+		s.tpClientConn = nil
+	}
+
+	if s.rawClientConn != nil {
+		_ = s.rawClientConn.Close()
+		s.rawClientConn = nil
 	}
 }
 
 func (s *SessionImpl) LinkClientAndBackend() {
 	logger := log.GetLogger(s.backendCtx)
-	reader := io.TeeReader(s.clientConn, s.backendConn) // Track client activity
+	reader := io.TeeReader(s.rawClientConn, s.rawBackendConn) // Track client activity
 
 	go func() {
 		buf := make([]byte, 1024)
@@ -423,7 +424,7 @@ func (s *SessionImpl) setupCommandFilters() *filter.CommandFilterManager {
 		commandFilter.AddFilter(filter.NewStartTLSFilter())
 	}
 
-	if s.backendConn == nil {
+	if s.tpBackendConn == nil {
 		commandFilter.AddFilter(filter.NewIDFilter())
 	}
 
@@ -444,15 +445,12 @@ func (s *SessionImpl) GetUser() string {
 }
 
 func (s *SessionImpl) SetClientConn(conn net.Conn) {
-	s.clientConn = conn
+	s.rawClientConn = conn
+	s.tpClientConn = textproto.NewConn(conn)
 }
 
 func (s *SessionImpl) GetClientConn() net.Conn {
-	return s.clientConn
-}
-
-func (s *SessionImpl) SetReader(reader *bufio.Reader) {
-	s.reader = reader
+	return s.rawClientConn
 }
 
 func (s *SessionImpl) GetBackendGreeting() string {
@@ -484,7 +482,7 @@ func (s *SessionImpl) SetClientID(id string) {
 }
 
 func (s *SessionImpl) GetBackendConn() net.Conn {
-	return s.backendConn
+	return s.rawBackendConn
 }
 
 func (s *SessionImpl) GetCapability() string {

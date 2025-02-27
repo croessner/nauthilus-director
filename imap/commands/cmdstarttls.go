@@ -1,7 +1,6 @@
 package commands
 
 import (
-	"bufio"
 	"crypto/tls"
 	"fmt"
 	"log/slog"
@@ -19,13 +18,13 @@ func (s *StartTLS) Execute(session iface.IMAPSession) error {
 	logger := log.GetLogger(session.GetBackendContext())
 
 	if s.TLSConfig == nil {
-		session.WriteResponse(s.Tag + " NO TLS configuration not available\r\n")
+		session.WriteResponse(s.Tag + " NO TLS configuration not available")
 		logger.Error("TLS config is nil", session.Session())
 
 		return fmt.Errorf("tls config is nil")
 	}
 
-	session.WriteResponse(s.Tag + " OK Begin TLS negotiation now\r\n")
+	session.WriteResponse(s.Tag + " OK Begin TLS negotiation now")
 
 	tlsConn := tls.Server(session.GetClientConn(), s.TLSConfig)
 	err := tlsConn.Handshake()
@@ -37,11 +36,9 @@ func (s *StartTLS) Execute(session iface.IMAPSession) error {
 	}
 
 	session.SetClientConn(tlsConn)
-	session.SetReader(bufio.NewReader(tlsConn))
+	session.SetTLSFlag(true)
 
 	logger.Info("TLS-connection established", slog.String("client", tlsConn.RemoteAddr().String()), session.Session())
-
-	session.SetTLSFlag(true)
 
 	return nil
 }
