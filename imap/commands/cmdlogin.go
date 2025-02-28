@@ -44,6 +44,7 @@ func (c *Login) Execute(session iface.IMAPSession) error {
 	}
 
 	session.WriteResponse(session.GetBackendGreeting())
+
 	logger.Debug("link client and backend", session.Session())
 	session.GetStopWatchDog() <- struct{}{}
 	session.LinkClientAndBackend()

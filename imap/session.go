@@ -118,37 +118,14 @@ func (s *SessionImpl) ConnectToIMAPBackend(tag, username, password string) error
 
 	logger.Debug("Received server greeting", slog.String("greeting", greeting))
 
-	// Send the CAPABILITY command
-	id, err := s.tpBackendConn.Cmd("%s CAPABILITY", tag)
-	if err != nil {
-		return fmt.Errorf("error sending CAPABILITY command: %w", err)
-	}
-
-	// Read the response to the CAPABILITY command
-	// StartResponse() -> Allows controlled reading of the response
-	s.tpBackendConn.StartResponse(id)
-
-	capabilityResponse, err := s.tpBackendConn.ReadLine()
-
-	if err == nil && strings.HasPrefix(capabilityResponse, "*") {
-		_, err = s.tpBackendConn.ReadLine()
-	}
-
-	s.tpBackendConn.EndResponse(id)
-
-	if err != nil {
-		return fmt.Errorf("error reading the CAPABILITY response: %w", err)
-	}
-
-	logger.Debug("Received CAPABILITY response", slog.String("response", capabilityResponse))
-
 	// Check supported authentication mechanisms
-	authPlain := strings.Contains(capabilityResponse, "AUTH=PLAIN")
-	authLogin := strings.Contains(capabilityResponse, "AUTH=LOGIN")
+	hasSASLIR := strings.Contains(greeting, "SASL-IR")
+	authPlain := strings.Contains(greeting, "AUTH=PLAIN")
+	authLogin := strings.Contains(greeting, "AUTH=LOGIN")
 
 	// AUTH=PLAIN mechanism
 	if authPlain {
-		if err = s.AuthPlain(tag, username, password); err != nil {
+		if err = s.AuthPlain(tag, username, password, hasSASLIR); err != nil {
 			return fmt.Errorf("AUTH=PLAIN failed: %w", err)
 		}
 
@@ -182,12 +159,13 @@ func (s *SessionImpl) AuthLegacyLogin(tag, username, password string) error {
 
 	// Read the LOGIN command response
 	s.tpBackendConn.StartResponse(id)
+
 	loginResponse, err := s.tpBackendConn.ReadLine()
-
 	if err == nil && strings.HasPrefix(loginResponse, "*") {
-		s.backendGreeting = loginResponse
-
 		loginResponse, err = s.tpBackendConn.ReadLine()
+		if err == nil && !strings.HasPrefix(loginResponse, tag) {
+			return fmt.Errorf("unexpected response for LOGIN: %s", loginResponse)
+		}
 	}
 
 	s.tpBackendConn.EndResponse(id)
@@ -200,31 +178,68 @@ func (s *SessionImpl) AuthLegacyLogin(tag, username, password string) error {
 		return fmt.Errorf("LOGIN failed: %s", loginResponse)
 	}
 
+	s.backendGreeting = loginResponse
+
 	logger.Debug("Successful LOGIN authentication", slog.String("response", loginResponse))
 
 	return nil
 }
 
-func (s *SessionImpl) AuthPlain(tag, username, password string) error {
+func (s *SessionImpl) AuthPlain(tag, username, password string, hasSASLIR bool) error {
+	var (
+		id  uint
+		err error
+	)
+
 	logger := log.GetLogger(s.backendCtx)
 
+	// Prepare credentials in PLAIN authentication format
 	plainCredentials := fmt.Sprintf("\x00%s\x00%s", username, password)
 	base64PlainCredentials := base64.StdEncoding.EncodeToString([]byte(plainCredentials))
 
-	id, err := s.tpBackendConn.Cmd("%s AUTHENTICATE PLAIN %s", tag, base64PlainCredentials)
-	if err != nil {
-		return fmt.Errorf("error during AUTH=PLAIN: %w", err)
+	// If the server supports SASL-IR, send AUTHENTICATE PLAIN with credentials directly
+	if hasSASLIR {
+		id, err = s.tpBackendConn.Cmd("%s AUTHENTICATE PLAIN %s", tag, base64PlainCredentials)
+		if err != nil {
+			return fmt.Errorf("error during AUTH=PLAIN with SASL-IR: %w", err)
+		}
+	} else {
+		// Send the AUTHENTICATE PLAIN command without credentials
+		id, err = s.tpBackendConn.Cmd("%s AUTHENTICATE PLAIN", tag)
+		if err != nil {
+			return fmt.Errorf("error sending AUTH=PLAIN command: %w", err)
+		}
+
+		// Wait for the server's response, expecting "+"
+		s.tpBackendConn.StartResponse(id)
+		line, err := s.tpBackendConn.ReadLine()
+		s.tpBackendConn.EndResponse(id)
+
+		if err != nil {
+			return fmt.Errorf("error waiting for AUTH=PLAIN response: %w", err)
+		}
+
+		// Check if the server response starts with "+"
+		if !strings.HasPrefix(line, "+") {
+			return fmt.Errorf("unexpected response during AUTH=PLAIN negotiation: %s", line)
+		}
+
+		// Send the Base64 encoded credentials after the server's "+" response
+		id, err = s.tpBackendConn.Cmd(base64PlainCredentials)
+		if err != nil {
+			return fmt.Errorf("error sending AUTH=PLAIN credentials: %w", err)
+		}
 	}
 
-	// Read the AUTH=PLAIN response
+	// Process the server's response after sending credentials
 	s.tpBackendConn.StartResponse(id)
 
 	plainAuthResponse, err := s.tpBackendConn.ReadLine()
-
 	if err == nil && strings.HasPrefix(plainAuthResponse, "*") {
-		s.backendGreeting = plainAuthResponse
-
 		plainAuthResponse, err = s.tpBackendConn.ReadLine()
+		if err == nil && !strings.HasPrefix(plainAuthResponse, tag) {
+			return fmt.Errorf("unexpected response for AUTH=PLAIN: %s", plainAuthResponse)
+		}
 	}
 
 	s.tpBackendConn.EndResponse(id)
@@ -236,6 +251,8 @@ func (s *SessionImpl) AuthPlain(tag, username, password string) error {
 	if !strings.Contains(plainAuthResponse, "OK") {
 		return fmt.Errorf("AUTH=PLAIN failed: %s", plainAuthResponse)
 	}
+
+	s.backendGreeting = plainAuthResponse
 
 	logger.Debug("Successful AUTH=PLAIN authentication", slog.String("response", plainAuthResponse))
 
@@ -298,8 +315,6 @@ func (s *SessionImpl) AuthLogin(tag, username, password string) error {
 	line, err = s.tpBackendConn.ReadLine()
 
 	if err == nil && strings.HasPrefix(line, "*") {
-		s.backendGreeting = line
-
 		line, err = s.tpBackendConn.ReadLine()
 	}
 
@@ -312,6 +327,8 @@ func (s *SessionImpl) AuthLogin(tag, username, password string) error {
 	if !strings.Contains(line, "OK") {
 		return fmt.Errorf("AUTH=LOGIN failed: %s", line)
 	}
+
+	s.backendGreeting = line
 
 	logger.Debug("Successful AUTH=LOGIN authentication", slog.String("response", line))
 
@@ -372,16 +389,16 @@ func (s *SessionImpl) handleCommand(line string) {
 			return
 		}
 
-		switch strings.ToUpper(parts[2]) {
-		case proto.PLAIN:
-			// TODO: Lot of things are pending...
-			command = &commands.Authenticate{Tag: tag, Method: proto.PLAIN}
-		case proto.LOGIN:
-			// TODO: Lot of things are pending...
-			command = &commands.Authenticate{Tag: tag, Method: proto.LOGIN}
-		case proto.XOAUTH2:
-			// TODO: Lot of things are pending...
-			command = &commands.XOAUTH2{Tag: tag}
+		method := strings.ToUpper(parts[2])
+		initialResponse := ""
+
+		if len(parts) > 3 {
+			initialResponse = parts[3]
+		}
+
+		switch method {
+		case proto.PLAIN, proto.LOGIN:
+			command = &commands.Authenticate{Tag: tag, Method: method, InitialResponse: initialResponse}
 		default:
 			s.WriteResponse(tag + " NO Unsupported auth method")
 

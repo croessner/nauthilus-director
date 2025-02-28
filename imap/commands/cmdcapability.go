@@ -6,7 +6,7 @@ import (
 	"github.com/croessner/nauthilus-director/interfaces"
 )
 
-const DefaultCapabilities = "IMAP4rev1 ID ENABLE IDLE STARTTLS AUTH=PLAIN AUTH=LOGIN AUTH=XOAUTH2"
+const DefaultCapabilities = "IMAP4rev1 ID ENABLE SASL-IR IDLE STARTTLS AUTH=PLAIN AUTH=LOGIN AUTH=XOAUTH2"
 
 type Capability struct {
 	UseStartTLS bool

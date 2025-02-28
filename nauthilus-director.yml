@@ -7,7 +7,7 @@ x-defaultX509: &x-defaultX509
 x-defaultIMAPListener: &x-defaultIMAPListener
   kind: imap
   type: tcp
-  capability: "IMAP4rev1 ID ENABLE IDLE STARTTLS AUTH=PLAIN AUTH=LOGIN"
+  capability: "IMAP4rev1 ID ENABLE SASL-IR IDLE STARTTLS AUTH=PLAIN AUTH=LOGIN"
   auth_mechanisms:
     - plain
     - login
