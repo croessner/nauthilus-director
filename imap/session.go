@@ -1,8 +1,11 @@
 package imap
 
 import (
+	"crypto/sha256"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -23,22 +26,39 @@ import (
 )
 
 type SessionImpl struct {
-	authenticator   iface.Authenticator
-	backendCtx      *context.Context
-	clientCtx       *context.Context
-	tlsConfig       *tls.Config
-	tpBackendConn   *textproto.Conn
-	tpClientConn    *textproto.Conn
-	rawBackendConn  net.Conn
-	rawClientConn   net.Conn
-	stopWatchDog    chan struct{}
-	clientUsername  string
-	clientID        string
-	backendGreeting string
-	session         string
-	instance        config.Listen
-	tlsFlag         bool
-	errorCounter    uint8
+	authenticator      iface.Authenticator
+	tlsConfig          *tls.Config
+	rawBackendConn     net.Conn
+	rawClientConn      net.Conn
+	tpBackendConn      *textproto.Conn
+	tpClientConn       *textproto.Conn
+	clientCtx          *context.Context
+	backendCtx         *context.Context
+	instance           config.Listen
+	service            string
+	clientUsername     string
+	clientID           string
+	backendGreeting    string
+	session            string
+	tlsProtocol        string
+	tlsCipherSuite     string
+	tlsFingerprint     string
+	tlsClientCName     string
+	tlsIssuerDN        string
+	tlsClientDN        string
+	tlsClientNotBefore string
+	tlsClientNotAfter  string
+	tlsSerial          string
+	tlsClientIssuerDN  string
+	tlsDNSNames        string
+	localPort          int
+	remotePort         int
+	localIP            string
+	remoteIP           string
+	stopWatchDog       chan struct{}
+	tlsVerified        bool
+	tlsFlag            bool
+	errorCounter       uint8
 }
 
 var _ iface.Session = (*SessionImpl)(nil)
@@ -77,6 +97,59 @@ func (s *SessionImpl) ReadLine() (string, error) {
 	}
 
 	return line, nil
+}
+
+func (s *SessionImpl) InitializeTLSFields() {
+	tlsConn, ok := s.rawClientConn.(*tls.Conn)
+	if !ok {
+		return
+	}
+
+	connectionState := tlsConn.ConnectionState()
+
+	// TLS Versions-Protokoll und Cipher Suite
+	s.tlsProtocol = versionToString(connectionState.Version)
+	s.tlsCipherSuite = tls.CipherSuiteName(connectionState.CipherSuite)
+
+	if len(connectionState.PeerCertificates) > 0 {
+		clientCert := connectionState.PeerCertificates[0]
+
+		s.tlsFingerprint = fingerprint(clientCert) // Zertifikats-Fingerprint
+		s.tlsClientCName = clientCert.Subject.CommonName
+		s.tlsIssuerDN = clientCert.Issuer.String()
+		s.tlsClientDN = clientCert.Subject.String()
+		s.tlsClientNotBefore = clientCert.NotBefore.String()
+		s.tlsClientNotAfter = clientCert.NotAfter.String()
+		s.tlsSerial = clientCert.SerialNumber.String()
+
+		if len(clientCert.DNSNames) > 0 {
+			s.tlsDNSNames = strings.Join(clientCert.DNSNames, ", ")
+		}
+	}
+
+	s.tlsVerified = connectionState.VerifiedChains != nil && len(connectionState.VerifiedChains) > 0
+}
+
+func versionToString(version uint16) string {
+	switch version {
+	case tls.VersionTLS10:
+		return "TLS 1.0"
+	case tls.VersionTLS11:
+		return "TLS 1.1"
+	case tls.VersionTLS12:
+		return "TLS 1.2"
+	case tls.VersionTLS13:
+		return "TLS 1.3"
+	default:
+		return "unknown"
+	}
+}
+
+func fingerprint(cert *x509.Certificate) string {
+	h := sha256.New()
+	h.Write(cert.Raw)
+
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 func (s *SessionImpl) initializeIMAPConnection() error {
@@ -488,6 +561,10 @@ func (s *SessionImpl) setupCommandFilters() *filter.CommandFilterManager {
 	return commandFilter
 }
 
+func (s *SessionImpl) GetService() string {
+	return s.service
+}
+
 func (s *SessionImpl) SetUser(username string) {
 	s.clientUsername = username
 }
@@ -543,4 +620,72 @@ func (s *SessionImpl) GetCapability() string {
 
 func (s *SessionImpl) GetStopWatchDog() chan struct{} {
 	return s.stopWatchDog
+}
+
+func (s *SessionImpl) GetTLSVerified() bool {
+	return s.tlsVerified
+}
+
+func (s *SessionImpl) GetTLSProtocol() string {
+	return s.tlsProtocol
+}
+
+func (s *SessionImpl) GetTLSCipherSuite() string {
+	return s.tlsCipherSuite
+}
+
+func (s *SessionImpl) GetTLSFingerprint() string {
+	return s.tlsFingerprint
+}
+
+func (s *SessionImpl) GetTLSClientCName() string {
+	return s.tlsClientCName
+}
+
+func (s *SessionImpl) GetTLSIssuerDN() string {
+	return s.tlsIssuerDN
+}
+
+func (s *SessionImpl) GetTLSClientDN() string {
+	return s.tlsClientDN
+}
+
+func (s *SessionImpl) GetTLSClientNotBefore() string {
+	return s.tlsClientNotBefore
+}
+
+func (s *SessionImpl) GetTLSClientNotAfter() string {
+	return s.tlsClientNotAfter
+}
+
+func (s *SessionImpl) GetTLSSerial() string {
+	return s.tlsSerial
+}
+
+func (s *SessionImpl) GetTLSClientIssuerDN() string {
+	return s.tlsClientIssuerDN
+}
+
+func (s *SessionImpl) GetTLSDNSNames() string {
+	return s.tlsDNSNames
+}
+
+func (s *SessionImpl) GetLocalIP() string {
+	return s.localIP
+}
+
+func (s *SessionImpl) GetRemoteIP() string {
+	return s.remoteIP
+}
+
+func (s *SessionImpl) GetLocalPort() int {
+	return s.localPort
+}
+
+func (s *SessionImpl) GetRemotePort() int {
+	return s.remotePort
+}
+
+func (s *SessionImpl) GetUserLookup() bool {
+	return s.instance.UserLookup
 }

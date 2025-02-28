@@ -37,8 +37,24 @@ func (s *StartTLS) Execute(session iface.IMAPSession) error {
 
 	session.SetClientConn(tlsConn)
 	session.SetTLSFlag(true)
+	session.InitializeTLSFields()
 
-	logger.Info("TLS-connection established", slog.String("client", tlsConn.RemoteAddr().String()), session.Session())
+	logger.Info("TLS connection established",
+		slog.String(log.LogKeyClient, session.GetClientConn().RemoteAddr().String()),
+		session.Session(),
+		slog.String(log.LogKeyTLSProtocol, session.GetTLSProtocol()),
+		slog.String(log.LogKeyTLSCipherSuite, session.GetTLSCipherSuite()),
+		slog.String(log.LogKeyTLSClientCName, session.GetTLSClientCName()),
+		slog.String(log.LogKeyTLSIssuerDN, session.GetTLSIssuerDN()),
+		slog.String(log.LogKeyTLSClientDN, session.GetTLSClientDN()),
+		slog.String(log.LogKeyTLSClientNotBefore, session.GetTLSClientNotBefore()),
+		slog.String(log.LogKeyTLSClientNotAfter, session.GetTLSClientNotAfter()),
+		slog.String(log.LogKeyTLSSerial, session.GetTLSSerial()),
+		slog.String(log.LogKeyTLSClientIssuerDN, session.GetTLSClientIssuerDN()),
+		slog.String(log.LogKeyTLSDNSNames, session.GetTLSDNSNames()),
+		slog.String(log.LogKeyTLSFingerprint, session.GetTLSFingerprint()),
+		slog.Bool(log.LogKeyTLSVerified, session.GetTLSVerified()),
+	)
 
 	return nil
 }

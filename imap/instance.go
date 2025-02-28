@@ -13,7 +13,7 @@ import (
 
 func NewInstance(ctx *context.Context, instance config.Listen, wg *sync.WaitGroup) {
 	logger := log.GetLogger(ctx)
-	authenticator := &auth.MockAuthenticator{} // TODO: Replace with Nauthilus authenticator
+	authenticator := &auth.NauthilusAuthenticator{} // TODO: Replace with Nauthilus authenticator
 	proxy := NewProxy(ctx, instance, authenticator, wg)
 
 	if proxy == nil {

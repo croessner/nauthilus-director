@@ -99,13 +99,17 @@ func (c *Authenticate) handlePlainAuthWithInitialResponse(session iface.IMAPSess
 	password := parts[2]
 
 	auth := session.GetAuthenticator()
-	if !auth.Authenticate(username, password) {
+
+	auth.SetUserLookup(session.GetUserLookup())
+	addTlsSessionInfos(session, auth)
+
+	if !auth.Authenticate(session.GetClientContext(), session.GetService(), username, password) {
 		session.WriteResponse(c.Tag + " NO Authentication failed")
 
 		return fmt.Errorf("PLAIN auth failed")
 	}
 
-	session.SetUser(username)
+	session.SetUser(auth.GetAccount())
 
 	return nil
 }
@@ -139,13 +143,17 @@ func (c *Authenticate) handlePlainAuth(session iface.IMAPSession) error {
 	password := parts[2]
 
 	auth := session.GetAuthenticator()
-	if !auth.Authenticate(username, password) {
+
+	auth.SetUserLookup(session.GetUserLookup())
+	addTlsSessionInfos(session, auth)
+
+	if !auth.Authenticate(session.GetClientContext(), session.GetService(), username, password) {
 		session.WriteResponse(c.Tag + " NO Authentication failed")
 
 		return fmt.Errorf("PLAIN auth failed for user: %s", username)
 	}
 
-	session.SetUser(username)
+	session.SetUser(auth.GetAccount())
 
 	return nil
 }
@@ -188,13 +196,17 @@ func (c *Authenticate) handleLoginAuth(session iface.IMAPSession) error {
 	password := string(passwordBytes)
 
 	auth := session.GetAuthenticator()
-	if !auth.Authenticate(username, password) {
+
+	auth.SetUserLookup(session.GetUserLookup())
+	addTlsSessionInfos(session, auth)
+
+	if !auth.Authenticate(session.GetClientContext(), session.GetService(), username, password) {
 		session.WriteResponse(c.Tag + " NO Authentication failed")
 
 		return fmt.Errorf("LOGIN auth failed")
 	}
 
-	session.SetUser(username)
+	session.SetUser(auth.GetAccount())
 
 	return nil
 }

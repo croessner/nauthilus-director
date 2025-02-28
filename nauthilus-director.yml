@@ -16,19 +16,21 @@ server:
 
   listen:
 
-  - name: IMAP
+  - name: imap
     <<: *x-defaultIMAPListener
     address: 127.0.0.1
     port: 10143
+    user_lookup: false
     tls:
       enabled: true
       starttls: true
       <<: *x-defaultX509
 
-  - name: IMAPS
+  - name: imaps
     <<: *x-defaultIMAPListener
     address: 127.0.0.1
     port: 10993
+    user_lookup: false
     tls:
       enabled: true
       <<: *x-defaultX509

@@ -11,7 +11,34 @@ import (
 // Authenticator defines an interface for verifying username and password credentials.
 // The Authenticate method returns true if authentication succeeds and false otherwise.
 type Authenticator interface {
-	Authenticate(username, password string) bool
+	Authenticate(ctx *context.Context, service, username, password string) bool
+
+	SetUserLookup(flag bool)
+	GetAccount() string
+
+	/*
+		Connection related setter
+	*/
+	SetLocalIP(ip string)
+	SetRemoteIP(ip string)
+	SetLocalPort(port int)
+	SetRemotePort(port int)
+
+	/*
+		TLS-related setters
+	*/
+	SetTLSVerified(verified bool)
+	SetTLSProtocol(protocol string)
+	SetTLSCipherSuite(cipherSuite string)
+	SetTLSFingerprint(fingerprint string)
+	SetTLSClientCName(clientCName string)
+	SetTLSIssuerDN(issuerDN string)
+	SetTLSClientDN(clientDN string)
+	SetTLSClientNotBefore(notBefore string)
+	SetTLSClientNotAfter(notAfter string)
+	SetTLSSerial(serial string)
+	SetTLSClientIssuerDN(clientIssuerDN string)
+	SetTLSDNSNames(dnsNames string)
 }
 
 // Proxy defines an interface for starting a proxy instance with specified configuration.
@@ -37,6 +64,7 @@ type Session interface {
 
 // IMAPSession defines an interface for managing an IMAP session, including client communication and authentication.
 // It provides methods for handling context, connection management, reading and writing data, and logging/debugging.
+// IMAPSession defines an interface for managing an IMAP session, including client communication and authentication.
 type IMAPSession interface {
 	/*
 		Context getters
@@ -61,6 +89,12 @@ type IMAPSession interface {
 	/*
 		Connection and session management
 	*/
+	GetUserLookup() bool
+	GetService() string
+	GetLocalIP() string
+	GetRemoteIP() string
+	GetLocalPort() int
+	GetRemotePort() int
 	SetClientConn(conn net.Conn)
 	GetClientConn() net.Conn
 	GetStopWatchDog() chan struct{}
@@ -72,12 +106,30 @@ type IMAPSession interface {
 	GetAuthenticator() Authenticator
 	SetUser(user string)
 	GetUser() string
+
 	ConnectToIMAPBackend(tag, masterUser, masterPass string) error
 
 	/*
 		Logging / Debugging
 	*/
 	Session() slog.Attr
+
+	/*
+		TLS-related getters
+	*/
+	InitializeTLSFields()
+	GetTLSVerified() bool
+	GetTLSProtocol() string
+	GetTLSCipherSuite() string
+	GetTLSFingerprint() string
+	GetTLSClientCName() string
+	GetTLSIssuerDN() string
+	GetTLSClientDN() string
+	GetTLSClientNotBefore() string
+	GetTLSClientNotAfter() string
+	GetTLSSerial() string
+	GetTLSClientIssuerDN() string
+	GetTLSDNSNames() string
 }
 
 // IMAPCommandFilter is an interface for filtering IMAP commands based on a given string input.

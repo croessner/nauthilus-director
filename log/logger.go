@@ -13,6 +13,22 @@ const loggerKey context.CtxKey = "logging"
 
 const Error = "error"
 
+const (
+	LogKeyClient             = "client"
+	LogKeyTLSProtocol        = "tls_protocol"
+	LogKeyTLSCipherSuite     = "tls_cipher_suite"
+	LogKeyTLSClientCName     = "tls_client_cname"
+	LogKeyTLSIssuerDN        = "tls_issuer_dn"
+	LogKeyTLSClientDN        = "tls_client_dn"
+	LogKeyTLSClientNotBefore = "tls_client_not_before"
+	LogKeyTLSClientNotAfter  = "tls_client_not_after"
+	LogKeyTLSSerial          = "tls_serial"
+	LogKeyTLSClientIssuerDN  = "tls_client_issuer_dn"
+	LogKeyTLSDNSNames        = "tls_dns_names"
+	LogKeyTLSFingerprint     = "tls_fingerprint"
+	LogKeyTLSVerified        = "tls_verified"
+)
+
 type WrappedHandler struct {
 	fields  []slog.Attr
 	handler slog.Handler

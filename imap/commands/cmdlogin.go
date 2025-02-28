@@ -19,7 +19,10 @@ func (c *Login) Execute(session iface.IMAPSession) error {
 	auth := session.GetAuthenticator()
 	logger := log.GetLogger(session.GetBackendContext())
 
-	if !auth.Authenticate(c.Username, c.Password) {
+	auth.SetUserLookup(session.GetUserLookup())
+	addTlsSessionInfos(session, auth)
+
+	if !auth.Authenticate(session.GetClientContext(), session.GetService(), c.Username, c.Password) {
 		session.WriteResponse(c.Tag + " NO Authentication failed")
 
 		return fmt.Errorf("auth failed")

@@ -161,6 +161,7 @@ func (p *Proxy) handleConnection(rawClientConn net.Conn) {
 	stopWatchdog := make(chan struct{})
 
 	session := &SessionImpl{
+		service:       p.instance.Name,
 		stopWatchDog:  stopWatchdog,
 		tpClientConn:  textproto.NewConn(rawClientConn),
 		rawClientConn: rawClientConn,
@@ -172,6 +173,10 @@ func (p *Proxy) handleConnection(rawClientConn net.Conn) {
 		instance:      p.instance,
 	}
 
+	// TODO: Local IP, port, remote IP, port... (haproxy...)
+
+	session.InitializeTLSFields()
+
 	filteredCapabilities := commands.GenerateCapabilities(
 		p.instance.TLS.Enabled && p.instance.TLS.StartTLS,
 		session.tlsFlag,
@@ -181,7 +186,22 @@ func (p *Proxy) handleConnection(rawClientConn net.Conn) {
 
 	session.WriteResponse("* OK [CAPABILITY " + filteredCapabilities + "] IMAP Ready")
 
-	logger.Info("New connection", slog.String("client", rawClientConn.RemoteAddr().String()), session.Session())
+	logger.Info("New connection",
+		slog.String(log.LogKeyClient, rawClientConn.RemoteAddr().String()),
+		session.Session(),
+		slog.String(log.LogKeyTLSProtocol, session.GetTLSProtocol()),
+		slog.String(log.LogKeyTLSCipherSuite, session.GetTLSCipherSuite()),
+		slog.String(log.LogKeyTLSClientCName, session.GetTLSClientCName()),
+		slog.String(log.LogKeyTLSIssuerDN, session.GetTLSIssuerDN()),
+		slog.String(log.LogKeyTLSClientDN, session.GetTLSClientDN()),
+		slog.String(log.LogKeyTLSClientNotBefore, session.GetTLSClientNotBefore()),
+		slog.String(log.LogKeyTLSClientNotAfter, session.GetTLSClientNotAfter()),
+		slog.String(log.LogKeyTLSSerial, session.GetTLSSerial()),
+		slog.String(log.LogKeyTLSClientIssuerDN, session.GetTLSClientIssuerDN()),
+		slog.String(log.LogKeyTLSDNSNames, session.GetTLSDNSNames()),
+		slog.String(log.LogKeyTLSFingerprint, session.GetTLSFingerprint()),
+		slog.Bool(log.LogKeyTLSVerified, session.GetTLSVerified()),
+	)
 
 	go func() {
 		for {

@@ -87,8 +87,9 @@ type Server struct {
 
 type Listen struct {
 	Port       int      `mapstructure:"port"`
-	HAProxy    bool     `mapstructure:"haproxy"`
 	TLS        TLS      `mapstructure:"tls"`
+	HAProxy    bool     `mapstructure:"haproxy"`
+	UserLookup bool     `mapstructure:"user_lookup"`
 	AuthMechs  []string `mapstructure:"auth_mechanisms"`
 	Kind       string   `mapstructure:"kind"`
 	Name       string   `mapstructure:"name"`
