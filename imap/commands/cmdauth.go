@@ -72,7 +72,7 @@ func (c *Authenticate) Execute(session iface.IMAPSession) error {
 
 	session.WriteResponse(session.GetBackendGreeting())
 
-	logger.Debug("link client and backend", session.Session())
+	logger.Info("link client and backend", session.Session(), slog.String("user", session.GetUser()))
 	session.GetStopWatchDog() <- struct{}{}
 	session.LinkClientAndBackend()
 

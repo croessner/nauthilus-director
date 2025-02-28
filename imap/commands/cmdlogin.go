@@ -3,6 +3,7 @@ package commands
 import (
 	"fmt"
 	"io"
+	"log/slog"
 
 	"github.com/croessner/nauthilus-director/interfaces"
 	"github.com/croessner/nauthilus-director/log"
@@ -45,7 +46,7 @@ func (c *Login) Execute(session iface.IMAPSession) error {
 
 	session.WriteResponse(session.GetBackendGreeting())
 
-	logger.Debug("link client and backend", session.Session())
+	logger.Info("link client and backend", session.Session(), slog.String("user", session.GetUser()))
 	session.GetStopWatchDog() <- struct{}{}
 	session.LinkClientAndBackend()
 
