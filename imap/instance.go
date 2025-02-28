@@ -13,7 +13,9 @@ import (
 
 func NewInstance(ctx *context.Context, instance config.Listen, wg *sync.WaitGroup) {
 	logger := log.GetLogger(ctx)
-	authenticator := &auth.NauthilusAuthenticator{} // TODO: Replace with Nauthilus authenticator
+	authenticator := &auth.NauthilusAuthenticator{}
+	// TODO: Replace with Nauthilus authenticator
+	// TODO: IMPORTANT: Make Authenticator part of a session!
 	proxy := NewProxy(ctx, instance, authenticator, wg)
 
 	if proxy == nil {
