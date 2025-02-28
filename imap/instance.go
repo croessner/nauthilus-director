@@ -5,7 +5,6 @@ import (
 	"os"
 	"sync"
 
-	"github.com/croessner/nauthilus-director/auth"
 	"github.com/croessner/nauthilus-director/config"
 	"github.com/croessner/nauthilus-director/context"
 	"github.com/croessner/nauthilus-director/log"
@@ -13,10 +12,7 @@ import (
 
 func NewInstance(ctx *context.Context, instance config.Listen, wg *sync.WaitGroup) {
 	logger := log.GetLogger(ctx)
-	authenticator := &auth.NauthilusAuthenticator{}
-	// TODO: Replace with Nauthilus authenticator
-	// TODO: IMPORTANT: Make Authenticator part of a session!
-	proxy := NewProxy(ctx, instance, authenticator, wg)
+	proxy := NewProxy(ctx, instance, wg)
 
 	if proxy == nil {
 		logger.Error("Error creating proxy")

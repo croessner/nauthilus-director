@@ -13,27 +13,26 @@ import (
 	"sync"
 	"time"
 
+	"github.com/croessner/nauthilus-director/auth"
 	"github.com/croessner/nauthilus-director/config"
 	"github.com/croessner/nauthilus-director/context"
 	"github.com/croessner/nauthilus-director/enc"
 	"github.com/croessner/nauthilus-director/imap/commands"
-	"github.com/croessner/nauthilus-director/interfaces"
 	"github.com/croessner/nauthilus-director/log"
 	"github.com/segmentio/ksuid"
 )
 
 type Proxy struct {
-	listener      net.Listener
-	wg            *sync.WaitGroup
-	ctx           *context.Context
-	tlsConfig     *tls.Config
-	authenticator iface.Authenticator
-	instance      config.Listen
-	listenAddr    string
-	name          string
+	listener   net.Listener
+	wg         *sync.WaitGroup
+	ctx        *context.Context
+	tlsConfig  *tls.Config
+	instance   config.Listen
+	listenAddr string
+	name       string
 }
 
-func NewProxy(ctx *context.Context, instance config.Listen, auth iface.Authenticator, wg *sync.WaitGroup) *Proxy {
+func NewProxy(ctx *context.Context, instance config.Listen, wg *sync.WaitGroup) *Proxy {
 	logger := log.GetLogger(ctx)
 
 	tlsConfig, err := enc.GetTLSConfig(instance)
@@ -43,13 +42,7 @@ func NewProxy(ctx *context.Context, instance config.Listen, auth iface.Authentic
 		return nil
 	}
 
-	return &Proxy{
-		authenticator: auth,
-		tlsConfig:     tlsConfig,
-		ctx:           ctx,
-		wg:            wg,
-		instance:      instance,
-	}
+	return &Proxy{tlsConfig: tlsConfig, ctx: ctx, wg: wg, instance: instance}
 }
 
 func (p *Proxy) Start(instance config.Listen) error {
@@ -161,11 +154,11 @@ func (p *Proxy) handleConnection(rawClientConn net.Conn) {
 	stopWatchdog := make(chan struct{})
 
 	session := &SessionImpl{
+		authenticator: &auth.NauthilusAuthenticator{},
 		service:       p.instance.Name,
 		stopWatchDog:  stopWatchdog,
 		tpClientConn:  textproto.NewConn(rawClientConn),
 		rawClientConn: rawClientConn,
-		authenticator: p.authenticator,
 		tlsConfig:     p.tlsConfig,
 		backendCtx:    p.ctx.Copy(),
 		clientCtx:     p.ctx.Copy(),
