@@ -29,7 +29,7 @@ func (s *StartTLS) Execute(session iface.IMAPSession) error {
 	tlsConn := tls.Server(session.GetClientConn(), s.TLSConfig)
 	err := tlsConn.Handshake()
 	if err != nil {
-		logger.Error("TLS-Handshake failed", slog.String(log.Error, err.Error()), session.Session())
+		logger.Error("TLS-Handshake failed", slog.String(log.KeyError, err.Error()), session.Session())
 		session.Close()
 
 		return err
@@ -40,20 +40,21 @@ func (s *StartTLS) Execute(session iface.IMAPSession) error {
 	session.InitializeTLSFields()
 
 	logger.Info("TLS connection established",
-		slog.String(log.LogKeyClient, session.GetClientConn().RemoteAddr().String()),
+		slog.String(log.KeyLocal, session.GetClientConn().LocalAddr().String()),
+		slog.String(log.KeyRemote, session.GetClientConn().RemoteAddr().String()),
 		session.Session(),
-		slog.String(log.LogKeyTLSProtocol, session.GetTLSProtocol()),
-		slog.String(log.LogKeyTLSCipherSuite, session.GetTLSCipherSuite()),
-		slog.String(log.LogKeyTLSClientCName, session.GetTLSClientCName()),
-		slog.String(log.LogKeyTLSIssuerDN, session.GetTLSIssuerDN()),
-		slog.String(log.LogKeyTLSClientDN, session.GetTLSClientDN()),
-		slog.String(log.LogKeyTLSClientNotBefore, session.GetTLSClientNotBefore()),
-		slog.String(log.LogKeyTLSClientNotAfter, session.GetTLSClientNotAfter()),
-		slog.String(log.LogKeyTLSSerial, session.GetTLSSerial()),
-		slog.String(log.LogKeyTLSClientIssuerDN, session.GetTLSClientIssuerDN()),
-		slog.String(log.LogKeyTLSDNSNames, session.GetTLSDNSNames()),
-		slog.String(log.LogKeyTLSFingerprint, session.GetTLSFingerprint()),
-		slog.Bool(log.LogKeyTLSVerified, session.GetTLSVerified()),
+		slog.String(log.KeyTLSProtocol, session.GetTLSProtocol()),
+		slog.String(log.KeyTLSCipherSuite, session.GetTLSCipherSuite()),
+		slog.String(log.KeyTLSClientCName, session.GetTLSClientCName()),
+		slog.String(log.KeyTLSIssuerDN, session.GetTLSIssuerDN()),
+		slog.String(log.KeyTLSClientDN, session.GetTLSClientDN()),
+		slog.String(log.KeyTLSClientNotBefore, session.GetTLSClientNotBefore()),
+		slog.String(log.KeyTLSClientNotAfter, session.GetTLSClientNotAfter()),
+		slog.String(log.KeyTLSSerial, session.GetTLSSerial()),
+		slog.String(log.KeyTLSClientIssuerDN, session.GetTLSClientIssuerDN()),
+		slog.String(log.KeyTLSDNSNames, session.GetTLSDNSNames()),
+		slog.String(log.KeyTLSFingerprint, session.GetTLSFingerprint()),
+		slog.Bool(log.KeyTLSVerified, session.GetTLSVerified()),
 	)
 
 	return nil

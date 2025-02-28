@@ -25,6 +25,7 @@ type NauthilusAuthenticator struct {
 	account            string
 	localIP            string
 	remoteIP           string
+	authMechanism      string
 	localPort          int
 	remotePort         int
 }
@@ -32,7 +33,26 @@ type NauthilusAuthenticator struct {
 func (n *NauthilusAuthenticator) Authenticate(ctx *context.Context, service, username, password string) bool {
 	logger := log.GetLogger(ctx)
 
-	logger.Debug("Nauthilus authentication", slog.String("service", service), slog.String("username", username))
+	logger.Debug("Nauthilus authentication",
+		slog.String("service", service),
+		slog.String("auth_mechanism", n.authMechanism),
+		slog.String("username", username),
+		slog.String("local_IP", n.localIP),
+		slog.Int("local_port", n.localPort),
+		slog.String("remote_IP", n.remoteIP),
+		slog.Int("remote_port", n.remotePort),
+		slog.String("tls_protocol", n.tlsProtocol),
+		slog.String("tls_cipher_suite", n.tlsCipherSuite),
+		slog.String("tls_fingerprint", n.tlsFingerprint),
+		slog.String("tls_client_CName", n.tlsClientCName),
+		slog.String("tls_issuer_DN", n.tlsIssuerDN),
+		slog.String("tls_client_DN", n.tlsClientDN),
+		slog.String("tls_client_not_before", n.tlsClientNotBefore),
+		slog.String("tls_client_not_after", n.tlsClientNotAfter),
+		slog.String("tls_serial", n.tlsSerial),
+		slog.String("tls_client_issuer_DN", n.tlsClientIssuerDN),
+		slog.String("tls_DNS_names", n.tlsDNSNames),
+	)
 
 	if username != "user" {
 		return false
@@ -53,6 +73,10 @@ func (n *NauthilusAuthenticator) SetUserLookup(flag bool) {
 
 func (n *NauthilusAuthenticator) GetAccount() string {
 	return n.account
+}
+
+func (n *NauthilusAuthenticator) SetAuthMechanism(mechanism string) {
+	n.authMechanism = mechanism
 }
 
 func (n *NauthilusAuthenticator) SetTLSProtocol(protocol string) {

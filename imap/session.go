@@ -72,7 +72,7 @@ func (s *SessionImpl) WriteResponse(response string) {
 	}
 
 	if err := s.tpClientConn.PrintfLine(response); err != nil {
-		logger.Error("Error while sending the response:", slog.String(log.Error, err.Error()), s.Session())
+		logger.Error("Error while sending the response:", slog.String(log.KeyError, err.Error()), s.Session())
 	}
 }
 
@@ -162,7 +162,7 @@ func (s *SessionImpl) initializeIMAPConnection() error {
 	conn, err := net.Dial("tcp", "127.0.0.1:1143")
 	if err != nil {
 		s.WriteResponse("* BYE Internal server error")
-		logger.Error("Error while connecting to the backend server:", slog.String(log.Error, err.Error()))
+		logger.Error("Error while connecting to the backend server:", slog.String(log.KeyError, err.Error()))
 
 		return err
 	}
@@ -491,7 +491,7 @@ func (s *SessionImpl) handleCommand(line string) {
 	}
 
 	if err := command.Execute(s); err != nil {
-		logger.Error("Error while executing the command:", slog.String(log.Error, err.Error()), s.Session())
+		logger.Error("Error while executing the command:", slog.String(log.KeyError, err.Error()), s.Session())
 	}
 }
 

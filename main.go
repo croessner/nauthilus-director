@@ -16,7 +16,7 @@ func main() {
 	log.SetupLogging(ctx, cfg)
 
 	if err != nil {
-		log.GetLogger(ctx).Error("Could not load config", slog.String(log.Error, err.Error()))
+		log.GetLogger(ctx).Error("Could not load config", slog.String(log.KeyError, err.Error()))
 
 		os.Exit(1)
 	}

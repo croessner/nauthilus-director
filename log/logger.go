@@ -11,22 +11,22 @@ import (
 
 const loggerKey context.CtxKey = "logging"
 
-const Error = "error"
-
 const (
-	LogKeyClient             = "client"
-	LogKeyTLSProtocol        = "tls_protocol"
-	LogKeyTLSCipherSuite     = "tls_cipher_suite"
-	LogKeyTLSClientCName     = "tls_client_cname"
-	LogKeyTLSIssuerDN        = "tls_issuer_dn"
-	LogKeyTLSClientDN        = "tls_client_dn"
-	LogKeyTLSClientNotBefore = "tls_client_not_before"
-	LogKeyTLSClientNotAfter  = "tls_client_not_after"
-	LogKeyTLSSerial          = "tls_serial"
-	LogKeyTLSClientIssuerDN  = "tls_client_issuer_dn"
-	LogKeyTLSDNSNames        = "tls_dns_names"
-	LogKeyTLSFingerprint     = "tls_fingerprint"
-	LogKeyTLSVerified        = "tls_verified"
+	KeyError              = "error"
+	KeyLocal              = "local"
+	KeyRemote             = "remote"
+	KeyTLSProtocol        = "tls_protocol"
+	KeyTLSCipherSuite     = "tls_cipher_suite"
+	KeyTLSClientCName     = "tls_client_cname"
+	KeyTLSIssuerDN        = "tls_issuer_dn"
+	KeyTLSClientDN        = "tls_client_dn"
+	KeyTLSClientNotBefore = "tls_client_not_before"
+	KeyTLSClientNotAfter  = "tls_client_not_after"
+	KeyTLSSerial          = "tls_serial"
+	KeyTLSClientIssuerDN  = "tls_client_issuer_dn"
+	KeyTLSDNSNames        = "tls_dns_names"
+	KeyTLSFingerprint     = "tls_fingerprint"
+	KeyTLSVerified        = "tls_verified"
 )
 
 type WrappedHandler struct {

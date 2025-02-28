@@ -38,7 +38,7 @@ func NewProxy(ctx *context.Context, instance config.Listen, auth iface.Authentic
 
 	tlsConfig, err := enc.GetTLSConfig(instance)
 	if err != nil {
-		logger.Error("Could not get TLS config", slog.String(log.Error, err.Error()))
+		logger.Error("Could not get TLS config", slog.String(log.KeyError, err.Error()))
 
 		return nil
 	}
@@ -136,7 +136,7 @@ func (p *Proxy) handleConnection(rawClientConn net.Conn) {
 			tlsConn = tls.Server(rawClientConn, p.tlsConfig)
 
 			if err := tlsConn.Handshake(); err != nil {
-				logger.Error("Could not handshake with client", slog.String(log.Error, err.Error()))
+				logger.Error("Could not handshake with client", slog.String(log.KeyError, err.Error()))
 
 				return
 			}
@@ -173,7 +173,14 @@ func (p *Proxy) handleConnection(rawClientConn net.Conn) {
 		instance:      p.instance,
 	}
 
-	// TODO: Local IP, port, remote IP, port... (haproxy...)
+	// TODO: HAproxy...
+	remoteAddr := rawClientConn.RemoteAddr().(*net.TCPAddr)
+	localAddr := rawClientConn.LocalAddr().(*net.TCPAddr)
+
+	session.remoteIP = remoteAddr.IP.String()
+	session.remotePort = remoteAddr.Port
+	session.localIP = localAddr.IP.String()
+	session.localPort = localAddr.Port
 
 	session.InitializeTLSFields()
 
@@ -187,20 +194,21 @@ func (p *Proxy) handleConnection(rawClientConn net.Conn) {
 	session.WriteResponse("* OK [CAPABILITY " + filteredCapabilities + "] IMAP Ready")
 
 	logger.Info("New connection",
-		slog.String(log.LogKeyClient, rawClientConn.RemoteAddr().String()),
+		slog.String(log.KeyLocal, rawClientConn.LocalAddr().String()),
+		slog.String(log.KeyRemote, rawClientConn.RemoteAddr().String()),
 		session.Session(),
-		slog.String(log.LogKeyTLSProtocol, session.GetTLSProtocol()),
-		slog.String(log.LogKeyTLSCipherSuite, session.GetTLSCipherSuite()),
-		slog.String(log.LogKeyTLSClientCName, session.GetTLSClientCName()),
-		slog.String(log.LogKeyTLSIssuerDN, session.GetTLSIssuerDN()),
-		slog.String(log.LogKeyTLSClientDN, session.GetTLSClientDN()),
-		slog.String(log.LogKeyTLSClientNotBefore, session.GetTLSClientNotBefore()),
-		slog.String(log.LogKeyTLSClientNotAfter, session.GetTLSClientNotAfter()),
-		slog.String(log.LogKeyTLSSerial, session.GetTLSSerial()),
-		slog.String(log.LogKeyTLSClientIssuerDN, session.GetTLSClientIssuerDN()),
-		slog.String(log.LogKeyTLSDNSNames, session.GetTLSDNSNames()),
-		slog.String(log.LogKeyTLSFingerprint, session.GetTLSFingerprint()),
-		slog.Bool(log.LogKeyTLSVerified, session.GetTLSVerified()),
+		slog.String(log.KeyTLSProtocol, session.GetTLSProtocol()),
+		slog.String(log.KeyTLSCipherSuite, session.GetTLSCipherSuite()),
+		slog.String(log.KeyTLSClientCName, session.GetTLSClientCName()),
+		slog.String(log.KeyTLSIssuerDN, session.GetTLSIssuerDN()),
+		slog.String(log.KeyTLSClientDN, session.GetTLSClientDN()),
+		slog.String(log.KeyTLSClientNotBefore, session.GetTLSClientNotBefore()),
+		slog.String(log.KeyTLSClientNotAfter, session.GetTLSClientNotAfter()),
+		slog.String(log.KeyTLSSerial, session.GetTLSSerial()),
+		slog.String(log.KeyTLSClientIssuerDN, session.GetTLSClientIssuerDN()),
+		slog.String(log.KeyTLSDNSNames, session.GetTLSDNSNames()),
+		slog.String(log.KeyTLSFingerprint, session.GetTLSFingerprint()),
+		slog.Bool(log.KeyTLSVerified, session.GetTLSVerified()),
 	)
 
 	go func() {
@@ -224,7 +232,7 @@ func (p *Proxy) handleConnection(rawClientConn net.Conn) {
 		line, err := session.ReadLine()
 		if err != nil {
 			if err != io.EOF {
-				logger.Error("Error reading IMAP command", slog.String(log.Error, err.Error()), session.Session())
+				logger.Error("Error reading IMAP command", slog.String(log.KeyError, err.Error()), session.Session())
 			} else {
 				logger.Info("Client disconnected", slog.String("client", rawClientConn.RemoteAddr().String()), session.Session())
 			}

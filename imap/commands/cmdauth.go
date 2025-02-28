@@ -100,7 +100,12 @@ func (c *Authenticate) handlePlainAuthWithInitialResponse(session iface.IMAPSess
 
 	auth := session.GetAuthenticator()
 
+	auth.SetRemoteIP(session.GetRemoteIP())
+	auth.SetRemotePort(session.GetRemotePort())
+	auth.SetLocalIP(session.GetLocalIP())
+	auth.SetLocalPort(session.GetLocalPort())
 	auth.SetUserLookup(session.GetUserLookup())
+	auth.SetAuthMechanism(strings.ToUpper(c.Method) + " (SASL)")
 	addTlsSessionInfos(session, auth)
 
 	if !auth.Authenticate(session.GetClientContext(), session.GetService(), username, password) {
@@ -144,7 +149,12 @@ func (c *Authenticate) handlePlainAuth(session iface.IMAPSession) error {
 
 	auth := session.GetAuthenticator()
 
+	auth.SetRemoteIP(session.GetRemoteIP())
+	auth.SetRemotePort(session.GetRemotePort())
+	auth.SetLocalIP(session.GetLocalIP())
+	auth.SetLocalPort(session.GetLocalPort())
 	auth.SetUserLookup(session.GetUserLookup())
+	auth.SetAuthMechanism(strings.ToUpper(c.Method) + " (SASL)")
 	addTlsSessionInfos(session, auth)
 
 	if !auth.Authenticate(session.GetClientContext(), session.GetService(), username, password) {
@@ -197,7 +207,12 @@ func (c *Authenticate) handleLoginAuth(session iface.IMAPSession) error {
 
 	auth := session.GetAuthenticator()
 
+	auth.SetRemoteIP(session.GetRemoteIP())
+	auth.SetRemotePort(session.GetRemotePort())
+	auth.SetLocalIP(session.GetLocalIP())
+	auth.SetLocalPort(session.GetLocalPort())
 	auth.SetUserLookup(session.GetUserLookup())
+	auth.SetAuthMechanism(strings.ToUpper(c.Method) + " (SASL)")
 	addTlsSessionInfos(session, auth)
 
 	if !auth.Authenticate(session.GetClientContext(), session.GetService(), username, password) {

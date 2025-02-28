@@ -15,6 +15,7 @@ type Authenticator interface {
 
 	SetUserLookup(flag bool)
 	GetAccount() string
+	SetAuthMechanism(mechanism string)
 
 	/*
 		Connection related setter

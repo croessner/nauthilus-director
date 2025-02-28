@@ -25,7 +25,7 @@ func NewInstance(ctx *context.Context, instance config.Listen, wg *sync.WaitGrou
 	defer wg.Done()
 
 	if err := proxy.Start(instance); err != nil {
-		logger.Error("Could not start proxy", slog.String(log.Error, err.Error()))
+		logger.Error("Could not start proxy", slog.String(log.KeyError, err.Error()))
 		os.Exit(1)
 	}
 }

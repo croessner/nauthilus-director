@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 
+	"github.com/croessner/nauthilus-director/imap/proto"
 	"github.com/croessner/nauthilus-director/interfaces"
 	"github.com/croessner/nauthilus-director/log"
 )
@@ -19,7 +20,12 @@ func (c *Login) Execute(session iface.IMAPSession) error {
 	auth := session.GetAuthenticator()
 	logger := log.GetLogger(session.GetBackendContext())
 
+	auth.SetRemoteIP(session.GetRemoteIP())
+	auth.SetRemotePort(session.GetRemotePort())
+	auth.SetLocalIP(session.GetLocalIP())
+	auth.SetLocalPort(session.GetLocalPort())
 	auth.SetUserLookup(session.GetUserLookup())
+	auth.SetAuthMechanism(proto.LOGIN + " (RFC3501)")
 	addTlsSessionInfos(session, auth)
 
 	if !auth.Authenticate(session.GetClientContext(), session.GetService(), c.Username, c.Password) {
