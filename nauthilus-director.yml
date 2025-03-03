@@ -4,39 +4,40 @@ x-defaultX509: &x-defaultX509
   cert: server.crt
   key: server.key
 
+#
+# Default listeners
+#
+
 x-defaultIMAPListener: &x-defaultIMAPListener
   kind: imap
   type: tcp
-  capability: "IMAP4rev1 ID ENABLE SASL-IR IDLE STARTTLS AUTH=PLAIN AUTH=LOGIN"
+  capability:
+  - "IMAP4rev1"
+  - "ID"
+  - "ENABLE"
+  - "SASL-IR"
+  - "IDLE"
+  - "STARTTLS"
+  - "AUTH=PLAIN"
+  - "AUTH=LOGIN"
   auth_mechanisms:
-    - plain
-    - login
+  - plain
+  - login
 
-server:
+x-defaultLMTPListener: &x-defaultLMTPListener
+  kind: lmtp
+  type: tcp
+  capability:
+  - "8BITMIME"
+  - "CHUNKING"
+  - "ENHANCEDSTATUSCODES"
+  - "PIPELINING"
+  - "SMTPUTF8"
+  - "SIZE 10485760"
 
-  listen:
-
-  - name: imap
-    <<: *x-defaultIMAPListener
-    address: 127.0.0.1
-    port: 10143
-    user_lookup: false
-    tls:
-      enabled: true
-      starttls: true
-      <<: *x-defaultX509
-
-  - name: imaps
-    <<: *x-defaultIMAPListener
-    address: 127.0.0.1
-    port: 10993
-    user_lookup: false
-    tls:
-      enabled: true
-      <<: *x-defaultX509
-
-  logging:
-    level: debug
+#
+# Default backends
+#
 
 x-defaultIMAPBackend: &x-defaultIMAPBackend
   protocol: imap
@@ -51,7 +52,69 @@ x-defaultIMAPBackend: &x-defaultIMAPBackend
     starttls: true
     skip_verify: true
 
+x-defaultLMTPBackend: &x-defaultLMTPBackend
+  protocol: lmtp
+  user_lookup: true
+  weight: 100
+  max_connections: 1000
+  check_interval: 5s
+  deep_check: true
+  test_password: password
+  haproxy: false
+  tls:
+    enabled: true
+    skip_verify: true
+
+server:
+
+  listen:
+
+    #
+    # IMAP
+    #
+
+  - name: imap
+    <<: *x-defaultIMAPListener
+    address: 127.0.0.1
+    port: 10143
+    tls:
+      enabled: true
+      starttls: true
+      <<: *x-defaultX509
+
+  - name: imaps
+    <<: *x-defaultIMAPListener
+    address: 127.0.0.1
+    port: 10993
+    tls:
+      enabled: true
+      <<: *x-defaultX509
+
+    #
+    # LMTP
+    #
+
+  - name: lmtp
+    <<: *x-defaultLMTPListener
+    address: 127.0.0.1
+    port: 10024
+
+  - name: lmtps
+    <<: *x-defaultLMTPListener
+    address: 127.0.0.1
+    port: 11024
+    tls:
+      enabled: true
+      <<: *x-defaultX509
+
+  logging:
+    level: debug
+
 backend_server:
+
+  #
+  # IMAP
+  #
 
 - <<: *x-defaultIMAPBackend
   shard_tag: ""
@@ -63,4 +126,20 @@ backend_server:
   shard_tag: ""
   host: 127.0.0.1
   port: 2143
+  test_username: testuser2
+
+  #
+  # LMTP
+  #
+
+- <<: *x-defaultLMTPBackend
+  shard_tag: ""
+  host: 127.0.0.1
+  port: 2424
+  test_username: testuser1
+
+- <<: *x-defaultIMAPBackend
+  shard_tag: ""
+  host: 127.0.0.1
+  port: 3424
   test_username: testuser2

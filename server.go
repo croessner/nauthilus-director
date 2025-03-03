@@ -7,6 +7,7 @@ import (
 	"github.com/croessner/nauthilus-director/config"
 	"github.com/croessner/nauthilus-director/context"
 	"github.com/croessner/nauthilus-director/imap"
+	"github.com/croessner/nauthilus-director/lmtp"
 	"github.com/croessner/nauthilus-director/log"
 	"github.com/croessner/nauthilus-director/version"
 )
@@ -22,20 +23,29 @@ func runServer(ctx *context.Context, cfg *config.Config) {
 	logger.Info("Starting server", slog.String("version", version.Version))
 
 	for _, instance := range cfg.Server.Listen {
+		if instance.Name == "" {
+			logger.Error("Service requires a name")
+
+			return
+		}
+
 		switch instance.Kind {
 		case "imap":
-			if instance.Name != "" {
-				wg.Add(1)
-				taskCount++
+			wg.Add(1)
+			taskCount++
 
-				logger.Debug("Starting IMAP service", slog.String("instance", instance.String()))
+			logger.Debug("Starting IMAP service", slog.String("instance", instance.String()))
 
-				go imap.NewInstance(ctx, instance, &wg)
-			} else {
-				logger.Error("IMAP service requires a name")
+			go imap.NewInstance(ctx, instance, &wg)
+		case "lmtp":
+			wg.Add(1)
+			taskCount++
 
-				return
-			}
+			logger.Debug("Starting LMTP service", slog.String("instance", instance.String()))
+
+			go lmtp.NewInstance(ctx, instance, &wg)
+		default:
+			logger.Error("Unknown service kind", slog.String("kind", instance.Kind))
 		}
 	}
 

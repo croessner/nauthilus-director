@@ -614,7 +614,7 @@ func (s *SessionImpl) GetBackendConn() net.Conn {
 	return s.rawBackendConn
 }
 
-func (s *SessionImpl) GetCapability() string {
+func (s *SessionImpl) GetCapability() []string {
 	return s.instance.Capability
 }
 

@@ -91,16 +91,16 @@ type Listen struct {
 	HAProxy    bool     `mapstructure:"haproxy"`
 	UserLookup bool     `mapstructure:"user_lookup"`
 	AuthMechs  []string `mapstructure:"auth_mechanisms"`
+	Capability []string `mapstructure:"capability"`
 	Kind       string   `mapstructure:"kind"`
 	Name       string   `mapstructure:"name"`
 	Type       string   `mapstructure:"type"`
 	Address    string   `mapstructure:"address"`
 	Mode       string   `mapstructure:"mode"`
-	Capability string   `mapstructure:"capability"`
 }
 
 func (l *Listen) String() string {
-	return fmt.Sprintf("{ Name: '%s' Kind: '%s' Type: '%s' Address:Port: '%s:%d' Mode: '%s' Capability: '%s' AuthMechs: '%v' TLS: '%s' }",
+	return fmt.Sprintf("{ Name: '%s' Kind: '%s' Type: '%s' Address:Port: '%s:%d' Mode: '%s' Capability: '%v' AuthMechs: '%v' TLS: '%s' }",
 		l.Name, l.Kind, l.Type, l.Address, l.Port, l.Mode, l.Capability, l.AuthMechs, l.TLS.String())
 }
 

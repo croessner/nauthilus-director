@@ -1,4 +1,4 @@
-package imap
+package lmtp
 
 import (
 	"log/slog"
@@ -13,9 +13,9 @@ import (
 
 func NewInstance(ctx *context.Context, instance config.Listen, wg *sync.WaitGroup) {
 	logger := log.GetLogger(ctx)
-	imapProxy := proxy.NewProxy(ctx, instance, wg)
+	lmtpProxy := proxy.NewProxy(ctx, instance, wg)
 
-	if imapProxy == nil {
+	if lmtpProxy == nil {
 		logger.Error("Error creating proxy")
 
 		os.Exit(1)
@@ -23,7 +23,7 @@ func NewInstance(ctx *context.Context, instance config.Listen, wg *sync.WaitGrou
 
 	defer wg.Done()
 
-	if err := imapProxy.Start(instance, Handler); err != nil {
+	if err := lmtpProxy.Start(instance, Handler); err != nil {
 		logger.Error("Could not start proxy", slog.String(log.KeyError, err.Error()))
 		os.Exit(1)
 	}

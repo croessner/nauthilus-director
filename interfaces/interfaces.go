@@ -1,8 +1,10 @@
 package iface
 
 import (
+	"crypto/tls"
 	"log/slog"
 	"net"
+	"sync"
 
 	"github.com/croessner/nauthilus-director/config"
 	"github.com/croessner/nauthilus-director/context"
@@ -44,7 +46,15 @@ type Authenticator interface {
 
 // Proxy defines an interface for starting a proxy instance with specified configuration.
 type Proxy interface {
-	Start(instance config.Listen) error
+	Start(instance config.Listen, handler func(Proxy, net.Conn)) error
+
+	GetListener() net.Listener
+	GetWaitGroup() *sync.WaitGroup
+	GetContext() *context.Context
+	GetTLSConfig() *tls.Config
+	GetInstance() config.Listen
+	GetListenAddr() string
+	GetName() string
 }
 
 // IMAPCommand represents an interface for handling and executing IMAP commands within a session.
@@ -82,7 +92,7 @@ type IMAPSession interface {
 	GetTLSFlag() bool
 	SetTLSFlag(flag bool)
 	GetAuthMechs() []string
-	GetCapability() string
+	GetCapability() []string
 	SetClientID(id string)
 	GetBackendConn() net.Conn
 	LinkClientAndBackend()
@@ -140,5 +150,5 @@ type IMAPCommandFilter interface {
 
 // IMAPResponseFilter defines methods for filtering and modifying IMAP response strings in a customizable manner.
 type IMAPResponseFilter interface {
-	FilterResponse(response string) string
+	FilterResponse(response []string) []string
 }

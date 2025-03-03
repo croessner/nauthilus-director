@@ -22,7 +22,7 @@ func (c *Capability) Execute(session iface.IMAPSession) error {
 	return nil
 }
 
-func GenerateCapabilities(useStartTLS, tlsFlag bool, mechanisms []string, rawCapability string) string {
+func GenerateCapabilities(useStartTLS, tlsFlag bool, mechanisms []string, rawCapability []string) string {
 	capabilityFilter := filter.NewResponseFilterManager()
 	if !useStartTLS || tlsFlag {
 		capabilityFilter.AddFilter(filter.NewStartTLSResponseFilter())
@@ -33,8 +33,8 @@ func GenerateCapabilities(useStartTLS, tlsFlag bool, mechanisms []string, rawCap
 
 	capabilityFilter.AddFilter(filter.NewAuthMechanismResponseFilter(disallowedMechanisms))
 
-	if rawCapability == "" {
-		rawCapability = DefaultCapabilities
+	if len(rawCapability) == 0 {
+		rawCapability = []string{DefaultCapabilities}
 	}
 
 	filteredCapabilities := capabilityFilter.ApplyFilters(rawCapability)

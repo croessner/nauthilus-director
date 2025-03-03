@@ -19,11 +19,12 @@ func (r *ResponseFilterManager) AddFilter(filter iface.IMAPResponseFilter) {
 	r.responseFilters = append(r.responseFilters, filter)
 }
 
-func (r *ResponseFilterManager) ApplyFilters(response string) string {
+func (r *ResponseFilterManager) ApplyFilters(response []string) string {
 	for _, filter := range r.responseFilters {
 		response = filter.FilterResponse(response)
 	}
-	return response
+
+	return strings.Join(response, " ")
 }
 
 type CommandFilterManager struct {
@@ -54,11 +55,18 @@ func NewStartTLSResponseFilter() *StartTLSResponseFilter {
 	return &StartTLSResponseFilter{}
 }
 
-func (f *StartTLSResponseFilter) FilterResponse(response string) string {
-	response = strings.ReplaceAll(response, proto.STARTTLS, "")
-	response = strings.Join(strings.Fields(response), " ")
+func (f *StartTLSResponseFilter) FilterResponse(response []string) []string {
+	allowedCaps := make([]string, 0)
 
-	return response
+	for _, item := range response {
+		if strings.EqualFold(item, proto.STARTTLS) {
+			continue
+		}
+
+		allowedCaps = append(allowedCaps, strings.TrimSpace(item))
+	}
+
+	return allowedCaps
 }
 
 type AuthMechanismResponseFilter struct {
@@ -71,15 +79,14 @@ func NewAuthMechanismResponseFilter(mechanisms []string) *AuthMechanismResponseF
 	}
 }
 
-func (a *AuthMechanismResponseFilter) FilterResponse(response string) string {
-	fields := strings.Fields(response)
+func (a *AuthMechanismResponseFilter) FilterResponse(response []string) []string {
 	remainingFields := make([]string, 0)
 
-	for _, field := range fields {
+	for _, item := range response {
 		forbidden := false
 
 		for _, mechanism := range a.mechanisms {
-			if strings.EqualFold(field, "AUTH="+strings.ToUpper(mechanism)) {
+			if strings.EqualFold(strings.TrimSpace(item), "AUTH="+strings.ToUpper(mechanism)) {
 				forbidden = true
 
 				break
@@ -87,11 +94,11 @@ func (a *AuthMechanismResponseFilter) FilterResponse(response string) string {
 		}
 
 		if !forbidden {
-			remainingFields = append(remainingFields, field)
+			remainingFields = append(remainingFields, item)
 		}
 	}
 
-	return strings.Join(remainingFields, " ")
+	return remainingFields
 }
 
 type StartTLSFilter struct{}
