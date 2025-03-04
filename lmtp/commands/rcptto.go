@@ -7,13 +7,12 @@ import (
 )
 
 type RcptTo struct {
-	Found    bool
-	Username string
+	recipient string
 }
 
-func NewRcptTo(username string) *RcptTo {
+func NewRcptTo(recipient string) *RcptTo {
 	return &RcptTo{
-		Username: username,
+		recipient: recipient,
 	}
 }
 
@@ -30,25 +29,29 @@ func (c *RcptTo) Execute(session iface.LMTPSession) error {
 	auth.SetAuthMechanism("NONE")
 	addTlsSessionInfos(session, auth)
 
-	if !auth.Authenticate(session.GetClientContext(), session.GetService(), normalizeUsername(c.Username), "") {
+	if !auth.Authenticate(session.GetClientContext(), session.GetService(), normalizeUsername(c.recipient), "") {
 		if err := session.WriteResponse("550 5.1.1 User does not exist"); err != nil {
 			return err
 		}
 	} else {
-		c.Found = true
+		if err := session.WriteResponse("250 2.1.5 OK"); err != nil {
+			return err
+		}
+
+		session.AddRecipient(c.recipient)
 	}
 
 	return nil
 }
 
-func normalizeUsername(username string) string {
-	if strings.HasPrefix(username, "<") {
-		username = strings.TrimPrefix(username, "<")
+func normalizeUsername(recipient string) string {
+	if strings.HasPrefix(recipient, "<") {
+		recipient = strings.TrimPrefix(recipient, "<")
 	}
 
-	if strings.HasSuffix(username, ">") {
-		username = strings.TrimSuffix(username, ">")
+	if strings.HasSuffix(recipient, ">") {
+		recipient = strings.TrimSuffix(recipient, ">")
 	}
 
-	return username
+	return recipient
 }

@@ -232,7 +232,7 @@ func (s *SessionImpl) Process() {
 		s.lastActivity <- struct{}{}
 
 		if strings.EqualFold(cmd, proto.NOOP) {
-			if err = s.WriteResponse("250 OK"); err != nil {
+			if err = s.WriteResponse("250 2.0.0 OK"); err != nil {
 				s.logger.Error(ErrWriteRespone, slog.String(log.KeyError, err.Error()), s.Session())
 
 				break
@@ -243,7 +243,7 @@ func (s *SessionImpl) Process() {
 			s.state = StateWaitingMailFrom
 			s.recipients = []string{}
 
-			if err = s.WriteResponse("250 OK"); err != nil {
+			if err = s.WriteResponse("250 2.0.0 OK"); err != nil {
 				s.logger.Error(ErrWriteRespone, slog.String(log.KeyError, err.Error()), s.Session())
 
 				break
@@ -255,7 +255,7 @@ func (s *SessionImpl) Process() {
 		switch s.state {
 		case StateWaitingMailFrom:
 			if strings.HasPrefix(cmd, proto.MAILFROM+":") {
-				if err = s.WriteResponse("250 OK"); err != nil {
+				if err = s.WriteResponse("250 2.1.0 OK"); err != nil {
 					s.logger.Error(ErrWriteRespone, slog.String(log.KeyError, err.Error()), s.Session())
 
 					break
@@ -264,7 +264,7 @@ func (s *SessionImpl) Process() {
 				s.state = StateWaitingRcptTo
 				s.recipients = []string{} // New message, reset recipients
 			} else if strings.HasPrefix(cmd, proto.QUIT) {
-				if err = s.WriteResponse("221 Bye"); err != nil {
+				if err = s.WriteResponse("221 2.0.0 Bye"); err != nil {
 					s.logger.Error(ErrWriteRespone, slog.String(log.KeyError, err.Error()), s.Session())
 				}
 
@@ -283,12 +283,6 @@ func (s *SessionImpl) Process() {
 			if strings.HasPrefix(cmd, proto.RCPTTO+":") {
 				recipient := strings.TrimSpace(strings.TrimPrefix(cmd, "RCPT TO:"))
 				if err = commands.NewRcptTo(recipient).Execute(s); err != nil {
-					s.logger.Error(ErrWriteRespone, slog.String(log.KeyError, err.Error()), s.Session())
-				}
-
-				s.recipients = append(s.recipients, recipient)
-
-				if err = s.WriteResponse("250 OK"); err != nil {
 					s.logger.Error(ErrWriteRespone, slog.String(log.KeyError, err.Error()), s.Session())
 
 					break
@@ -312,7 +306,7 @@ func (s *SessionImpl) Process() {
 					s.state = StateReceivingData
 				}
 			} else if strings.HasPrefix(cmd, proto.QUIT) {
-				if err = s.WriteResponse("221 Bye"); err != nil {
+				if err = s.WriteResponse("221 2.0.0 Bye"); err != nil {
 					s.logger.Error(ErrWriteRespone, slog.String(log.KeyError, err.Error()), s.Session())
 				}
 
@@ -329,9 +323,7 @@ func (s *SessionImpl) Process() {
 
 		case StateReceivingData:
 			if cmd == "." {
-				queueID := "12345"
-
-				if err = s.WriteResponse("250 2.0.0 OK: queued as " + queueID); err != nil {
+				if err = s.WriteResponse("250 2.0.0 OK: session id <" + s.sessionID + ">"); err != nil {
 					s.logger.Error(ErrWriteRespone, slog.String(log.KeyError, err.Error()), s.Session())
 
 					break
@@ -436,4 +428,8 @@ func (s *SessionImpl) GetRemotePort() int {
 
 func (s *SessionImpl) GetLogger() *slog.Logger {
 	return s.logger
+}
+
+func (s *SessionImpl) AddRecipient(recipient string) {
+	s.recipients = append(s.recipients, recipient)
 }

@@ -180,6 +180,7 @@ type LMTPSession interface {
 		Authentication (user lookup only)
 	*/
 	GetAuthenticator() Authenticator
+	AddRecipient(recipient string)
 
 	/*
 		TLS-related getters
