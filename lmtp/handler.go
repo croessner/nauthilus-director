@@ -41,6 +41,7 @@ func Handler(proxy iface.Proxy, rawClientConn net.Conn) {
 		stopWatchdog:      make(chan struct{}),
 		sessionID:         ksuid.New().String(),
 		inactivityTimeout: 60 * time.Second,
+		instance:          proxy.GetInstance(),
 	}
 
 	go session.StartWatchdog()

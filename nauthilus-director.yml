@@ -31,7 +31,6 @@ x-defaultLMTPListener: &x-defaultLMTPListener
   - "8BITMIME"
   - "CHUNKING"
   - "ENHANCEDSTATUSCODES"
-  - "PIPELINING"
   - "SMTPUTF8"
   - "SIZE 10485760"
 

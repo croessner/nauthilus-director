@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/croessner/nauthilus-director/config"
 	iface "github.com/croessner/nauthilus-director/interfaces"
 	"github.com/croessner/nauthilus-director/lmtp/proto"
 	"github.com/croessner/nauthilus-director/log"
@@ -56,7 +57,10 @@ type SessionImpl struct {
 	localIP            string
 	remotePort         int
 	localPort          int
+	instance           config.Listen
 }
+
+var _ iface.LMTPSession = (*SessionImpl)(nil)
 
 func (s *SessionImpl) WriteResponse(response string) error {
 	return s.conn.PrintfLine(response)
@@ -158,20 +162,27 @@ func (s *SessionImpl) handleLHLO() error {
 
 		s.logger.Debug("Received LHLO", slog.String("client_name", clientName), s.Session())
 
-		// TODO: Generate caps
-		capabilities := []string{
-			"250-8BITMIME",
-			"250-ENHANCEDSTATUSCODES",
-			"250 AUTH PLAIN",
-		}
+		// TODO: Filter unsupported caps
 
-		for _, item := range capabilities {
-			if err := s.WriteResponse(item); err != nil {
-				return err
+		capabilities := s.instance.Capability
+		if len(capabilities) == 0 {
+			capabilities = []string{
+				"8BITMIME",
+				"SMTPUTF8",
+				"ENHANCEDSTATUSCODES",
 			}
 		}
 
-		return s.WriteResponse("250 OK")
+		for index, item := range capabilities {
+			sep := "-"
+			if index == len(s.instance.Capability)-1 {
+				sep = " "
+			}
+
+			if err := s.WriteResponse("250" + sep + item); err != nil {
+				return err
+			}
+		}
 	} else {
 		if err = s.WriteResponse("501 5.5.4 LHLO expected"); err != nil {
 			return err
@@ -179,6 +190,8 @@ func (s *SessionImpl) handleLHLO() error {
 
 		return fmt.Errorf("expected LHLO but got: %s", cmd)
 	}
+
+	return nil
 }
 
 func (s *SessionImpl) Process() {
@@ -287,6 +300,8 @@ func (s *SessionImpl) Process() {
 			}
 
 		case StateReceivingData:
+			// TODO: Link with backends... just fake for now
+
 			if cmd == "." {
 				queueID := "12345"
 
