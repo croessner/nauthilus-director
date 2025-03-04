@@ -32,7 +32,7 @@ func Handler(proxy iface.Proxy, rawClientConn net.Conn) {
 
 	session := &SessionImpl{
 		authenticator:     &auth.NauthilusAuthenticator{},
-		conn:              textproto.NewConn(rawClientConn),
+		tpClientConn:      textproto.NewConn(rawClientConn),
 		rawClientConn:     rawClientConn,
 		logger:            logger,
 		state:             StateWaitingMailFrom,
@@ -82,4 +82,10 @@ func Handler(proxy iface.Proxy, rawClientConn net.Conn) {
 	}
 
 	session.Process()
+
+	logger.Info("Connection closed",
+		slog.String(log.KeyLocal, rawClientConn.LocalAddr().String()),
+		slog.String(log.KeyRemote, rawClientConn.RemoteAddr().String()),
+		session.Session(),
+	)
 }

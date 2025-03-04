@@ -1,7 +1,6 @@
 package proto
 
 const (
-	EHLO     = "EHLO"
 	LHLO     = "LHLO"
 	MAILFROM = "MAIL FROM"
 	RCPTTO   = "RCPT TO"

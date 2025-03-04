@@ -30,7 +30,7 @@ const ErrWriteRespone = "Error writing response"
 
 type SessionImpl struct {
 	authenticator      iface.Authenticator
-	conn               *textproto.Conn
+	tpClientConn       *textproto.Conn
 	rawClientConn      net.Conn
 	logger             *slog.Logger
 	state              State
@@ -63,11 +63,11 @@ type SessionImpl struct {
 var _ iface.LMTPSession = (*SessionImpl)(nil)
 
 func (s *SessionImpl) WriteResponse(response string) error {
-	return s.conn.PrintfLine(response)
+	return s.tpClientConn.PrintfLine(response)
 }
 
 func (s *SessionImpl) ReadCommand() (string, error) {
-	return s.conn.ReadLine()
+	return s.tpClientConn.ReadLine()
 }
 
 func (s *SessionImpl) Session() slog.Attr {
@@ -138,7 +138,8 @@ func (s *SessionImpl) StartWatchdog() {
 			}
 
 			s.logger.Warn("Session timed out due to inactivity",
-				slog.String("client", s.rawClientConn.RemoteAddr().String()),
+				slog.String(log.KeyLocal, s.rawClientConn.LocalAddr().String()),
+				slog.String(log.KeyRemote, s.rawClientConn.RemoteAddr().String()),
 				slog.String("session", s.sessionID),
 			)
 
@@ -154,16 +155,11 @@ func (s *SessionImpl) StartWatchdog() {
 func (s *SessionImpl) handleLHLO() error {
 	cmd, err := s.ReadCommand()
 	if err != nil {
-		return err
+		return nil
 	}
 
-	if strings.HasPrefix(cmd, proto.LHLO) {
-		clientName := strings.TrimSpace(strings.TrimPrefix(cmd, "LHLO"))
-
-		s.logger.Debug("Received LHLO", slog.String("client_name", clientName), s.Session())
-
+	if strings.HasPrefix(strings.ToUpper(cmd), proto.LHLO) {
 		// TODO: Filter unsupported caps
-
 		capabilities := s.instance.Capability
 		if len(capabilities) == 0 {
 			capabilities = []string{
@@ -179,7 +175,7 @@ func (s *SessionImpl) handleLHLO() error {
 				sep = " "
 			}
 
-			if err := s.WriteResponse("250" + sep + item); err != nil {
+			if err = s.WriteResponse("250" + sep + item); err != nil {
 				return err
 			}
 		}
@@ -195,18 +191,29 @@ func (s *SessionImpl) handleLHLO() error {
 }
 
 func (s *SessionImpl) Process() {
+	defer func() {
+		s.stopWatchdog <- struct{}{}
+
+		s.Close()
+	}()
+
 	if err := s.handleLHLO(); err != nil {
 		s.logger.Error(ErrWriteRespone, slog.String(log.KeyError, err.Error()), s.Session())
-		s.Close()
 
 		return
 	}
 
 	for {
+		if s.errorCounter > 5 {
+			if err := s.WriteResponse("521 5.7.0 Too many errors: closing connection"); err != nil {
+				s.logger.Error(ErrWriteRespone, slog.String(log.KeyError, err.Error()), s.Session())
+			}
+
+			break
+		}
+
 		cmd, err := s.ReadCommand()
 		if err != nil {
-			s.logger.Error(ErrWriteRespone, slog.String(log.KeyError, err.Error()), s.Session())
-
 			break
 		}
 
@@ -223,6 +230,7 @@ func (s *SessionImpl) Process() {
 		} else if strings.EqualFold(cmd, proto.RSET) {
 			s.state = StateWaitingMailFrom
 			s.recipients = []string{}
+
 			if err = s.WriteResponse("250 OK"); err != nil {
 				s.logger.Error(ErrWriteRespone, slog.String(log.KeyError, err.Error()), s.Session())
 
@@ -248,13 +256,15 @@ func (s *SessionImpl) Process() {
 					s.logger.Error(ErrWriteRespone, slog.String(log.KeyError, err.Error()), s.Session())
 				}
 
-				return
+				break
 			} else {
 				if err = s.WriteResponse("500 5.5.1 Syntax error, MAIL FROM or QUIT expected"); err != nil {
 					s.logger.Error(ErrWriteRespone, slog.String(log.KeyError, err.Error()), s.Session())
+
+					break
 				}
 
-				return
+				s.errorCounter++
 			}
 
 		case StateWaitingRcptTo:
@@ -267,13 +277,15 @@ func (s *SessionImpl) Process() {
 
 					break
 				}
-			} else if strings.EqualFold(cmd, proto.DATA) {
+			} else if strings.EqualFold(cmd, proto.DATA) || strings.EqualFold(cmd, proto.BDAT) {
 				if len(s.recipients) == 0 {
 					if err = s.WriteResponse("503 5.5.2 Bad sequence of commands: RCPT TO required before DATA"); err != nil {
 						s.logger.Error(ErrWriteRespone, slog.String(log.KeyError, err.Error()), s.Session())
+
+						break
 					}
 
-					break
+					s.errorCounter++
 				} else {
 					if err = s.WriteResponse("354 Start mail input"); err != nil {
 						s.logger.Error(ErrWriteRespone, slog.String(log.KeyError, err.Error()), s.Session())
@@ -286,22 +298,20 @@ func (s *SessionImpl) Process() {
 			} else if strings.HasPrefix(cmd, proto.QUIT) {
 				if err = s.WriteResponse("221 Bye"); err != nil {
 					s.logger.Error(ErrWriteRespone, slog.String(log.KeyError, err.Error()), s.Session())
-
-					s.Close()
 				}
 
-				return
+				break
 			} else {
 				if err = s.WriteResponse("500 5.5.1 Syntax error, RCPT TO, DATA or QUIT expected"); err != nil {
 					s.logger.Error(ErrWriteRespone, slog.String(log.KeyError, err.Error()), s.Session())
+
+					break
 				}
 
-				return
+				s.errorCounter++
 			}
 
 		case StateReceivingData:
-			// TODO: Link with backends... just fake for now
-
 			if cmd == "." {
 				queueID := "12345"
 
@@ -318,15 +328,18 @@ func (s *SessionImpl) Process() {
 			}
 		}
 	}
-
-	s.Close()
 }
 
 func (s *SessionImpl) Close() {
-	_ = s.conn.Close()
-	_ = s.rawClientConn.Close()
+	if s.tpClientConn != nil {
+		_ = s.tpClientConn.Close()
+		s.tpClientConn = nil
+	}
 
-	close(s.stopWatchdog)
+	if s.rawClientConn != nil {
+		_ = s.rawClientConn.Close()
+		s.rawClientConn = nil
+	}
 }
 
 func (s *SessionImpl) GetTLSProtocol() string {
