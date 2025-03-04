@@ -42,13 +42,13 @@ func (c *RcptTo) Execute(session iface.LMTPSession) error {
 }
 
 func normalizeUsername(username string) string {
-	// Entferne führendes "<" (falls vorhanden)
 	if strings.HasPrefix(username, "<") {
 		username = strings.TrimPrefix(username, "<")
 	}
-	// Entferne abschließendes ">" (falls vorhanden)
+
 	if strings.HasSuffix(username, ">") {
 		username = strings.TrimSuffix(username, ">")
 	}
+
 	return username
 }
