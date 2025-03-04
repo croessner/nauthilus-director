@@ -26,15 +26,16 @@ import (
 )
 
 type SessionImpl struct {
-	authenticator      iface.Authenticator
-	tlsConfig          *tls.Config
-	rawBackendConn     net.Conn
-	rawClientConn      net.Conn
-	tpBackendConn      *textproto.Conn
-	tpClientConn       *textproto.Conn
-	clientCtx          *context.Context
-	backendCtx         *context.Context
-	instance           config.Listen
+	authenticator  iface.Authenticator
+	tlsConfig      *tls.Config
+	rawBackendConn net.Conn
+	rawClientConn  net.Conn
+	tpBackendConn  *textproto.Conn
+	tpClientConn   *textproto.Conn
+	clientCtx      *context.Context
+	backendCtx     *context.Context
+	logger         *slog.Logger
+
 	service            string
 	clientUsername     string
 	clientID           string
@@ -51,18 +52,21 @@ type SessionImpl struct {
 	tlsSerial          string
 	tlsClientIssuerDN  string
 	tlsDNSNames        string
-	localPort          int
-	remotePort         int
 	localIP            string
 	remoteIP           string
-	stopWatchDog       chan struct{}
-	tlsVerified        bool
-	tlsFlag            bool
-	errorCounter       uint8
-	lastActivity       chan struct{}
-	stopWatchdog       chan struct{}
-	inactivityTimeout  time.Duration
-	logger             *slog.Logger
+
+	instance          config.Listen
+	inactivityTimeout time.Duration
+
+	localPort    int
+	remotePort   int
+	errorCounter uint8
+
+	tlsVerified bool
+	tlsFlag     bool
+
+	lastActivity chan struct{}
+	stopWatchdog chan struct{}
 }
 
 var _ iface.Session = (*SessionImpl)(nil)
@@ -107,10 +111,18 @@ func (s *SessionImpl) StartWatchdog() {
 		case <-s.lastActivity:
 			continue
 		case <-time.After(s.inactivityTimeout):
-			s.WriteResponse("* BYE Timeout: closing connection")
-			s.logger.Warn("Session timed out due to inactivity", slog.String("client", s.rawClientConn.RemoteAddr().String()), s.Session())
+			s.logger.Warn("Session timed out due to inactivity",
+				slog.String(log.KeyLocal, s.rawClientConn.LocalAddr().String()),
+				slog.String(log.KeyRemote, s.rawClientConn.RemoteAddr().String()),
+				s.Session(),
+			)
+
 			s.Close()
+
+			return
 		case <-s.stopWatchdog:
+			s.logger.Debug("Watchdog stopped", s.Session())
+
 			return
 		}
 	}
@@ -622,7 +634,7 @@ func (s *SessionImpl) GetCapability() []string {
 }
 
 func (s *SessionImpl) GetStopWatchDog() chan struct{} {
-	return s.stopWatchDog
+	return s.stopWatchdog
 }
 
 func (s *SessionImpl) GetTLSVerified() bool {

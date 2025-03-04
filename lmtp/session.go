@@ -29,16 +29,12 @@ const (
 const ErrWriteRespone = "Error writing response"
 
 type SessionImpl struct {
-	authenticator      iface.Authenticator
-	tpClientConn       *textproto.Conn
-	rawClientConn      net.Conn
-	logger             *slog.Logger
-	state              State
-	recipients         []string
-	lastActivity       chan struct{}
-	stopWatchdog       chan struct{}
+	authenticator iface.Authenticator
+	tpClientConn  *textproto.Conn
+	rawClientConn net.Conn
+	logger        *slog.Logger
+
 	sessionID          string
-	inactivityTimeout  time.Duration
 	tlsProtocol        string
 	tlsCipherSuite     string
 	tlsFingerprint     string
@@ -50,14 +46,24 @@ type SessionImpl struct {
 	tlsSerial          string
 	tlsClientIssuerDN  string
 	tlsDNSNames        string
-	tlsVerified        bool
-	tlsFlag            bool
-	errorCounter       uint8
 	remoteIP           string
 	localIP            string
-	remotePort         int
-	localPort          int
-	instance           config.Listen
+
+	recipients []string
+
+	instance          config.Listen
+	inactivityTimeout time.Duration
+
+	remotePort int
+	localPort  int
+
+	errorCounter uint8
+	tlsVerified  bool
+	tlsFlag      bool
+	state        State
+
+	lastActivity chan struct{}
+	stopWatchdog chan struct{}
 }
 
 var _ iface.LMTPSession = (*SessionImpl)(nil)
@@ -140,13 +146,15 @@ func (s *SessionImpl) StartWatchdog() {
 			s.logger.Warn("Session timed out due to inactivity",
 				slog.String(log.KeyLocal, s.rawClientConn.LocalAddr().String()),
 				slog.String(log.KeyRemote, s.rawClientConn.RemoteAddr().String()),
-				slog.String("session", s.sessionID),
+				s.Session(),
 			)
 
 			s.Close()
 
 			return
 		case <-s.stopWatchdog:
+			s.logger.Debug("Watchdog stopped", s.Session())
+
 			return
 		}
 	}
