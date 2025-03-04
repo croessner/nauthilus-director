@@ -52,6 +52,7 @@ type SessionImpl struct {
 	tlsDNSNames        string
 	remoteIP           string
 	localIP            string
+	messageData        string
 
 	recipients []string
 
@@ -242,6 +243,7 @@ func (s *SessionImpl) Process() {
 		} else if strings.EqualFold(cmd, proto.RSET) {
 			s.state = StateWaitingMailFrom
 			s.recipients = []string{}
+			s.messageData = ""
 
 			if err = s.WriteResponse("250 2.0.0 OK"); err != nil {
 				s.logger.Error(ErrWriteRespone, slog.String(log.KeyError, err.Error()), s.Session())
@@ -263,6 +265,7 @@ func (s *SessionImpl) Process() {
 
 				s.state = StateWaitingRcptTo
 				s.recipients = []string{} // New message, reset recipients
+				s.messageData = ""
 			} else if strings.HasPrefix(cmd, proto.QUIT) {
 				if err = s.WriteResponse("221 2.0.0 Bye"); err != nil {
 					s.logger.Error(ErrWriteRespone, slog.String(log.KeyError, err.Error()), s.Session())
@@ -322,17 +325,17 @@ func (s *SessionImpl) Process() {
 			}
 
 		case StateReceivingData:
-			if cmd == "." {
+			if strings.HasPrefix(cmd, "..") {
+				s.messageData += strings.TrimPrefix(cmd, ".") + "\n"
+			} else if cmd == "." {
 				if err = s.WriteResponse("250 2.0.0 OK: session id <" + s.sessionID + ">"); err != nil {
 					s.logger.Error(ErrWriteRespone, slog.String(log.KeyError, err.Error()), s.Session())
-
 					break
 				}
 
-				s.logger.Debug("Email processed for recipients", slog.String("recipients", strings.Join(s.recipients, ", ")), slog.String("session", s.sessionID))
 				s.state = StateWaitingMailFrom
 			} else {
-				s.logger.Debug("Received email data", slog.String("command", cmd), slog.String("session", s.sessionID))
+				s.messageData += cmd + "\n"
 			}
 		}
 	}
