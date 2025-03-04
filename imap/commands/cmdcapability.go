@@ -13,6 +13,8 @@ type Capability struct {
 	Tag         string
 }
 
+var _ iface.IMAPCommand = (*Capability)(nil)
+
 func (c *Capability) Execute(session iface.IMAPSession) error {
 	filteredCapabilities := GenerateCapabilities(c.UseStartTLS, session.GetTLSFlag(), session.GetAuthMechs(), session.GetCapability())
 

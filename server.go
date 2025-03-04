@@ -23,7 +23,7 @@ func runServer(ctx *context.Context, cfg *config.Config) {
 	logger.Info("Starting server", slog.String("version", version.Version))
 
 	for _, instance := range cfg.Server.Listen {
-		if instance.Name == "" {
+		if instance.ServiceName == "" {
 			logger.Error("Service requires a name")
 
 			return

@@ -15,6 +15,8 @@ type Login struct {
 	Password string
 }
 
+var _ iface.IMAPCommand = (*Login)(nil)
+
 func (c *Login) Execute(session iface.IMAPSession) error {
 	auth := session.GetAuthenticator()
 
@@ -22,7 +24,7 @@ func (c *Login) Execute(session iface.IMAPSession) error {
 	auth.SetRemotePort(session.GetRemotePort())
 	auth.SetLocalIP(session.GetLocalIP())
 	auth.SetLocalPort(session.GetLocalPort())
-	auth.SetUserLookup(session.GetUserLookup())
+	auth.SetUserLookup(false)
 	auth.SetAuthMechanism(proto.LOGIN + " (RFC3501)")
 	addTlsSessionInfos(session, auth)
 
@@ -32,7 +34,7 @@ func (c *Login) Execute(session iface.IMAPSession) error {
 		return fmt.Errorf("auth failed")
 	}
 
-	session.SetUser(c.Username)
+	session.SetUser(auth.GetAccount())
 
 	// TODO: config master user
 	_ = "masteruser"

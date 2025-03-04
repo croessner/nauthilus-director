@@ -74,8 +74,8 @@ func (p *Proxy) Start(instance config.Listen, handler func(iface.Proxy, net.Conn
 		p.listenAddr = fmt.Sprintf("%s:%d", instance.Address, instance.Port)
 	}
 
-	if instance.Name != "" {
-		p.name = instance.Name
+	if instance.ServiceName != "" {
+		p.name = instance.ServiceName
 	}
 
 	p.listener, err = net.Listen(instance.Type, p.listenAddr)

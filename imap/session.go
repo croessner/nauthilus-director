@@ -701,10 +701,6 @@ func (s *SessionImpl) GetRemotePort() int {
 	return s.remotePort
 }
 
-func (s *SessionImpl) GetUserLookup() bool {
-	return s.instance.UserLookup
-}
-
 func (s *SessionImpl) GetLogger() *slog.Logger {
 	return s.logger
 }

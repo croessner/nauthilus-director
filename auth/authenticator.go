@@ -54,7 +54,7 @@ func (n *NauthilusAuthenticator) Authenticate(ctx *context.Context, service, use
 		slog.String("tls_DNS_names", n.tlsDNSNames),
 	)
 
-	if username != "user" {
+	if username != "user@example.com" {
 		return false
 	} else {
 		n.account = username

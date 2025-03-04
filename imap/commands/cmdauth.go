@@ -17,6 +17,8 @@ type Authenticate struct {
 	InitialResponse string // Holds the SASL-IR if provided
 }
 
+var _ iface.IMAPCommand = (*Authenticate)(nil)
+
 func (c *Authenticate) Execute(session iface.IMAPSession) error {
 	switch strings.ToUpper(c.Method) {
 	case proto.PLAIN:
@@ -101,7 +103,7 @@ func (c *Authenticate) handlePlainAuthWithInitialResponse(session iface.IMAPSess
 	auth.SetRemotePort(session.GetRemotePort())
 	auth.SetLocalIP(session.GetLocalIP())
 	auth.SetLocalPort(session.GetLocalPort())
-	auth.SetUserLookup(session.GetUserLookup())
+	auth.SetUserLookup(false)
 	auth.SetAuthMechanism(strings.ToUpper(c.Method) + " (SASL)")
 	addTlsSessionInfos(session, auth)
 
@@ -150,7 +152,7 @@ func (c *Authenticate) handlePlainAuth(session iface.IMAPSession) error {
 	auth.SetRemotePort(session.GetRemotePort())
 	auth.SetLocalIP(session.GetLocalIP())
 	auth.SetLocalPort(session.GetLocalPort())
-	auth.SetUserLookup(session.GetUserLookup())
+	auth.SetUserLookup(false)
 	auth.SetAuthMechanism(strings.ToUpper(c.Method) + " (SASL)")
 	addTlsSessionInfos(session, auth)
 
@@ -208,7 +210,7 @@ func (c *Authenticate) handleLoginAuth(session iface.IMAPSession) error {
 	auth.SetRemotePort(session.GetRemotePort())
 	auth.SetLocalIP(session.GetLocalIP())
 	auth.SetLocalPort(session.GetLocalPort())
-	auth.SetUserLookup(session.GetUserLookup())
+	auth.SetUserLookup(false)
 	auth.SetAuthMechanism(strings.ToUpper(c.Method) + " (SASL)")
 	addTlsSessionInfos(session, auth)
 

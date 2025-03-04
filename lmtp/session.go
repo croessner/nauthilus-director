@@ -13,7 +13,9 @@ import (
 	"time"
 
 	"github.com/croessner/nauthilus-director/config"
+	"github.com/croessner/nauthilus-director/context"
 	iface "github.com/croessner/nauthilus-director/interfaces"
+	"github.com/croessner/nauthilus-director/lmtp/commands"
 	"github.com/croessner/nauthilus-director/lmtp/proto"
 	"github.com/croessner/nauthilus-director/log"
 )
@@ -33,8 +35,10 @@ type SessionImpl struct {
 	tpClientConn  *textproto.Conn
 	rawClientConn net.Conn
 	logger        *slog.Logger
+	clientCtx     *context.Context
 
 	sessionID          string
+	service            string
 	tlsProtocol        string
 	tlsCipherSuite     string
 	tlsFingerprint     string
@@ -278,6 +282,10 @@ func (s *SessionImpl) Process() {
 		case StateWaitingRcptTo:
 			if strings.HasPrefix(cmd, proto.RCPTTO+":") {
 				recipient := strings.TrimSpace(strings.TrimPrefix(cmd, "RCPT TO:"))
+				if err = commands.NewRcptTo(recipient).Execute(s); err != nil {
+					s.logger.Error(ErrWriteRespone, slog.String(log.KeyError, err.Error()), s.Session())
+				}
+
 				s.recipients = append(s.recipients, recipient)
 
 				if err = s.WriteResponse("250 OK"); err != nil {
@@ -350,6 +358,18 @@ func (s *SessionImpl) Close() {
 	}
 }
 
+func (s *SessionImpl) GetAuthenticator() iface.Authenticator {
+	return s.authenticator
+}
+
+func (s *SessionImpl) GetService() string {
+	return s.instance.ServiceName
+}
+
+func (s *SessionImpl) GetClientContext() *context.Context {
+	return s.clientCtx
+}
+
 func (s *SessionImpl) GetTLSProtocol() string {
 	return s.tlsProtocol
 }
@@ -396,4 +416,24 @@ func (s *SessionImpl) GetTLSClientIssuerDN() string {
 
 func (s *SessionImpl) GetTLSFingerprint() string {
 	return s.tlsFingerprint
+}
+
+func (s *SessionImpl) GetLocalIP() string {
+	return s.localIP
+}
+
+func (s *SessionImpl) GetRemoteIP() string {
+	return s.remoteIP
+}
+
+func (s *SessionImpl) GetLocalPort() int {
+	return s.localPort
+}
+
+func (s *SessionImpl) GetRemotePort() int {
+	return s.remotePort
+}
+
+func (s *SessionImpl) GetLogger() *slog.Logger {
+	return s.logger
 }

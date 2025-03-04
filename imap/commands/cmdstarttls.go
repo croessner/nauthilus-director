@@ -14,6 +14,8 @@ type StartTLS struct {
 	Tag       string
 }
 
+var _ iface.IMAPCommand = (*StartTLS)(nil)
+
 func (s *StartTLS) Execute(session iface.IMAPSession) error {
 	if s.TLSConfig == nil {
 		session.WriteResponse(s.Tag + " NO TLS configuration not available")

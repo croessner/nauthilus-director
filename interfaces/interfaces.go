@@ -62,6 +62,11 @@ type IMAPCommand interface {
 	Execute(session IMAPSession) error
 }
 
+// LMTPCommand defines an interface for executing LMTP-specific commands within an LMTPSession.
+type LMTPCommand interface {
+	Execute(session LMTPSession) error
+}
+
 // Session represents an interface that provides a method for retrieving session-specific logging attributes.
 type Session interface {
 	GetClientContext() *context.Context
@@ -100,7 +105,6 @@ type IMAPSession interface {
 	/*
 		Connection and session management
 	*/
-	GetUserLookup() bool
 	GetService() string
 	GetLocalIP() string
 	GetRemoteIP() string
@@ -155,8 +159,42 @@ type IMAPResponseFilter interface {
 }
 
 type LMTPSession interface {
+	/*
+		Context getters
+	*/
+	GetClientContext() *context.Context
+	/*
+		Connection and session management
+	*/
+	GetService() string
+	GetLocalIP() string
+	GetRemoteIP() string
+	GetLocalPort() int
+	GetRemotePort() int
 	WriteResponse(response string) error
 	ReadCommand() (string, error)
 	Process()
 	Close()
+
+	/*
+		Authentication (user lookup only)
+	*/
+	GetAuthenticator() Authenticator
+
+	/*
+		TLS-related getters
+	*/
+	GetTLSVerified() bool
+	GetTLSProtocol() string
+	GetTLSCipherSuite() string
+	GetTLSFingerprint() string
+	GetTLSClientCName() string
+	GetTLSIssuerDN() string
+	GetTLSClientDN() string
+	GetTLSClientNotBefore() string
+	GetTLSClientNotAfter() string
+	GetTLSSerial() string
+	GetTLSClientIssuerDN() string
+	GetTLSDNSNames() string
+	GetLogger() *slog.Logger
 }

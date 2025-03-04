@@ -44,16 +44,16 @@ func Handler(proxy iface.Proxy, rawClientConn net.Conn) {
 	}
 
 	session := &SessionImpl{
-		logger:            logger,
-		authenticator:     &auth.NauthilusAuthenticator{},
-		service:           proxy.GetInstance().Name,
-		tpClientConn:      textproto.NewConn(rawClientConn),
+		sessionID:         ksuid.New().String(),
+		service:           proxy.GetInstance().ServiceName,
+		instance:          proxy.GetInstance(),
 		rawClientConn:     rawClientConn,
+		tpClientConn:      textproto.NewConn(rawClientConn),
 		tlsConfig:         proxy.GetTLSConfig(),
 		backendCtx:        proxy.GetContext().Copy(),
 		clientCtx:         proxy.GetContext().Copy(),
-		sessionID:         ksuid.New().String(),
-		instance:          proxy.GetInstance(),
+		authenticator:     &auth.NauthilusAuthenticator{},
+		logger:            logger,
 		lastActivity:      make(chan struct{}),
 		stopWatchdog:      make(chan struct{}),
 		inactivityTimeout: 60 * time.Second,

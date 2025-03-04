@@ -10,6 +10,8 @@ type ID struct {
 	Data string
 }
 
+var _ iface.IMAPCommand = (*ID)(nil)
+
 func (id *ID) Execute(session iface.IMAPSession) error {
 	session.WriteResponse("* ID (\"name\" \"Nauthilus director\" \"version\" \"" + version.Version + "\")")
 	session.WriteResponse(id.Tag + " OK ID completed")

@@ -32,16 +32,18 @@ func Handler(proxy iface.Proxy, rawClientConn net.Conn) {
 
 	session := &SessionImpl{
 		authenticator:     &auth.NauthilusAuthenticator{},
-		tpClientConn:      textproto.NewConn(rawClientConn),
+		service:           proxy.GetInstance().ServiceName,
 		rawClientConn:     rawClientConn,
+		tpClientConn:      textproto.NewConn(rawClientConn),
+		clientCtx:         proxy.GetContext().Copy(),
+		instance:          proxy.GetInstance(),
 		logger:            logger,
 		state:             StateWaitingMailFrom,
-		recipients:        []string{},
+		sessionID:         ksuid.New().String(),
 		lastActivity:      make(chan struct{}),
 		stopWatchdog:      make(chan struct{}),
-		sessionID:         ksuid.New().String(),
+		recipients:        []string{},
 		inactivityTimeout: 60 * time.Second,
-		instance:          proxy.GetInstance(),
 	}
 
 	go session.StartWatchdog()
