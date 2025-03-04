@@ -9,7 +9,6 @@ import (
 
 	"github.com/croessner/nauthilus-director/imap/proto"
 	"github.com/croessner/nauthilus-director/interfaces"
-	"github.com/croessner/nauthilus-director/log"
 )
 
 type Authenticate struct {
@@ -19,20 +18,18 @@ type Authenticate struct {
 }
 
 func (c *Authenticate) Execute(session iface.IMAPSession) error {
-	logger := log.GetLogger(session.GetBackendContext())
-
 	switch strings.ToUpper(c.Method) {
 	case proto.PLAIN:
 		if c.InitialResponse != "" {
 			// Client with SASL-IR
 			if err := c.handlePlainAuthWithInitialResponse(session); err != nil {
-				logger.Error("PLAIN authentication with SASL-IR failed", session.Session(), slog.String("error", err.Error()))
+				session.GetLogger().Error("PLAIN authentication with SASL-IR failed", session.Session(), slog.String("error", err.Error()))
 
 				return err
 			}
 		} else {
 			if err := c.handlePlainAuth(session); err != nil {
-				logger.Error("PLAIN authentication failed", session.Session(), slog.String("error", err.Error()))
+				session.GetLogger().Error("PLAIN authentication failed", session.Session(), slog.String("error", err.Error()))
 
 				return err
 			}
@@ -45,7 +42,7 @@ func (c *Authenticate) Execute(session iface.IMAPSession) error {
 		}
 
 		if err := c.handleLoginAuth(session); err != nil {
-			logger.Error("LOGIN authentication failed", session.Session(), slog.String("error", err.Error()))
+			session.GetLogger().Error("LOGIN authentication failed", session.Session(), slog.String("error", err.Error()))
 
 			return err
 		}
@@ -72,7 +69,7 @@ func (c *Authenticate) Execute(session iface.IMAPSession) error {
 
 	session.WriteResponse(session.GetBackendGreeting())
 
-	logger.Info("link client and backend", session.Session(), slog.String("user", session.GetUser()))
+	session.GetLogger().Info("link client and backend", session.Session(), slog.String("user", session.GetUser()))
 	session.GetStopWatchDog() <- struct{}{}
 	session.LinkClientAndBackend()
 

@@ -3,7 +3,7 @@ package commands
 import (
 	"strings"
 
-	iface "github.com/croessner/nauthilus-director/interfaces"
+	"github.com/croessner/nauthilus-director/interfaces"
 )
 
 func CalculateDisallowedMechanisms(allMechanisms, allowedMechanisms []string) []string {

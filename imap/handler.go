@@ -43,22 +43,20 @@ func Handler(proxy iface.Proxy, rawClientConn net.Conn) {
 		_ = conn.NetConn().(*net.TCPConn).SetLinger(0)
 	}
 
-	inactivityTimeout := 60 * time.Second
-
-	lastActivity := make(chan struct{})
-	stopWatchdog := make(chan struct{})
-
 	session := &SessionImpl{
-		authenticator: &auth.NauthilusAuthenticator{},
-		service:       proxy.GetInstance().Name,
-		stopWatchDog:  stopWatchdog,
-		tpClientConn:  textproto.NewConn(rawClientConn),
-		rawClientConn: rawClientConn,
-		tlsConfig:     proxy.GetTLSConfig(),
-		backendCtx:    proxy.GetContext().Copy(),
-		clientCtx:     proxy.GetContext().Copy(),
-		session:       ksuid.New().String(),
-		instance:      proxy.GetInstance(),
+		logger:            logger,
+		authenticator:     &auth.NauthilusAuthenticator{},
+		service:           proxy.GetInstance().Name,
+		tpClientConn:      textproto.NewConn(rawClientConn),
+		rawClientConn:     rawClientConn,
+		tlsConfig:         proxy.GetTLSConfig(),
+		backendCtx:        proxy.GetContext().Copy(),
+		clientCtx:         proxy.GetContext().Copy(),
+		sessionID:         ksuid.New().String(),
+		instance:          proxy.GetInstance(),
+		lastActivity:      make(chan struct{}),
+		stopWatchdog:      make(chan struct{}),
+		inactivityTimeout: 60 * time.Second,
 	}
 
 	// TODO: HAproxy...
@@ -99,22 +97,7 @@ func Handler(proxy iface.Proxy, rawClientConn net.Conn) {
 		slog.Bool(log.KeyTLSVerified, session.GetTLSVerified()),
 	)
 
-	go func() {
-		for {
-			select {
-			case <-lastActivity:
-				continue
-			case <-time.After(inactivityTimeout):
-				session.WriteResponse("* BYE Timeout: closing connection")
-				logger.Warn("Session timed out due to inactivity", slog.String("client", rawClientConn.RemoteAddr().String()), session.Session())
-				session.Close()
-
-				return
-			case <-stopWatchdog:
-				return
-			}
-		}
-	}()
+	go session.StartWatchdog()
 
 	for {
 		line, err := session.ReadLine()
@@ -125,14 +108,14 @@ func Handler(proxy iface.Proxy, rawClientConn net.Conn) {
 				logger.Info("Client disconnected", slog.String("client", rawClientConn.RemoteAddr().String()), session.Session())
 			}
 
-			stopWatchdog <- struct{}{}
+			session.stopWatchdog <- struct{}{}
 
 			session.Close()
 
 			return
 		}
 
-		lastActivity <- struct{}{}
+		session.lastActivity <- struct{}{}
 
 		session.handleCommand(line)
 	}

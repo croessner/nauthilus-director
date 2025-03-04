@@ -15,11 +15,9 @@ type StartTLS struct {
 }
 
 func (s *StartTLS) Execute(session iface.IMAPSession) error {
-	logger := log.GetLogger(session.GetBackendContext())
-
 	if s.TLSConfig == nil {
 		session.WriteResponse(s.Tag + " NO TLS configuration not available")
-		logger.Error("TLS config is nil", session.Session())
+		session.GetLogger().Error("TLS config is nil", session.Session())
 
 		return fmt.Errorf("tls config is nil")
 	}
@@ -29,7 +27,7 @@ func (s *StartTLS) Execute(session iface.IMAPSession) error {
 	tlsConn := tls.Server(session.GetClientConn(), s.TLSConfig)
 	err := tlsConn.Handshake()
 	if err != nil {
-		logger.Error("TLS-Handshake failed", slog.String(log.KeyError, err.Error()), session.Session())
+		session.GetLogger().Error("TLS-Handshake failed", slog.String(log.KeyError, err.Error()), session.Session())
 		session.Close()
 
 		return err
@@ -39,7 +37,7 @@ func (s *StartTLS) Execute(session iface.IMAPSession) error {
 	session.SetTLSFlag(true)
 	session.InitializeTLSFields()
 
-	logger.Info("TLS connection established",
+	session.GetLogger().Info("TLS connection established",
 		slog.String(log.KeyLocal, session.GetClientConn().LocalAddr().String()),
 		slog.String(log.KeyRemote, session.GetClientConn().RemoteAddr().String()),
 		session.Session(),

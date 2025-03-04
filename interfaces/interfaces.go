@@ -141,6 +141,7 @@ type IMAPSession interface {
 	GetTLSSerial() string
 	GetTLSClientIssuerDN() string
 	GetTLSDNSNames() string
+	GetLogger() *slog.Logger
 }
 
 // IMAPCommandFilter is an interface for filtering IMAP commands based on a given string input.
@@ -151,4 +152,11 @@ type IMAPCommandFilter interface {
 // IMAPResponseFilter defines methods for filtering and modifying IMAP response strings in a customizable manner.
 type IMAPResponseFilter interface {
 	FilterResponse(response []string) []string
+}
+
+type LMTPSession interface {
+	WriteResponse(response string) error
+	ReadCommand() (string, error)
+	Process()
+	Close()
 }

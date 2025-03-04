@@ -7,7 +7,6 @@ import (
 
 	"github.com/croessner/nauthilus-director/imap/proto"
 	"github.com/croessner/nauthilus-director/interfaces"
-	"github.com/croessner/nauthilus-director/log"
 )
 
 type Login struct {
@@ -18,7 +17,6 @@ type Login struct {
 
 func (c *Login) Execute(session iface.IMAPSession) error {
 	auth := session.GetAuthenticator()
-	logger := log.GetLogger(session.GetBackendContext())
 
 	auth.SetRemoteIP(session.GetRemoteIP())
 	auth.SetRemotePort(session.GetRemotePort())
@@ -55,7 +53,7 @@ func (c *Login) Execute(session iface.IMAPSession) error {
 
 	session.WriteResponse(session.GetBackendGreeting())
 
-	logger.Info("link client and backend", session.Session(), slog.String("user", session.GetUser()))
+	session.GetLogger().Info("link client and backend", session.Session(), slog.String("user", session.GetUser()))
 	session.GetStopWatchDog() <- struct{}{}
 	session.LinkClientAndBackend()
 

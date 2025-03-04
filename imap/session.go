@@ -39,7 +39,7 @@ type SessionImpl struct {
 	clientUsername     string
 	clientID           string
 	backendGreeting    string
-	session            string
+	sessionID          string
 	tlsProtocol        string
 	tlsCipherSuite     string
 	tlsFingerprint     string
@@ -59,20 +59,22 @@ type SessionImpl struct {
 	tlsVerified        bool
 	tlsFlag            bool
 	errorCounter       uint8
+	lastActivity       chan struct{}
+	stopWatchdog       chan struct{}
+	inactivityTimeout  time.Duration
+	logger             *slog.Logger
 }
 
 var _ iface.Session = (*SessionImpl)(nil)
 var _ iface.IMAPSession = (*SessionImpl)(nil)
 
 func (s *SessionImpl) WriteResponse(response string) {
-	logger := log.GetLogger(s.backendCtx)
-
 	if s.tpClientConn == nil {
 		return
 	}
 
 	if err := s.tpClientConn.PrintfLine(response); err != nil {
-		logger.Error("Error while sending the response:", slog.String(log.KeyError, err.Error()), s.Session())
+		s.logger.Error("Error while sending the response:", slog.String(log.KeyError, err.Error()), s.Session())
 	}
 }
 
@@ -99,6 +101,21 @@ func (s *SessionImpl) ReadLine() (string, error) {
 	return line, nil
 }
 
+func (s *SessionImpl) StartWatchdog() {
+	for {
+		select {
+		case <-s.lastActivity:
+			continue
+		case <-time.After(s.inactivityTimeout):
+			s.WriteResponse("* BYE Timeout: closing connection")
+			s.logger.Warn("Session timed out due to inactivity", slog.String("client", s.rawClientConn.RemoteAddr().String()), s.Session())
+			s.Close()
+		case <-s.stopWatchdog:
+			return
+		}
+	}
+}
+
 func (s *SessionImpl) InitializeTLSFields() {
 	tlsConn, ok := s.rawClientConn.(*tls.Conn)
 	if !ok {
@@ -107,14 +124,13 @@ func (s *SessionImpl) InitializeTLSFields() {
 
 	connectionState := tlsConn.ConnectionState()
 
-	// TLS Versions-Protokoll und Cipher Suite
 	s.tlsProtocol = versionToString(connectionState.Version)
 	s.tlsCipherSuite = tls.CipherSuiteName(connectionState.CipherSuite)
 
 	if len(connectionState.PeerCertificates) > 0 {
 		clientCert := connectionState.PeerCertificates[0]
 
-		s.tlsFingerprint = fingerprint(clientCert) // Zertifikats-Fingerprint
+		s.tlsFingerprint = fingerprint(clientCert)
 		s.tlsClientCName = clientCert.Subject.CommonName
 		s.tlsIssuerDN = clientCert.Issuer.String()
 		s.tlsClientDN = clientCert.Subject.String()
@@ -153,8 +169,6 @@ func fingerprint(cert *x509.Certificate) string {
 }
 
 func (s *SessionImpl) initializeIMAPConnection() error {
-	logger := log.GetLogger(s.backendCtx)
-
 	if s.tpBackendConn != nil {
 		return nil
 	}
@@ -162,7 +176,7 @@ func (s *SessionImpl) initializeIMAPConnection() error {
 	conn, err := net.Dial("tcp", "127.0.0.1:1143")
 	if err != nil {
 		s.WriteResponse("* BYE Internal server error")
-		logger.Error("Error while connecting to the backend server:", slog.String(log.KeyError, err.Error()))
+		s.logger.Error("Error while connecting to the backend server:", slog.String(log.KeyError, err.Error()))
 
 		return err
 	}
@@ -177,8 +191,6 @@ func (s *SessionImpl) initializeIMAPConnection() error {
 }
 
 func (s *SessionImpl) ConnectToIMAPBackend(tag, username, password string) error {
-	logger := log.GetLogger(s.backendCtx)
-
 	// Initialize the IMAP backend connection
 	if err := s.initializeIMAPConnection(); err != nil {
 		return err
@@ -189,7 +201,7 @@ func (s *SessionImpl) ConnectToIMAPBackend(tag, username, password string) error
 		return fmt.Errorf("error reading the server greeting: %w", err)
 	}
 
-	logger.Debug("Received server greeting", slog.String("greeting", greeting))
+	s.logger.Debug("Received server greeting", slog.String("greeting", greeting))
 
 	// Check supported authentication mechanisms
 	hasSASLIR := strings.Contains(greeting, "SASL-IR")
@@ -223,8 +235,6 @@ func (s *SessionImpl) ConnectToIMAPBackend(tag, username, password string) error
 }
 
 func (s *SessionImpl) AuthLegacyLogin(tag, username, password string) error {
-	logger := log.GetLogger(s.backendCtx)
-
 	id, err := s.tpBackendConn.Cmd("%s LOGIN %s %s", tag, username, password)
 	if err != nil {
 		return fmt.Errorf("error sending LOGIN command: %w", err)
@@ -253,7 +263,7 @@ func (s *SessionImpl) AuthLegacyLogin(tag, username, password string) error {
 
 	s.backendGreeting = loginResponse
 
-	logger.Debug("Successful LOGIN authentication", slog.String("response", loginResponse))
+	s.logger.Debug("Successful LOGIN authentication", slog.String("response", loginResponse))
 
 	return nil
 }
@@ -263,8 +273,6 @@ func (s *SessionImpl) AuthPlain(tag, username, password string, hasSASLIR bool) 
 		id  uint
 		err error
 	)
-
-	logger := log.GetLogger(s.backendCtx)
 
 	// Prepare credentials in PLAIN authentication format
 	plainCredentials := fmt.Sprintf("\x00%s\x00%s", username, password)
@@ -327,14 +335,12 @@ func (s *SessionImpl) AuthPlain(tag, username, password string, hasSASLIR bool) 
 
 	s.backendGreeting = plainAuthResponse
 
-	logger.Debug("Successful AUTH=PLAIN authentication", slog.String("response", plainAuthResponse))
+	s.logger.Debug("Successful AUTH=PLAIN authentication", slog.String("response", plainAuthResponse))
 
 	return nil
 }
 
 func (s *SessionImpl) AuthLogin(tag, username, password string) error {
-	logger := log.GetLogger(s.backendCtx)
-
 	// Step 1: Start AUTH=LOGIN process
 	id, err := s.tpBackendConn.Cmd("%s AUTHENTICATE LOGIN", tag)
 	if err != nil {
@@ -403,7 +409,7 @@ func (s *SessionImpl) AuthLogin(tag, username, password string) error {
 
 	s.backendGreeting = line
 
-	logger.Debug("Successful AUTH=LOGIN authentication", slog.String("response", line))
+	s.logger.Debug("Successful AUTH=LOGIN authentication", slog.String("response", line))
 
 	return nil
 }
@@ -414,8 +420,6 @@ func (s *SessionImpl) GetAuthenticator() iface.Authenticator {
 
 func (s *SessionImpl) handleCommand(line string) {
 	var command iface.IMAPCommand
-
-	logger := log.GetLogger(s.backendCtx)
 
 	if s.errorCounter >= 5 {
 		s.WriteResponse("* BAD Too many errors")
@@ -491,7 +495,7 @@ func (s *SessionImpl) handleCommand(line string) {
 	}
 
 	if err := command.Execute(s); err != nil {
-		logger.Error("Error while executing the command:", slog.String(log.KeyError, err.Error()), s.Session())
+		s.logger.Error("Error while executing the command:", slog.String(log.KeyError, err.Error()), s.Session())
 	}
 }
 
@@ -518,7 +522,6 @@ func (s *SessionImpl) Close() {
 }
 
 func (s *SessionImpl) LinkClientAndBackend() {
-	logger := log.GetLogger(s.backendCtx)
 	reader := io.TeeReader(s.rawClientConn, s.rawBackendConn) // Track client activity
 
 	go func() {
@@ -531,7 +534,7 @@ func (s *SessionImpl) LinkClientAndBackend() {
 			}
 
 			// TODO: Refresh Valkey data
-			logger.Debug("Client active", slog.String("data", string(buf[:n])), s.Session())
+			s.logger.Debug("Client active", slog.String("data", string(buf[:n])), s.Session())
 		}
 	}()
 
@@ -539,7 +542,7 @@ func (s *SessionImpl) LinkClientAndBackend() {
 }
 
 func (s *SessionImpl) Session() slog.Attr {
-	return slog.String("session", s.session)
+	return slog.String("session", s.sessionID)
 }
 
 func (s *SessionImpl) setupCommandFilters() *filter.CommandFilterManager {
@@ -688,4 +691,8 @@ func (s *SessionImpl) GetRemotePort() int {
 
 func (s *SessionImpl) GetUserLookup() bool {
 	return s.instance.UserLookup
+}
+
+func (s *SessionImpl) GetLogger() *slog.Logger {
+	return s.logger
 }
