@@ -173,7 +173,6 @@ func (s *SessionImpl) handleLHLO() error {
 	}
 
 	if strings.HasPrefix(strings.ToUpper(cmd), proto.LHLO) {
-		// TODO: Filter unsupported caps
 		capabilities := s.instance.Capability
 		if len(capabilities) == 0 {
 			capabilities = []string{
