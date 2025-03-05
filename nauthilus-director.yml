@@ -27,6 +27,7 @@ x-defaultIMAPListener: &x-defaultIMAPListener
 x-defaultLMTPListener: &x-defaultLMTPListener
   kind: lmtp
   type: tcp
+  smtputf8_enable: true
   capability:
     - "CHUNKING"
 

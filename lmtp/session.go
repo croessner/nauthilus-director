@@ -176,14 +176,20 @@ func (s *SessionImpl) handleLHLO() error {
 	if strings.HasPrefix(strings.ToUpper(cmd), proto.LHLO) {
 		capabilities := s.instance.Capability
 
+		// Remove extensions
 		capabilityFilter := filter.NewResponseFilterManager()
 		capabilityFilter.AddFilter(filter.NewStartTLSResponseFilter())
 		capabilityFilter.AddFilter(filter.NewPipelingingResponseFilter())
 
 		capabilities = capabilityFilter.ApplyFilters(capabilities)
 
+		// Add extensions
 		capabilityExtender := extender.NewResponseExtenderManager()
-		capabilityExtender.AddExtender(extender.NewSMTPUTF8ResponseExtender())
+
+		if s.instance.SmtpUTF8Enable {
+			capabilityExtender.AddExtender(extender.NewSMTPUTF8ResponseExtender())
+		}
+
 		capabilityExtender.AddExtender(extender.NewEnhancedStatusCodesResponseExtender())
 		capabilityExtender.AddExtender(extender.NewEightbitMimeResponseExtender())
 

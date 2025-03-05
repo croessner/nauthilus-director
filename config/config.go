@@ -115,6 +115,7 @@ type Listen struct {
 	Port            int      `mapstructure:"port" validate:"required,min=1,max=65535"`
 	TLS             TLS      `mapstructure:"tls"`
 	HAProxy         bool     `mapstructure:"haproxy"`
+	SmtpUTF8Enable  bool     `mapstructure:"smtputf8_enable" validate:"excluded_unless=Kind lmtp"`
 	AuthMechs       []string `mapstructure:"auth_mechanisms" validate:"omitempty,dive,oneof=plain login"`
 	Capability      []string `mapstructure:"capability"`
 	MatchIdentifier []string `mapstructure:"match_identifier" validate:"required,dive,min=1"`
