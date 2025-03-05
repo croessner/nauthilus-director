@@ -61,6 +61,7 @@ func (w *WrappedHandler) WithGroup(name string) slog.Handler {
 
 func SetupLogging(ctx *context.Context, cfg *config.Config) {
 	var (
+		noLogging      bool
 		baseHandler    slog.Handler
 		wrappedHandler slog.Handler
 	)
@@ -72,6 +73,8 @@ func SetupLogging(ctx *context.Context, cfg *config.Config) {
 
 	if cfg != nil {
 		switch cfg.Server.Logging.Level {
+		case "none":
+			noLogging = true
 		case "debug":
 			handlerOpts.Level = slog.LevelDebug
 			handlerOpts.AddSource = true
@@ -82,7 +85,7 @@ func SetupLogging(ctx *context.Context, cfg *config.Config) {
 		case "error":
 			handlerOpts.Level = slog.LevelError
 		default:
-			handlerOpts.Level = slog.LevelInfo
+			noLogging = true
 		}
 
 		if cfg.Server.Logging.JSON {
@@ -99,9 +102,13 @@ func SetupLogging(ctx *context.Context, cfg *config.Config) {
 			slog.String("instance", cfg.Server.InstanceID),
 		}
 
-		wrappedHandler = &WrappedHandler{
-			handler: baseHandler,
-			fields:  defaultFields,
+		if noLogging {
+			wrappedHandler = slog.DiscardHandler
+		} else {
+			wrappedHandler = &WrappedHandler{
+				handler: baseHandler,
+				fields:  defaultFields,
+			}
 		}
 	} else {
 		wrappedHandler = slog.NewTextHandler(
