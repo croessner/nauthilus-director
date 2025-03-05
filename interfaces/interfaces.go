@@ -199,3 +199,8 @@ type LMTPSession interface {
 	GetTLSDNSNames() string
 	GetLogger() *slog.Logger
 }
+
+// LMTPResponseFilter defines an interface for filtering LMTP service responses.
+type LMTPResponseFilter interface {
+	FilterResponse(response []string) []string
+}

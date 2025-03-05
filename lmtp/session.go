@@ -16,6 +16,7 @@ import (
 	"github.com/croessner/nauthilus-director/context"
 	iface "github.com/croessner/nauthilus-director/interfaces"
 	"github.com/croessner/nauthilus-director/lmtp/commands"
+	"github.com/croessner/nauthilus-director/lmtp/commands/filter"
 	"github.com/croessner/nauthilus-director/lmtp/proto"
 	"github.com/croessner/nauthilus-director/log"
 )
@@ -181,6 +182,12 @@ func (s *SessionImpl) handleLHLO() error {
 				"ENHANCEDSTATUSCODES",
 			}
 		}
+
+		capabilityFilter := filter.NewResponseFilterManager()
+		capabilityFilter.AddFilter(filter.NewStartTLSResponseFilter())
+		capabilityFilter.AddFilter(filter.NewPipelingingResponseFilter())
+
+		capabilities = capabilityFilter.ApplyFilters(capabilities)
 
 		for index, item := range capabilities {
 			sep := "-"
