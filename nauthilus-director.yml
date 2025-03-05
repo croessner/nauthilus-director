@@ -28,10 +28,7 @@ x-defaultLMTPListener: &x-defaultLMTPListener
   kind: lmtp
   type: tcp
   capability:
-    - "8BITMIME"
     - "CHUNKING"
-    - "ENHANCEDSTATUSCODES"
-    - "SMTPUTF8"
 
 #
 # Default backends

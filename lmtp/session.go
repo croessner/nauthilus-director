@@ -16,6 +16,7 @@ import (
 	"github.com/croessner/nauthilus-director/context"
 	iface "github.com/croessner/nauthilus-director/interfaces"
 	"github.com/croessner/nauthilus-director/lmtp/commands"
+	"github.com/croessner/nauthilus-director/lmtp/commands/extender"
 	"github.com/croessner/nauthilus-director/lmtp/commands/filter"
 	"github.com/croessner/nauthilus-director/lmtp/proto"
 	"github.com/croessner/nauthilus-director/log"
@@ -174,13 +175,6 @@ func (s *SessionImpl) handleLHLO() error {
 
 	if strings.HasPrefix(strings.ToUpper(cmd), proto.LHLO) {
 		capabilities := s.instance.Capability
-		if len(capabilities) == 0 {
-			capabilities = []string{
-				"8BITMIME",
-				"SMTPUTF8",
-				"ENHANCEDSTATUSCODES",
-			}
-		}
 
 		capabilityFilter := filter.NewResponseFilterManager()
 		capabilityFilter.AddFilter(filter.NewStartTLSResponseFilter())
@@ -188,9 +182,16 @@ func (s *SessionImpl) handleLHLO() error {
 
 		capabilities = capabilityFilter.ApplyFilters(capabilities)
 
+		capabilityExtender := extender.NewResponseExtenderManager()
+		capabilityExtender.AddExtender(extender.NewSMTPUTF8ResponseExtender())
+		capabilityExtender.AddExtender(extender.NewEnhancedStatusCodesResponseExtender())
+		capabilityExtender.AddExtender(extender.NewEightbitMimeResponseExtender())
+
+		capabilities = capabilityExtender.ApplyExtenders(capabilities)
+
 		for index, item := range capabilities {
 			sep := "-"
-			if index == len(s.instance.Capability)-1 {
+			if index == len(capabilities)-1 {
 				sep = " "
 			}
 

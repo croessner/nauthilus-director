@@ -204,3 +204,7 @@ type LMTPSession interface {
 type LMTPResponseFilter interface {
 	FilterResponse(response []string) []string
 }
+
+type LMTPResponseExtender interface {
+	ExtendResponse() []string
+}
