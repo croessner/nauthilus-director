@@ -12,27 +12,26 @@ x-defaultIMAPListener: &x-defaultIMAPListener
   kind: imap
   type: tcp
   capability:
-  - "IMAP4rev1"
-  - "ID"
-  - "ENABLE"
-  - "SASL-IR"
-  - "IDLE"
-  - "STARTTLS"
-  - "AUTH=PLAIN"
-  - "AUTH=LOGIN"
+    - "IMAP4rev1"
+    - "ID"
+    - "ENABLE"
+    - "SASL-IR"
+    - "IDLE"
+    - "STARTTLS"
+    - "AUTH=PLAIN"
+    - "AUTH=LOGIN"
   auth_mechanisms:
-  - plain
-  - login
+    - plain
+    - login
 
 x-defaultLMTPListener: &x-defaultLMTPListener
   kind: lmtp
   type: tcp
   capability:
-  - "8BITMIME"
-  - "CHUNKING"
-  - "ENHANCEDSTATUSCODES"
-  - "SMTPUTF8"
-  - "SIZE 10485760"
+    - "8BITMIME"
+    - "CHUNKING"
+    - "ENHANCEDSTATUSCODES"
+    - "SMTPUTF8"
 
 #
 # Default backends
@@ -65,45 +64,59 @@ x-defaultLMTPBackend: &x-defaultLMTPBackend
 
 server:
 
+  instance_id: nauthilus-director
+
   listen:
 
     #
     # IMAP
     #
 
-  - service_name: imap
-    <<: *x-defaultIMAPListener
-    address: 127.0.0.1
-    port: 10143
-    tls:
-      enabled: true
-      starttls: true
-      <<: *x-defaultX509
+    - service_name: imap
+      <<: *x-defaultIMAPListener
+      address: 127.0.0.1
+      port: 10143
+      match_identifier:
+        - 4174d130-50ef-4a7e-b413-7fed56280d0e
+        - 810a979b-d37a-461b-8027-63296a932f6f
+      tls:
+        enabled: true
+        starttls: true
+        <<: *x-defaultX509
 
-  - service_name: imaps
-    <<: *x-defaultIMAPListener
-    address: 127.0.0.1
-    port: 10993
-    tls:
-      enabled: true
-      <<: *x-defaultX509
+    - service_name: imaps
+      <<: *x-defaultIMAPListener
+      address: 127.0.0.1
+      port: 10993
+      match_identifier:
+        - 4174d130-50ef-4a7e-b413-7fed56280d0e
+        - 810a979b-d37a-461b-8027-63296a932f6f
+      tls:
+        enabled: true
+        <<: *x-defaultX509
 
     #
     # LMTP
     #
 
-  - service_name: lmtp
-    <<: *x-defaultLMTPListener
-    address: 127.0.0.1
-    port: 10024
+    - service_name: lmtp
+      <<: *x-defaultLMTPListener
+      address: 127.0.0.1
+      port: 10024
+      match_identifier:
+        - 68e3dd20-c6d1-46bf-9c98-71b665c37fc6
+        - 8013897d-020b-4420-bd7f-d73a15166805
 
-  - service_name: lmtps
-    <<: *x-defaultLMTPListener
-    address: 127.0.0.1
-    port: 11024
-    tls:
-      enabled: true
-      <<: *x-defaultX509
+    - service_name: lmtps
+      <<: *x-defaultLMTPListener
+      address: 127.0.0.1
+      port: 11024
+      match_identifier:
+        - 68e3dd20-c6d1-46bf-9c98-71b665c37fc6
+        - 8013897d-020b-4420-bd7f-d73a15166805
+      tls:
+        enabled: true
+        <<: *x-defaultX509
 
   logging:
     level: debug
@@ -114,30 +127,34 @@ backend_server:
   # IMAP
   #
 
-- <<: *x-defaultIMAPBackend
-  shard_tag: ""
-  host: 127.0.0.1
-  port: 1143
-  test_username: testuser1
+  - <<: *x-defaultIMAPBackend
+    identifier: 4174d130-50ef-4a7e-b413-7fed56280d0e
+    shard_tag: ""
+    host: 127.0.0.1
+    port: 1143
+    test_username: testuser1
 
-- <<: *x-defaultIMAPBackend
-  shard_tag: ""
-  host: 127.0.0.1
-  port: 2143
-  test_username: testuser2
+  - <<: *x-defaultIMAPBackend
+    identifier: 810a979b-d37a-461b-8027-63296a932f6f
+    shard_tag: ""
+    host: 127.0.0.1
+    port: 2143
+    test_username: testuser2
 
   #
   # LMTP
   #
 
-- <<: *x-defaultLMTPBackend
-  shard_tag: ""
-  host: 127.0.0.1
-  port: 2424
-  test_username: testuser1
+  - <<: *x-defaultLMTPBackend
+    identifier: 68e3dd20-c6d1-46bf-9c98-71b665c37fc6
+    shard_tag: ""
+    host: 127.0.0.1
+    port: 2424
+    test_username: testuser1
 
-- <<: *x-defaultIMAPBackend
-  shard_tag: ""
-  host: 127.0.0.1
-  port: 3424
-  test_username: testuser2
+  - <<: *x-defaultIMAPBackend
+    identifier: 8013897d-020b-4420-bd7f-d73a15166805
+    shard_tag: ""
+    host: 127.0.0.1
+    port: 3424
+    test_username: testuser2
