@@ -231,12 +231,6 @@ func (s *SessionImpl) handleLHLO() error {
 }
 
 func (s *SessionImpl) Process() {
-	defer func() {
-		s.stopWatchdog <- struct{}{}
-
-		s.Close()
-	}()
-
 	if err := s.handleLHLO(); err != nil {
 		return
 	}

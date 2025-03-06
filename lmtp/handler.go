@@ -85,6 +85,10 @@ func Handler(proxy iface.Proxy, rawClientConn net.Conn) {
 	session.WriteResponse("220 LMTP Server Ready")
 	session.Process()
 
+	session.stopWatchdog <- struct{}{}
+
+	session.Close()
+
 	logger.Info("Connection closed",
 		slog.String(log.KeyLocal, rawClientConn.LocalAddr().String()),
 		slog.String(log.KeyRemote, rawClientConn.RemoteAddr().String()),

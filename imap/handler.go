@@ -2,7 +2,6 @@ package imap
 
 import (
 	"crypto/tls"
-	"io"
 	"log/slog"
 	"net"
 	"net/textproto"
@@ -108,21 +107,21 @@ func Handler(proxy iface.Proxy, rawClientConn net.Conn) {
 	for {
 		line, err := session.ReadLine()
 		if err != nil {
-			if err != io.EOF {
-				logger.Error("Error reading IMAP command", slog.String(log.KeyError, err.Error()), session.Session())
-			} else {
-				logger.Info("Client disconnected", slog.String("client", rawClientConn.RemoteAddr().String()), session.Session())
-			}
-
-			session.stopWatchdog <- struct{}{}
-
-			session.Close()
-
-			return
+			break
 		}
 
 		session.lastActivity <- struct{}{}
 
-		session.handleCommand(line)
+		session.Process(line)
 	}
+
+	session.stopWatchdog <- struct{}{}
+
+	session.Close()
+
+	logger.Info("Connection closed",
+		slog.String(log.KeyLocal, rawClientConn.LocalAddr().String()),
+		slog.String(log.KeyRemote, rawClientConn.RemoteAddr().String()),
+		session.Session(),
+	)
 }

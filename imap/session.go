@@ -428,7 +428,7 @@ func (s *SessionImpl) GetAuthenticator() iface.Authenticator {
 	return s.authenticator
 }
 
-func (s *SessionImpl) handleCommand(line string) {
+func (s *SessionImpl) Process(line string) {
 	var command iface.IMAPCommand
 
 	if s.errorCounter >= 5 {
