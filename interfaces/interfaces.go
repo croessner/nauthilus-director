@@ -180,8 +180,8 @@ type LMTPSession interface {
 	GetLocalPort() int
 	GetRemotePort() int
 	GetTLSFlag() bool
-	WriteResponse(response string) error
-	ReadCommand() (string, error)
+	WriteResponse(response string)
+	ReadLine() (string, error)
 	Process()
 	Close()
 

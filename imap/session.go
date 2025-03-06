@@ -26,6 +26,8 @@ import (
 	"github.com/croessner/nauthilus-director/log"
 )
 
+const ErrWriteRespone = "Error writing response"
+
 type SessionImpl struct {
 	authenticator  iface.Authenticator
 	tlsConfig      *tls.Config
@@ -80,7 +82,7 @@ func (s *SessionImpl) WriteResponse(response string) {
 	}
 
 	if err := s.tpClientConn.PrintfLine(response); err != nil {
-		s.logger.Error("Error while sending the response:", slog.String(log.KeyError, err.Error()), s.Session())
+		s.logger.Error(ErrWriteRespone, slog.String(log.KeyError, err.Error()), s.Session())
 	}
 }
 
@@ -91,12 +93,6 @@ func (s *SessionImpl) ReadLine() (string, error) {
 
 	line, err := s.tpClientConn.ReadLine()
 	if err != nil {
-		var opErr *net.OpError
-
-		if errors.As(err, &opErr) && opErr.Err.Error() == "use of closed network connection" {
-			return "", io.EOF
-		}
-
 		return "", err
 	}
 

@@ -45,14 +45,9 @@ func (c *RcptTo) Execute(session iface.LMTPSession) error {
 	}
 
 	if !userfound {
-		if err = session.WriteResponse("550 5.1.1 User does not exist"); err != nil {
-			return err
-		}
+		session.WriteResponse("550 5.1.1 User does not exist")
 	} else {
-		if err = session.WriteResponse("250 2.1.5 OK"); err != nil {
-			return err
-		}
-
+		session.WriteResponse("250 2.1.5 OK")
 		session.AddRecipient(c.recipient)
 	}
 

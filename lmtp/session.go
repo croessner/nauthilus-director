@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/textproto"
@@ -76,12 +77,31 @@ type SessionImpl struct {
 
 var _ iface.LMTPSession = (*SessionImpl)(nil)
 
-func (s *SessionImpl) WriteResponse(response string) error {
-	return s.tpClientConn.PrintfLine(response)
+func (s *SessionImpl) WriteResponse(response string) {
+	if s.tpClientConn == nil {
+		return
+	}
+
+	if err := s.tpClientConn.PrintfLine(response); err != nil {
+		s.logger.Error(ErrWriteRespone, slog.String(log.KeyError, err.Error()), s.Session())
+	}
 }
 
-func (s *SessionImpl) ReadCommand() (string, error) {
-	return s.tpClientConn.ReadLine()
+func (s *SessionImpl) ReadLine() (string, error) {
+	if s.tpClientConn == nil {
+		return "", io.EOF
+	}
+
+	line, err := s.tpClientConn.ReadLine()
+	if err != nil {
+		return "", err
+	}
+
+	if line == "" {
+		return "", io.EOF
+	}
+
+	return line, nil
 }
 
 func (s *SessionImpl) Session() slog.Attr {
@@ -147,10 +167,7 @@ func (s *SessionImpl) StartWatchdog() {
 		case <-s.lastActivity:
 			continue
 		case <-time.After(s.inactivityTimeout):
-			if err := s.WriteResponse("421 Timeout: closing connection"); err != nil {
-				s.logger.Error(ErrWriteRespone, slog.String(log.KeyError, err.Error()), s.Session())
-			}
-
+			s.WriteResponse("421 Timeout: closing connection")
 			s.logger.Warn("Session timed out due to inactivity",
 				slog.String(log.KeyLocal, s.rawClientConn.LocalAddr().String()),
 				slog.String(log.KeyRemote, s.rawClientConn.RemoteAddr().String()),
@@ -169,9 +186,9 @@ func (s *SessionImpl) StartWatchdog() {
 }
 
 func (s *SessionImpl) handleLHLO() error {
-	cmd, err := s.ReadCommand()
+	cmd, err := s.ReadLine()
 	if err != nil {
-		return nil
+		return err
 	}
 
 	if strings.HasPrefix(strings.ToUpper(cmd), proto.LHLO) {
@@ -202,14 +219,10 @@ func (s *SessionImpl) handleLHLO() error {
 				sep = " "
 			}
 
-			if err = s.WriteResponse("250" + sep + item); err != nil {
-				return err
-			}
+			s.WriteResponse("250" + sep + item)
 		}
 	} else {
-		if err = s.WriteResponse("501 5.5.4 LHLO expected"); err != nil {
-			return err
-		}
+		s.WriteResponse("501 5.5.4 LHLO expected")
 
 		return fmt.Errorf("expected LHLO but got: %s", cmd)
 	}
@@ -225,22 +238,18 @@ func (s *SessionImpl) Process() {
 	}()
 
 	if err := s.handleLHLO(); err != nil {
-		s.logger.Error(ErrWriteRespone, slog.String(log.KeyError, err.Error()), s.Session())
-
 		return
 	}
 
 Commands:
 	for {
 		if s.errorCounter > 5 {
-			if err := s.WriteResponse("521 5.7.0 Too many errors: closing connection"); err != nil {
-				s.logger.Error(ErrWriteRespone, slog.String(log.KeyError, err.Error()), s.Session())
-			}
+			s.WriteResponse("521 5.7.0 Too many errors: closing connection")
 
 			break Commands
 		}
 
-		cmd, err := s.ReadCommand()
+		cmd, err := s.ReadLine()
 		if err != nil {
 			break Commands
 		}
@@ -248,11 +257,7 @@ Commands:
 		s.lastActivity <- struct{}{}
 
 		if strings.EqualFold(cmd, proto.NOOP) {
-			if err = s.WriteResponse("250 2.0.0 OK"); err != nil {
-				s.logger.Error(ErrWriteRespone, slog.String(log.KeyError, err.Error()), s.Session())
-
-				break Commands
-			}
+			s.WriteResponse("250 2.0.0 OK")
 
 			continue
 		} else if strings.EqualFold(cmd, proto.RSET) {
@@ -260,11 +265,7 @@ Commands:
 			s.recipients = []string{}
 			s.messageData = ""
 
-			if err = s.WriteResponse("250 2.0.0 OK"); err != nil {
-				s.logger.Error(ErrWriteRespone, slog.String(log.KeyError, err.Error()), s.Session())
-
-				break Commands
-			}
+			s.WriteResponse("250 2.0.0 OK")
 
 			continue
 		}
@@ -272,27 +273,17 @@ Commands:
 		switch s.state {
 		case StateWaitingMailFrom:
 			if strings.HasPrefix(cmd, proto.MAILFROM+":") {
-				if err = s.WriteResponse("250 2.1.0 OK"); err != nil {
-					s.logger.Error(ErrWriteRespone, slog.String(log.KeyError, err.Error()), s.Session())
-
-					break Commands
-				}
+				s.WriteResponse("250 2.1.0 OK")
 
 				s.state = StateWaitingRcptTo
 				s.recipients = []string{} // New message, reset recipients
 				s.messageData = ""
 			} else if strings.HasPrefix(cmd, proto.QUIT) {
-				if err = s.WriteResponse("221 2.0.0 Bye"); err != nil {
-					s.logger.Error(ErrWriteRespone, slog.String(log.KeyError, err.Error()), s.Session())
-				}
+				s.WriteResponse("221 2.0.0 Bye")
 
 				break Commands
 			} else {
-				if err = s.WriteResponse("500 5.5.1 Syntax error, MAIL FROM or QUIT expected"); err != nil {
-					s.logger.Error(ErrWriteRespone, slog.String(log.KeyError, err.Error()), s.Session())
-
-					break Commands
-				}
+				s.WriteResponse("500 5.5.1 Syntax error, MAIL FROM or QUIT expected")
 
 				s.errorCounter++
 			}
@@ -301,42 +292,24 @@ Commands:
 			if strings.HasPrefix(cmd, proto.RCPTTO+":") {
 				recipient := strings.TrimSpace(strings.TrimPrefix(cmd, "RCPT TO:"))
 				if err = commands.NewRcptTo(recipient).Execute(s); err != nil {
-					if err := s.WriteResponse("451 4.5.1 Error: " + err.Error()); err != nil {
-						s.logger.Error(ErrWriteRespone, slog.String(log.KeyError, err.Error()), s.Session())
-
-						break Commands
-					}
+					s.WriteResponse("451 4.5.1 Error: " + err.Error())
 				}
 			} else if strings.EqualFold(cmd, proto.DATA) || strings.EqualFold(cmd, proto.BDAT) {
 				if len(s.recipients) == 0 {
-					if err = s.WriteResponse("503 5.5.2 Bad sequence of commands: RCPT TO required before DATA"); err != nil {
-						s.logger.Error(ErrWriteRespone, slog.String(log.KeyError, err.Error()), s.Session())
-
-						break Commands
-					}
+					s.WriteResponse("503 5.5.2 Bad sequence of commands: RCPT TO required before DATA")
 
 					s.errorCounter++
 				} else {
-					if err = s.WriteResponse("354 Start mail input"); err != nil {
-						s.logger.Error(ErrWriteRespone, slog.String(log.KeyError, err.Error()), s.Session())
-
-						break Commands
-					}
+					s.WriteResponse("354 Start mail input")
 
 					s.state = StateReceivingData
 				}
 			} else if strings.HasPrefix(cmd, proto.QUIT) {
-				if err = s.WriteResponse("221 2.0.0 Bye"); err != nil {
-					s.logger.Error(ErrWriteRespone, slog.String(log.KeyError, err.Error()), s.Session())
-				}
+				s.WriteResponse("221 2.0.0 Bye")
 
 				break Commands
 			} else {
-				if err = s.WriteResponse("500 5.5.1 Syntax error, RCPT TO, DATA or QUIT expected"); err != nil {
-					s.logger.Error(ErrWriteRespone, slog.String(log.KeyError, err.Error()), s.Session())
-
-					break Commands
-				}
+				s.WriteResponse("500 5.5.1 Syntax error, RCPT TO, DATA or QUIT expected")
 
 				s.errorCounter++
 			}
@@ -345,11 +318,7 @@ Commands:
 			if strings.HasPrefix(cmd, "..") {
 				s.messageData += strings.TrimPrefix(cmd, ".") + "\n"
 			} else if cmd == "." {
-				if err = s.WriteResponse("250 2.0.0 OK: session id <" + s.sessionID + ">"); err != nil {
-					s.logger.Error(ErrWriteRespone, slog.String(log.KeyError, err.Error()), s.Session())
-
-					break Commands
-				}
+				s.WriteResponse("250 2.0.0 OK: session id <" + s.sessionID + ">")
 
 				s.state = StateWaitingMailFrom
 			} else {

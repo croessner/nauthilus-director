@@ -82,13 +82,7 @@ func Handler(proxy iface.Proxy, rawClientConn net.Conn) {
 		slog.Bool(log.KeyTLSVerified, session.GetTLSVerified()),
 	)
 
-	if err := session.WriteResponse("220 LMTP Server Ready"); err != nil {
-		logger.Error(ErrWriteRespone, slog.String(log.KeyError, err.Error()), session.Session())
-		session.Close()
-
-		return
-	}
-
+	session.WriteResponse("220 LMTP Server Ready")
 	session.Process()
 
 	logger.Info("Connection closed",
