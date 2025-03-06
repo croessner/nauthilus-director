@@ -31,7 +31,7 @@ type Proxy struct {
 func NewProxy(ctx *context.Context, instance config.Listen, wg *sync.WaitGroup) *Proxy {
 	logger := log.GetLogger(ctx)
 
-	tlsConfig, err := enc.GetTLSConfig(instance)
+	tlsConfig, err := enc.GetServerTLSConfig(instance.TLS)
 	if err != nil {
 		logger.Error("Could not get TLS config", slog.String(log.KeyError, err.Error()))
 

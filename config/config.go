@@ -105,10 +105,10 @@ func isValidOctalMode(fl validator.FieldLevel) bool {
 }
 
 type Server struct {
-	InstanceID string     `mapstructure:"instance_id" validate:"required"`
-	Listen     []Listen   `mapstructure:"listen" validate:"required,dive"`
-	HTTPClient HTTPClient `mapstructure:"http_client"`
-	Logging    Logging    `mapstructure:"logging"`
+	InstanceID string    `mapstructure:"instance_id" validate:"required"`
+	Listen     []Listen  `mapstructure:"listen" validate:"required,dive"`
+	Logging    Logging   `mapstructure:"logging"`
+	Nauthilus  Nauthilus `mapstructure:"nauthilus" validate:"required"`
 }
 
 type Listen struct {
@@ -145,11 +145,16 @@ type HTTPClient struct {
 }
 
 type TLS struct {
-	Enabled    bool   `mapstructure:"enabled"`
-	StartTLS   bool   `mapstructure:"starttls"`
-	SkipVerify bool   `mapstructure:"skip_verify"`
-	Cert       string `mapstructure:"cert" validate:"omitempty,file"`
-	Key        string `mapstructure:"key" validate:"omitempty,file"`
+	Enabled     bool     `mapstructure:"enabled"`
+	StartTLS    bool     `mapstructure:"starttls"`
+	SkipVerify  bool     `mapstructure:"skip_verify"`
+	Cert        string   `mapstructure:"cert" validate:"omitempty,file"`
+	Key         string   `mapstructure:"key" validate:"omitempty,file"`
+	CAFile      string   `mapstructure:"c_file" validate:"omitempty,file"`
+	ServerName  string   `mapstructure:"server_name" validate:"omitempty,hostname|ip"`
+	MinVersion  string   `mapstructure:"min_version" validate:"omitempty,oneof=TLSv1.2 TLSv1.3"`
+	MaxVersion  string   `mapstructure:"max_version" validate:"omitempty,oneof=TLSv1.2 TLSv1.3"`
+	CipherSuite []string `mapstructure:"cipher_suite"`
 }
 
 func (t *TLS) String() string {
@@ -177,4 +182,12 @@ type BackendServer struct {
 func (b *BackendServer) String() string {
 	return fmt.Sprintf("{ Host: '%s' Port: '%d' Protocol: '%s' ShardTag '%s'  Maintenance: '%v' DeepCheck: '%v' HAProxy: '%v' TLS: '%s' Weight: '%d' MaxConnections: '%d' CheckInterval: '%s' TestUsername: '%s' TestPassword: '%s' Identifier: '%s' }",
 		b.Host, b.Port, b.Protocol, b.ShardTag, b.Maintenance, b.DeepCheck, b.HAProxy, b.TLS.String(), b.Weight, b.MaxConnections, b.CheckInterval, b.TestUsername, b.TestPassword, b.Identifier)
+}
+
+type Nauthilus struct {
+	Url        string     `mapstructure:"url" validate:"required,http_url"`
+	Username   string     `mapstructure:"username"`
+	Password   string     `mapstructure:"password"`
+	HTTPClient HTTPClient `mapstructure:"http_client"`
+	TLS        TLS        `mapstructure:"tls"`
 }

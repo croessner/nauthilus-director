@@ -119,6 +119,16 @@ server:
   logging:
     level: debug
 
+  nauthilus:
+    url: http://127.0.0.1:8080/api/v1/auth/json
+    username: nauthilus
+    password: nauthilus
+    http_client:
+      max_connections_per_host: 10
+      max_idle_connections: 4
+      max_idle_connections_per_host: 1
+      idle_connection_timeout: 10
+
 backend_server:
 
   #
