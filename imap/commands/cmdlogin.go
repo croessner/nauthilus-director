@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"errors"
 	"io"
 	"log/slog"
 
@@ -25,9 +26,11 @@ func (c *Login) Execute(session iface.IMAPSession) error {
 
 	isAuthenticated, err := auth.Authenticate(session.GetClientContext(), session.GetService(), c.Username, c.Password)
 	if err != nil {
-		session.Close()
+		if !(errors.Is(err, authenticator.ErrAuthenticationFailed) || errors.Is(err, authenticator.ErrUserNotFound)) {
+			session.WriteResponse(c.Tag + " NO Internal error")
 
-		return err
+			session.Close()
+		}
 	}
 
 	if !isAuthenticated {

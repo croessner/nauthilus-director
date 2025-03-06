@@ -1,8 +1,10 @@
 package commands
 
 import (
+	"errors"
 	"strings"
 
+	authenticator "github.com/croessner/nauthilus-director/auth"
 	"github.com/croessner/nauthilus-director/interfaces"
 )
 
@@ -35,9 +37,11 @@ func (c *RcptTo) Execute(session iface.LMTPSession) error {
 
 	userfound, err := auth.Authenticate(session.GetClientContext(), session.GetService(), normalizeUsername(c.recipient), "")
 	if err != nil {
-		session.Close()
+		if !errors.Is(err, authenticator.ErrUserNotFound) {
+			return err
+		}
 
-		return err
+		err = nil
 	}
 
 	if !userfound {

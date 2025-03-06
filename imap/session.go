@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/croessner/nauthilus-director/auth"
 	"github.com/croessner/nauthilus-director/config"
 	"github.com/croessner/nauthilus-director/context"
 	"github.com/croessner/nauthilus-director/imap/commands"
@@ -508,7 +509,12 @@ func (s *SessionImpl) handleCommand(line string) {
 	}
 
 	if err := command.Execute(s); err != nil {
-		s.logger.Error("Error while executing the command:", slog.String(log.KeyError, err.Error()), s.Session())
+		msg := "Error while executing the command"
+		if errors.Is(err, auth.ErrInternalServer) {
+			msg = "Error talking to Nauthilus"
+		}
+
+		s.logger.Error(msg, slog.String(log.KeyError, err.Error()), s.Session(), slog.String("command", cmd))
 	}
 }
 

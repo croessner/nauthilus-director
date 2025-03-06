@@ -2,6 +2,7 @@ package commands
 
 import (
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -105,9 +106,11 @@ func (c *Authenticate) handlePlainAuthWithInitialResponse(session iface.IMAPSess
 
 	isAuthenticated, err := auth.Authenticate(session.GetClientContext(), session.GetService(), username, password)
 	if err != nil {
-		session.Close()
+		if !(errors.Is(err, authenticator.ErrAuthenticationFailed) || errors.Is(err, authenticator.ErrUserNotFound)) {
+			session.WriteResponse(c.Tag + " NO Internal error")
 
-		return err
+			return err
+		}
 	}
 
 	if !isAuthenticated {
@@ -156,9 +159,11 @@ func (c *Authenticate) handlePlainAuth(session iface.IMAPSession) error {
 
 	isAuthenticated, err := auth.Authenticate(session.GetClientContext(), session.GetService(), username, password)
 	if err != nil {
-		session.Close()
+		if !(errors.Is(err, authenticator.ErrAuthenticationFailed) || errors.Is(err, authenticator.ErrUserNotFound)) {
+			session.WriteResponse(c.Tag + " NO Internal error")
 
-		return err
+			return err
+		}
 	}
 
 	if !isAuthenticated {
@@ -216,9 +221,11 @@ func (c *Authenticate) handleLoginAuth(session iface.IMAPSession) error {
 
 	isAuthenticated, err := auth.Authenticate(session.GetClientContext(), session.GetService(), username, password)
 	if err != nil {
-		session.Close()
+		if !(errors.Is(err, authenticator.ErrAuthenticationFailed) || errors.Is(err, authenticator.ErrUserNotFound)) {
+			session.WriteResponse(c.Tag + " NO Internal error")
 
-		return err
+			return err
+		}
 	}
 
 	if !isAuthenticated {

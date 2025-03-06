@@ -1,0 +1,50 @@
+# File: nauthilus.yml
+
+server:
+  address: "0.0.0.0:8080"
+  instance_name: nauthilus
+
+  log:
+    color: true
+    level: debug
+
+  backends:
+    - cache
+    - lua
+
+  frontend:
+    enabled: false
+
+  dns:
+    timeout: 2
+    resolve_client_ip: false
+
+  redis:
+    database_number: 0
+    pool_size: 10
+    password_nonce: 5yBOr5PKa8UQq8iXF44ceFWaWW3vO15W
+
+    master:
+      address: valkey:6379
+    replica:
+      address: valkey:6379
+
+  master_user:
+    enabled: true
+    delimiter: "*"
+
+  prometheus_timer:
+    enabled: true
+    labels:
+      - backend
+      - request
+
+lua:
+  config:
+    init_script_path: /usr/app/lua-plugins.d/init/init.lua
+    backend_script_path: /etc/nauthilus/lua/backend.lua
+
+  search:
+    - protocol:
+        - default
+      cache_name: dovecot

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -19,7 +20,11 @@ import (
 	nauthilus "github.com/croessner/nauthilus/server/core"
 )
 
-var ErrAuthenticationFailed = errors.New("authentication failed")
+var (
+	ErrAuthenticationFailed = errors.New("authentication failed")
+	ErrUserNotFound         = errors.New("user not found")
+	ErrInternalServer       = errors.New("internal server error")
+)
 
 func NewHTTPClient(httpOptions config.HTTPClient, tlsOptions config.TLS) (*http.Client, error) {
 	var proxyFunc func(*http.Request) (*url.URL, error)
@@ -114,10 +119,10 @@ func (n *NauthilusAuthenticator) generatePayload(service, username, password str
 	}
 }
 
-func (n *NauthilusAuthenticator) logDebugRequest(ctx *context.Context, service, username string) {
+func (n *NauthilusAuthenticator) logFaeildRequest(ctx *context.Context, service, username string) {
 	logger := log.GetLogger(ctx)
 
-	logger.Debug("Nauthilus authentication",
+	logger.Warn("Nauthilus authentication failure",
 		slog.String("service", service),
 		slog.String("auth_mechanism", n.authMechanism),
 		slog.String("username", username),
@@ -140,7 +145,7 @@ func (n *NauthilusAuthenticator) logDebugRequest(ctx *context.Context, service, 
 }
 
 func (n *NauthilusAuthenticator) Authenticate(ctx *context.Context, service, username, password string) (bool, error) {
-	n.logDebugRequest(ctx, service, username)
+	var incorrectResponse bool
 
 	httpClient, err := NewHTTPClient(n.httpOptions, n.tlsOptions)
 	if err != nil {
@@ -155,26 +160,70 @@ func (n *NauthilusAuthenticator) Authenticate(ctx *context.Context, service, use
 		return false, fmt.Errorf("failed to marshal payload: %w", err)
 	}
 
-	response, err := httpClient.Post(n.nauthilusApi, "application/json", bytes.NewBuffer(payloadBytes))
+	mode := ""
+	if n.userLookup {
+		mode = "?mode=no-auth"
+	}
+
+	response, err := httpClient.Post(n.nauthilusApi+mode, "application/json", bytes.NewBuffer(payloadBytes))
 	if err != nil {
 		return false, err
 	}
 
 	defer func() {
 		_ = response.Body.Close()
+
+		if incorrectResponse {
+			n.logFaeildRequest(ctx, service, username)
+		}
 	}()
 
-	if username != "user@example.com" {
-		return false, nil
+	if response.StatusCode == http.StatusOK {
+		var (
+			responseBytes []byte
+			userInfo      map[string]any
+		)
+
+		responseBytes, err = io.ReadAll(response.Body)
+		if err != nil {
+			return false, err
+		}
+
+		err = json.Unmarshal(responseBytes, &userInfo)
+		if err != nil {
+			return false, err
+		}
+
+		if accountField, okay := userInfo["account_field"].(string); okay {
+			if attributes, okay := userInfo["attributes"].(map[string]any); okay {
+				if accounts, okay := attributes[accountField].([]any); okay {
+					if len(accounts) == 1 {
+						if account, okay := accounts[0].(string); okay {
+							n.account = account
+
+							return true, nil
+						}
+					}
+				}
+			}
+		}
+
+		incorrectResponse = true
+
+		return false, ErrUserNotFound
+	} else if response.StatusCode == http.StatusUnauthorized {
+		return false, ErrAuthenticationFailed
+	} else if response.StatusCode == http.StatusForbidden {
+		if n.userLookup {
+			return false, ErrUserNotFound
+		}
+
+		return false, ErrAuthenticationFailed
 	} else {
-		n.account = username
-	}
+		incorrectResponse = true
 
-	if n.userLookup {
-		return true, nil
+		return false, ErrInternalServer
 	}
-
-	return password == "pass", nil
 }
 
 func (n *NauthilusAuthenticator) SetUserLookup(flag bool) {

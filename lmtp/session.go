@@ -230,18 +230,19 @@ func (s *SessionImpl) Process() {
 		return
 	}
 
+Commands:
 	for {
 		if s.errorCounter > 5 {
 			if err := s.WriteResponse("521 5.7.0 Too many errors: closing connection"); err != nil {
 				s.logger.Error(ErrWriteRespone, slog.String(log.KeyError, err.Error()), s.Session())
 			}
 
-			break
+			break Commands
 		}
 
 		cmd, err := s.ReadCommand()
 		if err != nil {
-			break
+			break Commands
 		}
 
 		s.lastActivity <- struct{}{}
@@ -250,7 +251,7 @@ func (s *SessionImpl) Process() {
 			if err = s.WriteResponse("250 2.0.0 OK"); err != nil {
 				s.logger.Error(ErrWriteRespone, slog.String(log.KeyError, err.Error()), s.Session())
 
-				break
+				break Commands
 			}
 
 			continue
@@ -262,7 +263,7 @@ func (s *SessionImpl) Process() {
 			if err = s.WriteResponse("250 2.0.0 OK"); err != nil {
 				s.logger.Error(ErrWriteRespone, slog.String(log.KeyError, err.Error()), s.Session())
 
-				break
+				break Commands
 			}
 
 			continue
@@ -274,7 +275,7 @@ func (s *SessionImpl) Process() {
 				if err = s.WriteResponse("250 2.1.0 OK"); err != nil {
 					s.logger.Error(ErrWriteRespone, slog.String(log.KeyError, err.Error()), s.Session())
 
-					break
+					break Commands
 				}
 
 				s.state = StateWaitingRcptTo
@@ -285,12 +286,12 @@ func (s *SessionImpl) Process() {
 					s.logger.Error(ErrWriteRespone, slog.String(log.KeyError, err.Error()), s.Session())
 				}
 
-				break
+				break Commands
 			} else {
 				if err = s.WriteResponse("500 5.5.1 Syntax error, MAIL FROM or QUIT expected"); err != nil {
 					s.logger.Error(ErrWriteRespone, slog.String(log.KeyError, err.Error()), s.Session())
 
-					break
+					break Commands
 				}
 
 				s.errorCounter++
@@ -300,16 +301,18 @@ func (s *SessionImpl) Process() {
 			if strings.HasPrefix(cmd, proto.RCPTTO+":") {
 				recipient := strings.TrimSpace(strings.TrimPrefix(cmd, "RCPT TO:"))
 				if err = commands.NewRcptTo(recipient).Execute(s); err != nil {
-					s.logger.Error(ErrWriteRespone, slog.String(log.KeyError, err.Error()), s.Session())
+					if err := s.WriteResponse("451 4.5.1 Error: " + err.Error()); err != nil {
+						s.logger.Error(ErrWriteRespone, slog.String(log.KeyError, err.Error()), s.Session())
 
-					break
+						break Commands
+					}
 				}
 			} else if strings.EqualFold(cmd, proto.DATA) || strings.EqualFold(cmd, proto.BDAT) {
 				if len(s.recipients) == 0 {
 					if err = s.WriteResponse("503 5.5.2 Bad sequence of commands: RCPT TO required before DATA"); err != nil {
 						s.logger.Error(ErrWriteRespone, slog.String(log.KeyError, err.Error()), s.Session())
 
-						break
+						break Commands
 					}
 
 					s.errorCounter++
@@ -317,7 +320,7 @@ func (s *SessionImpl) Process() {
 					if err = s.WriteResponse("354 Start mail input"); err != nil {
 						s.logger.Error(ErrWriteRespone, slog.String(log.KeyError, err.Error()), s.Session())
 
-						break
+						break Commands
 					}
 
 					s.state = StateReceivingData
@@ -327,12 +330,12 @@ func (s *SessionImpl) Process() {
 					s.logger.Error(ErrWriteRespone, slog.String(log.KeyError, err.Error()), s.Session())
 				}
 
-				break
+				break Commands
 			} else {
 				if err = s.WriteResponse("500 5.5.1 Syntax error, RCPT TO, DATA or QUIT expected"); err != nil {
 					s.logger.Error(ErrWriteRespone, slog.String(log.KeyError, err.Error()), s.Session())
 
-					break
+					break Commands
 				}
 
 				s.errorCounter++
@@ -344,7 +347,8 @@ func (s *SessionImpl) Process() {
 			} else if cmd == "." {
 				if err = s.WriteResponse("250 2.0.0 OK: session id <" + s.sessionID + ">"); err != nil {
 					s.logger.Error(ErrWriteRespone, slog.String(log.KeyError, err.Error()), s.Session())
-					break
+
+					break Commands
 				}
 
 				s.state = StateWaitingMailFrom

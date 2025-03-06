@@ -10,6 +10,8 @@ services:
     volumes:
       - ./docker/local.conf:/etc/dovecot/conf.d/local.conf:ro
       - shared:/srv/mail
+    networks:
+      - dovecot
 
   backend2:
     image: dovecot/dovecot:2.4-latest
@@ -21,6 +23,40 @@ services:
     volumes:
       - ./docker/local.conf:/etc/dovecot/conf.d/local.conf:ro
       - shared:/srv/mail
+    networks:
+      - dovecot
+
+  nauthilus:
+    image: ghcr.io/croessner/nauthilus:v1.4.8
+    container_name: nauthilus
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    ports:
+      - "127.0.0.1:8080:8080/tcp"
+    volumes:
+      - ./docker/nauthilus.yml:/etc/nauthilus/nauthilus.yml:ro
+      - ./docker/lua:/etc/nauthilus/lua:ro
+    networks:
+      - dovecot
+      - nauthilus
+    healthcheck:
+      test: ["CMD", "/usr/app/healthcheck", "--url", "http://127.0.0.1:8080/ping"]
+
+  valkey:
+    image: valkey/valkey:8-alpine
+    container_name: valkey
+    restart: unless-stopped
+    environment:
+      VALKEY_EXTRA_FLAGS: "--loglevel warning --bind 0.0.0.0"
+    networks:
+      - nauthilus
+
+networks:
+  dovecot:
+  nauthilus:
 
 volumes:
   shared:
