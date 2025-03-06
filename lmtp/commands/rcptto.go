@@ -27,14 +27,25 @@ func (c *RcptTo) Execute(session iface.LMTPSession) error {
 	auth.SetLocalPort(session.GetLocalPort())
 	auth.SetUserLookup(true)
 	auth.SetAuthMechanism("NONE")
+	auth.SetHTTPOptions(session.GetNauthilus().HTTPClient)
+	auth.SetTLSOptions(session.GetNauthilus().TLS)
+	auth.SetTLSSecured(session.GetTLSFlag())
+	auth.SetNauthilusApi(session.GetNauthilus().Url)
 	addTlsSessionInfos(session, auth)
 
-	if !auth.Authenticate(session.GetClientContext(), session.GetService(), normalizeUsername(c.recipient), "") {
-		if err := session.WriteResponse("550 5.1.1 User does not exist"); err != nil {
+	userfound, err := auth.Authenticate(session.GetClientContext(), session.GetService(), normalizeUsername(c.recipient), "")
+	if err != nil {
+		session.Close()
+
+		return err
+	}
+
+	if !userfound {
+		if err = session.WriteResponse("550 5.1.1 User does not exist"); err != nil {
 			return err
 		}
 	} else {
-		if err := session.WriteResponse("250 2.1.5 OK"); err != nil {
+		if err = session.WriteResponse("250 2.1.5 OK"); err != nil {
 			return err
 		}
 

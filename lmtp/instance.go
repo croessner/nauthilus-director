@@ -11,9 +11,9 @@ import (
 	"github.com/croessner/nauthilus-director/proxy"
 )
 
-func NewInstance(ctx *context.Context, instance config.Listen, wg *sync.WaitGroup) {
+func NewInstance(ctx *context.Context, instance config.Listen, nauthilus config.Nauthilus, wg *sync.WaitGroup) {
 	logger := log.GetLogger(ctx)
-	lmtpProxy := proxy.NewProxy(ctx, instance, wg)
+	lmtpProxy := proxy.NewProxy(ctx, instance, nauthilus, wg)
 
 	if lmtpProxy == nil {
 		logger.Error("Error creating proxy")

@@ -36,14 +36,14 @@ func runServer(ctx *context.Context, cfg *config.Config) {
 
 			logger.Debug("Starting IMAP service", slog.String("instance", instance.String()))
 
-			go imap.NewInstance(ctx, instance, &wg)
+			go imap.NewInstance(ctx, instance, cfg.Server.Nauthilus, &wg)
 		case "lmtp":
 			wg.Add(1)
 			taskCount++
 
 			logger.Debug("Starting LMTP service", slog.String("instance", instance.String()))
 
-			go lmtp.NewInstance(ctx, instance, &wg)
+			go lmtp.NewInstance(ctx, instance, cfg.Server.Nauthilus, &wg)
 		default:
 			logger.Error("Unknown service kind", slog.String("kind", instance.Kind))
 		}

@@ -1,14 +1,60 @@
 package auth
 
 import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"log/slog"
+	"net/http"
+	"net/url"
+	"strconv"
+	"time"
 
+	"github.com/croessner/nauthilus-director/config"
 	"github.com/croessner/nauthilus-director/context"
+	"github.com/croessner/nauthilus-director/enc"
+	"github.com/croessner/nauthilus-director/interfaces"
 	"github.com/croessner/nauthilus-director/log"
+	nauthilus "github.com/croessner/nauthilus/server/core"
 )
+
+var ErrAuthenticationFailed = errors.New("authentication failed")
+
+func NewHTTPClient(httpOptions config.HTTPClient, tlsOptions config.TLS) (*http.Client, error) {
+	var proxyFunc func(*http.Request) (*url.URL, error)
+
+	if httpOptions.Proxy != "" {
+		proxyURL, err := url.Parse(httpOptions.Proxy)
+		if err != nil {
+			proxyFunc = http.ProxyFromEnvironment
+		} else {
+			proxyFunc = http.ProxyURL(proxyURL)
+		}
+	} else {
+		proxyFunc = http.ProxyFromEnvironment
+	}
+
+	tlsConfig, err := enc.GetClientTLSConfig(tlsOptions)
+
+	httpClient := &http.Client{
+		Timeout: 60 * time.Second,
+		Transport: &http.Transport{
+			Proxy:               proxyFunc,
+			MaxConnsPerHost:     httpOptions.MaxConnsPerHost,
+			MaxIdleConns:        httpOptions.MaxIdleConns,
+			MaxIdleConnsPerHost: httpOptions.MaxIdleConnsPerHost,
+			IdleConnTimeout:     httpOptions.IdleConnTimeout,
+			TLSClientConfig:     tlsConfig,
+		},
+	}
+
+	return httpClient, err
+}
 
 type NauthilusAuthenticator struct {
 	userLookup         bool
+	tlsSecured         bool
 	tlsVerified        bool
 	tlsProtocol        string
 	tlsCipherSuite     string
@@ -26,11 +72,48 @@ type NauthilusAuthenticator struct {
 	localIP            string
 	remoteIP           string
 	authMechanism      string
+	nauthilusApi       string
 	localPort          int
 	remotePort         int
+	httpOptions        config.HTTPClient
+	tlsOptions         config.TLS
 }
 
-func (n *NauthilusAuthenticator) Authenticate(ctx *context.Context, service, username, password string) bool {
+var _ iface.Authenticator = (*NauthilusAuthenticator)(nil)
+
+func (n *NauthilusAuthenticator) generatePayload(service, username, password string) *nauthilus.JSONRequest {
+	return &nauthilus.JSONRequest{
+		Username:            username,
+		Password:            password,
+		ClientIP:            n.remoteIP,
+		ClientPort:          strconv.Itoa(n.remotePort),
+		ClientHostname:      "",
+		ClientID:            "",
+		LocalIP:             n.localIP,
+		LocalPort:           strconv.Itoa(n.localPort),
+		Service:             service,
+		Method:              "",
+		AuthLoginAttempt:    0,
+		XSSL:                fmt.Sprintf("%t", n.tlsSecured),
+		XSSLSessionID:       "",
+		XSSLClientVerify:    fmt.Sprintf("%t", n.tlsVerified),
+		XSSLClientDN:        n.tlsClientDN,
+		XSSLClientCN:        n.tlsClientCName,
+		XSSLIssuer:          "",
+		XSSLClientNotBefore: n.tlsClientNotBefore,
+		XSSLClientNotAfter:  n.tlsClientNotAfter,
+		XSSLSubjectDN:       "",
+		XSSLIssuerDN:        n.tlsIssuerDN,
+		XSSLClientSubjectDN: "",
+		XSSLClientIssuerDN:  n.tlsClientIssuerDN,
+		XSSLProtocol:        n.tlsProtocol,
+		XSSLCipher:          n.tlsCipherSuite,
+		SSLSerial:           n.tlsSerial,
+		SSLFingerprint:      n.tlsFingerprint,
+	}
+}
+
+func (n *NauthilusAuthenticator) logDebugRequest(ctx *context.Context, service, username string) {
 	logger := log.GetLogger(ctx)
 
 	logger.Debug("Nauthilus authentication",
@@ -53,18 +136,44 @@ func (n *NauthilusAuthenticator) Authenticate(ctx *context.Context, service, use
 		slog.String("tls_client_issuer_DN", n.tlsClientIssuerDN),
 		slog.String("tls_DNS_names", n.tlsDNSNames),
 	)
+}
+
+func (n *NauthilusAuthenticator) Authenticate(ctx *context.Context, service, username, password string) (bool, error) {
+	n.logDebugRequest(ctx, service, username)
+
+	httpClient, err := NewHTTPClient(n.httpOptions, n.tlsOptions)
+	if err != nil {
+		return false, err
+	}
+
+	defer httpClient.CloseIdleConnections()
+
+	payload := n.generatePayload(service, username, password)
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return false, fmt.Errorf("failed to marshal payload: %w", err)
+	}
+
+	response, err := httpClient.Post(n.nauthilusApi, "application/json", bytes.NewBuffer(payloadBytes))
+	if err != nil {
+		return false, err
+	}
+
+	defer func() {
+		_ = response.Body.Close()
+	}()
 
 	if username != "user@example.com" {
-		return false
+		return false, nil
 	} else {
 		n.account = username
 	}
 
 	if n.userLookup {
-		return true
+		return true, nil
 	}
 
-	return password == "pass"
+	return password == "pass", nil
 }
 
 func (n *NauthilusAuthenticator) SetUserLookup(flag bool) {
@@ -77,6 +186,10 @@ func (n *NauthilusAuthenticator) GetAccount() string {
 
 func (n *NauthilusAuthenticator) SetAuthMechanism(mechanism string) {
 	n.authMechanism = mechanism
+}
+
+func (n *NauthilusAuthenticator) SetTLSSecured(secured bool) {
+	n.tlsSecured = secured
 }
 
 func (n *NauthilusAuthenticator) SetTLSProtocol(protocol string) {
@@ -141,4 +254,16 @@ func (n *NauthilusAuthenticator) SetLocalPort(port int) {
 
 func (n *NauthilusAuthenticator) SetRemotePort(port int) {
 	n.remotePort = port
+}
+
+func (n *NauthilusAuthenticator) SetHTTPOptions(options config.HTTPClient) {
+	n.httpOptions = options
+}
+
+func (n *NauthilusAuthenticator) SetTLSOptions(options config.TLS) {
+	n.tlsOptions = options
+}
+
+func (n *NauthilusAuthenticator) SetNauthilusApi(api string) {
+	n.nauthilusApi = api
 }

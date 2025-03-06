@@ -56,6 +56,7 @@ type SessionImpl struct {
 	remoteIP           string
 
 	instance          config.Listen
+	nauthilus         config.Nauthilus
 	inactivityTimeout time.Duration
 
 	localPort    int
@@ -703,4 +704,8 @@ func (s *SessionImpl) GetRemotePort() int {
 
 func (s *SessionImpl) GetLogger() *slog.Logger {
 	return s.logger
+}
+
+func (s *SessionImpl) GetNauthilus() config.Nauthilus {
+	return s.nauthilus
 }

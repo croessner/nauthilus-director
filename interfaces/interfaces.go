@@ -13,15 +13,19 @@ import (
 // Authenticator defines an interface for verifying username and password credentials.
 // The Authenticate method returns true if authentication succeeds and false otherwise.
 type Authenticator interface {
-	Authenticate(ctx *context.Context, service, username, password string) bool
+	Authenticate(ctx *context.Context, service, username, password string) (bool, error)
 
 	SetUserLookup(flag bool)
 	GetAccount() string
 	SetAuthMechanism(mechanism string)
+	SetHTTPOptions(options config.HTTPClient)
+	SetTLSOptions(options config.TLS)
+	SetNauthilusApi(api string)
 
 	/*
 		Connection related setter
 	*/
+	SetTLSSecured(secured bool)
 	SetLocalIP(ip string)
 	SetRemoteIP(ip string)
 	SetLocalPort(port int)
@@ -55,6 +59,7 @@ type Proxy interface {
 	GetInstance() config.Listen
 	GetListenAddr() string
 	GetName() string
+	GetNauthilus() config.Nauthilus
 }
 
 // IMAPCommand represents an interface for handling and executing IMAP commands within a session.
@@ -121,6 +126,7 @@ type IMAPSession interface {
 	GetAuthenticator() Authenticator
 	SetUser(user string)
 	GetUser() string
+	GetNauthilus() config.Nauthilus
 
 	ConnectToIMAPBackend(tag, masterUser, masterPass string) error
 
@@ -171,6 +177,7 @@ type LMTPSession interface {
 	GetRemoteIP() string
 	GetLocalPort() int
 	GetRemotePort() int
+	GetTLSFlag() bool
 	WriteResponse(response string) error
 	ReadCommand() (string, error)
 	Process()
@@ -181,6 +188,7 @@ type LMTPSession interface {
 	*/
 	GetAuthenticator() Authenticator
 	AddRecipient(recipient string)
+	GetNauthilus() config.Nauthilus
 
 	/*
 		TLS-related getters

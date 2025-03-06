@@ -26,9 +26,10 @@ type Proxy struct {
 	instance   config.Listen
 	listenAddr string
 	name       string
+	nauthilus  config.Nauthilus
 }
 
-func NewProxy(ctx *context.Context, instance config.Listen, wg *sync.WaitGroup) *Proxy {
+func NewProxy(ctx *context.Context, instance config.Listen, nauthilus config.Nauthilus, wg *sync.WaitGroup) *Proxy {
 	logger := log.GetLogger(ctx)
 
 	tlsConfig, err := enc.GetServerTLSConfig(instance.TLS)
@@ -38,7 +39,7 @@ func NewProxy(ctx *context.Context, instance config.Listen, wg *sync.WaitGroup) 
 		return nil
 	}
 
-	return &Proxy{tlsConfig: tlsConfig, ctx: ctx, wg: wg, instance: instance}
+	return &Proxy{tlsConfig: tlsConfig, ctx: ctx, wg: wg, instance: instance, nauthilus: nauthilus}
 }
 
 func (p *Proxy) Start(instance config.Listen, handler func(iface.Proxy, net.Conn)) error {
@@ -142,4 +143,8 @@ func (p *Proxy) GetListenAddr() string {
 
 func (p *Proxy) GetName() string {
 	return p.name
+}
+
+func (p *Proxy) GetNauthilus() config.Nauthilus {
+	return p.nauthilus
 }

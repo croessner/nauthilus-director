@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"strings"
 
+	authenticator "github.com/croessner/nauthilus-director/auth"
 	"github.com/croessner/nauthilus-director/imap/proto"
 	"github.com/croessner/nauthilus-director/interfaces"
 )
@@ -99,18 +100,20 @@ func (c *Authenticate) handlePlainAuthWithInitialResponse(session iface.IMAPSess
 
 	auth := session.GetAuthenticator()
 
-	auth.SetRemoteIP(session.GetRemoteIP())
-	auth.SetRemotePort(session.GetRemotePort())
-	auth.SetLocalIP(session.GetLocalIP())
-	auth.SetLocalPort(session.GetLocalPort())
-	auth.SetUserLookup(false)
+	setupAuthenticator(session, auth)
 	auth.SetAuthMechanism(strings.ToUpper(c.Method) + " (SASL)")
-	addTlsSessionInfos(session, auth)
 
-	if !auth.Authenticate(session.GetClientContext(), session.GetService(), username, password) {
+	isAuthenticated, err := auth.Authenticate(session.GetClientContext(), session.GetService(), username, password)
+	if err != nil {
+		session.Close()
+
+		return err
+	}
+
+	if !isAuthenticated {
 		session.WriteResponse(c.Tag + " NO Authentication failed")
 
-		return fmt.Errorf("PLAIN auth failed")
+		return authenticator.ErrAuthenticationFailed
 	}
 
 	session.SetUser(auth.GetAccount())
@@ -148,18 +151,20 @@ func (c *Authenticate) handlePlainAuth(session iface.IMAPSession) error {
 
 	auth := session.GetAuthenticator()
 
-	auth.SetRemoteIP(session.GetRemoteIP())
-	auth.SetRemotePort(session.GetRemotePort())
-	auth.SetLocalIP(session.GetLocalIP())
-	auth.SetLocalPort(session.GetLocalPort())
-	auth.SetUserLookup(false)
+	setupAuthenticator(session, auth)
 	auth.SetAuthMechanism(strings.ToUpper(c.Method) + " (SASL)")
-	addTlsSessionInfos(session, auth)
 
-	if !auth.Authenticate(session.GetClientContext(), session.GetService(), username, password) {
+	isAuthenticated, err := auth.Authenticate(session.GetClientContext(), session.GetService(), username, password)
+	if err != nil {
+		session.Close()
+
+		return err
+	}
+
+	if !isAuthenticated {
 		session.WriteResponse(c.Tag + " NO Authentication failed")
 
-		return fmt.Errorf("PLAIN auth failed for user: %s", username)
+		return authenticator.ErrAuthenticationFailed
 	}
 
 	session.SetUser(auth.GetAccount())
@@ -206,18 +211,20 @@ func (c *Authenticate) handleLoginAuth(session iface.IMAPSession) error {
 
 	auth := session.GetAuthenticator()
 
-	auth.SetRemoteIP(session.GetRemoteIP())
-	auth.SetRemotePort(session.GetRemotePort())
-	auth.SetLocalIP(session.GetLocalIP())
-	auth.SetLocalPort(session.GetLocalPort())
-	auth.SetUserLookup(false)
+	setupAuthenticator(session, auth)
 	auth.SetAuthMechanism(strings.ToUpper(c.Method) + " (SASL)")
-	addTlsSessionInfos(session, auth)
 
-	if !auth.Authenticate(session.GetClientContext(), session.GetService(), username, password) {
+	isAuthenticated, err := auth.Authenticate(session.GetClientContext(), session.GetService(), username, password)
+	if err != nil {
+		session.Close()
+
+		return err
+	}
+
+	if !isAuthenticated {
 		session.WriteResponse(c.Tag + " NO Authentication failed")
 
-		return fmt.Errorf("LOGIN auth failed")
+		return authenticator.ErrAuthenticationFailed
 	}
 
 	session.SetUser(auth.GetAccount())

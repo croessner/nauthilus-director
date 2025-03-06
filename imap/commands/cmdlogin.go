@@ -1,10 +1,10 @@
 package commands
 
 import (
-	"fmt"
 	"io"
 	"log/slog"
 
+	authenticator "github.com/croessner/nauthilus-director/auth"
 	"github.com/croessner/nauthilus-director/imap/proto"
 	"github.com/croessner/nauthilus-director/interfaces"
 )
@@ -20,18 +20,20 @@ var _ iface.IMAPCommand = (*Login)(nil)
 func (c *Login) Execute(session iface.IMAPSession) error {
 	auth := session.GetAuthenticator()
 
-	auth.SetRemoteIP(session.GetRemoteIP())
-	auth.SetRemotePort(session.GetRemotePort())
-	auth.SetLocalIP(session.GetLocalIP())
-	auth.SetLocalPort(session.GetLocalPort())
-	auth.SetUserLookup(false)
+	setupAuthenticator(session, auth)
 	auth.SetAuthMechanism(proto.LOGIN + " (RFC3501)")
-	addTlsSessionInfos(session, auth)
 
-	if !auth.Authenticate(session.GetClientContext(), session.GetService(), c.Username, c.Password) {
+	isAuthenticated, err := auth.Authenticate(session.GetClientContext(), session.GetService(), c.Username, c.Password)
+	if err != nil {
+		session.Close()
+
+		return err
+	}
+
+	if !isAuthenticated {
 		session.WriteResponse(c.Tag + " NO Authentication failed")
 
-		return fmt.Errorf("auth failed")
+		return authenticator.ErrAuthenticationFailed
 	}
 
 	session.SetUser(auth.GetAccount())
@@ -40,7 +42,7 @@ func (c *Login) Execute(session iface.IMAPSession) error {
 	_ = "masteruser"
 	masterPass := "password"
 
-	err := session.ConnectToIMAPBackend(c.Tag, session.GetUser(), masterPass)
+	err = session.ConnectToIMAPBackend(c.Tag, session.GetUser(), masterPass)
 	if err != nil {
 		if err == io.EOF {
 			session.Close()

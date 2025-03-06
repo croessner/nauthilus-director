@@ -14,6 +14,8 @@ import (
 )
 
 func Handler(proxy iface.Proxy, rawClientConn net.Conn) {
+	var tlsFlag bool
+
 	logger := log.GetLogger(proxy.GetContext())
 
 	defer func() {
@@ -28,6 +30,8 @@ func Handler(proxy iface.Proxy, rawClientConn net.Conn) {
 	if conn, ok := rawClientConn.(*tls.Conn); ok {
 		_ = conn.NetConn().(*net.TCPConn).SetNoDelay(true)
 		_ = conn.NetConn().(*net.TCPConn).SetLinger(0)
+
+		tlsFlag = true
 	}
 
 	session := &SessionImpl{
@@ -35,8 +39,10 @@ func Handler(proxy iface.Proxy, rawClientConn net.Conn) {
 		service:           proxy.GetInstance().ServiceName,
 		rawClientConn:     rawClientConn,
 		tpClientConn:      textproto.NewConn(rawClientConn),
+		tlsFlag:           tlsFlag,
 		clientCtx:         proxy.GetContext().Copy(),
 		instance:          proxy.GetInstance(),
+		nauthilus:         proxy.GetNauthilus(),
 		logger:            logger,
 		state:             StateWaitingMailFrom,
 		sessionID:         ksuid.New().String(),

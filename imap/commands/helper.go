@@ -42,3 +42,16 @@ func addTlsSessionInfos(session iface.IMAPSession, auth iface.Authenticator) {
 	auth.SetTLSDNSNames(session.GetTLSDNSNames())
 	auth.SetTLSFingerprint(session.GetTLSFingerprint())
 }
+
+func setupAuthenticator(session iface.IMAPSession, auth iface.Authenticator) {
+	auth.SetTLSSecured(session.GetTLSFlag())
+	auth.SetRemoteIP(session.GetRemoteIP())
+	auth.SetRemotePort(session.GetRemotePort())
+	auth.SetLocalIP(session.GetLocalIP())
+	auth.SetLocalPort(session.GetLocalPort())
+	auth.SetUserLookup(false)
+	auth.SetHTTPOptions(session.GetNauthilus().HTTPClient)
+	auth.SetTLSOptions(session.GetNauthilus().TLS)
+	auth.SetNauthilusApi(session.GetNauthilus().Url)
+	addTlsSessionInfos(session, auth)
+}

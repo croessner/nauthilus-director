@@ -59,6 +59,7 @@ type SessionImpl struct {
 	recipients []string
 
 	instance          config.Listen
+	nauthilus         config.Nauthilus
 	inactivityTimeout time.Duration
 
 	remotePort int
@@ -448,4 +449,12 @@ func (s *SessionImpl) GetLogger() *slog.Logger {
 
 func (s *SessionImpl) AddRecipient(recipient string) {
 	s.recipients = append(s.recipients, recipient)
+}
+
+func (s *SessionImpl) GetNauthilus() config.Nauthilus {
+	return s.nauthilus
+}
+
+func (s *SessionImpl) GetTLSFlag() bool {
+	return s.tlsFlag
 }
