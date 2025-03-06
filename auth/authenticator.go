@@ -73,6 +73,7 @@ type NauthilusAuthenticator struct {
 	remoteIP           string
 	authMechanism      string
 	nauthilusApi       string
+	clientID           string
 	localPort          int
 	remotePort         int
 	httpOptions        config.HTTPClient
@@ -87,24 +88,24 @@ func (n *NauthilusAuthenticator) generatePayload(service, username, password str
 		Password:            password,
 		ClientIP:            n.remoteIP,
 		ClientPort:          strconv.Itoa(n.remotePort),
-		ClientHostname:      "",
-		ClientID:            "",
+		ClientHostname:      "", // ignored
+		ClientID:            n.clientID,
 		LocalIP:             n.localIP,
 		LocalPort:           strconv.Itoa(n.localPort),
 		Service:             service,
-		Method:              "",
-		AuthLoginAttempt:    0,
+		Method:              n.authMechanism,
+		AuthLoginAttempt:    0, // ignored
 		XSSL:                fmt.Sprintf("%t", n.tlsSecured),
-		XSSLSessionID:       "",
+		XSSLSessionID:       "", // ignored
 		XSSLClientVerify:    fmt.Sprintf("%t", n.tlsVerified),
 		XSSLClientDN:        n.tlsClientDN,
 		XSSLClientCN:        n.tlsClientCName,
-		XSSLIssuer:          "",
+		XSSLIssuer:          "", // ignored
 		XSSLClientNotBefore: n.tlsClientNotBefore,
 		XSSLClientNotAfter:  n.tlsClientNotAfter,
-		XSSLSubjectDN:       "",
+		XSSLSubjectDN:       "", // ignored
 		XSSLIssuerDN:        n.tlsIssuerDN,
-		XSSLClientSubjectDN: "",
+		XSSLClientSubjectDN: "", // ignored
 		XSSLClientIssuerDN:  n.tlsClientIssuerDN,
 		XSSLProtocol:        n.tlsProtocol,
 		XSSLCipher:          n.tlsCipherSuite,
@@ -266,4 +267,8 @@ func (n *NauthilusAuthenticator) SetTLSOptions(options config.TLS) {
 
 func (n *NauthilusAuthenticator) SetNauthilusApi(api string) {
 	n.nauthilusApi = api
+}
+
+func (n *NauthilusAuthenticator) SetClientID(id string) {
+	n.clientID = id
 }

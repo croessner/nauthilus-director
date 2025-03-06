@@ -709,3 +709,7 @@ func (s *SessionImpl) GetLogger() *slog.Logger {
 func (s *SessionImpl) GetNauthilus() config.Nauthilus {
 	return s.nauthilus
 }
+
+func (s *SessionImpl) GetClientID() string {
+	return s.clientID
+}

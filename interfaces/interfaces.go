@@ -30,6 +30,7 @@ type Authenticator interface {
 	SetRemoteIP(ip string)
 	SetLocalPort(port int)
 	SetRemotePort(port int)
+	SetClientID(id string)
 
 	/*
 		TLS-related setters
@@ -104,6 +105,7 @@ type IMAPSession interface {
 	GetAuthMechs() []string
 	GetCapability() []string
 	SetClientID(id string)
+	GetClientID() string
 	GetBackendConn() net.Conn
 	LinkClientAndBackend()
 
