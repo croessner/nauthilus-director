@@ -136,12 +136,21 @@ type Logging struct {
 	Level string `mapstructure:"level" validate:"omitempty,oneof=none debug info warn error"`
 }
 
+func (l *Logging) String() string {
+	return fmt.Sprintf("{ JSON: '%v' Level: '%s' }", l.JSON, l.Level)
+}
+
 type HTTPClient struct {
 	Proxy               string        `mapstructure:"proxy"`
 	IdleConnTimeout     time.Duration `mapstructure:"idle_connection_timeout"`
 	MaxConnsPerHost     int           `mapstructure:"max_connections_per_host"`
 	MaxIdleConns        int           `mapstructure:"max_idle_connections"`
 	MaxIdleConnsPerHost int           `mapstructure:"max_idle_connections_per_host"`
+}
+
+func (c *HTTPClient) String() string {
+	return fmt.Sprintf("{ Proxy: '%s' IdleConnTimeout: '%s' MaxConnsPerHost: '%d' MaxIdleConns: '%d' MaxIdleConnsPerHost: '%d' }",
+		c.Proxy, c.IdleConnTimeout, c.MaxConnsPerHost, c.MaxIdleConns, c.MaxIdleConnsPerHost)
 }
 
 type TLS struct {
@@ -158,8 +167,8 @@ type TLS struct {
 }
 
 func (t *TLS) String() string {
-	return fmt.Sprintf("{ Enabled: '%v' StartTLS: '%v' SkipVerify: '%v' Cert: '%s' Key: '%s' }",
-		t.Enabled, t.StartTLS, t.SkipVerify, t.Cert, t.Key)
+	return fmt.Sprintf("{ Enabled: '%v' StartTLS: '%v' SkipVerify: '%v' Cert: '%s' Key: '%s' CAFile: '%s' ServerName: '%s' MinVersion: '%s' MaxVersion: '%s' CipherSuite: '%v' }",
+		t.Enabled, t.StartTLS, t.SkipVerify, t.Cert, t.Key, t.CAFile, t.ServerName, t.MinVersion, t.MaxVersion, t.CipherSuite)
 }
 
 type BackendServer struct {
@@ -190,4 +199,9 @@ type Nauthilus struct {
 	Password   string     `mapstructure:"password"`
 	HTTPClient HTTPClient `mapstructure:"http_client"`
 	TLS        TLS        `mapstructure:"tls"`
+}
+
+func (n *Nauthilus) String() string {
+	return fmt.Sprintf("{ Url: '%s' Username: '%s' Password: '%s' HTTPClient: '%s' TLS: '%s' }",
+		n.Url, n.Username, n.Password, n.HTTPClient.String(), n.TLS.String())
 }
