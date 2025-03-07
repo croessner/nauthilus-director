@@ -97,10 +97,6 @@ func (s *SessionImpl) ReadLine() (string, error) {
 		return "", err
 	}
 
-	if line == "" {
-		return "", io.EOF
-	}
-
 	return line, nil
 }
 

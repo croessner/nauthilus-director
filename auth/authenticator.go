@@ -144,8 +144,6 @@ func (n *NauthilusAuthenticator) logFaeildRequest(ctx *context.Context, service,
 }
 
 func (n *NauthilusAuthenticator) Authenticate(ctx *context.Context, service, username, password string) (bool, error) {
-	var incorrectResponse bool
-
 	httpClient, err := NewHTTPClient(n.httpOptions, n.tlsOptions)
 	if err != nil {
 		return false, err
@@ -169,47 +167,14 @@ func (n *NauthilusAuthenticator) Authenticate(ctx *context.Context, service, use
 		return false, err
 	}
 
-	defer func() {
-		_ = response.Body.Close()
-
-		if incorrectResponse {
-			n.logFaeildRequest(ctx, service, username)
-		}
-	}()
-
 	if response.StatusCode == http.StatusOK {
-		var (
-			responseBytes []byte
-			userInfo      map[string]any
-		)
+		if account, err := proccessResponseOk(response); err != nil {
+			n.logFaeildRequest(ctx, service, username)
 
-		responseBytes, err = io.ReadAll(response.Body)
-		if err != nil {
 			return false, err
+		} else {
+			n.account = account
 		}
-
-		err = json.Unmarshal(responseBytes, &userInfo)
-		if err != nil {
-			return false, err
-		}
-
-		if accountField, okay := userInfo["account_field"].(string); okay {
-			if attributes, okay := userInfo["attributes"].(map[string]any); okay {
-				if accounts, okay := attributes[accountField].([]any); okay {
-					if len(accounts) == 1 {
-						if account, okay := accounts[0].(string); okay {
-							n.account = account
-
-							return true, nil
-						}
-					}
-				}
-			}
-		}
-
-		incorrectResponse = true
-
-		return false, ErrUserNotFound
 	} else if response.StatusCode == http.StatusUnauthorized {
 		return false, ErrAuthenticationFailed
 	} else if response.StatusCode == http.StatusForbidden {
@@ -219,10 +184,12 @@ func (n *NauthilusAuthenticator) Authenticate(ctx *context.Context, service, use
 
 		return false, ErrAuthenticationFailed
 	} else {
-		incorrectResponse = true
+		n.logFaeildRequest(ctx, service, username)
 
 		return false, ErrInternalServer
 	}
+
+	return true, nil
 }
 
 func (n *NauthilusAuthenticator) SetUserLookup(flag bool) {
@@ -319,4 +286,34 @@ func (n *NauthilusAuthenticator) SetNauthilusApi(api string) {
 
 func (n *NauthilusAuthenticator) SetClientID(id string) {
 	n.clientID = id
+}
+
+func proccessResponseOk(response *http.Response) (string, error) {
+	var userInfo map[string]any
+
+	defer func() { _ = response.Body.Close() }()
+
+	responseBytes, err := io.ReadAll(response.Body)
+	if err != nil {
+		return "", err
+	}
+
+	err = json.Unmarshal(responseBytes, &userInfo)
+	if err != nil {
+		return "", err
+	}
+
+	if accountField, okay := userInfo["account_field"].(string); okay {
+		if attributes, okay := userInfo["attributes"].(map[string]any); okay {
+			if accounts, okay := attributes[accountField].([]any); okay {
+				if len(accounts) == 1 {
+					if account, okay := accounts[0].(string); okay {
+						return account, nil
+					}
+				}
+			}
+		}
+	}
+
+	return "", ErrUserNotFound
 }
