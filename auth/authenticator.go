@@ -12,12 +12,12 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/croessner/nauthilus-director/auth/nauthilus"
 	"github.com/croessner/nauthilus-director/config"
 	"github.com/croessner/nauthilus-director/context"
 	"github.com/croessner/nauthilus-director/enc"
 	"github.com/croessner/nauthilus-director/interfaces"
 	"github.com/croessner/nauthilus-director/log"
-	nauthilus "github.com/croessner/nauthilus/server/core"
 )
 
 var (
@@ -87,35 +87,34 @@ type NauthilusAuthenticator struct {
 
 var _ iface.Authenticator = (*NauthilusAuthenticator)(nil)
 
-func (n *NauthilusAuthenticator) generatePayload(service, username, password string) *nauthilus.JSONRequest {
-	return &nauthilus.JSONRequest{
-		Username:            username,
-		Password:            password,
-		ClientIP:            n.remoteIP,
-		ClientPort:          strconv.Itoa(n.remotePort),
-		ClientHostname:      "", // ignored
-		ClientID:            n.clientID,
-		LocalIP:             n.localIP,
-		LocalPort:           strconv.Itoa(n.localPort),
-		Service:             service,
-		Method:              n.authMechanism,
-		AuthLoginAttempt:    0, // ignored
-		XSSL:                fmt.Sprintf("%t", n.tlsSecured),
-		XSSLSessionID:       "", // ignored
-		XSSLClientVerify:    fmt.Sprintf("%t", n.tlsVerified),
-		XSSLClientDN:        n.tlsClientDN,
-		XSSLClientCN:        n.tlsClientCName,
-		XSSLIssuer:          "", // ignored
-		XSSLClientNotBefore: n.tlsClientNotBefore,
-		XSSLClientNotAfter:  n.tlsClientNotAfter,
-		XSSLSubjectDN:       "", // ignored
-		XSSLIssuerDN:        n.tlsIssuerDN,
-		XSSLClientSubjectDN: "", // ignored
-		XSSLClientIssuerDN:  n.tlsClientIssuerDN,
-		XSSLProtocol:        n.tlsProtocol,
-		XSSLCipher:          n.tlsCipherSuite,
-		SSLSerial:           n.tlsSerial,
-		SSLFingerprint:      n.tlsFingerprint,
+func (n *NauthilusAuthenticator) generatePayload(service, username, password string) *nauthilus.Request {
+	return &nauthilus.Request{
+		Username:           username,
+		Password:           password,
+		ClientIP:           n.remoteIP,
+		ClientPort:         strconv.Itoa(n.remotePort),
+		ClientID:           n.clientID,
+		LocalIP:            n.localIP,
+		LocalPort:          strconv.Itoa(n.localPort),
+		Service:            service,
+		Method:             n.authMechanism,
+		AuthLoginAttempt:   0, // ignored
+		SSL:                fmt.Sprintf("%t", n.tlsSecured),
+		SSLSessionID:       "", // ignored
+		SSLClientVerify:    fmt.Sprintf("%t", n.tlsVerified),
+		SSLClientDN:        n.tlsClientDN,
+		SSLClientCN:        n.tlsClientCName,
+		SSLIssuer:          "", // ignored
+		SSLClientNotBefore: n.tlsClientNotBefore,
+		SSLClientNotAfter:  n.tlsClientNotAfter,
+		SSLSubjectDN:       "", // ignored
+		SSLIssuerDN:        n.tlsIssuerDN,
+		SSLClientSubjectDN: "", // ignored
+		SSLClientIssuerDN:  n.tlsClientIssuerDN,
+		SSLProtocol:        n.tlsProtocol,
+		SSLCipher:          n.tlsCipherSuite,
+		SSLSerial:          n.tlsSerial,
+		SSLFingerprint:     n.tlsFingerprint,
 	}
 }
 
