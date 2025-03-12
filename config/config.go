@@ -27,7 +27,7 @@ func (cfg *Config) String() string {
 }
 
 func (cfg *Config) HandleConfig() error {
-	validate := validator.New()
+	validate := validator.New(validator.WithRequiredStructEnabled())
 
 	_ = validate.RegisterValidation("octal_mode", isValidOctalMode)
 
@@ -122,7 +122,7 @@ type Listen struct {
 	Kind            string   `mapstructure:"kind" validate:"required,oneof=imap lmtp"`
 	ServiceName     string   `mapstructure:"service_name" validate:"required"`
 	Type            string   `mapstructure:"type" validate:"required"`
-	Address         string   `mapstructure:"address" validate:"required"`
+	Address         string   `mapstructure:"address" validate:"required,ip_addr"`
 	Mode            string   `mapstructure:"mode" validate:"omitempty,octal_mode"`
 }
 
@@ -195,13 +195,13 @@ func (b *BackendServer) String() string {
 
 type Nauthilus struct {
 	Url        string     `mapstructure:"url" validate:"required,http_url"`
-	Username   string     `mapstructure:"username"`
-	Password   string     `mapstructure:"password"`
+	Username   string     `mapstructure:"username" validate:"omitempty,excludesall= "`
+	Password   string     `mapstructure:"password" validate:"omitempty,excludesall= "`
 	HTTPClient HTTPClient `mapstructure:"http_client"`
 	TLS        TLS        `mapstructure:"tls"`
 }
 
 func (n *Nauthilus) String() string {
-	return fmt.Sprintf("{ Url: '%s' Username: '%s' Password: '%s' HTTPClient: '%s' TLS: '%s' }",
-		n.Url, n.Username, n.Password, n.HTTPClient.String(), n.TLS.String())
+	return fmt.Sprintf("{ Url: '%s' Username: '%s' Password: '<hidden>' HTTPClient: '%s' TLS: '%s' }",
+		n.Url, n.Username, n.HTTPClient.String(), n.TLS.String())
 }
