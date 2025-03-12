@@ -41,6 +41,10 @@ func (cfg *Config) HandleConfig() error {
 	}
 
 	err = validate.Struct(cfg)
+	if err == nil {
+		return nil
+	}
+
 	if errors.As(err, &validationErrors) {
 		return prettyFormatValidationErrors(validationErrors)
 	}
