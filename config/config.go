@@ -163,17 +163,17 @@ func prettyFormatValidationErrors(validationErrors validator.ValidationErrors) e
 type Server struct {
 	InstanceID string    `mapstructure:"instance_id" validate:"required"`
 	Listen     []Listen  `mapstructure:"listen" validate:"required,dive"`
-	Logging    Logging   `mapstructure:"logging"`
+	Logging    Logging   `mapstructure:"logging" validate:"omitempty"`
 	Nauthilus  Nauthilus `mapstructure:"nauthilus" validate:"required"`
 }
 
 type Listen struct {
 	Port            int      `mapstructure:"port" validate:"required,min=1,max=65535"`
-	TLS             TLS      `mapstructure:"tls"`
+	TLS             TLS      `mapstructure:"tls" validate:"omitempty"`
 	HAProxy         bool     `mapstructure:"haproxy"`
 	SmtpUTF8Enable  bool     `mapstructure:"smtputf8_enable" validate:"excluded_unless=Kind lmtp"`
 	AuthMechs       []string `mapstructure:"auth_mechanisms" validate:"omitempty,dive,oneof=plain login"`
-	Capability      []string `mapstructure:"capability"`
+	Capability      []string `mapstructure:"capability" validate:"omitempty,dive,min=1"`
 	MatchIdentifier []string `mapstructure:"match_identifier" validate:"required,dive,min=1"`
 	Kind            string   `mapstructure:"kind" validate:"required,oneof=imap lmtp"`
 	ServiceName     string   `mapstructure:"service_name" validate:"required"`
@@ -197,11 +197,11 @@ func (l *Logging) String() string {
 }
 
 type HTTPClient struct {
-	Proxy               string        `mapstructure:"proxy"`
-	IdleConnTimeout     time.Duration `mapstructure:"idle_connection_timeout"`
-	MaxConnsPerHost     int           `mapstructure:"max_connections_per_host"`
-	MaxIdleConns        int           `mapstructure:"max_idle_connections"`
-	MaxIdleConnsPerHost int           `mapstructure:"max_idle_connections_per_host"`
+	Proxy               string        `mapstructure:"proxy" validate:"omitempty,http_url"`
+	IdleConnTimeout     time.Duration `mapstructure:"idle_connection_timeout" validate:"omitempty,min=1s,max=24h"`
+	MaxConnsPerHost     int           `mapstructure:"max_connections_per_host" validate:"omitempty,min=1,max=65535"`
+	MaxIdleConns        int           `mapstructure:"max_idle_connections" validate:"omitempty,min=1,max=65535"`
+	MaxIdleConnsPerHost int           `mapstructure:"max_idle_connections_per_host" validate:"omitempty,min=1,max=65535"`
 }
 
 func (c *HTTPClient) String() string {
@@ -219,7 +219,7 @@ type TLS struct {
 	ServerName  string   `mapstructure:"server_name" validate:"omitempty,hostname|ip"`
 	MinVersion  string   `mapstructure:"min_version" validate:"omitempty,oneof=TLSv1.2 TLSv1.3"`
 	MaxVersion  string   `mapstructure:"max_version" validate:"omitempty,oneof=TLSv1.2 TLSv1.3"`
-	CipherSuite []string `mapstructure:"cipher_suite"`
+	CipherSuite []string `mapstructure:"cipher_suite" validate:"omitempty,dive,min=1,excludesall= "`
 }
 
 func (t *TLS) String() string {
@@ -235,7 +235,7 @@ type BackendServer struct {
 	TestUsername   string        `mapstructure:"test_username"`
 	TestPassword   string        `mapstructure:"test_password"`
 	TLS            TLS           `mapstructure:"tls"`
-	CheckInterval  time.Duration `mapstructure:"check_interval"`
+	CheckInterval  time.Duration `mapstructure:"check_interval" validate:"required,min=1s,max=24h"`
 	Port           int           `mapstructure:"port" validate:"required,min=1,max=65535"`
 	MaxConnections uint16        `mapstructure:"max_connections" validate:"required,min=1,max=65535"`
 	Weight         uint8         `mapstructure:"weight" validate:"required,min=1,max=255"`
