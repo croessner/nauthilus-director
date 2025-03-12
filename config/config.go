@@ -1,10 +1,12 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/go-playground/validator/v10"
 	"github.com/spf13/pflag"
@@ -27,6 +29,8 @@ func (cfg *Config) String() string {
 }
 
 func (cfg *Config) HandleConfig() error {
+	var validationErrors validator.ValidationErrors
+
 	validate := validator.New(validator.WithRequiredStructEnabled())
 
 	_ = validate.RegisterValidation("octal_mode", isValidOctalMode)
@@ -36,7 +40,12 @@ func (cfg *Config) HandleConfig() error {
 		return err
 	}
 
-	return validate.Struct(cfg)
+	err = validate.Struct(cfg)
+	if errors.As(err, &validationErrors) {
+		return prettyFormatValidationErrors(validationErrors)
+	}
+
+	return err
 }
 
 func NewConfig() (cfg *Config, err error) {
@@ -102,6 +111,49 @@ func isValidOctalMode(fl validator.FieldLevel) bool {
 	_, err := strconv.ParseUint(mode, 8, 32)
 
 	return err == nil
+}
+
+func toSnakeCase(fieldName string) string {
+	var result strings.Builder
+
+	previousWasUpper := false
+
+	for i, r := range fieldName {
+		if unicode.IsUpper(r) {
+			if i > 0 && !previousWasUpper {
+				result.WriteByte('_')
+			}
+
+			previousWasUpper = true
+		} else {
+			previousWasUpper = false
+		}
+
+		result.WriteRune(unicode.ToLower(r))
+	}
+
+	return result.String()
+}
+
+func prettyFormatValidationErrors(validationErrors validator.ValidationErrors) error {
+	var errorMessages []string
+
+	for _, fieldErr := range validationErrors {
+		message := fmt.Sprintf(
+			"field '%s' (struct field: '%s') failed on the '%s' validation rule",
+			toSnakeCase(fieldErr.Field()),
+			fieldErr.StructField(),
+			fieldErr.Tag(),
+		)
+
+		if fieldErr.Param() != "" {
+			message = fmt.Sprintf("%s. Rule parameter: %s", message, fieldErr.Param())
+		}
+
+		errorMessages = append(errorMessages, message)
+	}
+
+	return errors.New("validation errors: " + strings.Join(errorMessages, "; "))
 }
 
 type Server struct {
