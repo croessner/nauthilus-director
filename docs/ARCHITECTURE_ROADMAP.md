@@ -2,11 +2,11 @@
 
 Status: production target design document
 
-This document describes the intended production architecture for `nauthilus-director`: a mail protocol director/proxy that authenticates through Nauthilus, owns backend selection itself and keeps runtime state observable and controllable.
+This document describes the intended production architecture for `nauthilus-director`: a mail protocol director/proxy that authenticates through Nauthilus, resolves routing facts through director-owned logic, selects concrete backends itself and keeps runtime state observable and controllable.
 
-This is not a POC model. The previous proof-of-concept may be useful as source material, but this document defines the real production target. Requirements in this document are implementation constraints, especially for protocol lifecycle, backend selection, session stickiness, security defaults and operational behavior.
+This is not a POC model. The previous proof-of-concept may be useful as source material, but this document defines the real production target. Requirements in this document are implementation constraints, especially for protocol lifecycle, Nauthilus integration, routing fact resolution, backend selection, session stickiness, security defaults and operational behavior.
 
-Read this document as the target model for the new codebase. Sections 1 through 22 describe architectural decisions and implementation direction. Section 23 collects the remaining decisions that still need explicit product or engineering choices before implementation reaches those areas.
+Read this document as the target model for the new codebase. The document is both architecture and roadmap: it defines boundaries and invariants, then breaks the target into implementation milestones. It is not yet a line-by-line implementation specification; milestone-specific implementation specs may be added under `docs/specs/implementation/` when a phase becomes active.
 
 ## 1. Purpose
 
@@ -23,7 +23,8 @@ client
       -> protocol-specific pre-auth state machine
       -> Nauthilus authentication / identity lookup
       -> director-owned routing fact resolution
-      -> Redis-backed active affinity or deterministic initial backend selection
+      -> Redis-backed active affinity or deterministic initial placement
+      -> director-owned backend selection
       -> transparent bidirectional proxying
           -> IMAP / LMTP / ManageSieve / POP3 backend
 ```
@@ -61,8 +62,9 @@ The protocol support should be layered so that shared pieces are reused:
 - STARTTLS handling
 - HAProxy PROXY protocol
 - connection limits
-- backend selection
 - Nauthilus authentication requests
+- routing fact resolution
+- backend selection
 - logging
 - metrics
 - tracing
@@ -70,27 +72,15 @@ The protocol support should be layered so that shared pieces are reused:
 
 ## 4. Repository foundation
 
-The previous implementation has been moved to `poc/`. That directory is a historical proof-of-concept archive, not the target architecture and not the package layout for the new implementation.
+The previous implementation lives under `poc/`. That directory is a historical proof-of-concept archive and source of ideas only. Production code must start from the root package layout and must not import from `poc/`, depend on its package structure, or preserve POC behavior as a compatibility constraint.
 
-The old proof-of-concept configuration is still available as `poc/nauthilus-director.yml`. It is useful source material, but it is not the production schema. The current target draft lives in `docs/config/nauthilus-director.target.yml` and must be kept aligned with this architecture document until a formal config schema exists.
-
-Useful ideas in `poc/`:
-
-- configuration model for listeners
-- listener kind separation, currently including IMAP and LMTP
-- capability and authentication mechanism configuration
-- backend server model with protocol, identifier, weight, max connections, maintenance, deep check and TLS settings
-- Nauthilus HTTP endpoint configuration
-- validation via `go-playground/validator`
-- Viper-based configuration handling
-
-The new codebase starts cleanly from the root package layout described below. `poc/` may be read for behavior, experiments and examples, but production code must not import it, depend on it, preserve its package structure or justify behavior only because the POC behaved that way.
+The old proof-of-concept configuration is still useful as source material, but it is not the production schema. The current target draft lives in `docs/config/nauthilus-director.target.yml` and must be kept aligned with this architecture document until a formal config schema exists.
 
 Known Nauthilus integration constraint learned from the proof-of-concept: the director-side auth request model must be aligned with the real structured auth DTO before relying on `/api/v1/auth/json` in production. In particular, `service` is not a valid JSON body field for that endpoint; the mail protocol belongs in `protocol`.
 
 ## 5. High-level components
 
-The implementation should be organized around explicit ownership boundaries: process lifecycle, typed configuration, listener management, protocol pre-auth state machines, Nauthilus transport clients, backend/runtime state, REST management, observability and the raw proxy pipe. The package layout can evolve, but those boundaries should remain visible in code and tests.
+The implementation should be organized around explicit ownership boundaries: process lifecycle, typed configuration, listener management, protocol pre-auth state machines, Nauthilus transport clients, routing fact resolution, backend/runtime state, REST management, observability and the raw proxy pipe.
 
 Target package layout:
 
@@ -140,13 +130,6 @@ internal/protocol/sieve/
   auth.go
   proxy.go
 
-internal/backend/
-  registry.go
-  selector.go
-  health.go
-  connection_limits.go
-  maintenance.go
-
 internal/nauthilus/
   client.go
   request.go
@@ -158,12 +141,26 @@ internal/routing/
   auth_attribute.go
   static.go
   hash.go
+  chain.go
+
+internal/backend/
+  registry.go
+  selector.go
+  health.go
+  connection_limits.go
+  maintenance.go
+
+internal/state/
+  affinity.go
+  sessions.go
+  snapshots.go
 
 internal/rest/
   server.go
   routes.go
   auth.go
-  models.go
+  adapters.go
+  generated/
 
 internal/observability/
   logging.go
@@ -174,20 +171,147 @@ internal/proxy/
   pipe.go
   deadlines.go
   accounting.go
-
-internal/state/
-  affinity.go
-  sessions.go
-  snapshots.go
 ```
 
-The important point is separation of concerns: protocol handling must not become mixed with routing fact resolution, backend registry, Nauthilus client code and REST management.
+The important point is separation of concerns: protocol handling must not become mixed with routing fact resolution, backend registry, Nauthilus client code, REST management or observability plumbing.
+
+### 5.1 Technical foundation
+
+The engineering baseline is security-by-design, security-by-default, strict object-oriented boundaries in Go, intentional DRY and conservative dependency choices. Domain objects own their invariants; shared helpers are extracted when they remove real duplication without hiding protocol-specific behavior.
+
+Approved foundation dependencies:
+
+- Uber Fx (`go.uber.org/fx`) for application composition, lifecycle wiring and dependency injection.
+- Viper for configuration loading and environment binding, including its `mapstructure`-based decode path.
+- go-playground/validator (`github.com/go-playground/validator/v10`) for mandatory typed configuration validation after Viper/mapstructure decoding.
+- `github.com/redis/go-redis/v9` pinned initially to `v9.19.0` for central production state: active user affinity, session coordination, operational caches and future distributed coordination needs.
+- jsoniter for JSON paths where the project intentionally chooses it over the standard library.
+
+These packages are accepted as architectural building blocks, not as blanket permission to add convenience dependencies. Additional vendor packages still need a concrete justification and should be avoided when a small local implementation is clearer, safer and cheaper to maintain.
+
+OpenAPI is part of the foundation for the REST control API from the beginning. The REST contract, generated REST server boundary, generated REST DTOs and generated client code should originate from the OpenAPI specification before hand-written REST handlers expand. Generated REST code must stay at the REST boundary and adapt into explicit domain objects.
+
+### 5.2 Configuration target
+
+The initial target configuration is documented as YAML in `docs/config/nauthilus-director.target.yml`.
+
+It intentionally follows the same broad grouping style as Nauthilus config v2:
+
+- `runtime`: process lifecycle, control server, shared timeouts and generic clients
+- `observability`: logs, metrics, tracing and profiling
+- `storage`: full Redis connection, security and topology configuration
+- `auth`: Nauthilus authority definitions and transport selection
+- `director`: mail listeners, routing, affinity, health, maintenance, backend pools and backends
+
+This split keeps operational runtime concerns separate from the mail director domain. Nauthilus is still only an authentication authority; routing fact resolution and backend selection remain under `director`.
+
+Redis configuration lives in exactly one place: `storage.redis`. That includes connection topology, TLS, credentials and Redis key namespaces for affinity, sessions, user runtime state and backend runtime state. Active affinity uses Redis implicitly because Redis is the only production state backend for this project; no feature-specific Redis config subtree is part of the target schema.
+
+Stable for M0/M1:
+
+- `runtime.process`, `runtime.servers.control`, `runtime.timeouts` and `runtime.clients`
+- `observability`
+- `storage.redis`, including topology, TLS, auth, pool, retry, health, key-prefix and namespace shape
+- `auth.authorities`, including the HTTP-or-gRPC transport switch and OIDC delegation to Nauthilus
+- `director.security`
+- common listener fields: `protocol`, `service_name`, `network`, `address`, `authority`, `backend_pool`, `proxy_protocol` and `tls`
+- `director.listeners.imap` and `director.listeners.imaps`
+- `director.routing`, including resolver configuration, failover and selector defaults
+- `director.affinity`, `director.health`, `director.maintenance` and `director.runtime_overrides`
+- `director.backend_pools` and `director.backends` for the IMAP MVP, including backend TLS/SNI and backend authentication shape
+
+Draft until their implementation phases:
+
+- LMTP listener/backend details until M5
+- ManageSieve listener/backend details until M6
+- POP3 listener/backend details until M7
+- protocol-specific config fields added for later capability negotiation, delivery semantics, script handling or backend protocol quirks
+
+Config handling rules:
+
+- YAML is the project default for examples, generated defaults and operator documentation.
+- The Viper loader must support the common Viper configuration formats where practical.
+- Scalar config values must support Nauthilus-style environment expansion with `${NAME}` placeholders.
+- Ordinary `$` characters remain literal and `$${NAME}` escapes a placeholder.
+- Expansion happens after file/include/patch merging and before Viper/mapstructure decoding, typed validation and Viper environment overrides.
+- Map keys are not expanded.
+- Missing placeholders fail closed with a path-specific, secret-safe diagnostic.
+- Secret-bearing fields must use explicit secret metadata so redaction and `-P` behavior are deterministic.
+
+Config inspection commands:
+
+```text
+nauthilus-director config dump -d --format yaml
+nauthilus-director config dump -n --format yaml
+nauthilus-director config dump -n -P --format yaml
+```
+
+Required semantics:
+
+- `-d` prints canonical defaults only.
+- `-n` prints non-default effective configuration after config value expansion and environment overrides, redacted by default.
+- `-P` includes protected credential values in config output. It must be explicit and must not affect logs, metrics or REST responses.
+- Config dump output is inspection output only. It must not include Redis runtime overrides unless a separate runtime-state command explicitly asks for them.
+
+## 6. Runtime model
+
+Each incoming connection becomes a session with a stable session ID.
+
+A session should carry:
+
+```go
+type SessionContext struct {
+    SessionID        string
+    ListenerName     string
+    Protocol         string
+    ServiceName      string
+    LocalAddr        string
+    RemoteAddr       string
+    ClientIP         string
+    HAProxyInfo      *ProxyInfo
+    TLSState         *tls.ConnectionState
+    Username         string
+    Authenticated    bool
+    AccountKey       string
+    Tenant           string
+    ShardTag         string
+    SelectedBackend  string
+    NauthilusTraceID string
+    StartedAt        time.Time
+}
+```
+
+The session lifecycle:
+
+```text
+accept
+  -> create session
+  -> apply listener-level limits
+  -> optional PROXY protocol read
+  -> optional implicit TLS
+  -> protocol greeting
+  -> pre-auth protocol handling
+  -> Nauthilus auth / lookup
+  -> routing fact resolution
+  -> active affinity lookup or initial placement
+  -> backend selection
+  -> connect backend
+  -> optional backend TLS / STARTTLS
+  -> optional backend authentication / login replay
+  -> proxy until EOF/error/timeout
+  -> cleanup counters/session registry
+```
 
 ## 7. Nauthilus integration
 
 Nauthilus should be the authentication authority only. The director may ask Nauthilus to authenticate a user or to perform an identity lookup, but Nauthilus must not make concrete director backend-selection decisions. Backend selection is owned entirely by `nauthilus-director`.
 
-Nauthilus may return authentication status, account fields, attributes and session/correlation metadata. Those values may include directory-derived routing facts, for example a normalized account name, tenant, security domain, mailbox home value or logical shard tag. They remain facts about the authenticated identity. They must not be treated as a command to use a concrete backend identifier.
+The Nauthilus auth transport is configurable. A deployment uses either HTTP or gRPC for the director-to-Nauthilus auth call:
+
+- HTTP structured auth endpoint: `/api/v1/auth/json` with `application/json`
+- gRPC AuthService endpoint: `nauthilus.auth.v1.AuthService`
+
+OIDC-backed authentication belongs to Nauthilus. The director may receive OAuth/OIDC bearer material through mail SASL mechanisms or through the control API, but it should not become a local OIDC validation authority. It extracts the mechanism payload, preserves the mechanism identity, applies size and secrecy rules, and asks Nauthilus to validate the credential over the configured HTTP or gRPC authority.
 
 Both transports must map into the same director-internal auth result:
 
@@ -203,11 +327,75 @@ type AuthResult struct {
 
 Routing facts may be derived from `Account` and `Attributes`, but backend selection still runs after authentication through the director-owned routing resolver, active affinity and backend selector pipeline.
 
+### 7.1 SASL mechanisms and OIDC-backed credentials
+
+Required frontend mechanisms for user-stateful protocols:
+
+- `PLAIN`
+- `LOGIN`, where the frontend protocol commonly exposes it
+- `XOAUTH2`
+- `OAUTHBEARER`
+
+Mechanism handling rules:
+
+- `PLAIN` and `LOGIN` provide username/password credentials.
+- `XOAUTH2` and `OAUTHBEARER` provide bearer-token credentials.
+- Tokens, passwords and SASL blobs must never be logged, traced or exposed in metrics.
+- The director may parse the SASL envelope enough to extract the authorization identity, authentication identity, bearer token and optional client metadata.
+- The request sent to Nauthilus must include the original mechanism name so Nauthilus can apply mechanism-specific policy.
+- SASL-IR is allowed where the frontend protocol supports it, but size limits and pre-auth timeouts still apply.
+
+### 7.2 HTTP JSON authentication request
+
+The director uses only the HTTP JSON endpoint when `auth.authorities.<name>.transport` is `http`. The request body is the real structured Nauthilus auth DTO encoded as `application/json`. JSON is strict: unknown top-level fields are rejected.
+
+The director must not send fields such as `service`, nested `tls`, nested `proxy`, `listener`, `session_id`, `backend_identifier` or `routing_hint` in the JSON body unless Nauthilus adds those fields explicitly. The protocol identity belongs in `protocol`, not in a top-level `service` body field.
+
+Identity lookup uses the same endpoint and request body without a password:
+
+```text
+POST /api/v1/auth/json?mode=no-auth
+```
+
+List-accounts uses:
+
+```text
+GET  /api/v1/auth/json?mode=list-accounts
+POST /api/v1/auth/json?mode=list-accounts
+```
+
+Nauthilus may return an internal `backend` value for its own purposes. The director must treat it as opaque metadata unless an explicit routing resolver mapping converts that value into a logical `shard_tag`.
+
+Example successful response with routing facts in attributes:
+
+```json
+{
+  "ok": true,
+  "account_field": "account",
+  "attributes": {
+    "account": ["user@example.org"],
+    "mailShard": ["mailstore-a"],
+    "tenant": ["default"]
+  }
+}
+```
+
+### 7.3 gRPC AuthService
+
+Nauthilus also exposes a typed gRPC AuthService:
+
+```text
+nauthilus.auth.v1.AuthService
+  Authenticate(AuthRequest) returns (AuthResponse)
+  LookupIdentity(LookupIdentityRequest) returns (AuthResponse)
+  ListAccounts(ListAccountsRequest) returns (ListAccountsResponse)
+```
+
+`AuthRequest` is the protobuf equivalent of the shared structured auth DTO plus `password` and `auth_login_attempt`. `LookupIdentityRequest` is a dedicated no-password request. `ListAccountsRequest` is a dedicated account-listing request. The director's gRPC client must translate these protobuf responses into the same `AuthResult` shape as the HTTP client.
+
 ### 7.4 Backend selection boundary
 
 There is one routing model for this project: Nauthilus authenticates; the director resolves routing facts and selects the backend.
-
-Nauthilus may provide identity facts and directory-derived routing facts. It must not return, choose or require concrete director backend identifiers such as `mailstore-a-imap`. If a legacy Nauthilus response contains an internal `backend` value, the director must treat it as opaque metadata unless an explicit resolver mapping converts that value into a logical `shard_tag`.
 
 The director's routing pipeline is:
 
@@ -233,13 +421,11 @@ Director-owned routing inputs include:
 - max connection limits and weights
 - Redis-backed active affinity and runtime override state
 
-The v1 model keeps the Nauthilus client interface transport-neutral and selects the concrete HTTP or gRPC client from configuration. Both transports must return the same director-level auth outcome: authenticated, rejected or temporary failure, plus safe metadata for logging and correlation.
-
-## 8. Backend selection
+## 8. Routing and backend selection
 
 Backend selection must be deterministic, observable and safe.
 
-The director has two separate routing responsibilities:
+The director has two separate responsibilities:
 
 1. Resolve a logical routing target, normally `tenant + normalized_account -> shard_tag`.
 2. Resolve the concrete protocol backend, normally `shard_tag + protocol + backend_pool -> backend_identifier`.
@@ -308,21 +494,7 @@ director:
       strategy: same_shard_then_any_healthy
 ```
 
-Example Nauthilus authentication attributes consumed by the resolver:
-
-```json
-{
-  "ok": true,
-  "account_field": "account",
-  "attributes": {
-    "account": ["user@example.org"],
-    "mailShard": ["mailstore-a"],
-    "tenant": ["default"]
-  }
-}
-```
-
-The director then maps the logical shard to the protocol backend:
+The director then maps the logical shard to protocol-specific backend entries:
 
 ```yaml
 director:
@@ -360,19 +532,11 @@ Supported selector strategy candidates:
 - least connections within shard
 - fixed shard tag mapping
 
-Backend connection addressing and TLS identity are separate concerns. A backend
-`address` may be an IP address or another routable endpoint, while
-`tls.server_name` is the DNS name used for TLS SNI and certificate hostname
-verification. When backend TLS is enabled and the TCP address is not the
-certificate name, `tls.server_name` must be configured explicitly. The
-implementation must not silently disable verification to make IP-address
-backends work; `insecure_skip_verify` remains false by default.
+Backend connection addressing and TLS identity are separate concerns. A backend `address` may be an IP address or another routable endpoint, while `tls.server_name` is the DNS name used for TLS SNI and certificate hostname verification. When backend TLS is enabled and the TCP address is not the certificate name, `tls.server_name` must be configured explicitly. The implementation must not silently disable verification to make IP-address backends work; `insecure_skip_verify` remains false by default.
 
-For IMAP/POP3/ManageSieve the default is active-user sticky routing, not merely deterministic hashing.
+For IMAP/POP3/ManageSieve the default is active-user sticky routing, not merely deterministic hashing. For LMTP the default should be recipient-based and should use the same resolver model for recipient mailbox identity where practical.
 
-For LMTP the default should be recipient-based and should use the same resolver model for recipient mailbox identity where practical.
-
-## 9. Session affinity
+## 9. Session affinity and Redis state
 
 Session affinity is mandatory production behavior for user-stateful protocols.
 
@@ -399,11 +563,34 @@ tenant + normalized_username -> shard_tag
 shard_tag + protocol -> backend_identifier
 ```
 
-The affinity hash is derived from tenant and normalized user identity. Raw usernames should not be required in Redis keys; any human-readable user details stored for diagnostics must be optional, redaction-aware and never required for routing correctness.
-
 Redis is the central production state store for active affinity and session coordination. Local in-process state may be used as a cache or fast path, but it must not be the source of truth for production active-user stickiness when multiple director instances exist.
 
-The v1 foundation includes Redis-backed active affinity. Deterministic hashing remains the stateless initial placement fallback and the recovery mechanism when no active pin exists.
+Redis integration is a production subsystem, not a best-effort cache. It must support ACL/auth, TLS, standalone, Sentinel and Cluster modes, explicit timeouts, pooling, key namespacing, script execution and fail-closed behavior for required state.
+
+Redis state model decision:
+
+- Active affinity and session coordination use per-affinity Redis key groups.
+- Keys that must be touched atomically share a Redis Cluster hash tag derived from the normalized affinity key, for example `{aff:<affinity_hash>}`.
+- The normal routing path uses small atomic Redis Lua scripts, not distributed locks.
+- Scripts cover session open, heartbeat, close, expired-session reaping, user move, user kick, affinity clear and administrative pin changes.
+- Scripts use Redis server time, update a generation counter and fail closed on ambiguous state.
+- Session liveness is lease-based. A crashed director instance must not leave permanent active sessions.
+- Backend runtime overrides live in separate Redis hashes keyed by backend identifier.
+- Secondary indexes for REST/CLI listing are repairable convenience indexes.
+
+Initial key shape:
+
+```text
+<prefix>:v<schema>:{aff:<affinity_hash>}:state
+<prefix>:v<schema>:{aff:<affinity_hash>}:sessions
+<prefix>:v<schema>:{aff:<affinity_hash>}:session:<session_id>
+<prefix>:v<schema>:{aff:<affinity_hash>}:override
+<prefix>:v<schema>:runtime:backend:<backend_id>
+<prefix>:v<schema>:idx:sessions
+<prefix>:v<schema>:idx:backends
+```
+
+The affinity hash is derived from tenant and normalized user identity. Raw usernames should not be required in Redis keys; any human-readable user details stored for diagnostics must be optional, redaction-aware and never required for routing correctness.
 
 ## 10. IMAP design
 
@@ -421,20 +608,46 @@ Required frontend commands before proxy mode:
 - LOGIN
 - ID, optional
 
-After successful authentication, the director resolves routing facts, selects the backend, performs the configured backend authentication step and transitions to transparent proxy mode.
+Optional later:
 
-Backend authentication is explicit and configurable. Nauthilus remains the preferred frontend authentication authority, but operators may decide whether the backend receives a master-user login or the original user credential material.
+- SASL-IR
+- AUTHENTICATE LOGIN
+- literal handling for LOGIN/AUTHENTICATE edge cases
+- command pipelining robustness
 
-Supported backend auth modes for user-stateful protocols:
+After successful authentication, the director resolves routing facts, applies active affinity, selects the backend, performs the configured backend authentication step and transitions to transparent proxy mode.
 
-- `master_user`: the director authenticates to the backend with a configured master credential and opens the session as the authenticated user. This is the preferred production mode when the backend supports it.
+Backend authentication is explicit and configurable. Supported backend auth modes for user-stateful protocols:
+
+- `master_user`: the director authenticates to the backend with a configured master credential and opens the session as the authenticated user.
 - `credential_replay`: the director forwards the original authentication material to the backend after Nauthilus has accepted it.
+
+`credential_replay` must be opt-in because it extends the lifetime and blast radius of user passwords or bearer tokens inside the director. Both modes must avoid logging passwords, master credentials, SASL blobs and bearer tokens.
+
+## 11. POP3 design
+
+POP3 support should come after IMAP MVP.
+
+Required commands before proxy mode:
+
+- CAPA
+- STLS
+- USER
+- PASS
+- AUTH XOAUTH2
+- AUTH OAUTHBEARER
+- QUIT
+- NOOP
+
+After authentication and backend selection, proxy transparently.
 
 ## 12. LMTP design
 
 LMTP is not a login protocol. Routing happens per envelope recipient.
 
-The director uses a same-backend-only recipient routing strategy.
+The frontend LMTP listener still needs transport security and optional client authentication. This authenticates the submitting LMTP peer, not the mailbox user and not the backend routing decision.
+
+The director uses a same-backend-only recipient routing strategy:
 
 - Accept one transaction.
 - Resolve each `RCPT TO` recipient through the same routing resolver model, using a recipient lookup API or Nauthilus-provided recipient facts where configured, before accepting it into the transaction.
@@ -443,6 +656,8 @@ The director uses a same-backend-only recipient routing strategy.
 - Recipients that resolve to another backend are rejected or temporary-failed before `DATA`, so the sending side can retry them in a separate transaction.
 - `DATA` is forwarded only to the single selected backend for the accepted recipient set.
 - The director must not spool one message body for replay to multiple backend groups.
+
+LMTP must return per-recipient status. Multi-recipient routing must be safe, explicit and observable.
 
 ## 13. Sieve / ManageSieve design
 
@@ -464,17 +679,62 @@ ManageSieve client
 
 Decision: use separate backend entries per protocol and connect them through the same `shard_tag`. This avoids assuming IMAP, LMTP and ManageSieve ports live on identical host/port definitions while preserving user affinity.
 
+Sieve script contents, script names and command bodies should not be logged or used as high-cardinality metrics labels.
+
 ## 14. REST control API
 
-Routing debug:
+The director should expose an administrative REST API for introspection, controlled automation and eventually a CLI/client.
+
+It must not be part of the mail protocol data path. It should be optional and bind to localhost or a protected management interface by default.
+
+Deployment decision for v1: the REST control API runs inside the main `nauthilus-director` process on its own `runtime.servers.control` listener. It shares the same typed config snapshot, Redis-backed runtime state, lifecycle and observability wiring as the mail protocol listeners, but remains isolated from the mail data path by listener, authentication, authorization and handler boundaries.
+
+Supported authentication modes:
+
+- disabled
+- static bearer token
+- mTLS
+- reverse-proxy authenticated headers
+- OIDC/JWT via Nauthilus
+
+The control API must never write the YAML configuration file. Mutating operations change runtime state only. Runtime state lives in Redis and is reflected into in-process snapshots; configuration remains the immutable baseline until an operator changes and reloads it outside the API.
+
+Initial endpoint groups:
 
 ```text
+GET  /healthz
+GET  /readyz
+GET  /api/v1/version
+GET  /api/v1/config/effective
+GET  /api/v1/config/defaults
+GET  /api/v1/config/non-default
+POST /api/v1/reload
+GET  /api/v1/backends
+GET  /api/v1/backends/{identifier}
+POST /api/v1/backends/{identifier}/maintenance
+DELETE /api/v1/backends/{identifier}/maintenance
+POST /api/v1/backends/{identifier}/runtime/in
+POST /api/v1/backends/{identifier}/runtime/out
+POST /api/v1/backends/{identifier}/runtime/drain
+DELETE /api/v1/backends/{identifier}/runtime
+GET  /api/v1/sessions
+GET  /api/v1/sessions/{session_id}
+DELETE /api/v1/sessions/{session_id}
+GET  /api/v1/users
+GET  /api/v1/users/{user_key}
+GET  /api/v1/users/{user_key}/sessions
+GET  /api/v1/users/{user_key}/affinity
+PUT  /api/v1/users/{user_key}/affinity
+DELETE /api/v1/users/{user_key}/affinity
+POST /api/v1/users/{user_key}/move
+POST /api/v1/users/{user_key}/kick
 POST /api/v1/route/lookup
+GET  /metrics
 ```
 
-Route lookup decision: this endpoint is a director-only routing diagnostic. It does not authenticate credentials, does not call Nauthilus and does not ask Nauthilus for identity or routing input. The caller supplies an already known or operator-provided identity key, protocol and listener context; the director then explains how its own configured resolver inputs, Redis affinity, runtime overrides, health and maintenance state would select a backend.
+Route lookup is a director-only routing diagnostic. It does not authenticate credentials, does not call Nauthilus and does not ask Nauthilus for identity or routing input. The caller supplies an already known or operator-provided identity key, protocol, listener context and optional attributes; the director then explains how its configured resolver inputs, Redis affinity, runtime overrides, health and maintenance state would select a backend.
 
-The endpoint must be side-effect free. It may read Redis-backed affinity and runtime state, but it must not create sessions, refresh leases, mutate affinity, perform backend auth or trigger Nauthilus auth/lookup calls. If a future diagnostic needs to test Nauthilus authentication or identity normalization, it must be a separate auth diagnostic surface, not part of `route/lookup`.
+The endpoint must be side-effect free. It may read Redis-backed affinity and runtime state, but it must not create sessions, refresh leases, mutate affinity, perform backend auth or trigger Nauthilus auth/lookup calls.
 
 Example request:
 
@@ -503,46 +763,292 @@ Example response:
 }
 ```
 
+## 15. CLI client
+
+A small CLI client should make operations scriptable.
+
+Initial binary name:
+
+```text
+nauthilus-directorctl
+```
+
+The client command grammar must use clean nested subcommands. The CLI must use the generated OpenAPI REST client SDK as its HTTP transport boundary. Hand-written CLI code may provide command structure, configuration, output formatting and operator-friendly error messages, but it must not maintain a parallel REST client model or duplicate request/response DTOs.
+
+Example commands:
+
+```text
+nauthilus-director --version
+nauthilus-directorctl --version
+nauthilus-directorctl status
+nauthilus-directorctl backends list
+nauthilus-directorctl backends show <identifier>
+nauthilus-directorctl backends maintenance enable <identifier> --reason "storage migration"
+nauthilus-directorctl backends out <identifier> --reason "host maintenance"
+nauthilus-directorctl backends in <identifier>
+nauthilus-directorctl backends drain <identifier> --mode soft --reason "host replacement"
+nauthilus-directorctl sessions list --protocol imap
+nauthilus-directorctl sessions kill <session-id>
+nauthilus-directorctl users move user@example.org --to-shard mailstore-b --strategy kick-existing
+nauthilus-directorctl users kick user@example.org --reason "operator requested reconnect"
+nauthilus-directorctl users affinity clear user@example.org
+nauthilus-directorctl route lookup --protocol imap --user user@example.org --attribute mailShard=mailstore-a
+nauthilus-directorctl reload
+```
+
+CLI mutating commands must state whether they change runtime state or request a reload. Runtime operations write Redis-backed state only; they must not patch, rewrite or persist changes into YAML configuration.
+
+## 16. OpenAPI workflow
+
+The REST API and `nauthilus-directorctl` should use an OpenAPI-first workflow from hour zero.
+
+Generator decision: use `oapi-codegen` `v2.7.0` from `github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen`. The initial generated surface should use Go's standard `net/http` server style, strict server interfaces, generated models and a generated client-with-responses SDK for `nauthilus-directorctl`.
+
+Repository layout:
+
+```text
+docs/specs/openapi/nauthilus-director.yaml
+docs/specs/implementation/
+docs/man/
+internal/rest/generated/
+internal/rest/adapters/
+internal/client/generated/
+scripts/generate-openapi.sh
+```
+
+Expected Makefile targets once the REST contract exists:
+
+```text
+make generate-openapi
+make check-openapi
+```
+
+Generated code must not own mail protocol state machines, backend registry, selector, health model, routing resolver implementation or Nauthilus transport implementation. Those remain explicit domain objects with hand-written tests.
+
+## 17. OpenTelemetry and metrics
+
+OpenTelemetry should be first-class from the beginning, not bolted on later.
+
+Trace boundaries:
+
+- accepted frontend session
+- protocol pre-auth phase
+- Nauthilus authentication request
+- routing fact resolution
+- backend selection
+- backend connect
+- backend TLS/STARTTLS
+- proxy lifetime
+- LMTP recipient routing
+- REST API requests
+
+Initial span names:
+
+```text
+nauthilus_director.session
+nauthilus_director.imap.pre_auth
+nauthilus_director.pop3.pre_auth
+nauthilus_director.lmtp.transaction
+nauthilus_director.sieve.pre_auth
+nauthilus_director.nauthilus.auth
+nauthilus_director.routing.resolve
+nauthilus_director.backend.select
+nauthilus_director.backend.connect
+nauthilus_director.proxy.pipe
+nauthilus_director.rest.request
+```
+
+Allowed metric labels:
+
+```text
+protocol
+service
+listener
+operation
+result
+reason_class
+transport
+mechanism
+backend_pool
+shard_tag
+maintenance_mode
+direction
+method
+route
+status_class
+tls_mode
+redis_mode
+```
+
+Forbidden metric labels:
+
+```text
+username
+user_hash
+recipient
+session_id
+trace_id
+request_id
+client_ip
+remote_addr
+backend_identifier
+token
+password
+sasl_blob
+raw_error
+```
+
+Prometheus metrics should include sessions, auth totals/durations, routing resolver totals/durations, backend selection totals, backend health, backend maintenance, proxy bytes/durations, LMTP recipient totals, REST requests and Redis operation health.
+
+`backend_pool` and `shard_tag` are acceptable labels; raw backend identifiers are not metrics labels. Per-backend details belong in REST, logs and traces.
+
+## 18. Health checks and maintenance
+
+Backend health should support two levels.
+
+Light check:
+
+- TCP connect
+- optional TLS handshake
+- optional greeting read
+
+Deep check:
+
+- protocol-specific login or transaction test
+- IMAP: authenticate test user and logout
+- POP3: authenticate test user and quit
+- LMTP: LHLO and optional NOOP/RSET
+- ManageSieve: greeting/capability and optional auth test
+
+Maintenance mode should prevent new sessions from being assigned to a backend while optionally allowing existing sessions to drain.
+
+Modes:
+
+```text
+soft: no new initial placements, existing sessions remain
+hard: no new sessions, existing sessions may be killed after grace period
+disabled: normal operation
+```
+
+Soft maintenance excludes a backend from new initial placements while preserving existing sessions and active pins by default. Hard maintenance excludes all new sessions and may terminate existing sessions after explicit grace. Maintenance and drain operations must be auditable.
+
+Runtime weight `0` is weaker than maintenance. It removes a backend from weighted initial placement, but it does not by itself imply hard exclusion, session termination or maintenance audit semantics.
+
+## 19. Configuration reload
+
+Reload should be explicit and safe.
+
+Reloadable:
+
+- listener additions
+- listener removals with graceful drain
+- backend additions/removals
+- backend maintenance defaults
+- weights
+- routing resolver configuration
+- health intervals
+- logging level
+
+Not safely reloadable without restart, at least initially:
+
+- changing REST listener bind address
+- changing global telemetry exporter setup
+- changing core protocol behavior
+
+On reload:
+
+1. Parse new config.
+2. Validate new config.
+3. Build new runtime snapshot.
+4. Apply listener/backend/resolver changes.
+5. Keep existing sessions on old backend object until closed.
+6. New sessions use the new snapshot.
+
+## 20. Security model
+
+The director is in the authentication path and must be treated as security-sensitive. Security-by-design and security-by-default are hard requirements.
+
+Rules:
+
+- Never log credentials.
+- Never log raw SASL blobs.
+- Never log OAuth/OIDC bearer tokens.
+- Avoid logging Sieve script contents.
+- Use strict timeouts on unauthenticated sessions.
+- Limit pre-auth command size.
+- Limit line length and literal size.
+- Protect REST API by default.
+- Prefer localhost or management network binding for REST.
+- Support TLS min version configuration.
+- Avoid `skip_verify` in production examples.
+- Explicitly document trusted backend network assumptions.
+- Fail closed on ambiguous authentication, routing, Redis or backend-selection state.
+
 ## 21. Testing strategy
 
 Unit tests:
 
+- config validation
+- env placeholder expansion and redaction
 - routing resolver behavior, including `auth_attribute`, missing attribute handling and deterministic hash fallback
 - backend selector determinism
 - Redis-backed active affinity, user moves and user kicks
+- health state transitions
+- REST handlers and OpenAPI adapters
 - Nauthilus client error mapping
 - Nauthilus structured request mapping, including rejection of unknown JSON fields such as `service`
+- SASL XOAUTH2/OAUTHBEARER parsing with secret-safe diagnostics
 - route lookup staying director-only and side-effect-free
 
 Integration tests:
 
 - fake Nauthilus auth endpoint returning account and routing attributes
 - fake IMAP backend
+- fake POP3 backend
 - fake LMTP backend
 - fake ManageSieve backend
+- TLS and STARTTLS flows
+- HAProxy PROXY protocol flows
 - backend down / maintenance / max connections
+- backend runtime weight `0`, runtime in/out and drain operations
 - user move/kick flows across active sessions
 
 E2E tests:
 
+- run through `make e2e`
+- use fake or containerized Nauthilus authorities over HTTP and gRPC
+- use fake IMAP, LMTP, ManageSieve and POP3 backends that expose protocol-level observations
+- use real Redis or a Redis-compatible test service for active affinity and runtime overrides
 - authenticate through the public protocol listener, then assert backend routing externally
 - verify `auth_attribute` routing from Nauthilus-provided attributes
 - verify active-user stickiness across parallel connections and reconnects
 - verify route lookup does not call Nauthilus, create sessions or mutate Redis
+- verify TLS/STARTTLS and backend TLS/SNI behavior with test certificates
+- scrape Prometheus metrics and optionally receive OTLP traces where the test environment provides collectors
+- keep credentials and SASL bearer material out of test logs
+
+Local quality gate:
+
+```text
+make guardrails
+```
+
+`make guardrails` should include formatting, vet, lint, unit tests, race tests, E2E tests and build checks once the root production module exists.
 
 ## 22. Implementation milestones
 
-### M0: Repository hygiene
+### M0: Repository hygiene and foundation
 
 - keep the old implementation isolated under `poc/` as reference material only
 - finalize package layout
-- add CI
-- add basic test structure
-- document architecture
+- create the new production Go module skeleton under the root package layout
+- add the approved foundation dependencies and tool pins to the production module
+- add CI and basic test structure
 - define public config schema from `docs/config/nauthilus-director.target.yml`
+- implement typed config loading, canonical defaults, redacted/non-redacted dumps and validator-based validation
 - align the director-side Nauthilus request/response models with the real HTTP JSON and gRPC contracts
-- add the approved foundation dependencies to the production module only when the new root module is created
 - create the initial routing resolver abstraction and document `auth_attribute` plus hash fallback semantics
+- create the E2E harness entrypoint and fake service structure so later protocol work can add externally observable tests immediately
 
 ### M1: IMAP MVP
 
@@ -553,17 +1059,97 @@ E2E tests:
 - backend selection by active Redis-backed affinity or initial deterministic placement
 - backend connect
 - transparent proxy loop
-- basic metrics/logging
+- basic metrics/logging/tracing
 - E2E proof for successful IMAP auth, routing resolver behavior, backend selection, active stickiness and secret-safe observable output
+
+### M2: Backend runtime
+
+- backend registry
+- Redis-backed active affinity registry
+- health checks
+- maintenance mode
+- max connection limits
+- weighted/deterministic selection
+- Redis-coordinated session registry
+- graceful shutdown
+- E2E proof for backend weight `0`, in/out, drain, user move and user kick
+
+### M3: REST API and client
+
+- OpenAPI-first workflow
+- generated REST server boundary
+- reproducible OpenAPI generation and stale-output check
+- `/healthz`, `/readyz`
+- backend list/show/maintenance/runtime operations
+- session list/show/kill
+- user list/show/move/kick/affinity
+- route lookup
+- reload
+- `nauthilus-directorctl`
+- E2E proof for REST and CLI managing the same Redis-backed runtime state
+
+### M4: Observability
+
+- OTLP exporter config
+- traces for sessions/auth/routing/backend/proxy
+- Prometheus metrics
+- structured log correlation
+
+### M5: LMTP MVP
+
+- LMTP state machine
+- LMTP STARTTLS, implicit TLS and client-auth handling
+- recipient routing through the resolver model
+- single-backend transaction support
+- same-backend-only multi-recipient handling
+- per-recipient status mapping
+
+### M6: ManageSieve / Sieve proxy
+
+- ManageSieve pre-auth handling
+- Nauthilus auth
+- same-shard backend selection
+- transparent proxying
+- metrics/tracing without script leakage
+
+### M7: POP3
+
+- POP3 pre-auth state machine
+- Nauthilus auth
+- backend selection
+- transparent proxying
+
+### M8: Production hardening
+
+- hardened Docker image
+- systemd unit
+- reload semantics
+- pprof optional
+- operational docs
+- failure-mode docs
+- rollout and operational migration guide
+
+## 23. Open decisions
+
+All M0/M1 foundation decisions tracked in this document are settled enough to start implementation. New open decisions should be added here only when they are not already governed by the architecture, policy or target configuration above.
+
+Known future decisions:
+
+- Exact HTTP/gRPC routing resolver service contract for external routing services.
+- Whether recipient lookup for LMTP should call a dedicated Nauthilus lookup mode, a generic routing service or a separate mailbox-directory service.
+- Whether local OIDC token validation should ever be supported as an explicit non-default mode.
+- Exact REST authorization model beyond initial bearer token and Nauthilus-backed OIDC delegation.
 
 ## 24. Immediate next steps
 
-1. Create the new production Go module skeleton under the root package layout.
-2. Add the approved foundation dependencies and tool pins to the production module.
-3. Implement typed config loading, canonical defaults, redacted/non-redacted dumps and validator-based validation against `docs/config/nauthilus-director.target.yml`.
-4. Add the routing resolver package with `auth_attribute` and deterministic hash fallback support.
-5. Add the initial OpenAPI specification under `docs/specs/openapi/nauthilus-director.yaml` and wire reproducible generation/check targets.
-6. Build the E2E harness with fake Nauthilus and fake backend test servers before expanding production protocol code.
-7. Implement the IMAP MVP end-to-end with Redis-backed active affinity, basic metrics, structured logs, trace boundaries and externally observable E2E coverage.
+1. Keep this architecture roadmap healthy and aligned with `docs/config/nauthilus-director.target.yml`.
+2. Create `docs/specs/implementation/M0_FOUNDATION_SPEC.md` before starting broad implementation.
+3. Create the new production Go module skeleton under the root package layout.
+4. Add the approved foundation dependencies and tool pins to the production module.
+5. Implement typed config loading, canonical defaults, redacted/non-redacted dumps and validator-based validation.
+6. Add the routing resolver package with `auth_attribute` and deterministic hash fallback support.
+7. Add the initial OpenAPI specification under `docs/specs/openapi/nauthilus-director.yaml` and wire reproducible generation/check targets.
+8. Build the E2E harness with fake Nauthilus and fake backend test servers before expanding production protocol code.
+9. Implement the IMAP MVP end-to-end with Redis-backed active affinity, basic metrics, structured logs, trace boundaries and externally observable E2E coverage.
 
 The project should evolve as a small, sharp director: protocol-aware only where necessary, authenticated through Nauthilus, routed through director-owned facts and selectors, observable by default, and operationally safe enough to sit in front of real mail backends.
