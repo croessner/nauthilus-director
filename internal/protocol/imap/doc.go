@@ -14,17 +14,6 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-// Package app owns production process composition and lifecycle wiring.
-package app
-
-import (
-	"github.com/croessner/nauthilus-director/internal/listener"
-	"go.uber.org/fx"
-)
-
-// Module returns the root application composition module.
-func Module() fx.Option {
-	return fx.Options(
-		listener.Module(),
-	)
-}
+// Package imap owns the initial IMAP session boundary for accepted frontend
+// connections before authentication, routing or backend proxying exists.
+package imap

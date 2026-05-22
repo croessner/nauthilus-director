@@ -93,6 +93,9 @@ github.com/pelletier/go-toml/v2/unstable
 # github.com/perimeterx/marshmallow v1.1.5
 ## explicit; go 1.17
 github.com/perimeterx/marshmallow
+# github.com/pires/go-proxyproto v0.12.0
+## explicit; go 1.25
+github.com/pires/go-proxyproto
 # github.com/redis/go-redis/v9 v9.19.0
 ## explicit; go 1.24
 github.com/redis/go-redis/v9

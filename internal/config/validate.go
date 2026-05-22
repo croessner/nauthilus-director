@@ -20,6 +20,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net/netip"
 	"strings"
 )
 
@@ -219,6 +220,16 @@ func validateDirector(director DirectorConfig, authorities map[string]AuthorityC
 		}
 		if strings.TrimSpace(listener.TLS.Mode) == "" {
 			addProblem(problems, path+".tls.mode is required")
+		}
+		if listener.ProxyProtocol.Enabled {
+			if len(listener.ProxyProtocol.TrustedCIDRs) == 0 {
+				addProblem(problems, path+".proxy_protocol.trusted_cidrs is required when proxy protocol is enabled")
+			}
+			for _, trustedCIDR := range listener.ProxyProtocol.TrustedCIDRs {
+				if _, err := netip.ParsePrefix(strings.TrimSpace(trustedCIDR)); err != nil {
+					addProblem(problems, path+".proxy_protocol.trusted_cidrs contains invalid CIDR "+trustedCIDR)
+				}
+			}
 		}
 	}
 
