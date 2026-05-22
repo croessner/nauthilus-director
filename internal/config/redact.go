@@ -58,7 +58,6 @@ func collectSecretPathsInto(current reflect.Type, path []string, paths *[]secret
 	switch current.Kind() {
 	case reflect.Struct:
 		for field := range current.Fields() {
-			field := field
 			if field.PkgPath != "" {
 				continue
 			}
