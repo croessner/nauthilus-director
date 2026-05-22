@@ -222,9 +222,16 @@ func (m *Manager) ListenerNames() []string {
 
 // defaultSessionHandlerFactory creates the first IMAP session boundary.
 func defaultSessionHandlerFactory(options SessionOptions) SessionHandler {
-	var capabilities []string
+	var (
+		capabilities        []string
+		authMechanisms      []string
+		requireIDBeforeAuth bool
+	)
+
 	if options.Config.IMAP != nil {
 		capabilities = options.Config.IMAP.Capabilities
+		authMechanisms = options.Config.IMAP.AuthMechanisms
+		requireIDBeforeAuth = options.Config.IMAP.RequireIDBeforeAuth
 	}
 
 	return imap.NewHandler(imap.SessionConfig{
@@ -233,6 +240,8 @@ func defaultSessionHandlerFactory(options SessionOptions) SessionHandler {
 		Network:                options.Config.Network,
 		TLSMode:                options.Config.TLS.Mode,
 		Capabilities:           capabilities,
+		AuthMechanisms:         authMechanisms,
+		RequireIDBeforeAuth:    requireIDBeforeAuth,
 		PreauthTimeout:         options.Timeouts.Preauth.Std(),
 		AuthTimeout:            options.Timeouts.Auth.Std(),
 		BackendConnectTimeout:  options.Timeouts.BackendConnect.Std(),

@@ -18,6 +18,7 @@ package imap
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -25,8 +26,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"strconv"
-	"strings"
 	"time"
 )
 
@@ -42,6 +41,8 @@ var (
 	ErrPreauthLiteralTooLarge = errors.New("imap: preauth literal exceeds configured limit")
 	// ErrPreauthLiteralUnsupported reports that literal handling is not part of this session slice.
 	ErrPreauthLiteralUnsupported = errors.New("imap: preauth literals are not supported yet")
+	// ErrPreauthPartialCommand reports a connection closed before a command line was complete.
+	ErrPreauthPartialCommand = errors.New("imap: partial preauth command")
 )
 
 // Handler creates bounded IMAP sessions for one configured listener.
@@ -64,12 +65,15 @@ func (h *Handler) Serve(ctx context.Context, conn net.Conn) error {
 	return session.Serve(ctx)
 }
 
-// Session owns one accepted IMAP frontend stream until later auth/proxy phases take over.
+// Session owns one accepted IMAP frontend stream until auth and proxy handling take over.
 type Session struct {
 	context Context
 	conn    net.Conn
 	reader  *bufio.Reader
 	writer  *bufio.Writer
+
+	tlsActive bool
+	clientID  string
 }
 
 // NewSession creates a bounded IMAP session context for an accepted connection.
@@ -100,10 +104,13 @@ func NewSession(config SessionConfig, conn net.Conn) (*Session, error) {
 			MaxPreauthLineBytes:    config.MaxPreauthLineBytes,
 			MaxPreauthLiteralBytes: config.MaxPreauthLiteralBytes,
 			Capabilities:           append([]string(nil), config.Capabilities...),
+			AuthMechanisms:         append([]string(nil), config.AuthMechanisms...),
+			RequireIDBeforeAuth:    config.RequireIDBeforeAuth,
 		},
-		conn:   conn,
-		reader: bufio.NewReaderSize(conn, config.MaxPreauthLineBytes+1),
-		writer: bufio.NewWriter(conn),
+		conn:      conn,
+		reader:    bufio.NewReaderSize(conn, config.MaxPreauthLineBytes+1),
+		writer:    bufio.NewWriter(conn),
+		tlsActive: config.TLSMode == TLSModeImplicit,
 	}, nil
 }
 
@@ -112,7 +119,7 @@ func (s *Session) Context() Context {
 	return s.context
 }
 
-// Serve writes the initial greeting and then holds the pre-auth boundary open.
+// Serve writes the initial greeting and processes pre-auth commands in wire order.
 func (s *Session) Serve(ctx context.Context) error {
 	if err := s.applyPreauthDeadline(); err != nil {
 		return err
@@ -139,16 +146,68 @@ func (s *Session) Serve(ctx context.Context) error {
 				return nil
 			}
 
+			if errors.Is(err, ErrPreauthPartialCommand) {
+				_ = s.writeCommandSyntaxError(tagHintForLine(line))
+				_ = s.writer.Flush()
+
+				return err
+			}
+
 			return err
 		}
 
-		if err := s.rejectUnsupportedLiteral(line); err != nil {
-			_, _ = s.writer.WriteString("* BAD pre-auth literals are not accepted\r\n")
-			_ = s.writer.Flush()
-
+		closeSession, err := s.processPreauthLine(line)
+		if err != nil {
 			return err
+		}
+
+		if closeSession {
+			return nil
 		}
 	}
+}
+
+// TLSActive reports whether the session has crossed an implicit or STARTTLS boundary.
+func (s *Session) TLSActive() bool {
+	return s.tlsActive
+}
+
+// BufferedProxyHandoff drains bytes already read ahead for later transparent proxy mode.
+func (s *Session) BufferedProxyHandoff() ProxyHandoff {
+	buffered := make([]byte, s.reader.Buffered())
+	if len(buffered) > 0 {
+		_, _ = io.ReadFull(s.reader, buffered)
+	}
+
+	return ProxyHandoff{frontend: s.conn, buffered: buffered}
+}
+
+// ProxyHandoff carries the frontend stream and any bytes buffered during pre-auth parsing.
+type ProxyHandoff struct {
+	frontend net.Conn
+	buffered []byte
+}
+
+// Buffered returns a copy of bytes that must be sent to the backend first.
+func (h ProxyHandoff) Buffered() []byte {
+	copied := make([]byte, len(h.buffered))
+	copy(copied, h.buffered)
+
+	return copied
+}
+
+// Reader returns a stream that replays buffered bytes before live frontend reads.
+func (h ProxyHandoff) Reader() io.Reader {
+	if len(h.buffered) == 0 {
+		return h.frontend
+	}
+
+	return io.MultiReader(bytes.NewReader(h.buffered), h.frontend)
+}
+
+// Frontend returns the underlying client connection for later proxy ownership.
+func (h ProxyHandoff) Frontend() net.Conn {
+	return h.frontend
 }
 
 // applyPreauthDeadline sets the initial session read/write deadline.
@@ -167,6 +226,10 @@ func (s *Session) readPreauthLine() ([]byte, error) {
 		return nil, ErrPreauthLineTooLarge
 	}
 
+	if errors.Is(err, io.EOF) && len(line) > 0 {
+		return line, ErrPreauthPartialCommand
+	}
+
 	if err != nil {
 		return nil, err
 	}
@@ -174,10 +237,46 @@ func (s *Session) readPreauthLine() ([]byte, error) {
 	return line, nil
 }
 
-// rejectUnsupportedLiteral enforces literal size limits before later IMAP parsing exists.
-func (s *Session) rejectUnsupportedLiteral(line []byte) error {
-	size, ok, err := preauthLiteralSize(line)
+// processPreauthLine parses and dispatches one pre-auth command.
+func (s *Session) processPreauthLine(line []byte) (bool, error) {
+	tag := tagHintForLine(line)
+
+	if err := s.rejectUnsupportedLiteral(line, tag); err != nil {
+		return false, err
+	}
+
+	command, err := parsePreauthCommand(line, s.context.MaxPreauthLineBytes)
 	if err != nil {
+		if writeErr := s.writeCommandSyntaxError(tag); writeErr != nil {
+			return false, writeErr
+		}
+
+		if flushErr := s.writer.Flush(); flushErr != nil {
+			return false, flushErr
+		}
+
+		return false, nil
+	}
+
+	outcome, err := s.handlePreauthCommand(command)
+	if flushErr := s.writer.Flush(); flushErr != nil {
+		return false, flushErr
+	}
+
+	if errors.Is(err, ErrUnsupportedCommand) {
+		return false, nil
+	}
+
+	return outcome.closeSession, err
+}
+
+// rejectUnsupportedLiteral emits a tagged error and avoids continuation reads.
+func (s *Session) rejectUnsupportedLiteral(line []byte, tag string) error {
+	size, ok, err := preauthLiteralMarker(line)
+	if err != nil {
+		_ = s.writeTagged(tag, responseBad, "Unsupported IMAP literal before authentication")
+		_ = s.writer.Flush()
+
 		return err
 	}
 
@@ -186,35 +285,16 @@ func (s *Session) rejectUnsupportedLiteral(line []byte) error {
 	}
 
 	if size > s.context.MaxPreauthLiteralBytes {
+		_ = s.writeTagged(tag, responseBad, "Unsupported IMAP literal before authentication")
+		_ = s.writer.Flush()
+
 		return ErrPreauthLiteralTooLarge
 	}
 
+	_ = s.writeTagged(tag, responseBad, "Unsupported IMAP literal before authentication")
+	_ = s.writer.Flush()
+
 	return ErrPreauthLiteralUnsupported
-}
-
-// preauthLiteralSize extracts a terminal IMAP literal marker from a pre-auth line.
-func preauthLiteralSize(line []byte) (int, bool, error) {
-	trimmed := strings.TrimRight(string(line), "\r\n")
-	if !strings.HasSuffix(trimmed, "}") {
-		return 0, false, nil
-	}
-
-	open := strings.LastIndex(trimmed, "{")
-	if open < 0 {
-		return 0, false, nil
-	}
-
-	value := strings.TrimSuffix(trimmed[open+1:len(trimmed)-1], "+")
-	if value == "" {
-		return 0, true, fmt.Errorf("%w: empty literal size", ErrPreauthLiteralUnsupported)
-	}
-
-	size, err := strconv.Atoi(value)
-	if err != nil || size < 0 {
-		return 0, true, fmt.Errorf("%w: invalid literal size", ErrPreauthLiteralUnsupported)
-	}
-
-	return size, true, nil
 }
 
 // newSessionID creates a stable opaque session identifier for internal correlation.

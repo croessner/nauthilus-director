@@ -35,6 +35,8 @@ type SessionConfig struct {
 	Network                string
 	TLSMode                string
 	Capabilities           []string
+	AuthMechanisms         []string
+	RequireIDBeforeAuth    bool
 	PreauthTimeout         time.Duration
 	AuthTimeout            time.Duration
 	BackendConnectTimeout  time.Duration
@@ -60,6 +62,8 @@ type Context struct {
 	MaxPreauthLineBytes    int
 	MaxPreauthLiteralBytes int
 	Capabilities           []string
+	AuthMechanisms         []string
+	RequireIDBeforeAuth    bool
 }
 
 // StartTLSAvailable reports whether this session can later expose STARTTLS.

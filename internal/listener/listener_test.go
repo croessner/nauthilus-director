@@ -45,7 +45,7 @@ const (
 	trustedLocalhostCIDR = "127.0.0.1/32"
 )
 
-// TestManagerSelectsOnlyIMAPListeners verifies that M1 starts only protocol=imap entries.
+// TestManagerSelectsOnlyIMAPListeners verifies that the manager starts only protocol=imap entries.
 func TestManagerSelectsOnlyIMAPListeners(t *testing.T) {
 	cfg := config.DefaultConfig()
 

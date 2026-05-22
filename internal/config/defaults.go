@@ -359,8 +359,9 @@ func defaultIMAPListener(serviceName string, address string, tlsMode string, cer
 			MinTLSVersion: "TLS1.2",
 		},
 		IMAP: &IMAPListenerConfig{
-			Capabilities:   []string{"IMAP4rev1", "ID", "ENABLE", "SASL-IR", "AUTH=PLAIN", "AUTH=XOAUTH2", "AUTH=OAUTHBEARER"},
-			AuthMechanisms: []string{"plain", "xoauth2", "oauthbearer"},
+			Capabilities:        []string{"IMAP4rev1", "ID", "SASL-IR", "AUTH=PLAIN", "AUTH=XOAUTH2", "AUTH=OAUTHBEARER"},
+			AuthMechanisms:      []string{"plain", "xoauth2", "oauthbearer"},
+			RequireIDBeforeAuth: false,
 		},
 	}
 }

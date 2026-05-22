@@ -26,7 +26,7 @@ import (
 	"github.com/croessner/nauthilus-director/internal/config"
 )
 
-// buildListenerTLSConfig loads implicit TLS settings while keeping STARTTLS lazy for later phases.
+// buildListenerTLSConfig loads implicit TLS settings while keeping STARTTLS lazy for command handling.
 func buildListenerTLSConfig(listener config.ListenerConfig) (*tls.Config, error) {
 	minVersion, err := tlsMinVersion(listener.TLS.MinTLSVersion)
 	if err != nil {

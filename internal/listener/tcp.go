@@ -264,7 +264,7 @@ func validateNetwork(network string) error {
 	}
 }
 
-// validateTLSMode accepts the frontend TLS modes defined for M1 IMAP listeners.
+// validateTLSMode accepts the frontend TLS modes supported by IMAP listeners.
 func validateTLSMode(mode string) error {
 	switch mode {
 	case tlsModeStartTLS, tlsModeImplicit:

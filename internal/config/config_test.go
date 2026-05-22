@@ -95,7 +95,7 @@ observability:
 patch:
   - op: add
     path: director.listeners.imap.imap.capabilities
-    value: XTEST
+    value: STARTTLS
 `)
 	mainPath := writeConfigFile(t, root, "main.yaml", `env: dev
 includes:
@@ -138,8 +138,8 @@ patch:
 	}
 
 	capabilities := snapshot.Config.Director.Listeners["imap"].IMAP.Capabilities
-	if !containsString(capabilities, "XTEST") {
-		t.Fatalf("capabilities = %v, want XTEST added", capabilities)
+	if !containsString(capabilities, "STARTTLS") {
+		t.Fatalf("capabilities = %v, want STARTTLS added", capabilities)
 	}
 	mechanisms := snapshot.Config.Director.Listeners["imap"].IMAP.AuthMechanisms
 	if containsString(mechanisms, "oauthbearer") {
@@ -155,6 +155,23 @@ patch:
 		if strings.Contains(text, loaderKey) {
 			t.Fatalf("non-default dump contains loader key %q:\n%s", loaderKey, text)
 		}
+	}
+}
+
+// TestIMAPValidationRejectsUnsupportedEnableCapability keeps CAPABILITY output truthful.
+func TestIMAPValidationRejectsUnsupportedEnableCapability(t *testing.T) {
+	cfg := DefaultConfig()
+	entry := cfg.Director.Listeners["imap"]
+	entry.IMAP.Capabilities = append(entry.IMAP.Capabilities, "ENABLE")
+	cfg.Director.Listeners["imap"] = entry
+
+	err := NewLoader().Validate(cfg)
+	if err == nil {
+		t.Fatal("Validate accepted unsupported IMAP ENABLE capability")
+	}
+
+	if !strings.Contains(err.Error(), "must not advertise unsupported ENABLE") {
+		t.Fatalf("error = %q, want ENABLE validation", err.Error())
 	}
 }
 

@@ -215,6 +215,9 @@ func validateDirector(director DirectorConfig, authorities map[string]AuthorityC
 		if listener.Protocol == protocolIMAP && listener.IMAP == nil {
 			addProblem(problems, path+".imap is required for imap listeners")
 		}
+		if listener.Protocol == protocolIMAP && listener.IMAP != nil {
+			validateIMAPListener(path+".imap", *listener.IMAP, problems)
+		}
 		if listener.Protocol == protocolLMTP && listener.LMTP == nil {
 			addProblem(problems, path+".lmtp is required for lmtp listeners")
 		}
@@ -275,6 +278,41 @@ func validateDirector(director DirectorConfig, authorities map[string]AuthorityC
 	requirePositiveDuration("director.health.timeout", director.Health.Timeout, problems)
 	requirePositiveDuration("director.maintenance.drain_timeout", director.Maintenance.DrainTimeout, problems)
 	requirePositiveDuration("director.maintenance.hard_kill_grace", director.Maintenance.HardKillGrace, problems)
+}
+
+// validateIMAPListener rejects unsupported pre-auth advertisements and mechanisms.
+func validateIMAPListener(path string, imap IMAPListenerConfig, problems *[]string) {
+	for _, capability := range imap.Capabilities {
+		normalized := strings.ToUpper(strings.TrimSpace(capability))
+		switch {
+		case normalized == "IMAP4REV1", normalized == "ID", normalized == "SASL-IR", normalized == "STARTTLS":
+		case strings.HasPrefix(normalized, "AUTH="):
+			mechanism := strings.TrimPrefix(normalized, "AUTH=")
+			if !validIMAPAuthMechanism(mechanism) {
+				addProblem(problems, path+".capabilities advertises unsupported mechanism "+capability)
+			}
+		case normalized == "ENABLE":
+			addProblem(problems, path+".capabilities must not advertise unsupported ENABLE")
+		default:
+			addProblem(problems, path+".capabilities contains unsupported capability "+capability)
+		}
+	}
+
+	for _, mechanism := range imap.AuthMechanisms {
+		if !validIMAPAuthMechanism(mechanism) {
+			addProblem(problems, path+".auth_mechanisms contains unsupported mechanism "+mechanism)
+		}
+	}
+}
+
+// validIMAPAuthMechanism reports whether pre-auth command handling accepts this mechanism shape.
+func validIMAPAuthMechanism(mechanism string) bool {
+	switch strings.ToUpper(strings.TrimSpace(mechanism)) {
+	case "PLAIN", "XOAUTH2", "OAUTHBEARER":
+		return true
+	default:
+		return false
+	}
 }
 
 // requirePositiveDuration records a path-specific error for zero or negative durations.

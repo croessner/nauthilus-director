@@ -20,6 +20,7 @@ const redactedSecret = "<redacted>"
 
 const (
 	safeFieldClientIPPresent          = "client_ip_present"
+	safeFieldClientIDPresent          = "client_id_present"
 	safeFieldExternalSessionIDPresent = "external_session_id_present"
 	safeFieldHasCredential            = "has_credential"
 	safeFieldMethod                   = "method"
@@ -137,6 +138,10 @@ func safeContextFields(context RequestContext, operation authOperation) SafeFiel
 
 	if context.ClientIP != "" {
 		fields[safeFieldClientIPPresent] = boolString(true)
+	}
+
+	if context.ClientID != "" {
+		fields[safeFieldClientIDPresent] = boolString(true)
 	}
 
 	if context.ExternalSessionID != "" {
