@@ -20,6 +20,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	"net/netip"
 	"sort"
 	"strings"
 
@@ -45,9 +47,44 @@ type Backend struct {
 	BackendPool     string
 	ShardTag        string
 	Address         string
+	TLS             TLSConfig
+	Auth            AuthConfig
 	MaintenanceMode MaintenanceMode
 	Weight          int
 	MaxConnections  int
+}
+
+// TLSConfig describes the transport security policy for one backend connection.
+type TLSConfig struct {
+	Mode               string
+	CAFile             string
+	Cert               string
+	Key                config.SecretString
+	ServerName         string
+	MinTLSVersion      string
+	InsecureSkipVerify bool
+}
+
+// AuthConfig describes the backend login mode used after frontend auth succeeds.
+type AuthConfig struct {
+	Mode             string
+	MasterUser       MasterUserConfig
+	CredentialReplay CredentialReplayConfig
+}
+
+// MasterUserConfig contains the configured administrative IMAP login identity.
+type MasterUserConfig struct {
+	Username   string
+	Password   config.SecretString
+	UserFormat string
+	Mechanism  string
+}
+
+// CredentialReplayConfig contains the mechanism policy for replaying frontend credentials.
+type CredentialReplayConfig struct {
+	RequireBackendTLS bool
+	PreserveMechanism bool
+	AllowedMechanisms []string
 }
 
 // Pool describes one configured backend pool and its selector.
@@ -337,12 +374,19 @@ func newBackend(poolName string, identifier string, backend config.BackendConfig
 		return Backend{}, newBackendError(ErrorKindConfig, "registry", "backend max connections required", nil)
 	}
 
+	address, err := normalizeTCPAddress(backend.Address)
+	if err != nil {
+		return Backend{}, err
+	}
+
 	return Backend{
 		Identifier:      identifier,
 		Protocol:        protocol,
 		BackendPool:     poolName,
 		ShardTag:        shardTag,
-		Address:         strings.TrimSpace(backend.Address),
+		Address:         address,
+		TLS:             newBackendTLSConfig(backend.TLS),
+		Auth:            newBackendAuthConfig(backend.Auth),
 		MaintenanceMode: mode,
 		Weight:          backend.Weight,
 		MaxConnections:  backend.MaxConnections,
@@ -402,6 +446,83 @@ func sortedPoolNames(pools map[string]config.BackendPoolConfig) []string {
 // normalizeProtocol makes protocol matching case-insensitive at the boundary.
 func normalizeProtocol(protocol string) string {
 	return strings.ToLower(strings.TrimSpace(protocol))
+}
+
+// normalizeTCPAddress rejects Unix-socket paths before runtime backend dialing.
+func normalizeTCPAddress(address string) (string, error) {
+	address = strings.TrimSpace(address)
+	if address == "" {
+		return "", newBackendError(ErrorKindConfig, "registry", "backend tcp address required", nil)
+	}
+
+	if looksLikeUnixSocketAddress(address) {
+		return "", newBackendError(ErrorKindConfig, "registry", "backend unix socket addresses are not supported for IMAP backend connectivity", nil)
+	}
+
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return "", newBackendError(ErrorKindConfig, "registry", "backend tcp address must be host:port", err)
+	}
+
+	if strings.TrimSpace(host) == "" || strings.TrimSpace(port) == "" {
+		return "", newBackendError(ErrorKindConfig, "registry", "backend tcp address must include host and port", nil)
+	}
+
+	if _, err := netip.ParseAddrPort(address); err == nil {
+		return address, nil
+	}
+
+	return net.JoinHostPort(strings.TrimSpace(host), strings.TrimSpace(port)), nil
+}
+
+// looksLikeUnixSocketAddress detects explicit Unix networks and absolute socket paths.
+func looksLikeUnixSocketAddress(address string) bool {
+	lower := strings.ToLower(address)
+	return strings.HasPrefix(lower, "unix:") || strings.HasPrefix(address, "/")
+}
+
+// newBackendTLSConfig copies backend TLS config into the selector result domain.
+func newBackendTLSConfig(tlsConfig config.BackendTLSConfig) TLSConfig {
+	return TLSConfig{
+		Mode:               strings.ToLower(strings.TrimSpace(tlsConfig.Mode)),
+		CAFile:             strings.TrimSpace(tlsConfig.CAFile),
+		Cert:               strings.TrimSpace(tlsConfig.Cert),
+		Key:                tlsConfig.Key,
+		ServerName:         strings.TrimSpace(tlsConfig.ServerName),
+		MinTLSVersion:      strings.TrimSpace(tlsConfig.MinTLSVersion),
+		InsecureSkipVerify: tlsConfig.InsecureSkipVerify,
+	}
+}
+
+// newBackendAuthConfig copies backend auth config into the selector result domain.
+func newBackendAuthConfig(auth config.BackendAuthConfig) AuthConfig {
+	return AuthConfig{
+		Mode: strings.ToLower(strings.TrimSpace(auth.Mode)),
+		MasterUser: MasterUserConfig{
+			Username:   strings.TrimSpace(auth.MasterUser.Username),
+			Password:   auth.MasterUser.PasswordFile,
+			UserFormat: strings.TrimSpace(auth.MasterUser.UserFormat),
+			Mechanism:  strings.ToLower(strings.TrimSpace(auth.MasterUser.Mechanism)),
+		},
+		CredentialReplay: CredentialReplayConfig{
+			RequireBackendTLS: auth.CredentialReplay.RequireBackendTLS,
+			PreserveMechanism: auth.CredentialReplay.PreserveMechanism,
+			AllowedMechanisms: normalizeMechanisms(auth.CredentialReplay.AllowedMechanisms),
+		},
+	}
+}
+
+// normalizeMechanisms canonicalizes configured mechanism names at the backend boundary.
+func normalizeMechanisms(mechanisms []string) []string {
+	normalized := make([]string, 0, len(mechanisms))
+	for _, mechanism := range mechanisms {
+		mechanism = strings.ToLower(strings.TrimSpace(mechanism))
+		if mechanism != "" {
+			normalized = append(normalized, mechanism)
+		}
+	}
+
+	return normalized
 }
 
 // newBackendError creates a classified backend error.

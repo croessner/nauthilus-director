@@ -33,7 +33,7 @@ type Server struct {
 	handler http.Handler
 }
 
-// NewServer builds the generated strict-server boundary with M0 adapters.
+// NewServer builds the generated strict-server boundary with local adapters.
 func NewServer(options Options) *Server {
 	handler := adapters.NewHandler(adapters.HandlerOptions{Version: options.Version})
 	strict := generated.NewStrictHandlerWithOptions(handler, nil, generated.StrictHTTPServerOptions{

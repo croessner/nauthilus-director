@@ -25,6 +25,7 @@ import (
 
 type commandOutcome struct {
 	closeSession bool
+	flushed      bool
 }
 
 // handlePreauthCommand dispatches one parsed command in wire order.
@@ -41,9 +42,9 @@ func (s *Session) handlePreauthCommand(ctx context.Context, command preauthComma
 	case commandID:
 		return commandOutcome{}, s.handleID(command)
 	case commandLogin:
-		return commandOutcome{}, s.handleLogin(ctx, command)
+		return s.handleLogin(ctx, command)
 	case commandAuthenticate:
-		return commandOutcome{}, s.handleAuthenticate(ctx, command)
+		return s.handleAuthenticate(ctx, command)
 	default:
 		if err := s.writeTagged(command.tag, responseBad, "Unsupported command before authentication"); err != nil {
 			return commandOutcome{}, err
@@ -76,46 +77,46 @@ func (s *Session) handleLogout(command preauthCommand) error {
 }
 
 // handleLogin extracts LOGIN credentials without retaining them on the session.
-func (s *Session) handleLogin(ctx context.Context, command preauthCommand) error {
+func (s *Session) handleLogin(ctx context.Context, command preauthCommand) (commandOutcome, error) {
 	credentials, err := parseLoginCredentials(command)
 	if err != nil {
-		return s.writeTagged(command.tag, responseBad, "Invalid LOGIN command")
+		return commandOutcome{}, s.writeTagged(command.tag, responseBad, "Invalid LOGIN command")
 	}
 	defer credentials.Clear()
 
 	if s.requiresClientID() {
-		return s.writeTagged(command.tag, responseNo, genericAuthFailText)
+		return commandOutcome{}, s.writeTagged(command.tag, responseNo, genericAuthFailText)
 	}
 
 	return s.authenticateAndPlace(ctx, command.tag, credentials)
 }
 
 // handleAuthenticate extracts supported SASL credentials without retaining them on the session.
-func (s *Session) handleAuthenticate(ctx context.Context, command preauthCommand) error {
+func (s *Session) handleAuthenticate(ctx context.Context, command preauthCommand) (commandOutcome, error) {
 	if len(command.arguments) < 1 || len(command.arguments) > 2 || command.arguments[0].kind != tokenAtom {
-		return s.writeTagged(command.tag, responseBad, "Invalid AUTHENTICATE command")
+		return commandOutcome{}, s.writeTagged(command.tag, responseBad, "Invalid AUTHENTICATE command")
 	}
 
 	mechanism, err := newMechanismIdentity(command.arguments[0].value)
 	if err != nil || !s.supportsAuthMechanism(mechanism.Normalized()) {
-		return s.writeTagged(command.tag, responseNo, "Unsupported authentication mechanism")
+		return commandOutcome{}, s.writeTagged(command.tag, responseNo, "Unsupported authentication mechanism")
 	}
 
 	if s.requiresClientID() {
-		return s.writeTagged(command.tag, responseNo, genericAuthFailText)
+		return commandOutcome{}, s.writeTagged(command.tag, responseNo, genericAuthFailText)
 	}
 
 	encoded, err := s.authenticateResponsePayload(command)
 	if err != nil {
 		if errors.Is(err, errInvalidInitialResponse) {
-			return s.writeTagged(command.tag, responseBad, "Invalid AUTHENTICATE initial response")
+			return commandOutcome{}, s.writeTagged(command.tag, responseBad, "Invalid AUTHENTICATE initial response")
 		}
 
 		if errors.Is(err, ErrCredentialRejected) || errors.Is(err, ErrMalformedCommand) {
-			return s.writeTagged(command.tag, responseBad, "Invalid AUTHENTICATE response")
+			return commandOutcome{}, s.writeTagged(command.tag, responseBad, "Invalid AUTHENTICATE response")
 		}
 
-		return err
+		return commandOutcome{}, err
 	}
 
 	credentials, err := parseSASLCredentials(
@@ -125,7 +126,7 @@ func (s *Session) handleAuthenticate(ctx context.Context, command preauthCommand
 		s.context.MaxBearerTokenBytes,
 	)
 	if err != nil {
-		return s.writeTagged(command.tag, responseBad, "Invalid AUTHENTICATE response")
+		return commandOutcome{}, s.writeTagged(command.tag, responseBad, "Invalid AUTHENTICATE response")
 	}
 	defer credentials.Clear()
 
@@ -152,7 +153,7 @@ func authenticateInitialResponse(token argumentToken) (string, error) {
 	return token.value, nil
 }
 
-// readSASLContinuation prompts for and reads one bounded AUTHENTICATE response.
+// readSASLContinuation writes a continuation request and reads one bounded AUTHENTICATE response.
 func (s *Session) readSASLContinuation(tag string) (string, error) {
 	if _, err := s.writer.WriteString("+ \r\n"); err != nil {
 		return "", err

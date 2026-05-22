@@ -35,7 +35,7 @@ const (
 	pathContractUserAffinity       = "/api/v1/users/{user_key}/affinity"
 )
 
-// TestOpenAPIContractIncludesPlannedEndpointGroupSet checks the M0.5 route inventory.
+// TestOpenAPIContractIncludesPlannedEndpointGroupSet checks the planned route inventory.
 func TestOpenAPIContractIncludesPlannedEndpointGroupSet(t *testing.T) {
 	contract := loadContract(t)
 	planned := []struct {

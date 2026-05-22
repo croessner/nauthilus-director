@@ -18,9 +18,12 @@
 package imap
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -29,7 +32,9 @@ import (
 	"time"
 
 	"github.com/croessner/nauthilus-director/internal/backend"
+	"github.com/croessner/nauthilus-director/internal/config"
 	"github.com/croessner/nauthilus-director/internal/nauthilus"
+	"github.com/croessner/nauthilus-director/internal/proxy"
 	"github.com/croessner/nauthilus-director/internal/routing"
 	"github.com/croessner/nauthilus-director/internal/state"
 )
@@ -222,6 +227,71 @@ func TestAuthenticatedPathBuildsRoutingAndPlacement(t *testing.T) {
 	assertAuthenticatedPipelineCalls(t, authenticator, router, store, selector)
 }
 
+// TestReplaySecretsAreClearedBeforeProxyMode verifies credential replay does not enter long-lived state.
+func TestReplaySecretsAreClearedBeforeProxyMode(t *testing.T) {
+	credentials := plainCredentialsForBackendTest(t)
+	defer credentials.Clear()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+
+	proxyStarted := make(chan struct{}, 1)
+	runner := &recordingProxyRunner{
+		check: func(proxy.PipeConfig) {
+			if !credentials.Secret().IsZero() {
+				t.Errorf("credential secret was still present at proxy start")
+			}
+			proxyStarted <- struct{}{}
+		},
+	}
+
+	session, err := NewSession(pipelineSessionConfig(
+		&recordingAuthenticator{},
+		&recordingRoutingResolver{},
+		&recordingSessionStore{},
+		&recordingBackendSelector{},
+	), server)
+	if err != nil {
+		t.Fatalf("NewSession returned error: %v", err)
+	}
+	session.sessionStore = &recordingSessionStore{}
+	session.backendConnector = &recordingBackendConnector{}
+	session.proxyRunner = runner
+	session.placement = Placement{
+		Routing: routing.RoutingResult{Tenant: defaultTenantName, AccountKey: "alice@example.test"},
+		Affinity: state.AffinityRecord{
+			Key: state.AffinityKey{Tenant: defaultTenantName, AccountKey: "alice@example.test"},
+		},
+		Backend: backend.SelectionResult{Backend: testReplayPipelineBackend()},
+	}
+	session.placed = true
+
+	done := make(chan error, 1)
+	go func() {
+		_, transitionErr := session.transitionAuthenticatedSession(context.Background(), "A001", credentials)
+		done <- transitionErr
+	}()
+
+	if line := readPipeLine(t, client); line != "A001 OK Authentication completed\r\n" {
+		t.Fatalf("frontend auth response = %q, want OK", line)
+	}
+
+	select {
+	case <-proxyStarted:
+	case <-time.After(time.Second):
+		t.Fatal("proxy mode did not start")
+	}
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("transitionAuthenticatedSession returned error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for transition")
+	}
+}
+
 // assertAuthenticatedPipelineCalls verifies the auth, routing, session and selector requests.
 func assertAuthenticatedPipelineCalls(
 	t *testing.T,
@@ -408,10 +478,12 @@ func (r *recordingRoutingResolver) Resolve(_ context.Context, request routing.Ro
 }
 
 type recordingSessionStore struct {
-	calls  int
-	record state.SessionRecord
-	result state.AffinityRecord
-	err    error
+	calls          int
+	heartbeatCalls int
+	closeCalls     int
+	record         state.SessionRecord
+	result         state.AffinityRecord
+	err            error
 }
 
 // OpenSession records the session-open request and returns the configured affinity.
@@ -432,11 +504,15 @@ func (s *recordingSessionStore) HeartbeatSession(
 	string,
 	time.Duration,
 ) (state.AffinityRecord, error) {
+	s.heartbeatCalls++
+
 	return state.AffinityRecord{}, nil
 }
 
-// CloseSession is unused by the auth pipeline tests.
+// CloseSession records terminal lease release during fake proxy mode.
 func (s *recordingSessionStore) CloseSession(context.Context, state.AffinityKey, string) (state.AffinityRecord, error) {
+	s.closeCalls++
+
 	return state.AffinityRecord{}, nil
 }
 
@@ -451,6 +527,9 @@ type recordingBackendSelector struct {
 func (s *recordingBackendSelector) Select(_ context.Context, request backend.SelectionRequest) (backend.SelectionResult, error) {
 	s.calls++
 	s.request = request
+	if s.result.Backend.Protocol == "" {
+		s.result.Backend = defaultPipelineBackend(s.result.Backend.Identifier)
+	}
 
 	return s.result, s.err
 }
@@ -471,8 +550,134 @@ func pipelineSessionConfig(
 	config.RoutingResolver = resolver
 	config.SessionStore = sessionStore
 	config.BackendSelector = selector
+	config.BackendConnector = &recordingBackendConnector{}
+	config.ProxyRunner = &recordingProxyRunner{}
 
 	return config
+}
+
+// defaultPipelineBackend fills successful pipeline tests with explicit backend auth policy.
+func defaultPipelineBackend(identifier string) backend.Backend {
+	if strings.TrimSpace(identifier) == "" {
+		identifier = "selected-imap"
+	}
+
+	return backend.Backend{
+		Identifier: identifier,
+		Protocol:   backendProtocol,
+		Address:    "127.0.0.1:1143",
+		TLS: backend.TLSConfig{
+			Mode:          backendTLSStartTLS,
+			ServerName:    "mailstore.example.test",
+			MinTLSVersion: backendTLSMinDefault,
+		},
+		Auth: backend.AuthConfig{
+			Mode: backendAuthModeMasterUser,
+			MasterUser: backend.MasterUserConfig{
+				Username:   "director-master",
+				Password:   config.Secret("master-secret"),
+				UserFormat: "{user}*{master_user}",
+				Mechanism:  mechanismPlain,
+			},
+		},
+	}
+}
+
+// testReplayPipelineBackend returns a credential-replay backend for transition tests.
+func testReplayPipelineBackend() backend.Backend {
+	target := defaultPipelineBackend("replay-imap")
+	target.Auth = backend.AuthConfig{
+		Mode: backendAuthModeCredentialReplay,
+		CredentialReplay: backend.CredentialReplayConfig{
+			RequireBackendTLS: true,
+			PreserveMechanism: true,
+			AllowedMechanisms: []string{mechanismPlain, mechanismLogin, mechanismXOAUTH2, mechanismOAuthBearer},
+		},
+	}
+
+	return target
+}
+
+// readPipeLine reads one CRLF-terminated line from a net.Pipe connection.
+func readPipeLine(t *testing.T, conn net.Conn) string {
+	t.Helper()
+
+	if err := conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+
+	reader := bufio.NewReader(conn)
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		t.Fatalf("read pipe line: %v", err)
+	}
+
+	return line
+}
+
+// recordingBackendConnector returns an already prepared fake backend connection.
+type recordingBackendConnector struct {
+	calls  int
+	target backend.Backend
+}
+
+// Connect records the selected backend and prepares a fake auth-capable stream.
+func (c *recordingBackendConnector) Connect(_ context.Context, target backend.Backend, _ time.Duration) (*BackendConnection, error) {
+	c.calls++
+	c.target = target
+
+	client, server := net.Pipe()
+	connection := newBackendConnection(client)
+	connection.capabilities = testBackendCapabilities()
+	connection.tlsActive = true
+	connection.tlsVerified = true
+
+	go serveOneBackendAuthCommand(server)
+
+	return connection, nil
+}
+
+// serveOneBackendAuthCommand accepts one backend auth command and then waits for proxy close.
+func serveOneBackendAuthCommand(conn net.Conn) {
+	defer func() { _ = conn.Close() }()
+
+	reader := bufio.NewReader(conn)
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		return
+	}
+
+	tag, _, _ := strings.Cut(strings.TrimSpace(line), " ")
+	if tag == "" {
+		return
+	}
+
+	_, _ = io.WriteString(conn, tag+" OK backend auth completed\r\n")
+	_, _ = io.Copy(io.Discard, reader)
+}
+
+// recordingProxyRunner records transparent proxy start and releases the test lease.
+type recordingProxyRunner struct {
+	calls  int
+	config proxy.PipeConfig
+	check  func(proxy.PipeConfig)
+	err    error
+}
+
+// Run records proxy config, applies an optional assertion and closes both streams.
+func (r *recordingProxyRunner) Run(ctx context.Context, config proxy.PipeConfig) (proxy.Result, error) {
+	r.calls++
+	r.config = config
+	if r.check != nil {
+		r.check(config)
+	}
+	if config.Lease != nil {
+		_ = config.Lease.Close(ctx)
+	}
+	_ = config.Frontend.Close()
+	_ = config.Backend.Close()
+
+	return proxy.Result{Class: proxy.ResultClientClosed}, r.err
 }
 
 // mustPipelineChain creates the real auth-attribute plus hash fallback resolver chain.

@@ -21,35 +21,37 @@ import (
 	"errors"
 	"net"
 	"strings"
+	"time"
 
 	"github.com/croessner/nauthilus-director/internal/backend"
 	"github.com/croessner/nauthilus-director/internal/nauthilus"
+	"github.com/croessner/nauthilus-director/internal/proxy"
 	"github.com/croessner/nauthilus-director/internal/routing"
 	"github.com/croessner/nauthilus-director/internal/state"
 )
 
 // authenticateAndPlace maps frontend credentials through Nauthilus and director placement.
-func (s *Session) authenticateAndPlace(ctx context.Context, tag string, credentials *frontendCredentials) error {
+func (s *Session) authenticateAndPlace(ctx context.Context, tag string, credentials *frontendCredentials) (commandOutcome, error) {
 	result, err := s.authenticateWithAuthority(ctx, credentials)
 	if err != nil {
-		return s.writeTagged(tag, responseNo, authUnavailableText)
+		return commandOutcome{}, s.writeTagged(tag, responseNo, authUnavailableText)
 	}
 
 	switch result.Decision {
 	case nauthilus.DecisionAuthenticated:
 		if err := s.placeAuthenticatedSession(ctx, credentials, result); err != nil {
-			return s.writeTagged(tag, responseNo, authUnavailableText)
+			return commandOutcome{}, s.writeTagged(tag, responseNo, authUnavailableText)
 		}
 
 		s.authenticated = true
 
-		return s.writeTagged(tag, responseOK, authSuccessText)
+		return s.transitionAuthenticatedSession(ctx, tag, credentials)
 	case nauthilus.DecisionRejected:
-		return s.writeTagged(tag, responseNo, rejectedAuthResponseText(result.StatusMessage))
+		return commandOutcome{}, s.writeTagged(tag, responseNo, rejectedAuthResponseText(result.StatusMessage))
 	case nauthilus.DecisionTemporaryFailure:
-		return s.writeTagged(tag, responseNo, authUnavailableText)
+		return commandOutcome{}, s.writeTagged(tag, responseNo, authUnavailableText)
 	default:
-		return s.writeTagged(tag, responseNo, authUnavailableText)
+		return commandOutcome{}, s.writeTagged(tag, responseNo, authUnavailableText)
 	}
 }
 
@@ -117,6 +119,10 @@ func (s *Session) placeAuthenticatedSession(
 	affinity, err := s.sessionStore.OpenSession(ctx, sessionRecord)
 	if err != nil {
 		return err
+	}
+
+	if affinity.Key == (state.AffinityKey{}) {
+		affinity.Key = sessionRecord.Key
 	}
 
 	selectedShardTag := selectedAffinityShard(routingResult, affinity)
@@ -269,4 +275,132 @@ func (s *Session) ensurePlacementDependencies() error {
 	}
 
 	return nil
+}
+
+// transitionAuthenticatedSession connects, authenticates to the backend and enters proxy mode.
+func (s *Session) transitionAuthenticatedSession(
+	ctx context.Context,
+	tag string,
+	credentials *frontendCredentials,
+) (commandOutcome, error) {
+	connection, err := s.backendConnector.Connect(ctx, s.placement.Backend.Backend, s.context.BackendConnectTimeout)
+	if err != nil {
+		_ = s.closePlacedSession(context.Background())
+
+		return commandOutcome{}, s.writeTagged(tag, responseNo, authUnavailableText)
+	}
+
+	if err := AuthenticateBackend(connection, s.placement.Backend.Backend, credentials); err != nil {
+		_ = connection.Conn().Close()
+		_ = s.closePlacedSession(context.Background())
+
+		return commandOutcome{}, s.writeTagged(tag, responseNo, authUnavailableText)
+	}
+
+	credentials.Clear()
+
+	if err := s.writeTagged(tag, responseOK, authSuccessText); err != nil {
+		_ = connection.Conn().Close()
+		_ = s.closePlacedSession(context.Background())
+
+		return commandOutcome{}, err
+	}
+
+	if err := s.writer.Flush(); err != nil {
+		_ = connection.Conn().Close()
+		_ = s.closePlacedSession(context.Background())
+
+		return commandOutcome{}, err
+	}
+
+	handoff := s.BufferedProxyHandoff()
+	_, err = s.proxyRunner.Run(ctx, proxy.PipeConfig{
+		Frontend:          handoff.Frontend(),
+		Backend:           connection.Conn(),
+		BufferedToBackend: handoff.Buffered(),
+		BufferedToClient:  connection.Buffered(),
+		IdleTimeout:       s.context.ProxyIdleTimeout,
+		HeartbeatInterval: s.proxyHeartbeatInterval(),
+		Lease:             s.proxyLease(),
+	})
+
+	return commandOutcome{closeSession: true, flushed: true}, err
+}
+
+// closePlacedSession closes a Redis lease when backend setup fails before proxy mode owns it.
+func (s *Session) closePlacedSession(ctx context.Context) error {
+	if s.sessionStore == nil || !s.placed {
+		return nil
+	}
+
+	_, err := s.sessionStore.CloseSession(ctx, s.placementAffinityKey(), s.context.ID)
+
+	return err
+}
+
+// proxyLease builds the state lifecycle hook used by transparent proxy mode.
+func (s *Session) proxyLease() proxy.LeaseLifecycle {
+	if s.sessionStore == nil || !s.placed {
+		return nil
+	}
+
+	return &sessionLeaseLifecycle{
+		store:     s.sessionStore,
+		key:       s.placementAffinityKey(),
+		sessionID: s.context.ID,
+		ttl:       s.context.SessionLeaseTTL,
+	}
+}
+
+// proxyHeartbeatInterval derives a stable heartbeat cadence below the lease TTL.
+func (s *Session) proxyHeartbeatInterval() time.Duration {
+	ttl := s.context.SessionLeaseTTL
+	if ttl <= 0 {
+		ttl = s.context.ProxyIdleTimeout
+	}
+
+	if ttl <= 0 {
+		return time.Minute
+	}
+
+	interval := ttl / 2
+	if interval <= 0 {
+		return ttl
+	}
+
+	return interval
+}
+
+// placementAffinityKey returns the Redis key for the opened session lease.
+func (s *Session) placementAffinityKey() state.AffinityKey {
+	if s.placement.Affinity.Key != (state.AffinityKey{}) {
+		return s.placement.Affinity.Key
+	}
+
+	return state.AffinityKey{
+		Tenant:     normalizedRoutingFact(s.placement.Routing.Tenant),
+		AccountKey: normalizedAccount(s.placement.Routing.AccountKey),
+	}
+}
+
+// sessionLeaseLifecycle adapts Redis session methods to the proxy lifecycle.
+type sessionLeaseLifecycle struct {
+	store     state.SessionStore
+	key       state.AffinityKey
+	sessionID string
+	ttl       time.Duration
+}
+
+// Heartbeat refreshes the active session lease while proxy mode is running.
+func (l *sessionLeaseLifecycle) Heartbeat(ctx context.Context) error {
+	_, err := l.store.HeartbeatSession(ctx, l.key, l.sessionID, l.ttl)
+
+	return err
+}
+
+// Close releases the active session lease at proxy end.
+func (l *sessionLeaseLifecycle) Close(ctx context.Context) error {
+	_, err := l.store.CloseSession(ctx, l.key, l.sessionID)
+
+	return err
 }

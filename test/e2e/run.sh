@@ -66,4 +66,4 @@ printf 'SKIP e2e: ManageSieve backend scenario deferred until the production Man
 printf 'SKIP e2e: POP3 backend scenario deferred until the production POP3 protocol entrypoint exists\n'
 printf 'SKIP e2e: Redis active-affinity smoke deferred until a production state scenario needs a Redis-compatible test service\n'
 printf 'SKIP e2e: Docker interoperability lane deferred; future lane must use pinned Postfix and Dovecot assets and skip when unavailable\n'
-printf 'nauthilus-director e2e: completed with only scaffold-safe M0 checks\n'
+printf 'nauthilus-director e2e: completed with scaffold-safe checks\n'

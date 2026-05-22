@@ -20,6 +20,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
 	"net/netip"
 	"strings"
 )
@@ -256,23 +257,9 @@ func validateDirector(director DirectorConfig, authorities map[string]AuthorityC
 		requireNonNegativeInt(path+".weight", backend.Weight, problems)
 		requirePositiveInt(path+".max_connections", backend.MaxConnections, problems)
 		validateMaintenanceMode(path+".maintenance", backend.Maintenance, director.Maintenance.DefaultMode, problems)
-		switch backend.Auth.Mode {
-		case backendAuthModeMasterUser:
-			if backend.Auth.MasterUser.PasswordFile.IsZero() {
-				addProblem(problems, path+".auth.master_user.password_file is required in master_user mode")
-			}
-		case backendAuthModeCredentialReplay:
-			if len(backend.Auth.CredentialReplay.AllowedMechanisms) == 0 {
-				addProblem(problems, path+".auth.credential_replay.allowed_mechanisms is required in credential_replay mode")
-			}
-		case backendAuthModeSASL:
-			if backend.Auth.SASL.PasswordFile.IsZero() {
-				addProblem(problems, path+".auth.sasl.password_file is required in sasl mode")
-			}
-		case backendAuthModeNone, backendAuthModeMTLS:
-		default:
-			addProblem(problems, path+".auth.mode must be none, mtls, sasl, master_user, or credential_replay")
-		}
+		validateBackendAddress(path+".address", backend.Address, problems)
+		validateBackendTLS(path+".tls", backend.TLS, problems)
+		validateBackendAuth(path+".auth", backend, problems)
 		if backend.HealthCheck.Enabled && backend.HealthCheck.PasswordFile.IsZero() {
 			addProblem(problems, path+".health_check.password_file is required when health check is enabled")
 		}
@@ -330,6 +317,122 @@ func validateIMAPListener(path string, imap IMAPListenerConfig, problems *[]stri
 func validIMAPAuthMechanism(mechanism string) bool {
 	switch strings.ToUpper(strings.TrimSpace(mechanism)) {
 	case "PLAIN", "XOAUTH2", "OAUTHBEARER":
+		return true
+	default:
+		return false
+	}
+}
+
+// validateBackendAddress keeps protocol backend transports TCP-only.
+func validateBackendAddress(path string, address string, problems *[]string) {
+	address = strings.TrimSpace(address)
+	if address == "" {
+		addProblem(problems, path+" is required")
+
+		return
+	}
+
+	if strings.HasPrefix(strings.ToLower(address), "unix:") || strings.HasPrefix(address, "/") {
+		addProblem(problems, path+" must be a TCP host:port address; Unix socket backend addresses are not supported for IMAP backend connectivity")
+
+		return
+	}
+
+	host, port, err := net.SplitHostPort(address)
+	if err != nil || strings.TrimSpace(host) == "" || strings.TrimSpace(port) == "" {
+		addProblem(problems, path+" must be a TCP host:port address")
+	}
+}
+
+// validateBackendTLS checks TLS mode vocabulary and hostname-verification prerequisites.
+func validateBackendTLS(path string, tlsConfig BackendTLSConfig, problems *[]string) {
+	mode := strings.ToLower(strings.TrimSpace(tlsConfig.Mode))
+	switch mode {
+	case "disabled", "plaintext":
+		return
+	case "starttls", "implicit":
+	default:
+		addProblem(problems, path+".mode must be disabled, plaintext, starttls, or implicit")
+
+		return
+	}
+
+	if strings.TrimSpace(tlsConfig.MinTLSVersion) == "" {
+		addProblem(problems, path+".min_tls_version is required when backend TLS is enabled")
+	}
+}
+
+// validateBackendAuth checks mode-specific backend authentication requirements.
+func validateBackendAuth(path string, backend BackendConfig, problems *[]string) {
+	mode := strings.ToLower(strings.TrimSpace(backend.Auth.Mode))
+	protocol := strings.ToLower(strings.TrimSpace(backend.Protocol))
+	if protocol == protocolIMAP {
+		switch mode {
+		case backendAuthModeMasterUser, backendAuthModeCredentialReplay:
+		default:
+			addProblem(problems, path+".mode for IMAP backends must be master_user or credential_replay")
+
+			return
+		}
+	}
+
+	switch mode {
+	case backendAuthModeMasterUser:
+		validateMasterUserAuth(path+".master_user", backend.Auth.MasterUser, problems)
+	case backendAuthModeCredentialReplay:
+		validateCredentialReplayAuth(path+".credential_replay", backend.Auth.CredentialReplay, problems)
+	case backendAuthModeSASL:
+		if backend.Auth.SASL.PasswordFile.IsZero() {
+			addProblem(problems, path+".sasl.password_file is required in sasl mode")
+		}
+	case backendAuthModeNone, backendAuthModeMTLS:
+	default:
+		addProblem(problems, path+".mode must be none, mtls, sasl, master_user, or credential_replay")
+	}
+}
+
+// validateMasterUserAuth checks configured administrative IMAP login material.
+func validateMasterUserAuth(path string, masterUser BackendMasterUserConfig, problems *[]string) {
+	if strings.TrimSpace(masterUser.Username) == "" {
+		addProblem(problems, path+".username is required in master_user mode")
+	}
+	if masterUser.PasswordFile.IsZero() {
+		addProblem(problems, path+".password_file is required in master_user mode")
+	}
+	if strings.TrimSpace(masterUser.UserFormat) == "" {
+		addProblem(problems, path+".user_format is required in master_user mode")
+	}
+	if !validBackendPasswordMechanism(masterUser.Mechanism) {
+		addProblem(problems, path+".mechanism must be plain or login")
+	}
+}
+
+// validateCredentialReplayAuth checks replay allowlists before runtime can use credentials.
+func validateCredentialReplayAuth(path string, replay BackendCredentialReplayConfig, problems *[]string) {
+	if len(replay.AllowedMechanisms) == 0 {
+		addProblem(problems, path+".allowed_mechanisms is required in credential_replay mode")
+	}
+	for _, mechanism := range replay.AllowedMechanisms {
+		if !validBackendReplayMechanism(mechanism) {
+			addProblem(problems, path+".allowed_mechanisms contains unsupported mechanism "+mechanism)
+		}
+	}
+}
+
+// validBackendPasswordMechanism reports whether a backend password flow can use the mechanism.
+func validBackendPasswordMechanism(mechanism string) bool {
+	switch strings.ToLower(strings.TrimSpace(mechanism)) {
+	case "plain", "login":
+		return true
+	default:
+		return false
+	}
+}
+
+// validBackendReplayMechanism reports whether credential replay can preserve this mechanism.
+func validBackendReplayMechanism(mechanism string) bool {
+	switch strings.ToLower(strings.TrimSpace(mechanism)) {
+	case "plain", "login", "xoauth2", "oauthbearer":
 		return true
 	default:
 		return false

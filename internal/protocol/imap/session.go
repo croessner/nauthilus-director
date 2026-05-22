@@ -30,6 +30,7 @@ import (
 
 	"github.com/croessner/nauthilus-director/internal/backend"
 	"github.com/croessner/nauthilus-director/internal/nauthilus"
+	"github.com/croessner/nauthilus-director/internal/proxy"
 	"github.com/croessner/nauthilus-director/internal/routing"
 	"github.com/croessner/nauthilus-director/internal/state"
 )
@@ -72,14 +73,16 @@ func (h *Handler) Serve(ctx context.Context, conn net.Conn) error {
 
 // Session owns one accepted IMAP frontend stream until auth and proxy handling take over.
 type Session struct {
-	context         Context
-	conn            net.Conn
-	reader          *bufio.Reader
-	writer          *bufio.Writer
-	authenticator   nauthilus.Authenticator
-	routingResolver routing.RoutingResolver
-	sessionStore    state.SessionStore
-	backendSelector backend.Selector
+	context          Context
+	conn             net.Conn
+	reader           *bufio.Reader
+	writer           *bufio.Writer
+	authenticator    nauthilus.Authenticator
+	routingResolver  routing.RoutingResolver
+	sessionStore     state.SessionStore
+	backendSelector  backend.Selector
+	backendConnector BackendConnector
+	proxyRunner      proxy.Runner
 
 	tlsActive     bool
 	clientID      string
@@ -100,6 +103,16 @@ func NewSession(config SessionConfig, conn net.Conn) (*Session, error) {
 	}
 
 	leaseTTL := defaultSessionLeaseTTL(config.SessionLeaseTTL, config.ProxyIdleTimeout)
+
+	backendConnector := config.BackendConnector
+	if backendConnector == nil {
+		backendConnector = NewTCPBackendConnector(nil)
+	}
+
+	proxyRunner := config.ProxyRunner
+	if proxyRunner == nil {
+		proxyRunner = proxy.NewPipe()
+	}
 
 	return &Session{
 		context: Context{
@@ -127,14 +140,16 @@ func NewSession(config SessionConfig, conn net.Conn) (*Session, error) {
 			SessionLeaseTTL:        leaseTTL,
 			SessionIdleGrace:       defaultSessionIdleGrace(config.SessionIdleGrace, leaseTTL),
 		},
-		conn:            conn,
-		reader:          bufio.NewReaderSize(conn, config.MaxPreauthLineBytes+1),
-		writer:          bufio.NewWriter(conn),
-		authenticator:   config.Authenticator,
-		routingResolver: config.RoutingResolver,
-		sessionStore:    config.SessionStore,
-		backendSelector: config.BackendSelector,
-		tlsActive:       config.TLSMode == TLSModeImplicit,
+		conn:             conn,
+		reader:           bufio.NewReaderSize(conn, config.MaxPreauthLineBytes+1),
+		writer:           bufio.NewWriter(conn),
+		authenticator:    config.Authenticator,
+		routingResolver:  config.RoutingResolver,
+		sessionStore:     config.SessionStore,
+		backendSelector:  config.BackendSelector,
+		backendConnector: backendConnector,
+		proxyRunner:      proxyRunner,
+		tlsActive:        config.TLSMode == TLSModeImplicit,
 	}, nil
 }
 
@@ -292,8 +307,10 @@ func (s *Session) processPreauthLine(ctx context.Context, line []byte) (bool, er
 	}
 
 	outcome, err := s.handlePreauthCommand(ctx, command)
-	if flushErr := s.writer.Flush(); flushErr != nil {
-		return false, flushErr
+	if !outcome.flushed {
+		if flushErr := s.writer.Flush(); flushErr != nil {
+			return false, flushErr
+		}
 	}
 
 	if errors.Is(err, ErrUnsupportedCommand) {

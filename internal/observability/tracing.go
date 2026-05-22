@@ -79,7 +79,7 @@ func SpanName(boundary TraceBoundary) (string, bool) {
 	return name, ok
 }
 
-// PreparedSpanNames returns all M0 span names in deterministic order.
+// PreparedSpanNames returns all prepared span names in deterministic order.
 func PreparedSpanNames() []string {
 	boundaries := []TraceBoundary{
 		TraceBoundaryBackendConnect,

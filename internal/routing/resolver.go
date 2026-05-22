@@ -20,7 +20,7 @@ import "context"
 
 // RoutingResolver resolves logical routing facts without backend selection.
 //
-//nolint:revive // The M0 spec intentionally names this public boundary RoutingResolver.
+//nolint:revive // The public API intentionally names this boundary RoutingResolver.
 type RoutingResolver interface {
 	Resolve(ctx context.Context, request RoutingRequest) (RoutingResult, error)
 }

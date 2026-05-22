@@ -187,6 +187,55 @@ func TestBackendWeightZeroValidatesForStaticMaintenance(t *testing.T) {
 	}
 }
 
+// TestBackendValidationRejectsUnixSocketAddress keeps IMAP backend connectivity TCP-only.
+func TestBackendValidationRejectsUnixSocketAddress(t *testing.T) {
+	cfg := DefaultConfig()
+	backend := cfg.Director.Backends["mailstore-a-imap"]
+	backend.Address = "/run/imap/backend.sock"
+	cfg.Director.Backends["mailstore-a-imap"] = backend
+
+	err := NewLoader().Validate(cfg)
+	if err == nil {
+		t.Fatal("Validate accepted Unix socket backend address")
+	}
+	if !strings.Contains(err.Error(), "Unix socket backend addresses are not supported for IMAP backend connectivity") {
+		t.Fatalf("error = %q, want Unix socket rejection", err.Error())
+	}
+}
+
+// TestIMAPBackendValidationRejectsSilentAuthSkip keeps backend auth explicit for IMAP.
+func TestIMAPBackendValidationRejectsSilentAuthSkip(t *testing.T) {
+	cfg := DefaultConfig()
+	backend := cfg.Director.Backends["mailstore-a-imap"]
+	backend.Auth.Mode = "none"
+	cfg.Director.Backends["mailstore-a-imap"] = backend
+
+	err := NewLoader().Validate(cfg)
+	if err == nil {
+		t.Fatal("Validate accepted IMAP backend auth mode none")
+	}
+	if !strings.Contains(err.Error(), "for IMAP backends must be master_user or credential_replay") {
+		t.Fatalf("error = %q, want IMAP backend auth mode rejection", err.Error())
+	}
+}
+
+// TestBackendValidationRejectsInvalidReplayMechanism protects runtime replay allowlists.
+func TestBackendValidationRejectsInvalidReplayMechanism(t *testing.T) {
+	cfg := DefaultConfig()
+	backend := cfg.Director.Backends["mailstore-a-imap"]
+	backend.Auth.Mode = "credential_replay"
+	backend.Auth.CredentialReplay.AllowedMechanisms = []string{"plain", "xoauth2", "oauthbearer", "external"}
+	cfg.Director.Backends["mailstore-a-imap"] = backend
+
+	err := NewLoader().Validate(cfg)
+	if err == nil {
+		t.Fatal("Validate accepted invalid replay mechanism")
+	}
+	if !strings.Contains(err.Error(), "allowed_mechanisms contains unsupported mechanism external") {
+		t.Fatalf("error = %q, want replay mechanism rejection", err.Error())
+	}
+}
+
 // TestIncludeCycleDetected prevents recursive include loops from hanging startup.
 func TestIncludeCycleDetected(t *testing.T) {
 	root := t.TempDir()

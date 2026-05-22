@@ -55,6 +55,14 @@ func TestStaticRegistryIndexesByProtocolPoolAndShard(t *testing.T) {
 		t.Fatalf("backend index fields = %#v", backends[0])
 	}
 
+	if backends[0].TLS.Mode != "starttls" || backends[0].TLS.ServerName != "mailstore-a.example.org" {
+		t.Fatalf("backend TLS fields = %#v", backends[0].TLS)
+	}
+
+	if backends[0].Auth.Mode != "master_user" || backends[0].Auth.MasterUser.UserFormat == "" {
+		t.Fatalf("backend auth fields = %#v", backends[0].Auth)
+	}
+
 	_, err = registry.BackendsForShard(context.Background(), RegistryRequest{
 		Protocol:    protocolIMAP,
 		BackendPool: testPoolIMAP,
@@ -62,6 +70,19 @@ func TestStaticRegistryIndexesByProtocolPoolAndShard(t *testing.T) {
 	})
 	if !IsErrorKind(err, ErrorKindNoBackend) {
 		t.Fatalf("missing shard error = %v, want no_backend", err)
+	}
+}
+
+// TestStaticRegistryRejectsUnixSocketBackendAddress keeps backend transport TCP-only.
+func TestStaticRegistryRejectsUnixSocketBackendAddress(t *testing.T) {
+	cfg := config.DefaultConfig()
+	backendConfig := cfg.Director.Backends[testBackendID]
+	backendConfig.Address = "unix:/run/mailstore/imap.sock"
+	cfg.Director.Backends[testBackendID] = backendConfig
+
+	_, err := NewStaticRegistry(cfg.Director)
+	if !IsErrorKind(err, ErrorKindConfig) {
+		t.Fatalf("NewStaticRegistry error = %v, want config", err)
 	}
 }
 

@@ -83,7 +83,7 @@ func TestSanitizeLogFieldsRedactsSecretsAndCollapsesIdentityValues(t *testing.T)
 	}
 }
 
-// TestTraceSpanNamesPrepared verifies named M0 trace boundaries.
+// TestTraceSpanNamesPrepared verifies named trace boundaries.
 func TestTraceSpanNamesPrepared(t *testing.T) {
 	routingName, ok := SpanName(TraceBoundaryRoutingResolve)
 	if !ok {

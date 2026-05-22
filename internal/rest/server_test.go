@@ -38,7 +38,7 @@ const (
 	secretLeakSentinel     = "do-not-leak"
 )
 
-// TestServerFoundationEndpoints verifies completed M0 control API endpoints.
+// TestServerFoundationEndpoints verifies completed control API endpoints.
 func TestServerFoundationEndpoints(t *testing.T) {
 	server := httptest.NewServer(rest.NewServer(rest.Options{Version: testVersion}).Handler())
 	t.Cleanup(server.Close)
@@ -111,7 +111,7 @@ func TestRouteLookupRejectsCredentialBearingInput(t *testing.T) {
 	}
 }
 
-// TestRouteLookupWithoutCredentialsStaysDomainIncomplete keeps lookup side-effect-free in M0.
+// TestRouteLookupWithoutCredentialsStaysDomainIncomplete keeps lookup side-effect-free before implementation.
 func TestRouteLookupWithoutCredentialsStaysDomainIncomplete(t *testing.T) {
 	server := httptest.NewServer(rest.NewServer(rest.Options{Version: testVersion}).Handler())
 	t.Cleanup(server.Close)

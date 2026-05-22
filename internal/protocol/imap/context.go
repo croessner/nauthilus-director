@@ -22,6 +22,7 @@ import (
 
 	"github.com/croessner/nauthilus-director/internal/backend"
 	"github.com/croessner/nauthilus-director/internal/nauthilus"
+	"github.com/croessner/nauthilus-director/internal/proxy"
 	"github.com/croessner/nauthilus-director/internal/routing"
 	"github.com/croessner/nauthilus-director/internal/state"
 )
@@ -78,6 +79,8 @@ type SessionConfig struct {
 	RoutingResolver        routing.RoutingResolver
 	SessionStore           state.SessionStore
 	BackendSelector        backend.Selector
+	BackendConnector       BackendConnector
+	ProxyRunner            proxy.Runner
 }
 
 // Context records stable, secret-safe session metadata for protocol handling.

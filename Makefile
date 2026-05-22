@@ -111,7 +111,7 @@ e2e:
 
 docs-check:
 	@test -d docs || { echo "docs/ is required"; exit 1; }
-	@test -d docs/specs || { echo "docs/specs/ is required for specifications"; exit 1; }
+	@test -d docs/specs || { echo "docs/specs/ is required for design documents"; exit 1; }
 	@test -d docs/man || { echo "docs/man/ is required for manpages"; exit 1; }
 
 generate-openapi:
