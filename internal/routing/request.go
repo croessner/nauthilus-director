@@ -20,7 +20,7 @@ import "strings"
 
 // RoutingRequest carries authenticated identity and listener context into routing.
 //
-//nolint:revive // The M0 spec intentionally names this public boundary RoutingRequest.
+//nolint:revive // The public API intentionally names this boundary RoutingRequest.
 type RoutingRequest struct {
 	Tenant            string
 	Protocol          string

@@ -27,7 +27,7 @@ const (
 
 // RoutingResult contains logical routing facts only.
 //
-//nolint:revive // The M0 spec intentionally names this public boundary RoutingResult.
+//nolint:revive // The public API intentionally names this boundary RoutingResult.
 type RoutingResult struct {
 	AccountKey        string
 	Tenant            string

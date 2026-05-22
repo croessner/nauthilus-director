@@ -28,7 +28,7 @@ import (
 
 const maxRouteLookupInspectionBytes = 1 << 20
 
-// ControlAuthenticator is the M0 control-plane guard around generated routes.
+// ControlAuthenticator is the control-plane guard around generated routes.
 type ControlAuthenticator struct{}
 
 // NewControlAuthenticator creates the initial control API guard.
@@ -36,7 +36,7 @@ func NewControlAuthenticator() ControlAuthenticator {
 	return ControlAuthenticator{}
 }
 
-// Wrap applies M0 request guards before generated request decoding.
+// Wrap applies request guards before generated request decoding.
 func (a ControlAuthenticator) Wrap(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if a.shouldInspectRouteLookup(r) {

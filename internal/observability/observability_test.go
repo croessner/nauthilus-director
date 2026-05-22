@@ -83,7 +83,7 @@ func TestSanitizeLogFieldsRedactsSecretsAndCollapsesIdentityValues(t *testing.T)
 	}
 }
 
-// TestTraceSpanNamesPrepared verifies named M0 trace boundaries.
+// TestTraceSpanNamesPrepared verifies named trace boundaries.
 func TestTraceSpanNamesPrepared(t *testing.T) {
 	routingName, ok := SpanName(TraceBoundaryRoutingResolve)
 	if !ok {
@@ -105,5 +105,76 @@ func TestTraceSpanNamesPrepared(t *testing.T) {
 
 	if len(PreparedSpanNames()) == 0 {
 		t.Fatal("prepared span name list is empty")
+	}
+}
+
+// TestIMAPSessionSpanNamesPrepared verifies the IMAP session span boundaries.
+func TestIMAPSessionSpanNamesPrepared(t *testing.T) {
+	required := map[TraceBoundary]string{
+		TraceBoundaryBackendConnect: traceSpanBackendConnect,
+		TraceBoundaryBackendSelect:  traceSpanBackendSelect,
+		TraceBoundaryIMAPPreAuth:    traceSpanIMAPPreAuth,
+		TraceBoundaryNauthilusAuth:  traceSpanNauthilusAuth,
+		TraceBoundaryProxyPipe:      traceSpanProxyPipe,
+		TraceBoundaryRoutingResolve: traceSpanRoutingResolve,
+		TraceBoundarySession:        traceSpanSession,
+	}
+
+	for boundary, want := range required {
+		got, ok := SpanName(boundary)
+		if !ok {
+			t.Fatalf("span name for %q is missing", boundary)
+		}
+
+		if got != want {
+			t.Fatalf("span name for %q = %q, want %q", boundary, got, want)
+		}
+	}
+}
+
+// TestEventNormalizationAppliesLogAndMetricPolicies verifies runtime hooks cannot bypass policy helpers.
+func TestEventNormalizationAppliesLogAndMetricPolicies(t *testing.T) {
+	event, err := NewEvent(EventNauthilusAuth, TraceBoundaryNauthilusAuth, map[string]string{
+		fieldPassword:     "secret-password",
+		fieldSessionID:    "session-1",
+		metricLabelResult: "ok",
+	}, map[string]string{
+		metricLabelMechanism: "plain",
+		metricLabelOperation: "authenticate",
+		metricLabelProtocol:  "imap",
+		metricLabelResult:    "ok",
+	})
+	if err != nil {
+		t.Fatalf("NewEvent returned error: %v", err)
+	}
+
+	if event.SpanName != traceSpanNauthilusAuth {
+		t.Fatalf("span name = %q, want %q", event.SpanName, traceSpanNauthilusAuth)
+	}
+
+	if event.LogFields[fieldPassword] != RedactedValue {
+		t.Fatalf("password field = %q, want redacted", event.LogFields[fieldPassword])
+	}
+
+	if _, ok := event.LogFields[fieldSessionID]; ok {
+		t.Fatal("raw session ID remained in event log fields")
+	}
+
+	if event.LogFields["session_id_present"] != logBoolTrue {
+		t.Fatalf("session_id_present = %q, want true", event.LogFields["session_id_present"])
+	}
+
+	if err := event.MetricLabels.Validate(); err != nil {
+		t.Fatalf("event metric labels failed validation: %v", err)
+	}
+}
+
+// TestEventNormalizationRejectsForbiddenMetricLabels keeps raw errors out of result labels.
+func TestEventNormalizationRejectsForbiddenMetricLabels(t *testing.T) {
+	_, err := NewEvent(EventProxyPipe, TraceBoundaryProxyPipe, nil, map[string]string{
+		fieldRawError: "dial tcp failed with raw details",
+	})
+	if err == nil {
+		t.Fatal("NewEvent accepted raw_error as a metric label")
 	}
 }

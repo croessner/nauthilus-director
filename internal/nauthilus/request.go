@@ -20,6 +20,7 @@ const redactedSecret = "<redacted>"
 
 const (
 	safeFieldClientIPPresent          = "client_ip_present"
+	safeFieldClientIDPresent          = "client_id_present"
 	safeFieldExternalSessionIDPresent = "external_session_id_present"
 	safeFieldHasCredential            = "has_credential"
 	safeFieldMethod                   = "method"
@@ -62,16 +63,17 @@ func (s Secret) String() string {
 
 // RequestContext contains auth-facing client and protocol context.
 type RequestContext struct {
-	Username           string
-	ClientIP           string
-	ClientPort         string
-	ClientHostname     string
-	ClientID           string
-	ExternalSessionID  string
-	UserAgent          string
-	LocalIP            string
-	LocalPort          string
-	Protocol           string
+	Username          string
+	ClientIP          string
+	ClientPort        string
+	ClientHostname    string
+	ClientID          string
+	ExternalSessionID string
+	UserAgent         string
+	LocalIP           string
+	LocalPort         string
+	Protocol          string
+	// Method carries the normalized frontend authentication mechanism sent to Nauthilus.
 	Method             string
 	TLS                string
 	TLSSessionID       string
@@ -137,6 +139,10 @@ func safeContextFields(context RequestContext, operation authOperation) SafeFiel
 
 	if context.ClientIP != "" {
 		fields[safeFieldClientIPPresent] = boolString(true)
+	}
+
+	if context.ClientID != "" {
+		fields[safeFieldClientIDPresent] = boolString(true)
 	}
 
 	if context.ExternalSessionID != "" {

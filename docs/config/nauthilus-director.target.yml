@@ -244,7 +244,6 @@ director:
         capabilities:
           - IMAP4rev1
           - ID
-          - ENABLE
           - SASL-IR
           - STARTTLS
           - AUTH=PLAIN
@@ -254,6 +253,7 @@ director:
           - plain
           - xoauth2
           - oauthbearer
+        require_id_before_auth: false
 
     imaps:
       protocol: imap
@@ -279,7 +279,6 @@ director:
         capabilities:
           - IMAP4rev1
           - ID
-          - ENABLE
           - SASL-IR
           - AUTH=PLAIN
           - AUTH=XOAUTH2
@@ -288,6 +287,7 @@ director:
           - plain
           - xoauth2
           - oauthbearer
+        require_id_before_auth: false
 
     lmtp:
       protocol: lmtp

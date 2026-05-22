@@ -331,8 +331,9 @@ type ListenerTLSConfig struct {
 }
 
 type IMAPListenerConfig struct {
-	Capabilities   []string `mapstructure:"capabilities" yaml:"capabilities"`
-	AuthMechanisms []string `mapstructure:"auth_mechanisms" yaml:"auth_mechanisms"`
+	Capabilities        []string `mapstructure:"capabilities" yaml:"capabilities"`
+	AuthMechanisms      []string `mapstructure:"auth_mechanisms" yaml:"auth_mechanisms"`
+	RequireIDBeforeAuth bool     `mapstructure:"require_id_before_auth" yaml:"require_id_before_auth"`
 }
 
 type LMTPListenerConfig struct {

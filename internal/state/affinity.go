@@ -34,6 +34,10 @@ type AffinityRecord struct {
 	Generation         string
 	ActiveSessionCount int
 	ExpiresAt          time.Time
+	LeaseExpiresAt     time.Time
+	ServerTime         time.Time
+	Status             string
+	Present            bool
 }
 
 // SessionRecord describes one lease-backed frontend session.
@@ -42,7 +46,8 @@ type SessionRecord struct {
 	Key       AffinityKey
 	Protocol  string
 	ShardTag  string
-	ExpiresAt time.Time
+	LeaseTTL  time.Duration
+	IdleGrace time.Duration
 }
 
 // BackendRuntimeState contains mutable operator state for a backend entry.
@@ -57,14 +62,13 @@ type BackendRuntimeState struct {
 // AffinityStore owns Redis-backed shard affinity reads and mutations.
 type AffinityStore interface {
 	LookupAffinity(ctx context.Context, key AffinityKey) (AffinityRecord, error)
-	ClearAffinity(ctx context.Context, key AffinityKey) error
 }
 
 // SessionStore owns lease-backed session coordination.
 type SessionStore interface {
 	OpenSession(ctx context.Context, record SessionRecord) (AffinityRecord, error)
-	HeartbeatSession(ctx context.Context, sessionID string, ttl time.Duration) error
-	CloseSession(ctx context.Context, sessionID string) error
+	HeartbeatSession(ctx context.Context, key AffinityKey, sessionID string, ttl time.Duration) (AffinityRecord, error)
+	CloseSession(ctx context.Context, key AffinityKey, sessionID string) (AffinityRecord, error)
 }
 
 // RuntimeStateStore owns Redis-backed operator runtime state.

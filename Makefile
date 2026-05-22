@@ -8,6 +8,7 @@ GOLANGCI_NEW_FROM_REV ?= HEAD
 GO ?= go
 POC_DIR := poc
 E2E_SCRIPT ?= ./test/e2e/run.sh
+E2E_INTEROP_SCRIPT ?= ./test/e2e/interop/run.sh
 
 MODULE_DIRS := $(shell find . -name go.mod -not -path './poc/*' -not -path './vendor/*' -exec dirname {} \; | sort)
 
@@ -109,9 +110,16 @@ e2e:
 		echo "No E2E runner found yet; skipping e2e"; \
 	fi
 
+e2e-interop:
+	@if [ -x "$(E2E_INTEROP_SCRIPT)" ]; then \
+		"$(E2E_INTEROP_SCRIPT)"; \
+	else \
+		echo "No interop E2E runner found yet; skipping e2e-interop"; \
+	fi
+
 docs-check:
 	@test -d docs || { echo "docs/ is required"; exit 1; }
-	@test -d docs/specs || { echo "docs/specs/ is required for specifications"; exit 1; }
+	@test -d docs/specs || { echo "docs/specs/ is required for design documents"; exit 1; }
 	@test -d docs/man || { echo "docs/man/ is required for manpages"; exit 1; }
 
 generate-openapi:
@@ -144,4 +152,4 @@ poc-race:
 version:
 	@echo $(VERSION)
 
-.PHONY: all build build-check clean fix vet lint-config lint test race e2e docs-check generate-openapi check-openapi copyright-check guardrails poc-test poc-race version
+.PHONY: all build build-check clean fix vet lint-config lint test race e2e e2e-interop docs-check generate-openapi check-openapi copyright-check guardrails poc-test poc-race version

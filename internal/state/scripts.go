@@ -209,6 +209,8 @@ func ClassifyRedisError(operation string, err error) error {
 	switch {
 	case errors.Is(err, redis.Nil):
 		return newStateError(RedisErrorKindAmbiguousState, operation, "missing required state", err)
+	case strings.Contains(message, "NDAMBIGUOUS"):
+		return newStateError(RedisErrorKindAmbiguousState, operation, "ambiguous state", err)
 	case strings.Contains(message, "NOSCRIPT"):
 		return newStateError(RedisErrorKindScriptMissing, operation, "script not loaded", err)
 	default:

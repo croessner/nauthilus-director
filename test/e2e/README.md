@@ -5,20 +5,21 @@ externally visible behavior. This lane must start real binaries or test
 processes, communicate through public sockets, REST endpoints, and CLI commands
 where applicable, and avoid internal package shortcuts as proof of behavior.
 
-M0 creates the harness entrypoint and fake-service scaffold before production
-mail protocol entrypoints exist. The runner therefore succeeds with explicit
-stable `SKIP e2e:` lines for protocol scenarios, Redis-backed state scenarios,
-and Docker interoperability until those entrypoints are available.
+The harness entrypoint starts production listener/session code in a test
+process, talks IMAP through public loopback sockets, and keeps deterministic
+fake services in-process unless the behavior under test requires an external
+artifact.
 
 ## Guardrail Lane
 
 The default lane is fake-service based and deterministic:
 
 - fake Nauthilus HTTP authority under `test/e2e/fakes/nauthilus_http/`
-- fake Nauthilus gRPC authority under `test/e2e/fakes/nauthilus_grpc/`
-- fake IMAP, LMTP, ManageSieve, and POP3 backends under `test/e2e/fakes/`
-- public loopback sockets or Unix sockets only when the tested listener
-  behavior is explicitly socket based
+- scaffolded fake Nauthilus gRPC authority under
+  `test/e2e/fakes/nauthilus_grpc/`
+- fake IMAP backend under `test/e2e/fakes/imap_backend/`
+- public loopback sockets for frontend IMAP, STARTTLS, implicit TLS and fake
+  backend handoff
 - CLI commands through `nauthilus-directorctl` when the control API exists
 - REST calls through the control listener when `runtime.servers.control` is
   runnable from the server binary
@@ -43,8 +44,8 @@ production active affinity.
 
 ## Docker Interoperability
 
-Docker interoperability is intentionally additive to this guardrail lane and is
-documented in `test/e2e/interop/README.md`. It must not replace deterministic
-fake-service coverage for edge cases, forced failures, routing decisions, or
-secret-safe observability.
-
+Docker interoperability is intentionally additive to this guardrail lane and
+runs through `make e2e-interop`. It is documented in
+`test/e2e/interop/README.md` and must not replace deterministic fake-service
+coverage for edge cases, forced failures, routing decisions, or secret-safe
+observability.

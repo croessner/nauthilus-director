@@ -1,0 +1,258 @@
+// Copyright (C) 2026 Christian Rößner
+//
+// SPDX-License-Identifier: AGPL-3.0-only
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, version 3 of the License.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+package imap
+
+import (
+	"context"
+	"errors"
+	"maps"
+	"strings"
+
+	"github.com/croessner/nauthilus-director/internal/observability"
+	"github.com/croessner/nauthilus-director/internal/proxy"
+)
+
+const (
+	observationOperationAuth           = "auth"
+	observationOperationBackendAuth    = "backend_auth"
+	observationOperationBackendConnect = "backend_connect"
+	observationOperationBackendSelect  = "backend_select"
+	observationOperationPreAuth        = "pre_auth"
+	observationOperationProxy          = "proxy"
+	observationOperationRouting        = "routing"
+	observationOperationSession        = "session"
+
+	observationResultFailure = "failure"
+	observationResultOK      = "ok"
+	observationResultStart   = "start"
+
+	reasonBackendAuth     = "backend_auth_failed"
+	reasonBackendConnect  = "backend_connect_failed"
+	reasonCanceled        = "canceled"
+	reasonCredentialInput = "credential_input"
+	reasonLiteral         = "literal"
+	reasonProtocol        = "protocol"
+	reasonState           = "state_failed"
+	reasonUnsupported     = "unsupported"
+
+	obsFieldAffinitySource    = "affinity_source"
+	obsFieldBackendIdentifier = "backend_identifier"
+	obsFieldBackendPool       = "backend_pool"
+	obsFieldCommand           = "command"
+	obsFieldListener          = "listener"
+	obsFieldMechanism         = "mechanism"
+	obsFieldOperation         = "operation"
+	obsFieldProtocol          = "protocol"
+	obsFieldProxyResult       = "proxy_result"
+	obsFieldReasonClass       = "reason_class"
+	obsFieldRemoteAddr        = "remote_addr"
+	obsFieldResult            = "result"
+	obsFieldRoutingSource     = "routing_source"
+	obsFieldService           = "service"
+	obsFieldSessionID         = "session_id"
+	obsFieldShardTag          = "shard_tag"
+	obsFieldTLSMode           = "tls_mode"
+)
+
+// recordSessionStart emits the first accepted-session observation.
+func (s *Session) recordSessionStart(ctx context.Context) {
+	s.recordObservation(ctx, observability.EventSessionStart, observability.TraceBoundarySession, observationOperationSession, observationResultStart, "", nil)
+}
+
+// recordSessionEnd emits the terminal accepted-session observation.
+func (s *Session) recordSessionEnd(ctx context.Context, err error) {
+	s.recordObservation(ctx, observability.EventSessionEnd, observability.TraceBoundarySession, observationOperationSession, resultLabel(err), reasonClass(err), nil)
+}
+
+// recordPreAuth emits one IMAP pre-auth parser or command observation.
+func (s *Session) recordPreAuth(ctx context.Context, command string, result string, reason string) {
+	s.recordObservation(ctx, observability.EventIMAPPreAuth, observability.TraceBoundaryIMAPPreAuth, observationOperationPreAuth, result, reason, map[string]string{
+		obsFieldCommand: strings.ToLower(strings.TrimSpace(command)),
+	})
+}
+
+// recordNauthilusAuth emits one authority authentication observation.
+func (s *Session) recordNauthilusAuth(ctx context.Context, mechanism string, result string, reason string) {
+	s.recordObservation(ctx, observability.EventNauthilusAuth, observability.TraceBoundaryNauthilusAuth, observationOperationAuth, result, reason, map[string]string{
+		obsFieldMechanism: strings.ToLower(strings.TrimSpace(mechanism)),
+	})
+}
+
+// recordRoutingResolve emits one director-owned routing observation.
+func (s *Session) recordRoutingResolve(ctx context.Context, result string, reason string, source string) {
+	s.recordObservation(ctx, observability.EventRoutingResolve, observability.TraceBoundaryRoutingResolve, observationOperationRouting, result, reason, map[string]string{
+		obsFieldRoutingSource: source,
+	})
+}
+
+// recordAffinityOpen emits the Redis-backed session-open observation.
+func (s *Session) recordAffinityOpen(ctx context.Context, result string, reason string, source string, shardTag string) {
+	s.recordObservation(ctx, observability.EventAffinityOpen, observability.TraceBoundaryRoutingResolve, "affinity_open", result, reason, map[string]string{
+		obsFieldAffinitySource: source,
+		obsFieldShardTag:       shardTag,
+	})
+}
+
+// recordBackendSelect emits one concrete backend selection observation.
+func (s *Session) recordBackendSelect(ctx context.Context, result string, reason string, shardTag string) {
+	s.recordObservation(ctx, observability.EventBackendSelect, observability.TraceBoundaryBackendSelect, observationOperationBackendSelect, result, reason, map[string]string{
+		obsFieldShardTag: shardTag,
+	})
+}
+
+// recordBackendConnect emits one backend connection observation.
+func (s *Session) recordBackendConnect(ctx context.Context, result string, reason string) {
+	s.recordObservation(ctx, observability.EventBackendConnect, observability.TraceBoundaryBackendConnect, observationOperationBackendConnect, result, reason, nil)
+}
+
+// recordBackendAuth emits one backend authentication observation.
+func (s *Session) recordBackendAuth(ctx context.Context, result string, reason string, mechanism string) {
+	s.recordObservation(ctx, observability.EventBackendAuth, observability.TraceBoundaryBackendConnect, observationOperationBackendAuth, result, reason, map[string]string{
+		obsFieldMechanism: strings.ToLower(strings.TrimSpace(mechanism)),
+	})
+}
+
+// recordProxyPipe emits the transparent proxy lifecycle observation.
+func (s *Session) recordProxyPipe(ctx context.Context, result proxy.Result, err error) {
+	reason := reasonClass(err)
+	if reason == "" {
+		reason = result.Class
+	}
+
+	s.recordObservation(ctx, observability.EventProxyPipe, observability.TraceBoundaryProxyPipe, observationOperationProxy, resultLabel(err), reason, map[string]string{
+		obsFieldProxyResult: result.Class,
+	})
+}
+
+// recordObservation builds a normalized event and drops impossible internal label mistakes.
+func (s *Session) recordObservation(
+	ctx context.Context,
+	name string,
+	boundary observability.TraceBoundary,
+	operation string,
+	result string,
+	reason string,
+	extraFields map[string]string,
+) {
+	recorder := observability.NormalizeRecorder(s.observability)
+	fields := s.observationFields(operation, result, reason)
+	maps.Copy(fields, extraFields)
+
+	labels := s.observationLabels(operation, result, reason, extraFields)
+
+	event, err := observability.NewEvent(name, boundary, fields, labels)
+	if err != nil {
+		return
+	}
+
+	recorder.Record(ctx, event)
+}
+
+// observationFields returns structured log fields before policy normalization.
+func (s *Session) observationFields(operation string, result string, reason string) map[string]string {
+	fields := map[string]string{
+		obsFieldBackendPool: s.context.BackendPool,
+		obsFieldListener:    s.context.ListenerName,
+		obsFieldOperation:   operation,
+		obsFieldProtocol:    protocolIMAP,
+		obsFieldRemoteAddr:  safeAddrString(s.context.RemoteAddr),
+		obsFieldResult:      result,
+		obsFieldService:     s.context.ServiceName,
+		obsFieldSessionID:   s.context.ID,
+		obsFieldTLSMode:     s.context.TLSMode,
+	}
+
+	if reason != "" {
+		fields[obsFieldReasonClass] = reason
+	}
+
+	if s.placed {
+		fields[obsFieldBackendIdentifier] = s.placement.Backend.Backend.Identifier
+		fields[obsFieldShardTag] = s.placement.SelectedShardTag
+	}
+
+	return fields
+}
+
+// observationLabels returns low-cardinality labels that must pass the allowlist.
+func (s *Session) observationLabels(operation string, result string, reason string, extraFields map[string]string) map[string]string {
+	labels := map[string]string{
+		obsFieldBackendPool: s.context.BackendPool,
+		obsFieldListener:    s.context.ListenerName,
+		obsFieldOperation:   operation,
+		obsFieldProtocol:    protocolIMAP,
+		obsFieldResult:      result,
+		obsFieldService:     s.context.ServiceName,
+		obsFieldTLSMode:     s.context.TLSMode,
+	}
+
+	if mechanism := extraFields[obsFieldMechanism]; mechanism != "" {
+		labels[obsFieldMechanism] = mechanism
+	}
+
+	if reason != "" {
+		labels[obsFieldReasonClass] = reason
+	}
+
+	if shardTag := extraFields[obsFieldShardTag]; shardTag != "" {
+		labels[obsFieldShardTag] = shardTag
+	} else if s.placed && s.placement.SelectedShardTag != "" {
+		labels[obsFieldShardTag] = s.placement.SelectedShardTag
+	}
+
+	return labels
+}
+
+// resultLabel turns an error into a bounded result value.
+func resultLabel(err error) string {
+	if err != nil {
+		return observationResultFailure
+	}
+
+	return observationResultOK
+}
+
+// reasonClass classifies errors without exposing raw error text.
+func reasonClass(err error) string {
+	switch {
+	case err == nil:
+		return ""
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		return reasonCanceled
+	case errors.Is(err, ErrBackendAuth), errors.Is(err, ErrBackendAuthPolicy):
+		return reasonBackendAuth
+	case errors.Is(err, ErrBackendConnect), errors.Is(err, ErrBackendTLS), errors.Is(err, ErrBackendProtocol):
+		return reasonBackendConnect
+	case errors.Is(err, ErrCredentialRejected), errors.Is(err, ErrCredentialTooLarge):
+		return reasonCredentialInput
+	case errors.Is(err, ErrPreauthLiteralTooLarge), errors.Is(err, ErrPreauthLiteralUnsupported):
+		return reasonLiteral
+	case errors.Is(err, ErrUnsupportedAuthMechanism), errors.Is(err, ErrUnsupportedCommand):
+		return reasonUnsupported
+	default:
+		return reasonProtocol
+	}
+}
+
+// safeAddrString returns address text only for sanitizer collapse into presence.
+func safeAddrString(addr interface{ String() string }) string {
+	if addr == nil {
+		return ""
+	}
+
+	return addr.String()
+}

@@ -95,7 +95,7 @@ observability:
 patch:
   - op: add
     path: director.listeners.imap.imap.capabilities
-    value: XTEST
+    value: STARTTLS
 `)
 	mainPath := writeConfigFile(t, root, "main.yaml", `env: dev
 includes:
@@ -138,8 +138,8 @@ patch:
 	}
 
 	capabilities := snapshot.Config.Director.Listeners["imap"].IMAP.Capabilities
-	if !containsString(capabilities, "XTEST") {
-		t.Fatalf("capabilities = %v, want XTEST added", capabilities)
+	if !containsString(capabilities, "STARTTLS") {
+		t.Fatalf("capabilities = %v, want STARTTLS added", capabilities)
 	}
 	mechanisms := snapshot.Config.Director.Listeners["imap"].IMAP.AuthMechanisms
 	if containsString(mechanisms, "oauthbearer") {
@@ -155,6 +155,84 @@ patch:
 		if strings.Contains(text, loaderKey) {
 			t.Fatalf("non-default dump contains loader key %q:\n%s", loaderKey, text)
 		}
+	}
+}
+
+// TestIMAPValidationRejectsUnsupportedEnableCapability keeps CAPABILITY output truthful.
+func TestIMAPValidationRejectsUnsupportedEnableCapability(t *testing.T) {
+	cfg := DefaultConfig()
+	entry := cfg.Director.Listeners["imap"]
+	entry.IMAP.Capabilities = append(entry.IMAP.Capabilities, "ENABLE")
+	cfg.Director.Listeners["imap"] = entry
+
+	err := NewLoader().Validate(cfg)
+	if err == nil {
+		t.Fatal("Validate accepted unsupported IMAP ENABLE capability")
+	}
+
+	if !strings.Contains(err.Error(), "must not advertise unsupported ENABLE") {
+		t.Fatalf("error = %q, want ENABLE validation", err.Error())
+	}
+}
+
+// TestBackendWeightZeroValidatesForStaticMaintenance allows selector-level initial placement exclusion.
+func TestBackendWeightZeroValidatesForStaticMaintenance(t *testing.T) {
+	cfg := DefaultConfig()
+	backend := cfg.Director.Backends["mailstore-a-imap"]
+	backend.Weight = 0
+	cfg.Director.Backends["mailstore-a-imap"] = backend
+
+	if err := NewLoader().Validate(cfg); err != nil {
+		t.Fatalf("Validate rejected weight zero backend: %v", err)
+	}
+}
+
+// TestBackendValidationRejectsUnixSocketAddress keeps IMAP backend connectivity TCP-only.
+func TestBackendValidationRejectsUnixSocketAddress(t *testing.T) {
+	cfg := DefaultConfig()
+	backend := cfg.Director.Backends["mailstore-a-imap"]
+	backend.Address = "/run/imap/backend.sock"
+	cfg.Director.Backends["mailstore-a-imap"] = backend
+
+	err := NewLoader().Validate(cfg)
+	if err == nil {
+		t.Fatal("Validate accepted Unix socket backend address")
+	}
+	if !strings.Contains(err.Error(), "Unix socket backend addresses are not supported for IMAP backend connectivity") {
+		t.Fatalf("error = %q, want Unix socket rejection", err.Error())
+	}
+}
+
+// TestIMAPBackendValidationRejectsSilentAuthSkip keeps backend auth explicit for IMAP.
+func TestIMAPBackendValidationRejectsSilentAuthSkip(t *testing.T) {
+	cfg := DefaultConfig()
+	backend := cfg.Director.Backends["mailstore-a-imap"]
+	backend.Auth.Mode = "none"
+	cfg.Director.Backends["mailstore-a-imap"] = backend
+
+	err := NewLoader().Validate(cfg)
+	if err == nil {
+		t.Fatal("Validate accepted IMAP backend auth mode none")
+	}
+	if !strings.Contains(err.Error(), "for IMAP backends must be master_user or credential_replay") {
+		t.Fatalf("error = %q, want IMAP backend auth mode rejection", err.Error())
+	}
+}
+
+// TestBackendValidationRejectsInvalidReplayMechanism protects runtime replay allowlists.
+func TestBackendValidationRejectsInvalidReplayMechanism(t *testing.T) {
+	cfg := DefaultConfig()
+	backend := cfg.Director.Backends["mailstore-a-imap"]
+	backend.Auth.Mode = "credential_replay"
+	backend.Auth.CredentialReplay.AllowedMechanisms = []string{"plain", "xoauth2", "oauthbearer", "external"}
+	cfg.Director.Backends["mailstore-a-imap"] = backend
+
+	err := NewLoader().Validate(cfg)
+	if err == nil {
+		t.Fatal("Validate accepted invalid replay mechanism")
+	}
+	if !strings.Contains(err.Error(), "allowed_mechanisms contains unsupported mechanism external") {
+		t.Fatalf("error = %q, want replay mechanism rejection", err.Error())
 	}
 }
 
