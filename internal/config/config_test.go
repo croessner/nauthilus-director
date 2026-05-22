@@ -175,6 +175,18 @@ func TestIMAPValidationRejectsUnsupportedEnableCapability(t *testing.T) {
 	}
 }
 
+// TestBackendWeightZeroValidatesForStaticMaintenance allows selector-level initial placement exclusion.
+func TestBackendWeightZeroValidatesForStaticMaintenance(t *testing.T) {
+	cfg := DefaultConfig()
+	backend := cfg.Director.Backends["mailstore-a-imap"]
+	backend.Weight = 0
+	cfg.Director.Backends["mailstore-a-imap"] = backend
+
+	if err := NewLoader().Validate(cfg); err != nil {
+		t.Fatalf("Validate rejected weight zero backend: %v", err)
+	}
+}
+
 // TestIncludeCycleDetected prevents recursive include loops from hanging startup.
 func TestIncludeCycleDetected(t *testing.T) {
 	root := t.TempDir()

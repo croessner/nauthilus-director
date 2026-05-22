@@ -63,6 +63,7 @@ type SessionOptions struct {
 	BearerTokenMaxBytes int
 	DefaultTenant       string
 	SessionLeaseTTL     time.Duration
+	SessionIdleGrace    time.Duration
 }
 
 // ManagerOption customizes listener manager construction in tests and future assembly code.
@@ -282,6 +283,7 @@ func defaultSessionHandlerFactory(options SessionOptions) SessionHandler {
 		MaxBearerTokenBytes:    options.BearerTokenMaxBytes,
 		RequireIDBeforeAuth:    requireIDBeforeAuth,
 		SessionLeaseTTL:        options.SessionLeaseTTL,
+		SessionIdleGrace:       options.SessionIdleGrace,
 		PreauthTimeout:         options.Timeouts.Preauth.Std(),
 		AuthTimeout:            options.Timeouts.Auth.Std(),
 		BackendConnectTimeout:  options.Timeouts.BackendConnect.Std(),

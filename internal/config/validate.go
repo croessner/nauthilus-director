@@ -203,6 +203,7 @@ func validateDirector(director DirectorConfig, authorities map[string]AuthorityC
 	if director.RuntimeOverrides.Backends.MaxWeight < director.RuntimeOverrides.Backends.MinWeight {
 		addProblem(problems, "director.runtime_overrides.backends.max_weight must not be lower than min_weight")
 	}
+	validateMaintenanceMode("director.maintenance.default_mode", director.Maintenance.DefaultMode, "disabled", problems)
 
 	for name, listener := range director.Listeners {
 		path := "director.listeners." + name
@@ -239,16 +240,22 @@ func validateDirector(director DirectorConfig, authorities map[string]AuthorityC
 	for name, pool := range director.BackendPools {
 		path := "director.backend_pools." + name
 		for _, backendName := range pool.Backends {
-			if _, ok := director.Backends[backendName]; !ok {
+			backend, ok := director.Backends[backendName]
+			if !ok {
 				addProblem(problems, path+".backends references unknown backend "+backendName)
+				continue
+			}
+			if !strings.EqualFold(strings.TrimSpace(pool.Protocol), strings.TrimSpace(backend.Protocol)) {
+				addProblem(problems, path+".backends references backend with different protocol "+backendName)
 			}
 		}
 	}
 
 	for name, backend := range director.Backends {
 		path := "director.backends." + name
-		requirePositiveInt(path+".weight", backend.Weight, problems)
+		requireNonNegativeInt(path+".weight", backend.Weight, problems)
 		requirePositiveInt(path+".max_connections", backend.MaxConnections, problems)
+		validateMaintenanceMode(path+".maintenance", backend.Maintenance, director.Maintenance.DefaultMode, problems)
 		switch backend.Auth.Mode {
 		case backendAuthModeMasterUser:
 			if backend.Auth.MasterUser.PasswordFile.IsZero() {
@@ -278,6 +285,20 @@ func validateDirector(director DirectorConfig, authorities map[string]AuthorityC
 	requirePositiveDuration("director.health.timeout", director.Health.Timeout, problems)
 	requirePositiveDuration("director.maintenance.drain_timeout", director.Maintenance.DrainTimeout, problems)
 	requirePositiveDuration("director.maintenance.hard_kill_grace", director.Maintenance.HardKillGrace, problems)
+}
+
+// validateMaintenanceMode rejects static backend maintenance modes that selectors cannot enforce.
+func validateMaintenanceMode(path string, value string, defaultMode string, problems *[]string) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		value = strings.ToLower(strings.TrimSpace(defaultMode))
+	}
+
+	switch value {
+	case "disabled", "soft", "hard":
+	default:
+		addProblem(problems, path+" must be disabled, soft, or hard")
+	}
 }
 
 // validateIMAPListener rejects unsupported pre-auth advertisements and mechanisms.
@@ -326,6 +347,13 @@ func requirePositiveDuration(path string, value Duration, problems *[]string) {
 func requirePositiveInt(path string, value int, problems *[]string) {
 	if value <= 0 {
 		addProblem(problems, path+" must be greater than zero")
+	}
+}
+
+// requireNonNegativeInt records a path-specific error for negative integers.
+func requireNonNegativeInt(path string, value int, problems *[]string) {
+	if value < 0 {
+		addProblem(problems, path+" must not be negative")
 	}
 }
 

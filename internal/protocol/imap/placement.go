@@ -21,7 +21,6 @@ import (
 	"errors"
 	"net"
 	"strings"
-	"time"
 
 	"github.com/croessner/nauthilus-director/internal/backend"
 	"github.com/croessner/nauthilus-director/internal/nauthilus"
@@ -122,7 +121,7 @@ func (s *Session) placeAuthenticatedSession(
 
 	selectedShardTag := selectedAffinityShard(routingResult, affinity)
 
-	backendResult, err := s.backendSelector.Select(ctx, s.selectionRequest(routingResult, selectedShardTag))
+	backendResult, err := s.backendSelector.Select(ctx, s.selectionRequest(routingResult, selectedShardTag, affinity))
 	if err != nil {
 		return err
 	}
@@ -188,18 +187,20 @@ func (s *Session) sessionRecord(result routing.RoutingResult) state.SessionRecor
 		},
 		Protocol:  protocolIMAP,
 		ShardTag:  normalizedRoutingFact(result.ShardTag),
-		ExpiresAt: time.Now().UTC().Add(ttl),
+		LeaseTTL:  ttl,
+		IdleGrace: s.context.SessionIdleGrace,
 	}
 }
 
 // selectionRequest builds the backend selector input from the final active shard.
-func (s *Session) selectionRequest(result routing.RoutingResult, shardTag string) backend.SelectionRequest {
+func (s *Session) selectionRequest(result routing.RoutingResult, shardTag string, affinity state.AffinityRecord) backend.SelectionRequest {
 	return backend.SelectionRequest{
-		AccountKey:  normalizedAccount(result.AccountKey),
-		Tenant:      normalizedRoutingFact(result.Tenant),
-		ShardTag:    normalizedRoutingFact(shardTag),
-		Protocol:    protocolIMAP,
-		BackendPool: s.context.BackendPool,
+		AccountKey:     normalizedAccount(result.AccountKey),
+		Tenant:         normalizedRoutingFact(result.Tenant),
+		ShardTag:       normalizedRoutingFact(shardTag),
+		Protocol:       protocolIMAP,
+		BackendPool:    s.context.BackendPool,
+		ActiveAffinity: affinityActiveForSelection(result, affinity),
 	}
 }
 
@@ -210,6 +211,16 @@ func selectedAffinityShard(result routing.RoutingResult, affinity state.Affinity
 	}
 
 	return normalizedRoutingFact(result.ShardTag)
+}
+
+// affinityActiveForSelection reports whether Redis returned an existing pin.
+func affinityActiveForSelection(result routing.RoutingResult, affinity state.AffinityRecord) bool {
+	switch affinity.Status {
+	case "created", "":
+		return normalizedRoutingFact(affinity.ShardTag) != "" && normalizedRoutingFact(affinity.ShardTag) != normalizedRoutingFact(result.ShardTag)
+	default:
+		return affinity.Present
+	}
 }
 
 // normalizedAccount returns the canonical account key used for routing and affinity.

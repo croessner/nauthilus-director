@@ -58,7 +58,7 @@ func newManagedListener(
 	runtime config.RuntimeConfig,
 	security config.DirectorSecurityConfig,
 	defaultTenant string,
-	sessionLeaseTTL time.Duration,
+	sessionIdleGrace time.Duration,
 	options managerOptions,
 ) (*managedListener, error) {
 	if err := validateNetwork(entry.Network); err != nil {
@@ -100,7 +100,8 @@ func newManagedListener(
 			Authenticator:       authenticator,
 			BearerTokenMaxBytes: authority.Mechanisms.Bearer.TokenMaxBytes,
 			DefaultTenant:       defaultTenant,
-			SessionLeaseTTL:     sessionLeaseTTL,
+			SessionLeaseTTL:     runtime.Timeouts.ProxyIdle.Std(),
+			SessionIdleGrace:    sessionIdleGrace,
 		}),
 		proxyProtocol: proxyPolicy,
 		listenConfig:  options.listenConfig,

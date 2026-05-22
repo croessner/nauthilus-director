@@ -16,7 +16,15 @@
 
 package backend
 
-import "context"
+import (
+	"context"
+	"errors"
+	"fmt"
+	"sort"
+	"strings"
+
+	"github.com/croessner/nauthilus-director/internal/config"
+)
 
 // MaintenanceMode describes runtime backend placement eligibility.
 type MaintenanceMode string
@@ -36,14 +44,25 @@ type Backend struct {
 	Protocol        string
 	BackendPool     string
 	ShardTag        string
+	Address         string
 	MaintenanceMode MaintenanceMode
 	Weight          int
+	MaxConnections  int
+}
+
+// Pool describes one configured backend pool and its selector.
+type Pool struct {
+	Name     string
+	Protocol string
+	Selector string
+	Backends []string
 }
 
 // Registry exposes backend entries without owning selection policy.
 type Registry interface {
 	BackendsForShard(ctx context.Context, request RegistryRequest) ([]Backend, error)
 	Lookup(ctx context.Context, identifier string) (Backend, error)
+	Pool(ctx context.Context, name string) (Pool, error)
 }
 
 // RegistryRequest identifies the logical shard-to-backend lookup.
@@ -51,4 +70,351 @@ type RegistryRequest struct {
 	Protocol    string
 	BackendPool string
 	ShardTag    string
+}
+
+// ErrorKind classifies fail-closed backend registry and selector failures.
+type ErrorKind string
+
+const (
+	// ErrorKindAmbiguous reports backend state that cannot be interpreted safely.
+	ErrorKindAmbiguous ErrorKind = "ambiguous"
+	// ErrorKindConfig reports unusable local backend configuration.
+	ErrorKindConfig ErrorKind = "config"
+	// ErrorKindInvalidRequest reports missing selector or registry request facts.
+	ErrorKindInvalidRequest ErrorKind = "invalid_request"
+	// ErrorKindNoBackend reports that no statically eligible backend exists.
+	ErrorKindNoBackend ErrorKind = "no_backend"
+)
+
+// Error is a secret-safe backend registry or selector failure.
+type Error struct {
+	Kind      ErrorKind
+	Operation string
+	Message   string
+	cause     error
+}
+
+// Error returns a backend diagnostic without high-cardinality account values.
+func (e *Error) Error() string {
+	if e == nil {
+		return ""
+	}
+
+	message := "backend failed: " + string(e.Kind)
+	if e.Operation != "" {
+		message += " operation=" + e.Operation
+	}
+
+	if e.Message != "" {
+		message += " " + e.Message
+	}
+
+	return message
+}
+
+// Unwrap exposes the wrapped cause for classification.
+func (e *Error) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+
+	return e.cause
+}
+
+// IsErrorKind reports whether err wraps a backend error with kind.
+func IsErrorKind(err error, kind ErrorKind) bool {
+	var backendErr *Error
+	if !errors.As(err, &backendErr) {
+		return false
+	}
+
+	return backendErr.Kind == kind
+}
+
+// StaticRegistry indexes backend config by protocol, pool and shard.
+type StaticRegistry struct {
+	pools    map[string]Pool
+	backends map[string]Backend
+	byShard  map[registryKey][]Backend
+}
+
+type registryKey struct {
+	protocol    string
+	backendPool string
+	shardTag    string
+}
+
+// NewStaticRegistry builds a fail-closed static backend registry from typed config.
+func NewStaticRegistry(director config.DirectorConfig) (*StaticRegistry, error) {
+	registry := &StaticRegistry{
+		pools:    make(map[string]Pool, len(director.BackendPools)),
+		backends: make(map[string]Backend, len(director.Backends)),
+		byShard:  make(map[registryKey][]Backend),
+	}
+
+	poolNames := sortedPoolNames(director.BackendPools)
+	for _, poolName := range poolNames {
+		poolConfig := director.BackendPools[poolName]
+
+		pool, err := newBackendPool(poolName, poolConfig)
+		if err != nil {
+			return nil, err
+		}
+
+		registry.pools[pool.Name] = pool
+
+		for _, backendID := range pool.Backends {
+			backendConfig, ok := director.Backends[backendID]
+			if !ok {
+				return nil, newBackendError(ErrorKindConfig, "registry", "pool references unknown backend", nil)
+			}
+
+			entry, err := newBackend(pool.Name, backendID, backendConfig, director.Maintenance.DefaultMode)
+			if err != nil {
+				return nil, err
+			}
+
+			if entry.Protocol != pool.Protocol {
+				return nil, newBackendError(ErrorKindConfig, "registry", "pool and backend protocol mismatch", nil)
+			}
+
+			if existing, exists := registry.backends[entry.Identifier]; exists && existing.BackendPool != entry.BackendPool {
+				return nil, newBackendError(ErrorKindAmbiguous, "registry", "backend appears in multiple pools", nil)
+			}
+
+			registry.backends[entry.Identifier] = entry
+
+			key := registryKey{
+				protocol:    entry.Protocol,
+				backendPool: entry.BackendPool,
+				shardTag:    entry.ShardTag,
+			}
+			registry.byShard[key] = append(registry.byShard[key], entry)
+		}
+	}
+
+	registry.sort()
+
+	return registry, nil
+}
+
+// BackendsForShard returns configured backends matching protocol, pool and shard.
+func (r *StaticRegistry) BackendsForShard(_ context.Context, request RegistryRequest) ([]Backend, error) {
+	if r == nil {
+		return nil, newBackendError(ErrorKindConfig, "registry", "registry unavailable", nil)
+	}
+
+	key, err := newRegistryKey(request)
+	if err != nil {
+		return nil, err
+	}
+
+	backends, ok := r.byShard[key]
+	if !ok {
+		return nil, newBackendError(ErrorKindNoBackend, "registry", "no backend for shard", nil)
+	}
+
+	return append([]Backend(nil), backends...), nil
+}
+
+// Lookup returns one configured backend by identifier.
+func (r *StaticRegistry) Lookup(_ context.Context, identifier string) (Backend, error) {
+	if r == nil {
+		return Backend{}, newBackendError(ErrorKindConfig, "registry", "registry unavailable", nil)
+	}
+
+	identifier = strings.TrimSpace(identifier)
+	if identifier == "" {
+		return Backend{}, newBackendError(ErrorKindInvalidRequest, "registry", "backend identifier required", nil)
+	}
+
+	backend, ok := r.backends[identifier]
+	if !ok {
+		return Backend{}, newBackendError(ErrorKindNoBackend, "registry", "backend not found", nil)
+	}
+
+	return backend, nil
+}
+
+// Pool returns one configured backend pool by name.
+func (r *StaticRegistry) Pool(_ context.Context, name string) (Pool, error) {
+	if r == nil {
+		return Pool{}, newBackendError(ErrorKindConfig, "registry", "registry unavailable", nil)
+	}
+
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return Pool{}, newBackendError(ErrorKindInvalidRequest, "registry", "backend pool required", nil)
+	}
+
+	pool, ok := r.pools[name]
+	if !ok {
+		return Pool{}, newBackendError(ErrorKindNoBackend, "registry", "backend pool not found", nil)
+	}
+
+	pool.Backends = append([]string(nil), pool.Backends...)
+
+	return pool, nil
+}
+
+// sort keeps registry readback deterministic for tests and diagnostics.
+func (r *StaticRegistry) sort() {
+	for key := range r.byShard {
+		sort.Slice(r.byShard[key], func(left int, right int) bool {
+			return r.byShard[key][left].Identifier < r.byShard[key][right].Identifier
+		})
+	}
+}
+
+// newBackendPool normalizes one configured backend pool.
+func newBackendPool(name string, pool config.BackendPoolConfig) (Pool, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return Pool{}, newBackendError(ErrorKindConfig, "registry", "backend pool name required", nil)
+	}
+
+	protocol := normalizeProtocol(pool.Protocol)
+	if protocol == "" {
+		return Pool{}, newBackendError(ErrorKindConfig, "registry", "backend pool protocol required", nil)
+	}
+
+	selector := strings.ToLower(strings.TrimSpace(pool.Selector))
+	if selector == "" {
+		return Pool{}, newBackendError(ErrorKindConfig, "registry", "backend pool selector required", nil)
+	}
+
+	backends := make([]string, 0, len(pool.Backends))
+
+	seen := make(map[string]struct{}, len(pool.Backends))
+	for _, backendID := range pool.Backends {
+		backendID = strings.TrimSpace(backendID)
+		if backendID == "" {
+			return Pool{}, newBackendError(ErrorKindConfig, "registry", "backend identifier required", nil)
+		}
+
+		if _, exists := seen[backendID]; exists {
+			return Pool{}, newBackendError(ErrorKindAmbiguous, "registry", "duplicate backend in pool", nil)
+		}
+
+		seen[backendID] = struct{}{}
+		backends = append(backends, backendID)
+	}
+
+	if len(backends) == 0 {
+		return Pool{}, newBackendError(ErrorKindConfig, "registry", "backend pool must not be empty", nil)
+	}
+
+	return Pool{Name: name, Protocol: protocol, Selector: selector, Backends: backends}, nil
+}
+
+// newBackend normalizes one configured backend entry.
+func newBackend(poolName string, identifier string, backend config.BackendConfig, defaultMode string) (Backend, error) {
+	identifier = strings.TrimSpace(identifier)
+	if identifier == "" {
+		return Backend{}, newBackendError(ErrorKindConfig, "registry", "backend identifier required", nil)
+	}
+
+	protocol := normalizeProtocol(backend.Protocol)
+	if protocol == "" {
+		return Backend{}, newBackendError(ErrorKindConfig, "registry", "backend protocol required", nil)
+	}
+
+	shardTag := strings.TrimSpace(backend.ShardTag)
+	if shardTag == "" {
+		return Backend{}, newBackendError(ErrorKindConfig, "registry", "backend shard required", nil)
+	}
+
+	mode, err := normalizeMaintenanceMode(backend.Maintenance, defaultMode)
+	if err != nil {
+		return Backend{}, err
+	}
+
+	if backend.Weight < 0 {
+		return Backend{}, newBackendError(ErrorKindConfig, "registry", "backend weight must not be negative", nil)
+	}
+
+	if backend.MaxConnections <= 0 {
+		return Backend{}, newBackendError(ErrorKindConfig, "registry", "backend max connections required", nil)
+	}
+
+	return Backend{
+		Identifier:      identifier,
+		Protocol:        protocol,
+		BackendPool:     poolName,
+		ShardTag:        shardTag,
+		Address:         strings.TrimSpace(backend.Address),
+		MaintenanceMode: mode,
+		Weight:          backend.Weight,
+		MaxConnections:  backend.MaxConnections,
+	}, nil
+}
+
+// normalizeMaintenanceMode applies the default mode and validates known static states.
+func normalizeMaintenanceMode(value string, defaultMode string) (MaintenanceMode, error) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		value = strings.ToLower(strings.TrimSpace(defaultMode))
+	}
+
+	switch MaintenanceMode(value) {
+	case MaintenanceModeDisabled, MaintenanceModeSoft, MaintenanceModeHard:
+		return MaintenanceMode(value), nil
+	default:
+		return "", newBackendError(ErrorKindConfig, "registry", "unsupported maintenance mode", nil)
+	}
+}
+
+// newRegistryKey normalizes a shard lookup request.
+func newRegistryKey(request RegistryRequest) (registryKey, error) {
+	key := registryKey{
+		protocol:    normalizeProtocol(request.Protocol),
+		backendPool: strings.TrimSpace(request.BackendPool),
+		shardTag:    strings.TrimSpace(request.ShardTag),
+	}
+
+	if key.protocol == "" {
+		return registryKey{}, newBackendError(ErrorKindInvalidRequest, "registry", "protocol required", nil)
+	}
+
+	if key.backendPool == "" {
+		return registryKey{}, newBackendError(ErrorKindInvalidRequest, "registry", "backend pool required", nil)
+	}
+
+	if key.shardTag == "" {
+		return registryKey{}, newBackendError(ErrorKindInvalidRequest, "registry", "shard tag required", nil)
+	}
+
+	return key, nil
+}
+
+// sortedPoolNames returns backend pool names in deterministic order.
+func sortedPoolNames(pools map[string]config.BackendPoolConfig) []string {
+	names := make([]string, 0, len(pools))
+	for name := range pools {
+		names = append(names, name)
+	}
+
+	sort.Strings(names)
+
+	return names
+}
+
+// normalizeProtocol makes protocol matching case-insensitive at the boundary.
+func normalizeProtocol(protocol string) string {
+	return strings.ToLower(strings.TrimSpace(protocol))
+}
+
+// newBackendError creates a classified backend error.
+func newBackendError(kind ErrorKind, operation string, message string, cause error) *Error {
+	return &Error{
+		Kind:      kind,
+		Operation: operation,
+		Message:   message,
+		cause:     cause,
+	}
+}
+
+// formatBackendCount builds a secret-free backend count diagnostic.
+func formatBackendCount(count int) string {
+	return fmt.Sprintf("%d backend candidates", count)
 }

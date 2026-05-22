@@ -303,8 +303,10 @@ func (h *sessionHarness) write(t *testing.T, input string) {
 func (h *sessionHarness) readLine(t *testing.T) string {
 	t.Helper()
 
-	if err := h.client.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
-		t.Fatalf("set read deadline: %v", err)
+	if h.reader.Buffered() == 0 {
+		if err := h.client.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+			t.Fatalf("set read deadline: %v", err)
+		}
 	}
 
 	line, err := h.reader.ReadString('\n')

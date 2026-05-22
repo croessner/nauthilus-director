@@ -311,6 +311,10 @@ func assertBackendSelectionRequest(t *testing.T, selector *recordingBackendSelec
 	if selector.request.Protocol != "imap" || selector.request.BackendPool != "imap-default" {
 		t.Fatalf("selector request = %#v", selector.request)
 	}
+
+	if !selector.request.ActiveAffinity {
+		t.Fatal("selector did not receive active affinity marker")
+	}
 }
 
 // TestAuthAttributeAndHashFallbackPlacement verifies real resolver chain flow from auth attributes.
@@ -422,13 +426,18 @@ func (s *recordingSessionStore) OpenSession(_ context.Context, record state.Sess
 }
 
 // HeartbeatSession is unused by the auth pipeline tests.
-func (s *recordingSessionStore) HeartbeatSession(context.Context, string, time.Duration) error {
-	return nil
+func (s *recordingSessionStore) HeartbeatSession(
+	context.Context,
+	state.AffinityKey,
+	string,
+	time.Duration,
+) (state.AffinityRecord, error) {
+	return state.AffinityRecord{}, nil
 }
 
 // CloseSession is unused by the auth pipeline tests.
-func (s *recordingSessionStore) CloseSession(context.Context, string) error {
-	return nil
+func (s *recordingSessionStore) CloseSession(context.Context, state.AffinityKey, string) (state.AffinityRecord, error) {
+	return state.AffinityRecord{}, nil
 }
 
 type recordingBackendSelector struct {

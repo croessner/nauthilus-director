@@ -67,6 +67,7 @@ type SessionConfig struct {
 	MaxBearerTokenBytes    int
 	RequireIDBeforeAuth    bool
 	SessionLeaseTTL        time.Duration
+	SessionIdleGrace       time.Duration
 	PreauthTimeout         time.Duration
 	AuthTimeout            time.Duration
 	BackendConnectTimeout  time.Duration
@@ -103,6 +104,7 @@ type Context struct {
 	MaxBearerTokenBytes    int
 	RequireIDBeforeAuth    bool
 	SessionLeaseTTL        time.Duration
+	SessionIdleGrace       time.Duration
 }
 
 // StartTLSAvailable reports whether this session can later expose STARTTLS.

@@ -99,6 +99,8 @@ func NewSession(config SessionConfig, conn net.Conn) (*Session, error) {
 		return nil, err
 	}
 
+	leaseTTL := defaultSessionLeaseTTL(config.SessionLeaseTTL, config.ProxyIdleTimeout)
+
 	return &Session{
 		context: Context{
 			ID:                     sessionID,
@@ -122,7 +124,8 @@ func NewSession(config SessionConfig, conn net.Conn) (*Session, error) {
 			AuthMechanisms:         append([]string(nil), config.AuthMechanisms...),
 			MaxBearerTokenBytes:    config.MaxBearerTokenBytes,
 			RequireIDBeforeAuth:    config.RequireIDBeforeAuth,
-			SessionLeaseTTL:        defaultSessionLeaseTTL(config.SessionLeaseTTL, config.ProxyIdleTimeout),
+			SessionLeaseTTL:        leaseTTL,
+			SessionIdleGrace:       defaultSessionIdleGrace(config.SessionIdleGrace, leaseTTL),
 		},
 		conn:            conn,
 		reader:          bufio.NewReaderSize(conn, config.MaxPreauthLineBytes+1),
@@ -354,6 +357,19 @@ func defaultSessionLeaseTTL(configured time.Duration, proxyIdle time.Duration) t
 
 	if proxyIdle > 0 {
 		return proxyIdle
+	}
+
+	return time.Minute
+}
+
+// defaultSessionIdleGrace returns the affinity retention grace after the final session closes.
+func defaultSessionIdleGrace(configured time.Duration, leaseTTL time.Duration) time.Duration {
+	if configured > 0 {
+		return configured
+	}
+
+	if leaseTTL > 0 {
+		return leaseTTL
 	}
 
 	return time.Minute
