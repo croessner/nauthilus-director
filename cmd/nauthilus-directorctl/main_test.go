@@ -18,9 +18,15 @@ package main
 
 import (
 	"bytes"
+	"strings"
 	"testing"
+
+	"net/http/httptest"
+
+	"github.com/croessner/nauthilus-director/internal/rest"
 )
 
+// TestVersionOutput keeps the client version flag stable for operators.
 func TestVersionOutput(t *testing.T) {
 	previousVersion := version
 	version = "test-version"
@@ -42,5 +48,28 @@ func TestVersionOutput(t *testing.T) {
 	const want = "nauthilus-directorctl test-version\n"
 	if stdout.String() != want {
 		t.Fatalf("version output = %q, want %q", stdout.String(), want)
+	}
+}
+
+// TestStatusCommandUsesGeneratedClient verifies the read-only SDK transport path.
+func TestStatusCommandUsesGeneratedClient(t *testing.T) {
+	server := httptest.NewServer(rest.NewServer(rest.Options{Version: "test-version"}).Handler())
+	t.Cleanup(server.Close)
+
+	var (
+		stdout bytes.Buffer
+		stderr bytes.Buffer
+	)
+
+	code := run([]string{"--address", server.URL, "status"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run returned exit code %d, want 0; stderr=%q", code, stderr.String())
+	}
+
+	output := stdout.String()
+	for _, want := range []string{"health=ok", "ready=ok", "version=test-version", "api_version=v1"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("status output = %q, want to contain %q", output, want)
+		}
 	}
 }
