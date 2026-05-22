@@ -1069,6 +1069,11 @@ OpenAPI workflow, CLI generated-client boundary, E2E harness scaffold and
 
 ### M1: IMAP MVP
 
+Status: completed. The IMAP listener/session/proxy path, Nauthilus auth
+boundary, director-owned routing, Redis-backed session affinity, backend
+selection/authentication, secret-safe observability, deterministic fake-service
+E2E lane and pinned Dovecot interoperability lane are in place.
+
 - listener lifecycle
 - IMAP greeting/CAPABILITY/STARTTLS/LOGIN/AUTH PLAIN
 - Nauthilus auth call over the configured HTTP or gRPC transport

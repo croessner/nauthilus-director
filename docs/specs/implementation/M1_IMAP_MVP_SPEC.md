@@ -1,6 +1,8 @@
 # M1 IMAP MVP Specification
 
-Status: implementation-ready M1 specification
+Status: completed. The IMAP MVP implementation is in place. `make guardrails`
+and `make e2e-interop` passed on 2026-05-22; the real-server interoperability
+lane used pinned `dovecot/dovecot:2.4.3-dev` with backend STARTTLS.
 
 This document defines the first externally usable IMAP/IMAPS implementation
 phase for `nauthilus-director`. M1 starts configured IMAP listeners,

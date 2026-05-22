@@ -245,6 +245,7 @@ type directorOptions struct {
 	Authenticator      nauthilus.Authenticator
 	BackendAuth        backend.AuthConfig
 	BackendAddress     string
+	BackendTLS         config.BackendTLSConfig
 	FrontendTLSConfig  *tls.Config
 	ListenerCertPath   string
 	ListenerKeyPath    string
@@ -373,6 +374,13 @@ func e2eConfig(options directorOptions) config.Config {
 			Backends: []string{"mailstore-a-imap"},
 		},
 	}
+	backendTLS := options.BackendTLS
+	if strings.TrimSpace(backendTLS.Mode) == "" {
+		backendTLS = config.BackendTLSConfig{
+			Mode:          "plaintext",
+			MinTLSVersion: "TLS1.2",
+		}
+	}
 	cfg.Director.Backends = map[string]config.BackendConfig{
 		"mailstore-a-imap": {
 			Protocol:       "imap",
@@ -381,11 +389,8 @@ func e2eConfig(options directorOptions) config.Config {
 			Weight:         100,
 			MaxConnections: 100,
 			Maintenance:    "disabled",
-			TLS: config.BackendTLSConfig{
-				Mode:          "plaintext",
-				MinTLSVersion: "TLS1.2",
-			},
-			Auth: backendAuthConfig(options.BackendAuth),
+			TLS:            backendTLS,
+			Auth:           backendAuthConfig(options.BackendAuth),
 			HealthCheck: config.BackendHealthConfig{
 				Enabled: false,
 			},

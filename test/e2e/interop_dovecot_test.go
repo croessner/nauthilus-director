@@ -25,6 +25,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/croessner/nauthilus-director/internal/config"
 	"github.com/croessner/nauthilus-director/internal/nauthilus"
 )
 
@@ -41,8 +42,13 @@ func TestDovecotCredentialReplayInterop(t *testing.T) {
 		Authenticator:  staticInteropAuthenticator{},
 		BackendAuth:    credentialReplayBackendAuth(false),
 		BackendAddress: backendAddress,
-		Recorder:       newCapturedRecorder(),
-		TLSMode:        "starttls",
+		BackendTLS: config.BackendTLSConfig{
+			Mode:               "starttls",
+			MinTLSVersion:      "TLS1.2",
+			InsecureSkipVerify: true,
+		},
+		Recorder: newCapturedRecorder(),
+		TLSMode:  "starttls",
 	})
 	defer director.Stop(t)
 
