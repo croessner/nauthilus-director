@@ -39,8 +39,8 @@ POC package structure as a compatibility constraint.
   values from the first production config loader. Expansion must happen before
   typed validation, must never expand map keys, must fail closed on missing
   variables, and must keep secret metadata and redaction intact.
-- Stabilize configuration paths by implementation phase. Once a config path is
-  stable for a phase, do not rename, remove or invert it without an explicit
+- Stabilize configuration paths by declared stability window. Once a config path
+  is stable, do not rename, remove or invert it without an explicit
   breaking-change decision plus docs, examples, migration notes and tests.
 - Use OpenAPI from hour zero for the REST control API. The REST contract,
   server boundary, REST DTOs, and generated clients should originate from the
@@ -71,7 +71,19 @@ POC package structure as a compatibility constraint.
 - When a unit test fails, first determine whether the failure exposes a defect
   in the core production code. Fix production code when it is wrong. Change the
   test only when the test logic, fixture, or assertion is demonstrably wrong.
-- Write code comments and technical documentation in English.
+- Write code comments and technical documentation in English. All hand-written
+  named functions and receiver methods must have concise English doc comments,
+  including unexported functions and unexported receiver methods. Comments
+  should explain intent, invariants, security assumptions, side effects, or
+  protocol behavior instead of merely restating the identifier.
+- Hand-written source files must carry the project copyright and license header:
+  `Copyright (C) 2026 Christian Rößner` and `SPDX-License-Identifier:
+  AGPL-3.0-only`. Generated Go files are exempt only when they use the standard
+  `Code generated ... DO NOT EDIT.` marker.
+- Name production code after domain behavior, not implementation artifacts.
+  Function names, receiver names, identifiers, comments and paths must not refer
+  to planning-only documents, phases, specs, milestones, prompt IDs, task IDs,
+  rollout labels or similar transient implementation references.
 - Maintain project documentation under `docs/`. Formal specs belong under
   `docs/specs/`; manpages belong under `docs/man/`.
 - Keep local planning, prompt, scratch, and handoff artifacts under `temp/`.

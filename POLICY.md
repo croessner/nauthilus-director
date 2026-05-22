@@ -32,10 +32,10 @@ These rules are mandatory for coding changes in this repository.
   escaping, run before mapstructure/validator processing, never expand map
   keys, and fail closed on missing variables without leaking raw or partially
   expanded values.
-- MUST: Stabilize configuration paths by implementation phase. Once a config
-  path is declared stable for a phase, it must not be renamed, removed or
-  semantically inverted without an explicit breaking-change decision and
-  matching docs, examples, migration notes and tests.
+- MUST: Stabilize configuration paths by declared stability window. Once a
+  config path is declared stable, it must not be renamed, removed or semantically
+  inverted without an explicit breaking-change decision and matching docs,
+  examples, migration notes and tests.
 - MUST: Use OpenAPI from hour zero for the REST control API. The REST contract,
   server boundary, REST DTOs, and generated clients must originate from the
   OpenAPI spec instead of being retrofitted later.
@@ -141,7 +141,19 @@ These rules are mandatory for coding changes in this repository.
   whether the failure exposes a defect in core production code; if it does, fix
   production code. Change the unit test only when the test logic, fixture, or
   assertion is demonstrably wrong.
-- MUST: Write code comments and technical documentation in English.
+- MUST: Write code comments and technical documentation in English. All
+  hand-written named functions and receiver methods must have concise English doc
+  comments, including unexported functions and unexported receiver methods.
+  Comments must explain intent, invariants, security assumptions, side effects,
+  or protocol behavior instead of merely restating the identifier.
+- MUST: Add the project copyright and license header to hand-written source
+  files: `Copyright (C) 2026 Christian Rößner` and
+  `SPDX-License-Identifier: AGPL-3.0-only`. Generated Go files are exempt only
+  when they use the standard `Code generated ... DO NOT EDIT.` marker.
+- MUST: Name production code after domain behavior, not implementation
+  artifacts. Function names, receiver names, identifiers, comments and paths
+  must not refer to planning-only documents, phases, specs, milestones, prompt
+  IDs, task IDs, rollout labels or similar transient implementation references.
 - MUST: Maintain project documentation under `docs/`. Formal specs must live
   under `docs/specs/`; manpages must live under `docs/man/`.
 - MUST: Keep product and architecture documentation vendor-neutral. Do not
@@ -180,6 +192,15 @@ These rules are mandatory for coding changes in this repository.
 - [ ] Failing unit tests were checked against core production behavior before
       test code was changed.
 - [ ] Comments and technical docs introduced by the change are English-only.
+- [ ] Hand-written named functions and receiver methods introduced or changed by
+      the change have concise English doc comments, including unexported
+      functions and unexported receiver methods.
+- [ ] Hand-written source files introduced or changed by the change carry the
+      project copyright and `SPDX-License-Identifier: AGPL-3.0-only` header;
+      generated Go files are exempt only with the standard generated-code marker.
+- [ ] Production code names, comments and paths introduced or changed by the
+      change describe domain behavior and do not refer to planning-only docs,
+      phases, specs, milestones, prompt IDs, task IDs or rollout labels.
 - [ ] Project docs live under `docs/`, specs under `docs/specs/`, and manpages
       under `docs/man/`.
 - [ ] Product and architecture docs stay vendor-neutral unless naming an actual

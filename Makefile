@@ -114,7 +114,10 @@ docs-check:
 	@test -d docs/specs || { echo "docs/specs/ is required for specifications"; exit 1; }
 	@test -d docs/man || { echo "docs/man/ is required for manpages"; exit 1; }
 
-guardrails: docs-check fix vet lint test race e2e build-check
+copyright-check:
+	sh ./scripts/check-go-headers.sh
+
+guardrails: docs-check copyright-check fix vet lint test race e2e build-check
 
 # Optional proof-of-concept checks
 poc-test:
@@ -135,4 +138,4 @@ poc-race:
 version:
 	@echo $(VERSION)
 
-.PHONY: all build build-check clean fix vet lint-config lint test race e2e docs-check guardrails poc-test poc-race version
+.PHONY: all build build-check clean fix vet lint-config lint test race e2e docs-check copyright-check guardrails poc-test poc-race version

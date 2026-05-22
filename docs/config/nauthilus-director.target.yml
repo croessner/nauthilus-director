@@ -14,9 +14,9 @@
 # placeholders such as "${NAUTHILUS_DIRECTOR_REDIS_PASSWORD_FILE}". Expansion is
 # performed before typed validation; expanded secrets remain redacted by default.
 #
-# Stability is phase-scoped. M0/M1 stabilize the runtime, observability,
-# storage.redis, auth.authorities, IMAP listener/backend, routing and affinity
-# foundation. Later protocol sections remain draft until their milestones.
+# Stable foundation paths cover runtime, observability, storage.redis,
+# auth.authorities, IMAP listener/backend, routing and affinity. Later protocol
+# sections remain draft until their concrete delivery work starts.
 ---
 runtime:
   instance_name: "nauthilus-director-01"
