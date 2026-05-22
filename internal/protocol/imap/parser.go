@@ -17,7 +17,6 @@
 package imap
 
 import (
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"strconv"
@@ -273,27 +272,6 @@ func validAtomByte(value byte) bool {
 func validateNoArguments(command preauthCommand) error {
 	if len(command.arguments) != 0 {
 		return fmt.Errorf("%w: unexpected arguments", ErrMalformedCommand)
-	}
-
-	return nil
-}
-
-// validateBase64Shape checks a SASL initial response without interpreting credentials.
-func validateBase64Shape(value string, maxBytes int) error {
-	if value == "=" {
-		return nil
-	}
-
-	if value == "" {
-		return fmt.Errorf("%w: empty base64 response", ErrMalformedCommand)
-	}
-
-	if maxBytes > 0 && len(value) > maxBytes {
-		return fmt.Errorf("%w: base64 response too large", ErrMalformedCommand)
-	}
-
-	if _, err := base64.StdEncoding.DecodeString(value); err != nil {
-		return fmt.Errorf("%w: malformed base64 response", ErrMalformedCommand)
 	}
 
 	return nil

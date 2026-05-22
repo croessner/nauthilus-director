@@ -148,7 +148,9 @@ func TestMissingIDPermissiveByDefault(t *testing.T) {
 func TestAuthenticateMechanismShapes(t *testing.T) {
 	harness := startTestSession(t, testPreauthConfig(TLSModeStartTLS, false))
 	harness.expectLine(t, greetingLine)
-	harness.write(t, "A001 AUTHENTICATE PLAIN AHVzZXIAcGFzcw==\r\nA002 AUTHENTICATE XOAUTH2 dXNlcg==\r\nA003 AUTHENTICATE OAUTHBEARER dXNlcg==\r\n")
+	harness.write(t, "A001 AUTHENTICATE PLAIN "+plainPayload("plain-user@example.test", "plain-passphrase")+"\r\n"+
+		"A002 AUTHENTICATE XOAUTH2 "+xoauth2Payload("xoauth2-user@example.test", "xoauth2-token")+"\r\n"+
+		"A003 AUTHENTICATE OAUTHBEARER "+oauthBearerPayload("oauth-user@example.test", "oauth-token")+"\r\n")
 
 	harness.expectLine(t, "A001 NO [UNAVAILABLE] Authentication handler unavailable\r\n")
 	harness.expectLine(t, "A002 NO [UNAVAILABLE] Authentication handler unavailable\r\n")
@@ -160,7 +162,7 @@ func TestAuthenticateRejectsMalformedInitialResponse(t *testing.T) {
 	harness := startTestSession(t, testPreauthConfig(TLSModeStartTLS, false))
 	harness.expectLine(t, greetingLine)
 	harness.write(t, "A001 AUTHENTICATE PLAIN !!!\r\n")
-	harness.expectLine(t, "A001 BAD Invalid AUTHENTICATE initial response\r\n")
+	harness.expectLine(t, "A001 BAD Invalid AUTHENTICATE response\r\n")
 }
 
 // TestMissingIDCanBeRequiredBeforeAuth verifies listener policy blocks auth generically.
@@ -346,6 +348,7 @@ func testPreauthConfig(tlsMode string, requireID bool) SessionConfig {
 		Network:                testNetworkTCP,
 		TLSMode:                tlsMode,
 		AuthMechanisms:         []string{"plain", "xoauth2", "oauthbearer"},
+		MaxBearerTokenBytes:    64,
 		RequireIDBeforeAuth:    requireID,
 		PreauthTimeout:         time.Second,
 		MaxPreauthLineBytes:    8192,

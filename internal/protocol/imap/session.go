@@ -105,6 +105,7 @@ func NewSession(config SessionConfig, conn net.Conn) (*Session, error) {
 			MaxPreauthLiteralBytes: config.MaxPreauthLiteralBytes,
 			Capabilities:           append([]string(nil), config.Capabilities...),
 			AuthMechanisms:         append([]string(nil), config.AuthMechanisms...),
+			MaxBearerTokenBytes:    config.MaxBearerTokenBytes,
 			RequireIDBeforeAuth:    config.RequireIDBeforeAuth,
 		},
 		conn:      conn,

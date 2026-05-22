@@ -53,6 +53,7 @@ type configListener struct {
 func newManagedListener(
 	name string,
 	entry config.ListenerConfig,
+	authority config.AuthorityConfig,
 	runtime config.RuntimeConfig,
 	security config.DirectorSecurityConfig,
 	options managerOptions,
@@ -81,9 +82,15 @@ func newManagedListener(
 	}
 
 	return &managedListener{
-		name:          name,
-		config:        configured,
-		handler:       options.handlerFactory(SessionOptions{ListenerName: name, Config: entry, Timeouts: runtime.Timeouts, Security: security}),
+		name:   name,
+		config: configured,
+		handler: options.handlerFactory(SessionOptions{
+			ListenerName:        name,
+			Config:              entry,
+			Timeouts:            runtime.Timeouts,
+			Security:            security,
+			BearerTokenMaxBytes: authority.Mechanisms.Bearer.TokenMaxBytes,
+		}),
 		proxyProtocol: proxyPolicy,
 		listenConfig:  options.listenConfig,
 		active:        map[net.Conn]struct{}{},

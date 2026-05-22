@@ -51,10 +51,11 @@ type SessionHandlerFactory func(options SessionOptions) SessionHandler
 
 // SessionOptions contains the typed listener values passed into a protocol handler.
 type SessionOptions struct {
-	ListenerName string
-	Config       config.ListenerConfig
-	Timeouts     config.RuntimeTimeouts
-	Security     config.DirectorSecurityConfig
+	ListenerName        string
+	Config              config.ListenerConfig
+	Timeouts            config.RuntimeTimeouts
+	Security            config.DirectorSecurityConfig
+	BearerTokenMaxBytes int
 }
 
 // ManagerOption customizes listener manager construction in tests and future assembly code.
@@ -120,7 +121,14 @@ func NewManagerWithConfig(cfg config.Config, opts ...ManagerOption) (*Manager, e
 
 	managed := make([]*managedListener, 0, len(listenerNames))
 	for _, name := range listenerNames {
-		entry, err := newManagedListener(name, cfg.Director.Listeners[name], cfg.Runtime, cfg.Director.Security, options)
+		listener := cfg.Director.Listeners[name]
+
+		authority, ok := cfg.Auth.Authorities[listener.Authority]
+		if !ok {
+			return nil, errors.New("listener " + name + ": authority not found")
+		}
+
+		entry, err := newManagedListener(name, listener, authority, cfg.Runtime, cfg.Director.Security, options)
 		if err != nil {
 			return nil, err
 		}
@@ -241,6 +249,7 @@ func defaultSessionHandlerFactory(options SessionOptions) SessionHandler {
 		TLSMode:                options.Config.TLS.Mode,
 		Capabilities:           capabilities,
 		AuthMechanisms:         authMechanisms,
+		MaxBearerTokenBytes:    options.BearerTokenMaxBytes,
 		RequireIDBeforeAuth:    requireIDBeforeAuth,
 		PreauthTimeout:         options.Timeouts.Preauth.Std(),
 		AuthTimeout:            options.Timeouts.Auth.Std(),

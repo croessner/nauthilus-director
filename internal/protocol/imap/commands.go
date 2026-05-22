@@ -17,6 +17,7 @@
 package imap
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -82,11 +83,13 @@ func (s *Session) handleLogout(command preauthCommand) error {
 	return s.writeTagged(command.tag, responseOK, "LOGOUT completed")
 }
 
-// handleLogin validates the LOGIN command shape without retaining credentials.
+// handleLogin extracts LOGIN credentials without retaining them on the session.
 func (s *Session) handleLogin(command preauthCommand) error {
-	if len(command.arguments) != 2 || !tokenIsStringLike(command.arguments[0]) || !tokenIsStringLike(command.arguments[1]) {
+	credentials, err := parseLoginCredentials(command)
+	if err != nil {
 		return s.writeTagged(command.tag, responseBad, "Invalid LOGIN command")
 	}
+	defer credentials.Clear()
 
 	if s.requiresClientID() {
 		return s.writeTagged(command.tag, responseNo, genericAuthFailText)
@@ -95,32 +98,88 @@ func (s *Session) handleLogin(command preauthCommand) error {
 	return s.writeTagged(command.tag, responseNo, authUnavailableText)
 }
 
-// handleAuthenticate validates AUTHENTICATE mechanism and SASL-IR shape only.
+// handleAuthenticate extracts supported SASL credentials without retaining them on the session.
 func (s *Session) handleAuthenticate(command preauthCommand) error {
 	if len(command.arguments) < 1 || len(command.arguments) > 2 || command.arguments[0].kind != tokenAtom {
 		return s.writeTagged(command.tag, responseBad, "Invalid AUTHENTICATE command")
 	}
 
-	mechanism := strings.ToUpper(command.arguments[0].value)
-	if !s.supportsAuthMechanism(mechanism) {
+	mechanism, err := newMechanismIdentity(command.arguments[0].value)
+	if err != nil || !s.supportsAuthMechanism(mechanism.Normalized()) {
 		return s.writeTagged(command.tag, responseNo, "Unsupported authentication mechanism")
-	}
-
-	if len(command.arguments) == 2 {
-		if command.arguments[1].kind != tokenAtom {
-			return s.writeTagged(command.tag, responseBad, "Invalid AUTHENTICATE initial response")
-		}
-
-		if err := validateBase64Shape(command.arguments[1].value, s.context.MaxPreauthLineBytes); err != nil {
-			return s.writeTagged(command.tag, responseBad, "Invalid AUTHENTICATE initial response")
-		}
 	}
 
 	if s.requiresClientID() {
 		return s.writeTagged(command.tag, responseNo, genericAuthFailText)
 	}
 
+	var encoded string
+	if len(command.arguments) == 2 {
+		if command.arguments[1].kind != tokenAtom {
+			return s.writeTagged(command.tag, responseBad, "Invalid AUTHENTICATE initial response")
+		}
+
+		encoded = command.arguments[1].value
+	} else {
+		response, err := s.readSASLContinuation(command.tag)
+		if err != nil {
+			if errors.Is(err, ErrCredentialRejected) || errors.Is(err, ErrMalformedCommand) {
+				return s.writeTagged(command.tag, responseBad, "Invalid AUTHENTICATE response")
+			}
+
+			return err
+		}
+
+		encoded = response
+	}
+
+	credentials, err := parseSASLCredentials(
+		mechanism,
+		encoded,
+		s.context.MaxPreauthLineBytes,
+		s.context.MaxBearerTokenBytes,
+	)
+	if err != nil {
+		return s.writeTagged(command.tag, responseBad, "Invalid AUTHENTICATE response")
+	}
+	defer credentials.Clear()
+
 	return s.writeTagged(command.tag, responseNo, authUnavailableText)
+}
+
+// readSASLContinuation prompts for and reads one bounded AUTHENTICATE response.
+func (s *Session) readSASLContinuation(tag string) (string, error) {
+	if _, err := s.writer.WriteString("+ \r\n"); err != nil {
+		return "", err
+	}
+
+	if err := s.writer.Flush(); err != nil {
+		return "", err
+	}
+
+	line, err := s.readPreauthLine()
+	if err != nil {
+		return "", err
+	}
+
+	if err := s.rejectUnsupportedLiteral(line, tag); err != nil {
+		return "", err
+	}
+
+	response, err := trimPreauthLine(line, s.context.MaxPreauthLineBytes)
+	if err != nil {
+		return "", err
+	}
+
+	if response == "*" {
+		return "", fmt.Errorf("%w: sasl cancelled", ErrCredentialRejected)
+	}
+
+	if !validAtom(response) {
+		return "", fmt.Errorf("%w: invalid sasl response", ErrCredentialRejected)
+	}
+
+	return response, nil
 }
 
 // writeTagged writes a single tagged IMAP response line.

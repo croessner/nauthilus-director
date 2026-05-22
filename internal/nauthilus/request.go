@@ -63,16 +63,17 @@ func (s Secret) String() string {
 
 // RequestContext contains auth-facing client and protocol context.
 type RequestContext struct {
-	Username           string
-	ClientIP           string
-	ClientPort         string
-	ClientHostname     string
-	ClientID           string
-	ExternalSessionID  string
-	UserAgent          string
-	LocalIP            string
-	LocalPort          string
-	Protocol           string
+	Username          string
+	ClientIP          string
+	ClientPort        string
+	ClientHostname    string
+	ClientID          string
+	ExternalSessionID string
+	UserAgent         string
+	LocalIP           string
+	LocalPort         string
+	Protocol          string
+	// Method carries the normalized frontend authentication mechanism sent to Nauthilus.
 	Method             string
 	TLS                string
 	TLSSessionID       string

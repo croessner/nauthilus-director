@@ -36,6 +36,7 @@ type SessionConfig struct {
 	TLSMode                string
 	Capabilities           []string
 	AuthMechanisms         []string
+	MaxBearerTokenBytes    int
 	RequireIDBeforeAuth    bool
 	PreauthTimeout         time.Duration
 	AuthTimeout            time.Duration
@@ -63,6 +64,7 @@ type Context struct {
 	MaxPreauthLiteralBytes int
 	Capabilities           []string
 	AuthMechanisms         []string
+	MaxBearerTokenBytes    int
 	RequireIDBeforeAuth    bool
 }
 

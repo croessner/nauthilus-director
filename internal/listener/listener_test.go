@@ -62,6 +62,34 @@ func TestManagerSelectsOnlyIMAPListeners(t *testing.T) {
 	}
 }
 
+// TestSessionOptionsIncludeAuthorityBearerTokenLimit verifies IMAP sessions inherit authority bearer limits.
+func TestSessionOptionsIncludeAuthorityBearerTokenLimit(t *testing.T) {
+	cfg := singleListenerConfig(testIMAPListener, tlsModeStartTLS)
+	authority := cfg.Auth.Authorities["default"]
+	authority.Mechanisms.Bearer.TokenMaxBytes = 42
+	cfg.Auth.Authorities["default"] = authority
+
+	captured := make(chan SessionOptions, 1)
+
+	_, err := NewManagerWithConfig(cfg, WithSessionHandlerFactory(func(options SessionOptions) SessionHandler {
+		captured <- options
+
+		return newRecordingHandler()
+	}))
+	if err != nil {
+		t.Fatalf("NewManagerWithConfig returned error: %v", err)
+	}
+
+	select {
+	case options := <-captured:
+		if options.BearerTokenMaxBytes != 42 {
+			t.Fatalf("bearer token limit = %d, want 42", options.BearerTokenMaxBytes)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for session options")
+	}
+}
+
 // TestStartTLSListenerStartsWithoutImplicitTLS verifies cleartext IMAP listener setup.
 func TestStartTLSListenerStartsWithoutImplicitTLS(t *testing.T) {
 	cfg := singleListenerConfig(testIMAPListener, tlsModeStartTLS)
