@@ -16,6 +16,11 @@
 
 package imap
 
+import (
+	"bufio"
+	"crypto/tls"
+)
+
 // handleStartTLS validates STARTTLS availability and updates the logical TLS state.
 func (s *Session) handleStartTLS(command preauthCommand) error {
 	if err := validateNoArguments(command); err != nil {
@@ -30,6 +35,24 @@ func (s *Session) handleStartTLS(command preauthCommand) error {
 		return err
 	}
 
+	if s.context.FrontendTLSConfig == nil {
+		s.tlsActive = true
+
+		return nil
+	}
+
+	if err := s.writer.Flush(); err != nil {
+		return err
+	}
+
+	tlsConn := tls.Server(s.conn, s.context.FrontendTLSConfig.Clone())
+	if err := tlsConn.Handshake(); err != nil {
+		return err
+	}
+
+	s.conn = tlsConn
+	s.reader = bufio.NewReaderSize(tlsConn, s.context.MaxPreauthLineBytes+1)
+	s.writer = bufio.NewWriter(tlsConn)
 	s.tlsActive = true
 
 	return nil
@@ -38,4 +61,13 @@ func (s *Session) handleStartTLS(command preauthCommand) error {
 // startTLSAdvertised reports whether STARTTLS should be exposed in CAPABILITY.
 func (s *Session) startTLSAdvertised() bool {
 	return s.context.StartTLSAvailable() && !s.tlsActive
+}
+
+// cloneTLSConfig detaches mutable frontend TLS config from session callers.
+func cloneTLSConfig(config *tls.Config) *tls.Config {
+	if config == nil {
+		return nil
+	}
+
+	return config.Clone()
 }

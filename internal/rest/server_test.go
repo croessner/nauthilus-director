@@ -111,7 +111,7 @@ func TestRouteLookupRejectsCredentialBearingInput(t *testing.T) {
 	}
 }
 
-// TestRouteLookupWithoutCredentialsStaysDomainIncomplete keeps lookup side-effect-free before implementation.
+// TestRouteLookupWithoutCredentialsStaysDomainIncomplete keeps lookup side-effect-free while domain behavior is incomplete.
 func TestRouteLookupWithoutCredentialsStaysDomainIncomplete(t *testing.T) {
 	server := httptest.NewServer(rest.NewServer(rest.Options{Version: testVersion}).Handler())
 	t.Cleanup(server.Close)

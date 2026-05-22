@@ -20,6 +20,7 @@ package listener
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"net"
 	"sort"
@@ -28,6 +29,7 @@ import (
 
 	"github.com/croessner/nauthilus-director/internal/config"
 	"github.com/croessner/nauthilus-director/internal/nauthilus"
+	"github.com/croessner/nauthilus-director/internal/observability"
 	"github.com/croessner/nauthilus-director/internal/protocol/imap"
 	"go.uber.org/fx"
 )
@@ -64,6 +66,8 @@ type SessionOptions struct {
 	DefaultTenant       string
 	SessionLeaseTTL     time.Duration
 	SessionIdleGrace    time.Duration
+	FrontendTLSConfig   *tls.Config
+	Observability       observability.Recorder
 }
 
 // ManagerOption customizes listener manager construction in tests and future assembly code.
@@ -94,6 +98,7 @@ type managerOptions struct {
 	handlerFactory    SessionHandlerFactory
 	authClientFactory NauthilusClientFactory
 	listenConfig      net.ListenConfig
+	observability     observability.Recorder
 }
 
 // Module wires the listener lifecycle into an Fx application.
@@ -122,6 +127,7 @@ func NewManagerWithConfig(cfg config.Config, opts ...ManagerOption) (*Manager, e
 	options := managerOptions{
 		handlerFactory:    defaultSessionHandlerFactory,
 		authClientFactory: defaultNauthilusClientFactory,
+		observability:     observability.NoopRecorder{},
 	}
 	for _, opt := range opts {
 		opt(&options)
@@ -176,6 +182,13 @@ func WithNauthilusClientFactory(factory NauthilusClientFactory) ManagerOption {
 		if factory != nil {
 			options.authClientFactory = factory
 		}
+	}
+}
+
+// WithObservabilityRecorder installs listener and session observability hooks.
+func WithObservabilityRecorder(recorder observability.Recorder) ManagerOption {
+	return func(options *managerOptions) {
+		options.observability = observability.NormalizeRecorder(recorder)
 	}
 }
 
@@ -284,6 +297,7 @@ func defaultSessionHandlerFactory(options SessionOptions) SessionHandler {
 		RequireIDBeforeAuth:    requireIDBeforeAuth,
 		SessionLeaseTTL:        options.SessionLeaseTTL,
 		SessionIdleGrace:       options.SessionIdleGrace,
+		FrontendTLSConfig:      options.FrontendTLSConfig,
 		PreauthTimeout:         options.Timeouts.Preauth.Std(),
 		AuthTimeout:            options.Timeouts.Auth.Std(),
 		BackendConnectTimeout:  options.Timeouts.BackendConnect.Std(),
@@ -291,6 +305,7 @@ func defaultSessionHandlerFactory(options SessionOptions) SessionHandler {
 		MaxPreauthLineBytes:    options.Security.MaxPreauthLineBytes,
 		MaxPreauthLiteralBytes: options.Security.MaxPreauthLiteralBytes,
 		Authenticator:          options.Authenticator,
+		Observability:          options.Observability,
 	})
 }
 

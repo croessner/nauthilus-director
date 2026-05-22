@@ -34,12 +34,17 @@ import (
 func (s *Session) authenticateAndPlace(ctx context.Context, tag string, credentials *frontendCredentials) (commandOutcome, error) {
 	result, err := s.authenticateWithAuthority(ctx, credentials)
 	if err != nil {
+		s.recordNauthilusAuth(ctx, credentials.Mechanism().Normalized(), observationResultFailure, reasonClass(err))
+
 		return commandOutcome{}, s.writeTagged(tag, responseNo, authUnavailableText)
 	}
 
 	switch result.Decision {
 	case nauthilus.DecisionAuthenticated:
+		s.recordNauthilusAuth(ctx, credentials.Mechanism().Normalized(), observationResultOK, "")
 		if err := s.placeAuthenticatedSession(ctx, credentials, result); err != nil {
+			s.recordRoutingResolve(ctx, observationResultFailure, reasonClass(err), "")
+
 			return commandOutcome{}, s.writeTagged(tag, responseNo, authUnavailableText)
 		}
 
@@ -47,10 +52,16 @@ func (s *Session) authenticateAndPlace(ctx context.Context, tag string, credenti
 
 		return s.transitionAuthenticatedSession(ctx, tag, credentials)
 	case nauthilus.DecisionRejected:
+		s.recordNauthilusAuth(ctx, credentials.Mechanism().Normalized(), "rejected", "")
+
 		return commandOutcome{}, s.writeTagged(tag, responseNo, rejectedAuthResponseText(result.StatusMessage))
 	case nauthilus.DecisionTemporaryFailure:
+		s.recordNauthilusAuth(ctx, credentials.Mechanism().Normalized(), observationResultFailure, "temporary_failure")
+
 		return commandOutcome{}, s.writeTagged(tag, responseNo, authUnavailableText)
 	default:
+		s.recordNauthilusAuth(ctx, credentials.Mechanism().Normalized(), observationResultFailure, "ambiguous")
+
 		return commandOutcome{}, s.writeTagged(tag, responseNo, authUnavailableText)
 	}
 }
@@ -107,17 +118,25 @@ func (s *Session) placeAuthenticatedSession(
 
 	routingResult, err := s.routingResolver.Resolve(ctx, routingRequest)
 	if err != nil {
+		s.recordRoutingResolve(ctx, observationResultFailure, reasonClass(err), "")
+
 		return err
 	}
 
 	if !routingResult.Complete() {
+		s.recordRoutingResolve(ctx, observationResultFailure, "incomplete", routingResult.RoutingSource)
+
 		return errors.New("imap: incomplete routing result")
 	}
+
+	s.recordRoutingResolve(ctx, observationResultOK, "", routingResult.RoutingSource)
 
 	sessionRecord := s.sessionRecord(routingResult)
 
 	affinity, err := s.sessionStore.OpenSession(ctx, sessionRecord)
 	if err != nil {
+		s.recordAffinityOpen(ctx, observationResultFailure, reasonClass(err), "", routingResult.ShardTag)
+
 		return err
 	}
 
@@ -127,10 +146,16 @@ func (s *Session) placeAuthenticatedSession(
 
 	selectedShardTag := selectedAffinityShard(routingResult, affinity)
 
+	s.recordAffinityOpen(ctx, observationResultOK, "", affinity.Status, selectedShardTag)
+
 	backendResult, err := s.backendSelector.Select(ctx, s.selectionRequest(routingResult, selectedShardTag, affinity))
 	if err != nil {
+		s.recordBackendSelect(ctx, observationResultFailure, reasonClass(err), selectedShardTag)
+
 		return err
 	}
+
+	s.recordBackendSelect(ctx, observationResultOK, "", selectedShardTag)
 
 	s.placement = Placement{
 		AuthResult:       cloneAuthResult(result),
@@ -285,17 +310,23 @@ func (s *Session) transitionAuthenticatedSession(
 ) (commandOutcome, error) {
 	connection, err := s.backendConnector.Connect(ctx, s.placement.Backend.Backend, s.context.BackendConnectTimeout)
 	if err != nil {
+		s.recordBackendConnect(ctx, observationResultFailure, reasonBackendConnect)
 		_ = s.closePlacedSession(context.Background())
 
 		return commandOutcome{}, s.writeTagged(tag, responseNo, authUnavailableText)
 	}
 
+	s.recordBackendConnect(ctx, observationResultOK, "")
+
 	if err := AuthenticateBackend(connection, s.placement.Backend.Backend, credentials); err != nil {
+		s.recordBackendAuth(ctx, observationResultFailure, reasonClass(err), credentials.Mechanism().Normalized())
 		_ = connection.Conn().Close()
 		_ = s.closePlacedSession(context.Background())
 
 		return commandOutcome{}, s.writeTagged(tag, responseNo, authUnavailableText)
 	}
+
+	s.recordBackendAuth(ctx, observationResultOK, "", credentials.Mechanism().Normalized())
 
 	credentials.Clear()
 
@@ -314,7 +345,7 @@ func (s *Session) transitionAuthenticatedSession(
 	}
 
 	handoff := s.BufferedProxyHandoff()
-	_, err = s.proxyRunner.Run(ctx, proxy.PipeConfig{
+	proxyResult, err := s.proxyRunner.Run(ctx, proxy.PipeConfig{
 		Frontend:          handoff.Frontend(),
 		Backend:           connection.Conn(),
 		BufferedToBackend: handoff.Buffered(),
@@ -322,7 +353,9 @@ func (s *Session) transitionAuthenticatedSession(
 		IdleTimeout:       s.context.ProxyIdleTimeout,
 		HeartbeatInterval: s.proxyHeartbeatInterval(),
 		Lease:             s.proxyLease(),
+		Observability:     s.observability,
 	})
+	s.recordProxyPipe(ctx, proxyResult, err)
 
 	return commandOutcome{closeSession: true, flushed: true}, err
 }

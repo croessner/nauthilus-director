@@ -23,6 +23,8 @@ import (
 	"net"
 	"sync"
 	"time"
+
+	"github.com/croessner/nauthilus-director/internal/observability"
 )
 
 const proxyBufferSize = 32 * 1024
@@ -47,6 +49,7 @@ type PipeConfig struct {
 	IdleTimeout       time.Duration
 	HeartbeatInterval time.Duration
 	Lease             LeaseLifecycle
+	Observability     observability.Recorder
 }
 
 // Pipe copies bytes until one stream closes, times out or the context shuts down.
@@ -58,7 +61,7 @@ func NewPipe() *Pipe {
 }
 
 // Run executes transparent bidirectional proxy mode and always attempts lease close.
-func (p *Pipe) Run(ctx context.Context, config PipeConfig) (Result, error) {
+func (p *Pipe) Run(ctx context.Context, config PipeConfig) (result Result, err error) {
 	if err := validatePipeConfig(config); err != nil {
 		return Result{Class: ResultStateFailed, Err: err}, err
 	}
@@ -67,12 +70,16 @@ func (p *Pipe) Run(ctx context.Context, config PipeConfig) (Result, error) {
 		ctx = context.Background()
 	}
 
+	recordProxyStart(ctx, config)
+	defer func() {
+		recordProxyEnd(ctx, config, result, err)
+	}()
+
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	deadlines := newDeadlineController(config.Frontend, config.Backend, config.IdleTimeout)
 
-	result := Result{}
 	if err := deadlines.touch(); err != nil {
 		result.Class = ResultStateFailed
 		result.Err = err

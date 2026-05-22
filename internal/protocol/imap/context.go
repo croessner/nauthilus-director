@@ -17,11 +17,13 @@
 package imap
 
 import (
+	"crypto/tls"
 	"net"
 	"time"
 
 	"github.com/croessner/nauthilus-director/internal/backend"
 	"github.com/croessner/nauthilus-director/internal/nauthilus"
+	"github.com/croessner/nauthilus-director/internal/observability"
 	"github.com/croessner/nauthilus-director/internal/proxy"
 	"github.com/croessner/nauthilus-director/internal/routing"
 	"github.com/croessner/nauthilus-director/internal/state"
@@ -75,12 +77,14 @@ type SessionConfig struct {
 	ProxyIdleTimeout       time.Duration
 	MaxPreauthLineBytes    int
 	MaxPreauthLiteralBytes int
+	FrontendTLSConfig      *tls.Config
 	Authenticator          nauthilus.Authenticator
 	RoutingResolver        routing.RoutingResolver
 	SessionStore           state.SessionStore
 	BackendSelector        backend.Selector
 	BackendConnector       BackendConnector
 	ProxyRunner            proxy.Runner
+	Observability          observability.Recorder
 }
 
 // Context records stable, secret-safe session metadata for protocol handling.
@@ -96,6 +100,7 @@ type Context struct {
 	LocalAddr              net.Addr
 	RemoteAddr             net.Addr
 	StartedAt              time.Time
+	FrontendTLSConfig      *tls.Config
 	PreauthTimeout         time.Duration
 	AuthTimeout            time.Duration
 	BackendConnectTimeout  time.Duration

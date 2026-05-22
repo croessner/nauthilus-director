@@ -30,6 +30,7 @@ import (
 
 	"github.com/croessner/nauthilus-director/internal/backend"
 	"github.com/croessner/nauthilus-director/internal/nauthilus"
+	"github.com/croessner/nauthilus-director/internal/observability"
 	"github.com/croessner/nauthilus-director/internal/proxy"
 	"github.com/croessner/nauthilus-director/internal/routing"
 	"github.com/croessner/nauthilus-director/internal/state"
@@ -83,6 +84,7 @@ type Session struct {
 	backendSelector  backend.Selector
 	backendConnector BackendConnector
 	proxyRunner      proxy.Runner
+	observability    observability.Recorder
 
 	tlsActive     bool
 	clientID      string
@@ -127,6 +129,7 @@ func NewSession(config SessionConfig, conn net.Conn) (*Session, error) {
 			LocalAddr:              conn.LocalAddr(),
 			RemoteAddr:             conn.RemoteAddr(),
 			StartedAt:              time.Now().UTC(),
+			FrontendTLSConfig:      cloneTLSConfig(config.FrontendTLSConfig),
 			PreauthTimeout:         config.PreauthTimeout,
 			AuthTimeout:            config.AuthTimeout,
 			BackendConnectTimeout:  config.BackendConnectTimeout,
@@ -149,6 +152,7 @@ func NewSession(config SessionConfig, conn net.Conn) (*Session, error) {
 		backendSelector:  config.BackendSelector,
 		backendConnector: backendConnector,
 		proxyRunner:      proxyRunner,
+		observability:    observability.NormalizeRecorder(config.Observability),
 		tlsActive:        config.TLSMode == TLSModeImplicit,
 	}, nil
 }
@@ -168,7 +172,12 @@ func (s *Session) Placement() (Placement, bool) {
 }
 
 // Serve writes the initial greeting and processes pre-auth commands in wire order.
-func (s *Session) Serve(ctx context.Context) error {
+func (s *Session) Serve(ctx context.Context) (err error) {
+	s.recordSessionStart(ctx)
+	defer func() {
+		s.recordSessionEnd(ctx, err)
+	}()
+
 	if err := s.applyPreauthDeadline(); err != nil {
 		return err
 	}
@@ -289,7 +298,11 @@ func (s *Session) readPreauthLine() ([]byte, error) {
 func (s *Session) processPreauthLine(ctx context.Context, line []byte) (bool, error) {
 	tag := tagHintForLine(line)
 
+	s.recordPreAuth(ctx, "parse", "start", "")
+
 	if err := s.rejectUnsupportedLiteral(line, tag); err != nil {
+		s.recordPreAuth(ctx, "literal", "rejected", reasonClass(err))
+
 		return false, err
 	}
 
@@ -303,9 +316,12 @@ func (s *Session) processPreauthLine(ctx context.Context, line []byte) (bool, er
 			return false, flushErr
 		}
 
+		s.recordPreAuth(ctx, "parse", "rejected", reasonClass(err))
+
 		return false, nil
 	}
 
+	s.recordPreAuth(ctx, command.name, "accepted", "")
 	outcome, err := s.handlePreauthCommand(ctx, command)
 	if !outcome.flushed {
 		if flushErr := s.writer.Flush(); flushErr != nil {
@@ -314,8 +330,12 @@ func (s *Session) processPreauthLine(ctx context.Context, line []byte) (bool, er
 	}
 
 	if errors.Is(err, ErrUnsupportedCommand) {
+		s.recordPreAuth(ctx, command.name, "unsupported", reasonClass(err))
+
 		return false, nil
 	}
+
+	s.recordPreAuth(ctx, command.name, resultLabel(err), reasonClass(err))
 
 	return outcome.closeSession, err
 }

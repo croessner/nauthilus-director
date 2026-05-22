@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/croessner/nauthilus-director/internal/config"
+	"github.com/croessner/nauthilus-director/internal/observability"
 )
 
 // managedListener owns one configured network listener and its active sessions.
@@ -36,6 +37,7 @@ type managedListener struct {
 	tlsConfig     *tls.Config
 	proxyProtocol *proxyProtocolPolicy
 	listenConfig  net.ListenConfig
+	observability observability.Recorder
 
 	mu        sync.Mutex
 	listener  net.Listener
@@ -102,9 +104,11 @@ func newManagedListener(
 			DefaultTenant:       defaultTenant,
 			SessionLeaseTTL:     runtime.Timeouts.ProxyIdle.Std(),
 			SessionIdleGrace:    sessionIdleGrace,
+			Observability:       options.observability,
 		}),
 		proxyProtocol: proxyPolicy,
 		listenConfig:  options.listenConfig,
+		observability: observability.NormalizeRecorder(options.observability),
 		active:        map[net.Conn]struct{}{},
 	}, nil
 }
@@ -122,6 +126,8 @@ func (l *managedListener) start(ctx context.Context) error {
 
 	ln, err := l.listenConfig.Listen(ctx, l.config.listener.Network, l.config.listener.Address)
 	if err != nil {
+		l.recordListenerEvent(ctx, observability.EventListenerStart, "failure", "bind_failed")
+
 		return fmt.Errorf("start listener %s on %s/%s: %w", l.name, l.config.listener.Network, l.config.listener.Address, err)
 	}
 
@@ -131,6 +137,8 @@ func (l *managedListener) start(ctx context.Context) error {
 
 	l.acceptWG.Add(1)
 	go l.acceptLoop(ln)
+
+	l.recordListenerEvent(ctx, observability.EventListenerStart, listenerResultOK, "")
 
 	return nil
 }
@@ -149,14 +157,20 @@ func (l *managedListener) stop(ctx context.Context) error {
 	l.acceptWG.Wait()
 
 	if waitGroupDone(ctx, &l.sessionWG) {
+		l.recordListenerEvent(ctx, observability.EventListenerStop, listenerResultOK, "")
+
 		return nil
 	}
 
 	l.closeActiveConnections()
 
 	if waitGroupDone(context.Background(), &l.sessionWG) {
+		l.recordListenerEvent(ctx, observability.EventListenerStop, listenerResultOK, "")
+
 		return nil
 	}
+
+	l.recordListenerEvent(ctx, observability.EventListenerStop, "failure", "shutdown_timeout")
 
 	return ctx.Err()
 }
