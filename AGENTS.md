@@ -74,6 +74,10 @@ POC package structure as a compatibility constraint.
 - Write code comments and technical documentation in English.
 - Maintain project documentation under `docs/`. Formal specs belong under
   `docs/specs/`; manpages belong under `docs/man/`.
+- Keep local planning, prompt, scratch, and handoff artifacts under `temp/`.
+  The root `temp/` directory is ignored and must never be staged, committed, or
+  re-included through ignore exceptions. If a temporary artifact becomes
+  durable project documentation, rewrite or move it under `docs/` first.
 - Keep product and architecture documentation vendor-neutral. Do not frame
   target behavior by naming other mail-server or director projects unless the
   named project is an actual dependency, protocol peer, or configured service.

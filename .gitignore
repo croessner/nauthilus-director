@@ -80,4 +80,7 @@ fabric.properties
 server.crt
 server.key
 
+# Local planning, handoff, and scratch artifacts. Keep this directory out of Git.
+/temp/
+
 .DS_Store
