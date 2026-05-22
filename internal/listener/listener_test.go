@@ -35,11 +35,14 @@ import (
 	"time"
 
 	"github.com/croessner/nauthilus-director/internal/config"
+	"github.com/croessner/nauthilus-director/internal/nauthilus"
 	proxyproto "github.com/pires/go-proxyproto"
 )
 
 const (
 	testGreeting         = "* OK test listener ready\r\n"
+	testGRPCTransport    = "grpc"
+	testGRPCAuthority    = "grpc-authority"
 	testIMAPListener     = "imap"
 	testIMAPSListener    = "imaps"
 	trustedLocalhostCIDR = "127.0.0.1/32"
@@ -84,6 +87,60 @@ func TestSessionOptionsIncludeAuthorityBearerTokenLimit(t *testing.T) {
 	case options := <-captured:
 		if options.BearerTokenMaxBytes != 42 {
 			t.Fatalf("bearer token limit = %d, want 42", options.BearerTokenMaxBytes)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for session options")
+	}
+}
+
+// TestManagerSelectsConfiguredListenerAuthorityTransport verifies listener authority selection.
+func TestManagerSelectsConfiguredListenerAuthorityTransport(t *testing.T) {
+	cfg := singleListenerConfig(testIMAPListener, tlsModeStartTLS)
+	authority := cfg.Auth.Authorities["default"]
+	authority.Transport = testGRPCTransport
+	cfg.Auth.Authorities[testGRPCAuthority] = authority
+
+	entry := cfg.Director.Listeners[testIMAPListener]
+	entry.Authority = testGRPCAuthority
+	cfg.Director.Listeners[testIMAPListener] = entry
+
+	captured := make(chan config.AuthorityConfig, 1)
+	optionsSeen := make(chan SessionOptions, 1)
+
+	_, err := NewManagerWithConfig(
+		cfg,
+		WithNauthilusClientFactory(func(authority config.AuthorityConfig) (nauthilus.Authenticator, error) {
+			captured <- authority
+
+			return noopAuthenticator{}, nil
+		}),
+		WithSessionHandlerFactory(func(options SessionOptions) SessionHandler {
+			optionsSeen <- options
+
+			return newRecordingHandler()
+		}),
+	)
+	if err != nil {
+		t.Fatalf("NewManagerWithConfig returned error: %v", err)
+	}
+
+	select {
+	case authority := <-captured:
+		if authority.Transport != testGRPCTransport {
+			t.Fatalf("authority transport = %q, want grpc", authority.Transport)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for selected authority")
+	}
+
+	select {
+	case options := <-optionsSeen:
+		if options.Config.Authority != testGRPCAuthority {
+			t.Fatalf("listener authority = %q, want grpc-authority", options.Config.Authority)
+		}
+
+		if options.Authenticator == nil {
+			t.Fatal("session options did not receive authenticator")
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for session options")
@@ -312,6 +369,13 @@ func TestProxyProtocolRejectsLocalCommand(t *testing.T) {
 // recordingHandler captures the effective remote address seen by the protocol boundary.
 type recordingHandler struct {
 	remote chan string
+}
+
+type noopAuthenticator struct{}
+
+// Authenticate returns a temporary failure without contacting an authority.
+func (noopAuthenticator) Authenticate(context.Context, nauthilus.AuthRequest) (nauthilus.AuthResult, error) {
+	return nauthilus.AuthResult{Decision: nauthilus.DecisionTemporaryFailure}, nil
 }
 
 // newRecordingHandler creates a buffered recorder for one listener test.

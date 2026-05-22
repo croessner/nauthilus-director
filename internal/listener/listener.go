@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/croessner/nauthilus-director/internal/config"
+	"github.com/croessner/nauthilus-director/internal/nauthilus"
 	"github.com/croessner/nauthilus-director/internal/protocol/imap"
 	"go.uber.org/fx"
 )
@@ -49,13 +50,19 @@ type SessionHandler interface {
 // SessionHandlerFactory builds a protocol handler for one configured listener.
 type SessionHandlerFactory func(options SessionOptions) SessionHandler
 
+// NauthilusClientFactory builds the selected authority client for one listener.
+type NauthilusClientFactory func(authority config.AuthorityConfig) (nauthilus.Authenticator, error)
+
 // SessionOptions contains the typed listener values passed into a protocol handler.
 type SessionOptions struct {
 	ListenerName        string
 	Config              config.ListenerConfig
 	Timeouts            config.RuntimeTimeouts
 	Security            config.DirectorSecurityConfig
+	Authenticator       nauthilus.Authenticator
 	BearerTokenMaxBytes int
+	DefaultTenant       string
+	SessionLeaseTTL     time.Duration
 }
 
 // ManagerOption customizes listener manager construction in tests and future assembly code.
@@ -83,8 +90,9 @@ type Manager struct {
 }
 
 type managerOptions struct {
-	handlerFactory SessionHandlerFactory
-	listenConfig   net.ListenConfig
+	handlerFactory    SessionHandlerFactory
+	authClientFactory NauthilusClientFactory
+	listenConfig      net.ListenConfig
 }
 
 // Module wires the listener lifecycle into an Fx application.
@@ -111,7 +119,8 @@ func NewManager(snapshot config.Snapshot) (*Manager, error) {
 // NewManagerWithConfig creates a listener manager from typed config and optional test hooks.
 func NewManagerWithConfig(cfg config.Config, opts ...ManagerOption) (*Manager, error) {
 	options := managerOptions{
-		handlerFactory: defaultSessionHandlerFactory,
+		handlerFactory:    defaultSessionHandlerFactory,
+		authClientFactory: defaultNauthilusClientFactory,
 	}
 	for _, opt := range opts {
 		opt(&options)
@@ -128,7 +137,16 @@ func NewManagerWithConfig(cfg config.Config, opts ...ManagerOption) (*Manager, e
 			return nil, errors.New("listener " + name + ": authority not found")
 		}
 
-		entry, err := newManagedListener(name, listener, authority, cfg.Runtime, cfg.Director.Security, options)
+		entry, err := newManagedListener(
+			name,
+			listener,
+			authority,
+			cfg.Runtime,
+			cfg.Director.Security,
+			cfg.Director.Affinity.ActiveUserPinning.Key.Tenant,
+			cfg.Director.Affinity.ActiveUserPinning.IdleGrace.Std(),
+			options,
+		)
 		if err != nil {
 			return nil, err
 		}
@@ -147,6 +165,15 @@ func WithSessionHandlerFactory(factory SessionHandlerFactory) ManagerOption {
 	return func(options *managerOptions) {
 		if factory != nil {
 			options.handlerFactory = factory
+		}
+	}
+}
+
+// WithNauthilusClientFactory replaces authority client construction for tests or later app wiring.
+func WithNauthilusClientFactory(factory NauthilusClientFactory) ManagerOption {
+	return func(options *managerOptions) {
+		if factory != nil {
+			options.authClientFactory = factory
 		}
 	}
 }
@@ -244,20 +271,30 @@ func defaultSessionHandlerFactory(options SessionOptions) SessionHandler {
 
 	return imap.NewHandler(imap.SessionConfig{
 		ListenerName:           options.ListenerName,
+		AuthorityName:          options.Config.Authority,
 		ServiceName:            options.Config.ServiceName,
 		Network:                options.Config.Network,
+		BackendPool:            options.Config.BackendPool,
+		DefaultTenant:          options.DefaultTenant,
 		TLSMode:                options.Config.TLS.Mode,
 		Capabilities:           capabilities,
 		AuthMechanisms:         authMechanisms,
 		MaxBearerTokenBytes:    options.BearerTokenMaxBytes,
 		RequireIDBeforeAuth:    requireIDBeforeAuth,
+		SessionLeaseTTL:        options.SessionLeaseTTL,
 		PreauthTimeout:         options.Timeouts.Preauth.Std(),
 		AuthTimeout:            options.Timeouts.Auth.Std(),
 		BackendConnectTimeout:  options.Timeouts.BackendConnect.Std(),
 		ProxyIdleTimeout:       options.Timeouts.ProxyIdle.Std(),
 		MaxPreauthLineBytes:    options.Security.MaxPreauthLineBytes,
 		MaxPreauthLiteralBytes: options.Security.MaxPreauthLiteralBytes,
+		Authenticator:          options.Authenticator,
 	})
+}
+
+// defaultNauthilusClientFactory creates the configured Nauthilus authority transport.
+func defaultNauthilusClientFactory(authority config.AuthorityConfig) (nauthilus.Authenticator, error) {
+	return nauthilus.NewClient(authority, nauthilus.ClientOptions{})
 }
 
 // sortedIMAPListenerNames selects configured IMAP protocol listeners deterministically.

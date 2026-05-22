@@ -19,6 +19,11 @@ package imap
 import (
 	"net"
 	"time"
+
+	"github.com/croessner/nauthilus-director/internal/backend"
+	"github.com/croessner/nauthilus-director/internal/nauthilus"
+	"github.com/croessner/nauthilus-director/internal/routing"
+	"github.com/croessner/nauthilus-director/internal/state"
 )
 
 const (
@@ -26,32 +31,63 @@ const (
 	TLSModeImplicit = "implicit"
 	// TLSModeStartTLS marks IMAP listeners where STARTTLS will be advertised by command handling.
 	TLSModeStartTLS = "starttls"
+
+	defaultTenantName = "default"
+	protocolIMAP      = "imap"
 )
+
+// Placement records the director-owned routing and selection facts for an authenticated session.
+type Placement struct {
+	AuthResult       nauthilus.AuthResult
+	Routing          routing.RoutingResult
+	Affinity         state.AffinityRecord
+	Backend          backend.SelectionResult
+	SelectedShardTag string
+}
+
+// Clone returns a detached placement snapshot.
+func (p Placement) Clone() Placement {
+	p.AuthResult.Attributes = cloneStringSlices(p.AuthResult.Attributes)
+	p.Routing = p.Routing.Clone()
+
+	return p
+}
 
 // SessionConfig contains the listener-owned values needed to create IMAP sessions.
 type SessionConfig struct {
 	ListenerName           string
+	AuthorityName          string
 	ServiceName            string
 	Network                string
+	BackendPool            string
+	DefaultTenant          string
 	TLSMode                string
 	Capabilities           []string
 	AuthMechanisms         []string
 	MaxBearerTokenBytes    int
 	RequireIDBeforeAuth    bool
+	SessionLeaseTTL        time.Duration
 	PreauthTimeout         time.Duration
 	AuthTimeout            time.Duration
 	BackendConnectTimeout  time.Duration
 	ProxyIdleTimeout       time.Duration
 	MaxPreauthLineBytes    int
 	MaxPreauthLiteralBytes int
+	Authenticator          nauthilus.Authenticator
+	RoutingResolver        routing.RoutingResolver
+	SessionStore           state.SessionStore
+	BackendSelector        backend.Selector
 }
 
 // Context records stable, secret-safe session metadata for protocol handling.
 type Context struct {
 	ID                     string
 	ListenerName           string
+	AuthorityName          string
 	ServiceName            string
 	Network                string
+	BackendPool            string
+	DefaultTenant          string
 	TLSMode                string
 	LocalAddr              net.Addr
 	RemoteAddr             net.Addr
@@ -66,6 +102,7 @@ type Context struct {
 	AuthMechanisms         []string
 	MaxBearerTokenBytes    int
 	RequireIDBeforeAuth    bool
+	SessionLeaseTTL        time.Duration
 }
 
 // StartTLSAvailable reports whether this session can later expose STARTTLS.

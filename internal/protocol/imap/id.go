@@ -50,10 +50,17 @@ func (s *Session) handleID(command preauthCommand) error {
 
 // NauthilusRequestContext builds the auth-facing context without HTTP-only user-agent data.
 func (s *Session) NauthilusRequestContext(method string) nauthilus.RequestContext {
+	clientIP, clientPort := splitSessionAddr(s.context.RemoteAddr)
+	localIP, localPort := splitSessionAddr(s.context.LocalAddr)
+
 	return nauthilus.RequestContext{
-		ClientID: s.clientID,
-		Protocol: "imap",
-		Method:   method,
+		ClientIP:   clientIP,
+		ClientPort: clientPort,
+		ClientID:   s.clientID,
+		LocalIP:    localIP,
+		LocalPort:  localPort,
+		Protocol:   protocolIMAP,
+		Method:     method,
 	}
 }
 

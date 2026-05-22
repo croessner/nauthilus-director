@@ -141,7 +141,7 @@ func TestMissingIDPermissiveByDefault(t *testing.T) {
 	harness := startTestSession(t, testPreauthConfig(TLSModeStartTLS, false))
 	harness.expectLine(t, greetingLine)
 	harness.write(t, `A001 LOGIN "alice" "secret"`+"\r\n")
-	harness.expectLine(t, "A001 NO [UNAVAILABLE] Authentication handler unavailable\r\n")
+	harness.expectLine(t, "A001 NO [UNAVAILABLE] Authentication service temporarily unavailable\r\n")
 }
 
 // TestAuthenticateMechanismShapes verifies supported SASL mechanisms and initial responses parse.
@@ -152,9 +152,9 @@ func TestAuthenticateMechanismShapes(t *testing.T) {
 		"A002 AUTHENTICATE XOAUTH2 "+xoauth2Payload("xoauth2-user@example.test", "xoauth2-token")+"\r\n"+
 		"A003 AUTHENTICATE OAUTHBEARER "+oauthBearerPayload("oauth-user@example.test", "oauth-token")+"\r\n")
 
-	harness.expectLine(t, "A001 NO [UNAVAILABLE] Authentication handler unavailable\r\n")
-	harness.expectLine(t, "A002 NO [UNAVAILABLE] Authentication handler unavailable\r\n")
-	harness.expectLine(t, "A003 NO [UNAVAILABLE] Authentication handler unavailable\r\n")
+	harness.expectLine(t, "A001 NO [UNAVAILABLE] Authentication service temporarily unavailable\r\n")
+	harness.expectLine(t, "A002 NO [UNAVAILABLE] Authentication service temporarily unavailable\r\n")
+	harness.expectLine(t, "A003 NO [UNAVAILABLE] Authentication service temporarily unavailable\r\n")
 }
 
 // TestAuthenticateRejectsMalformedInitialResponse verifies SASL-IR shape validation.

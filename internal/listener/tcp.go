@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/croessner/nauthilus-director/internal/config"
 )
@@ -56,6 +57,8 @@ func newManagedListener(
 	authority config.AuthorityConfig,
 	runtime config.RuntimeConfig,
 	security config.DirectorSecurityConfig,
+	defaultTenant string,
+	sessionLeaseTTL time.Duration,
 	options managerOptions,
 ) (*managedListener, error) {
 	if err := validateNetwork(entry.Network); err != nil {
@@ -81,6 +84,11 @@ func newManagedListener(
 		security: security,
 	}
 
+	authenticator, err := options.authClientFactory(authority)
+	if err != nil {
+		return nil, fmt.Errorf("listener %s: %w", name, err)
+	}
+
 	return &managedListener{
 		name:   name,
 		config: configured,
@@ -89,7 +97,10 @@ func newManagedListener(
 			Config:              entry,
 			Timeouts:            runtime.Timeouts,
 			Security:            security,
+			Authenticator:       authenticator,
 			BearerTokenMaxBytes: authority.Mechanisms.Bearer.TokenMaxBytes,
+			DefaultTenant:       defaultTenant,
+			SessionLeaseTTL:     sessionLeaseTTL,
 		}),
 		proxyProtocol: proxyPolicy,
 		listenConfig:  options.listenConfig,

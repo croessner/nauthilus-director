@@ -17,18 +17,10 @@
 package imap
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
-)
-
-const (
-	responseBad = "BAD"
-	responseNo  = "NO"
-	responseOK  = "OK"
-
-	authUnavailableText = "[UNAVAILABLE] Authentication handler unavailable"
-	genericAuthFailText = "Authentication failed"
 )
 
 type commandOutcome struct {
@@ -36,7 +28,7 @@ type commandOutcome struct {
 }
 
 // handlePreauthCommand dispatches one parsed command in wire order.
-func (s *Session) handlePreauthCommand(command preauthCommand) (commandOutcome, error) {
+func (s *Session) handlePreauthCommand(ctx context.Context, command preauthCommand) (commandOutcome, error) {
 	switch command.name {
 	case commandCapability:
 		return commandOutcome{}, s.handleCapability(command)
@@ -49,9 +41,9 @@ func (s *Session) handlePreauthCommand(command preauthCommand) (commandOutcome, 
 	case commandID:
 		return commandOutcome{}, s.handleID(command)
 	case commandLogin:
-		return commandOutcome{}, s.handleLogin(command)
+		return commandOutcome{}, s.handleLogin(ctx, command)
 	case commandAuthenticate:
-		return commandOutcome{}, s.handleAuthenticate(command)
+		return commandOutcome{}, s.handleAuthenticate(ctx, command)
 	default:
 		if err := s.writeTagged(command.tag, responseBad, "Unsupported command before authentication"); err != nil {
 			return commandOutcome{}, err
@@ -84,7 +76,7 @@ func (s *Session) handleLogout(command preauthCommand) error {
 }
 
 // handleLogin extracts LOGIN credentials without retaining them on the session.
-func (s *Session) handleLogin(command preauthCommand) error {
+func (s *Session) handleLogin(ctx context.Context, command preauthCommand) error {
 	credentials, err := parseLoginCredentials(command)
 	if err != nil {
 		return s.writeTagged(command.tag, responseBad, "Invalid LOGIN command")
@@ -95,11 +87,11 @@ func (s *Session) handleLogin(command preauthCommand) error {
 		return s.writeTagged(command.tag, responseNo, genericAuthFailText)
 	}
 
-	return s.writeTagged(command.tag, responseNo, authUnavailableText)
+	return s.authenticateAndPlace(ctx, command.tag, credentials)
 }
 
 // handleAuthenticate extracts supported SASL credentials without retaining them on the session.
-func (s *Session) handleAuthenticate(command preauthCommand) error {
+func (s *Session) handleAuthenticate(ctx context.Context, command preauthCommand) error {
 	if len(command.arguments) < 1 || len(command.arguments) > 2 || command.arguments[0].kind != tokenAtom {
 		return s.writeTagged(command.tag, responseBad, "Invalid AUTHENTICATE command")
 	}
@@ -113,24 +105,17 @@ func (s *Session) handleAuthenticate(command preauthCommand) error {
 		return s.writeTagged(command.tag, responseNo, genericAuthFailText)
 	}
 
-	var encoded string
-	if len(command.arguments) == 2 {
-		if command.arguments[1].kind != tokenAtom {
+	encoded, err := s.authenticateResponsePayload(command)
+	if err != nil {
+		if errors.Is(err, errInvalidInitialResponse) {
 			return s.writeTagged(command.tag, responseBad, "Invalid AUTHENTICATE initial response")
 		}
 
-		encoded = command.arguments[1].value
-	} else {
-		response, err := s.readSASLContinuation(command.tag)
-		if err != nil {
-			if errors.Is(err, ErrCredentialRejected) || errors.Is(err, ErrMalformedCommand) {
-				return s.writeTagged(command.tag, responseBad, "Invalid AUTHENTICATE response")
-			}
-
-			return err
+		if errors.Is(err, ErrCredentialRejected) || errors.Is(err, ErrMalformedCommand) {
+			return s.writeTagged(command.tag, responseBad, "Invalid AUTHENTICATE response")
 		}
 
-		encoded = response
+		return err
 	}
 
 	credentials, err := parseSASLCredentials(
@@ -144,7 +129,27 @@ func (s *Session) handleAuthenticate(command preauthCommand) error {
 	}
 	defer credentials.Clear()
 
-	return s.writeTagged(command.tag, responseNo, authUnavailableText)
+	return s.authenticateAndPlace(ctx, command.tag, credentials)
+}
+
+var errInvalidInitialResponse = errors.New("imap: invalid authenticate initial response")
+
+// authenticateResponsePayload returns the SASL payload from initial response or continuation.
+func (s *Session) authenticateResponsePayload(command preauthCommand) (string, error) {
+	if len(command.arguments) == 2 {
+		return authenticateInitialResponse(command.arguments[1])
+	}
+
+	return s.readSASLContinuation(command.tag)
+}
+
+// authenticateInitialResponse validates and unwraps the AUTHENTICATE initial response token.
+func authenticateInitialResponse(token argumentToken) (string, error) {
+	if token.kind != tokenAtom {
+		return "", errInvalidInitialResponse
+	}
+
+	return token.value, nil
 }
 
 // readSASLContinuation prompts for and reads one bounded AUTHENTICATE response.

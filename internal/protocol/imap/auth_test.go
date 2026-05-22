@@ -223,7 +223,7 @@ func TestAuthenticateSASLIRAndContinuationFlows(t *testing.T) {
 			harness := startTestSession(t, testPreauthConfig(TLSModeStartTLS, false))
 			harness.expectLine(t, greetingLine)
 			harness.write(t, fmt.Sprintf("A001 AUTHENTICATE %s %s\r\n", testCase.mechanism, testCase.encoded))
-			harness.expectLine(t, "A001 NO [UNAVAILABLE] Authentication handler unavailable\r\n")
+			harness.expectLine(t, "A001 NO [UNAVAILABLE] Authentication service temporarily unavailable\r\n")
 		})
 
 		t.Run(testCase.name+"_continuation", func(t *testing.T) {
@@ -232,7 +232,7 @@ func TestAuthenticateSASLIRAndContinuationFlows(t *testing.T) {
 			harness.write(t, fmt.Sprintf("A001 AUTHENTICATE %s\r\n", testCase.mechanism))
 			harness.expectLine(t, "+ \r\n")
 			harness.write(t, testCase.encoded+"\r\n")
-			harness.expectLine(t, "A001 NO [UNAVAILABLE] Authentication handler unavailable\r\n")
+			harness.expectLine(t, "A001 NO [UNAVAILABLE] Authentication service temporarily unavailable\r\n")
 		})
 	}
 }

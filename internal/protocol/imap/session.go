@@ -27,6 +27,11 @@ import (
 	"io"
 	"net"
 	"time"
+
+	"github.com/croessner/nauthilus-director/internal/backend"
+	"github.com/croessner/nauthilus-director/internal/nauthilus"
+	"github.com/croessner/nauthilus-director/internal/routing"
+	"github.com/croessner/nauthilus-director/internal/state"
 )
 
 const (
@@ -67,13 +72,20 @@ func (h *Handler) Serve(ctx context.Context, conn net.Conn) error {
 
 // Session owns one accepted IMAP frontend stream until auth and proxy handling take over.
 type Session struct {
-	context Context
-	conn    net.Conn
-	reader  *bufio.Reader
-	writer  *bufio.Writer
+	context         Context
+	conn            net.Conn
+	reader          *bufio.Reader
+	writer          *bufio.Writer
+	authenticator   nauthilus.Authenticator
+	routingResolver routing.RoutingResolver
+	sessionStore    state.SessionStore
+	backendSelector backend.Selector
 
-	tlsActive bool
-	clientID  string
+	tlsActive     bool
+	clientID      string
+	authenticated bool
+	placement     Placement
+	placed        bool
 }
 
 // NewSession creates a bounded IMAP session context for an accepted connection.
@@ -91,8 +103,11 @@ func NewSession(config SessionConfig, conn net.Conn) (*Session, error) {
 		context: Context{
 			ID:                     sessionID,
 			ListenerName:           config.ListenerName,
+			AuthorityName:          config.AuthorityName,
 			ServiceName:            config.ServiceName,
 			Network:                config.Network,
+			BackendPool:            config.BackendPool,
+			DefaultTenant:          defaultTenant(config.DefaultTenant),
 			TLSMode:                config.TLSMode,
 			LocalAddr:              conn.LocalAddr(),
 			RemoteAddr:             conn.RemoteAddr(),
@@ -107,17 +122,31 @@ func NewSession(config SessionConfig, conn net.Conn) (*Session, error) {
 			AuthMechanisms:         append([]string(nil), config.AuthMechanisms...),
 			MaxBearerTokenBytes:    config.MaxBearerTokenBytes,
 			RequireIDBeforeAuth:    config.RequireIDBeforeAuth,
+			SessionLeaseTTL:        defaultSessionLeaseTTL(config.SessionLeaseTTL, config.ProxyIdleTimeout),
 		},
-		conn:      conn,
-		reader:    bufio.NewReaderSize(conn, config.MaxPreauthLineBytes+1),
-		writer:    bufio.NewWriter(conn),
-		tlsActive: config.TLSMode == TLSModeImplicit,
+		conn:            conn,
+		reader:          bufio.NewReaderSize(conn, config.MaxPreauthLineBytes+1),
+		writer:          bufio.NewWriter(conn),
+		authenticator:   config.Authenticator,
+		routingResolver: config.RoutingResolver,
+		sessionStore:    config.SessionStore,
+		backendSelector: config.BackendSelector,
+		tlsActive:       config.TLSMode == TLSModeImplicit,
 	}, nil
 }
 
 // Context returns the stable internal session metadata without exposing it as metric labels.
 func (s *Session) Context() Context {
 	return s.context
+}
+
+// Placement returns the completed director placement facts when authentication succeeded.
+func (s *Session) Placement() (Placement, bool) {
+	if !s.placed {
+		return Placement{}, false
+	}
+
+	return s.placement.Clone(), true
 }
 
 // Serve writes the initial greeting and processes pre-auth commands in wire order.
@@ -157,7 +186,7 @@ func (s *Session) Serve(ctx context.Context) error {
 			return err
 		}
 
-		closeSession, err := s.processPreauthLine(line)
+		closeSession, err := s.processPreauthLine(ctx, line)
 		if err != nil {
 			return err
 		}
@@ -239,7 +268,7 @@ func (s *Session) readPreauthLine() ([]byte, error) {
 }
 
 // processPreauthLine parses and dispatches one pre-auth command.
-func (s *Session) processPreauthLine(line []byte) (bool, error) {
+func (s *Session) processPreauthLine(ctx context.Context, line []byte) (bool, error) {
 	tag := tagHintForLine(line)
 
 	if err := s.rejectUnsupportedLiteral(line, tag); err != nil {
@@ -259,7 +288,7 @@ func (s *Session) processPreauthLine(line []byte) (bool, error) {
 		return false, nil
 	}
 
-	outcome, err := s.handlePreauthCommand(command)
+	outcome, err := s.handlePreauthCommand(ctx, command)
 	if flushErr := s.writer.Flush(); flushErr != nil {
 		return false, flushErr
 	}
@@ -306,4 +335,40 @@ func newSessionID() (string, error) {
 	}
 
 	return hex.EncodeToString(raw[:]), nil
+}
+
+// defaultTenant returns the configured tenant fallback used before auth attributes override it.
+func defaultTenant(value string) string {
+	if value != "" {
+		return value
+	}
+
+	return defaultTenantName
+}
+
+// defaultSessionLeaseTTL returns a conservative lease duration for the session-open request.
+func defaultSessionLeaseTTL(configured time.Duration, proxyIdle time.Duration) time.Duration {
+	if configured > 0 {
+		return configured
+	}
+
+	if proxyIdle > 0 {
+		return proxyIdle
+	}
+
+	return time.Minute
+}
+
+// cloneStringSlices returns a detached copy of a string-slice map.
+func cloneStringSlices(values map[string][]string) map[string][]string {
+	if values == nil {
+		return nil
+	}
+
+	cloned := make(map[string][]string, len(values))
+	for key, entries := range values {
+		cloned[key] = append([]string(nil), entries...)
+	}
+
+	return cloned
 }
