@@ -1050,6 +1050,11 @@ make guardrails
 
 ### M0: Repository hygiene and foundation
 
+Status: completed. The production root module, typed configuration loader,
+Nauthilus auth boundary, routing resolver foundation, Redis state foundations,
+OpenAPI workflow, CLI generated-client boundary, E2E harness scaffold and
+`make guardrails` gate are in place for the IMAP MVP to start.
+
 - keep the old implementation isolated under `poc/` as reference material only
 - finalize package layout
 - create the new production Go module skeleton under the root package layout
@@ -1155,13 +1160,10 @@ Known future decisions:
 ## 24. Immediate next steps
 
 1. Keep this architecture roadmap healthy and aligned with `docs/config/nauthilus-director.target.yml`.
-2. Create `docs/specs/implementation/M0_FOUNDATION_SPEC.md` before starting broad implementation.
-3. Create the new production Go module skeleton under the root package layout.
-4. Add the approved foundation dependencies and tool pins to the production module.
-5. Implement typed config loading, canonical defaults, redacted/non-redacted dumps and validator-based validation.
-6. Add the routing resolver package with `auth_attribute` and deterministic hash fallback support.
-7. Add the initial OpenAPI specification under `docs/specs/openapi/nauthilus-director.yaml` and wire reproducible generation/check targets.
-8. Build the E2E harness with fake Nauthilus and fake backend test servers before expanding production protocol code.
-9. Implement the IMAP MVP end-to-end with Redis-backed active affinity, basic metrics, structured logs, trace boundaries and externally observable E2E coverage.
+2. Create `docs/specs/implementation/M1_IMAP_MVP_SPEC.md` before starting broad IMAP implementation.
+3. Define the M1 protocol package boundaries, listener lifecycle, IMAP pre-auth command subset and proxy transition rules.
+4. Specify how M1 wires configured Nauthilus HTTP/gRPC auth, routing facts, backend selection and Redis-backed active affinity into one externally observable session flow.
+5. Extend the fake-service E2E harness for IMAP, Redis-backed stickiness, route lookup safety and secret-safe logs before adding a Docker interoperability smoke.
+6. Implement the IMAP MVP end-to-end with basic metrics, structured logs, trace boundaries and `make guardrails` as the final local gate.
 
 The project should evolve as a small, sharp director: protocol-aware only where necessary, authenticated through Nauthilus, routed through director-owned facts and selectors, observable by default, and operationally safe enough to sit in front of real mail backends.
