@@ -1,0 +1,972 @@
+openapi: 3.0.3
+info:
+  title: nauthilus-director control API
+  version: v1
+  description: >
+    Administrative control API for nauthilus-director. The v1 surface is
+    OpenAPI-first; generated server and client code stay at the REST boundary.
+x-control-auth-modes:
+  - disabled
+  - static_bearer
+  - mtls
+  - reverse_proxy_headers
+  - oidc_jwt_via_nauthilus
+servers:
+  - url: http://127.0.0.1:9090
+    description: Default local control listener
+tags:
+  - name: health
+    description: Liveness, readiness and version checks.
+  - name: config
+    description: Read-only configuration inspection and reload control.
+  - name: backends
+    description: Backend inventory, maintenance and runtime overrides.
+  - name: sessions
+    description: Lease-backed frontend session inspection and control.
+  - name: users
+    description: User runtime state, affinity and administrative actions.
+  - name: routing
+    description: Director-only side-effect-free route diagnostics.
+  - name: metrics
+    description: Prometheus-compatible metrics endpoint.
+paths:
+  /healthz:
+    get:
+      operationId: getHealthz
+      tags:
+        - health
+      summary: Check process liveness.
+      responses:
+        "200":
+          description: Process is alive.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusResponse"
+        default:
+          $ref: "#/components/responses/Error"
+  /readyz:
+    get:
+      operationId: getReadyz
+      tags:
+        - health
+      summary: Check control-plane readiness.
+      responses:
+        "200":
+          description: Control plane is ready.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusResponse"
+        "503":
+          description: Control plane is not ready.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/v1/version:
+    get:
+      operationId: getVersion
+      tags:
+        - health
+      summary: Return binary and API version information.
+      responses:
+        "200":
+          description: Version information.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VersionResponse"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/v1/config/effective:
+    get:
+      operationId: getEffectiveConfig
+      tags:
+        - config
+      summary: Return the effective redacted configuration.
+      responses:
+        "200":
+          description: Effective configuration.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConfigDocument"
+        "501":
+          $ref: "#/components/responses/NotImplemented"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/v1/config/defaults:
+    get:
+      operationId: getDefaultConfig
+      tags:
+        - config
+      summary: Return canonical default configuration.
+      responses:
+        "200":
+          description: Default configuration.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConfigDocument"
+        "501":
+          $ref: "#/components/responses/NotImplemented"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/v1/config/non-default:
+    get:
+      operationId: getNonDefaultConfig
+      tags:
+        - config
+      summary: Return non-default effective configuration.
+      responses:
+        "200":
+          description: Non-default configuration.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConfigDocument"
+        "501":
+          $ref: "#/components/responses/NotImplemented"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/v1/reload:
+    post:
+      operationId: reload
+      tags:
+        - config
+      summary: Request configuration reload.
+      responses:
+        "202":
+          description: Reload request was accepted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AcceptedResponse"
+        "501":
+          $ref: "#/components/responses/NotImplemented"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/v1/backends:
+    get:
+      operationId: listBackends
+      tags:
+        - backends
+      summary: List configured backends.
+      responses:
+        "200":
+          description: Backend list.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BackendListResponse"
+        "501":
+          $ref: "#/components/responses/NotImplemented"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/v1/backends/{identifier}:
+    parameters:
+      - $ref: "#/components/parameters/Identifier"
+    get:
+      operationId: getBackend
+      tags:
+        - backends
+      summary: Show one backend.
+      responses:
+        "200":
+          description: Backend detail.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BackendDetail"
+        "501":
+          $ref: "#/components/responses/NotImplemented"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/v1/backends/{identifier}/maintenance:
+    parameters:
+      - $ref: "#/components/parameters/Identifier"
+    post:
+      operationId: enableBackendMaintenance
+      tags:
+        - backends
+      summary: Put a backend into maintenance.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MaintenanceRequest"
+      responses:
+        "202":
+          description: Maintenance change was accepted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AcceptedResponse"
+        "501":
+          $ref: "#/components/responses/NotImplemented"
+        default:
+          $ref: "#/components/responses/Error"
+    delete:
+      operationId: disableBackendMaintenance
+      tags:
+        - backends
+      summary: Clear backend maintenance.
+      responses:
+        "202":
+          description: Maintenance clear was accepted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AcceptedResponse"
+        "501":
+          $ref: "#/components/responses/NotImplemented"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/v1/backends/{identifier}/runtime/in:
+    parameters:
+      - $ref: "#/components/parameters/Identifier"
+    post:
+      operationId: markBackendIn
+      tags:
+        - backends
+      summary: Mark a backend in service for runtime placement.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RuntimeReasonRequest"
+      responses:
+        "202":
+          description: Runtime change was accepted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AcceptedResponse"
+        "501":
+          $ref: "#/components/responses/NotImplemented"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/v1/backends/{identifier}/runtime/out:
+    parameters:
+      - $ref: "#/components/parameters/Identifier"
+    post:
+      operationId: markBackendOut
+      tags:
+        - backends
+      summary: Mark a backend out of service for new runtime placement.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RuntimeReasonRequest"
+      responses:
+        "202":
+          description: Runtime change was accepted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AcceptedResponse"
+        "501":
+          $ref: "#/components/responses/NotImplemented"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/v1/backends/{identifier}/runtime/drain:
+    parameters:
+      - $ref: "#/components/parameters/Identifier"
+    post:
+      operationId: drainBackend
+      tags:
+        - backends
+      summary: Drain a backend with explicit operator intent.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DrainRequest"
+      responses:
+        "202":
+          description: Drain request was accepted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AcceptedResponse"
+        "501":
+          $ref: "#/components/responses/NotImplemented"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/v1/backends/{identifier}/runtime:
+    parameters:
+      - $ref: "#/components/parameters/Identifier"
+    delete:
+      operationId: clearBackendRuntime
+      tags:
+        - backends
+      summary: Clear runtime overrides for a backend.
+      responses:
+        "202":
+          description: Runtime clear was accepted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AcceptedResponse"
+        "501":
+          $ref: "#/components/responses/NotImplemented"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/v1/sessions:
+    get:
+      operationId: listSessions
+      tags:
+        - sessions
+      summary: List active frontend sessions.
+      parameters:
+        - name: protocol
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Session list.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionListResponse"
+        "501":
+          $ref: "#/components/responses/NotImplemented"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/v1/sessions/{session_id}:
+    parameters:
+      - $ref: "#/components/parameters/SessionID"
+    get:
+      operationId: getSession
+      tags:
+        - sessions
+      summary: Show one frontend session.
+      responses:
+        "200":
+          description: Session detail.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionDetail"
+        "501":
+          $ref: "#/components/responses/NotImplemented"
+        default:
+          $ref: "#/components/responses/Error"
+    delete:
+      operationId: deleteSession
+      tags:
+        - sessions
+      summary: Terminate one frontend session.
+      responses:
+        "202":
+          description: Session termination was accepted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AcceptedResponse"
+        "501":
+          $ref: "#/components/responses/NotImplemented"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/v1/users:
+    get:
+      operationId: listUsers
+      tags:
+        - users
+      summary: List users with runtime state.
+      responses:
+        "200":
+          description: User list.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserListResponse"
+        "501":
+          $ref: "#/components/responses/NotImplemented"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/v1/users/{user_key}:
+    parameters:
+      - $ref: "#/components/parameters/UserKey"
+    get:
+      operationId: getUser
+      tags:
+        - users
+      summary: Show user runtime state.
+      responses:
+        "200":
+          description: User detail.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserDetail"
+        "501":
+          $ref: "#/components/responses/NotImplemented"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/v1/users/{user_key}/sessions:
+    parameters:
+      - $ref: "#/components/parameters/UserKey"
+    get:
+      operationId: getUserSessions
+      tags:
+        - users
+      summary: List active sessions for one user key.
+      responses:
+        "200":
+          description: User session list.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionListResponse"
+        "501":
+          $ref: "#/components/responses/NotImplemented"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/v1/users/{user_key}/affinity:
+    parameters:
+      - $ref: "#/components/parameters/UserKey"
+    get:
+      operationId: getUserAffinity
+      tags:
+        - users
+      summary: Show active affinity for one user key.
+      responses:
+        "200":
+          description: User affinity.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserAffinity"
+        "501":
+          $ref: "#/components/responses/NotImplemented"
+        default:
+          $ref: "#/components/responses/Error"
+    put:
+      operationId: setUserAffinity
+      tags:
+        - users
+      summary: Set active affinity for one user key.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AffinityUpdateRequest"
+      responses:
+        "202":
+          description: Affinity update was accepted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AcceptedResponse"
+        "501":
+          $ref: "#/components/responses/NotImplemented"
+        default:
+          $ref: "#/components/responses/Error"
+    delete:
+      operationId: clearUserAffinity
+      tags:
+        - users
+      summary: Clear active affinity for one user key.
+      responses:
+        "202":
+          description: Affinity clear was accepted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AcceptedResponse"
+        "501":
+          $ref: "#/components/responses/NotImplemented"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/v1/users/{user_key}/move:
+    parameters:
+      - $ref: "#/components/parameters/UserKey"
+    post:
+      operationId: moveUser
+      tags:
+        - users
+      summary: Move one user key to another shard.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UserMoveRequest"
+      responses:
+        "202":
+          description: Move request was accepted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AcceptedResponse"
+        "501":
+          $ref: "#/components/responses/NotImplemented"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/v1/users/{user_key}/kick:
+    parameters:
+      - $ref: "#/components/parameters/UserKey"
+    post:
+      operationId: kickUser
+      tags:
+        - users
+      summary: Terminate active sessions for one user key.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UserKickRequest"
+      responses:
+        "202":
+          description: Kick request was accepted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AcceptedResponse"
+        "501":
+          $ref: "#/components/responses/NotImplemented"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/v1/route/lookup:
+    post:
+      operationId: lookupRoute
+      tags:
+        - routing
+      summary: Explain director-only routing for a known identity key.
+      description: >
+        This diagnostic endpoint is side-effect-free. It must not authenticate
+        credentials, call Nauthilus, create sessions, refresh leases or mutate
+        Redis state.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RouteLookupRequest"
+      responses:
+        "200":
+          description: Route lookup explanation.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RouteLookupResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "501":
+          $ref: "#/components/responses/NotImplemented"
+        default:
+          $ref: "#/components/responses/Error"
+  /metrics:
+    get:
+      operationId: getMetrics
+      tags:
+        - metrics
+      summary: Return Prometheus-compatible metrics.
+      responses:
+        "200":
+          description: Prometheus metrics.
+          content:
+            text/plain:
+              schema:
+                type: string
+        "501":
+          $ref: "#/components/responses/NotImplemented"
+        default:
+          $ref: "#/components/responses/Error"
+components:
+  parameters:
+    Identifier:
+      name: identifier
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 1
+    SessionID:
+      name: session_id
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 1
+    UserKey:
+      name: user_key
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 1
+  responses:
+    BadRequest:
+      description: The request was rejected before domain processing.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Error:
+      description: Structured error response.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    NotImplemented:
+      description: The route is reserved but the domain behavior is not implemented.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+  schemas:
+    AcceptedResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - status
+      properties:
+        status:
+          type: string
+          enum:
+            - accepted
+    BackendDetail:
+      type: object
+      additionalProperties: false
+      required:
+        - identifier
+        - protocol
+        - backend_pool
+        - shard_tag
+        - runtime
+      properties:
+        identifier:
+          type: string
+        protocol:
+          type: string
+        backend_pool:
+          type: string
+        shard_tag:
+          type: string
+        runtime:
+          $ref: "#/components/schemas/BackendRuntimeState"
+    BackendListResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - backends
+      properties:
+        backends:
+          type: array
+          items:
+            $ref: "#/components/schemas/BackendDetail"
+    BackendRuntimeState:
+      type: object
+      additionalProperties: false
+      required:
+        - in_service
+        - draining
+        - maintenance
+      properties:
+        in_service:
+          type: boolean
+        draining:
+          type: boolean
+        maintenance:
+          $ref: "#/components/schemas/MaintenanceMode"
+        weight:
+          type: integer
+          minimum: 0
+    ConfigDocument:
+      type: object
+      additionalProperties: false
+      required:
+        - format
+        - redacted
+        - data
+      properties:
+        format:
+          type: string
+          enum:
+            - yaml
+            - json
+        redacted:
+          type: boolean
+        data:
+          type: object
+          additionalProperties: true
+    DrainRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - mode
+        - reason
+      properties:
+        mode:
+          $ref: "#/components/schemas/DrainMode"
+        reason:
+          type: string
+          minLength: 1
+        grace_seconds:
+          type: integer
+          minimum: 0
+    DrainMode:
+      type: string
+      enum:
+        - soft
+        - hard
+    ErrorResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - status
+        - code
+        - message
+      properties:
+        status:
+          type: integer
+          minimum: 100
+          maximum: 599
+        code:
+          type: string
+          minLength: 1
+        message:
+          type: string
+          minLength: 1
+        operation:
+          type: string
+          nullable: true
+    MaintenanceMode:
+      type: string
+      enum:
+        - disabled
+        - soft
+        - hard
+    MaintenanceRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - mode
+        - reason
+      properties:
+        mode:
+          $ref: "#/components/schemas/MaintenanceMode"
+        reason:
+          type: string
+          minLength: 1
+        grace_seconds:
+          type: integer
+          minimum: 0
+    RouteLookupRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - protocol
+        - user_key
+      properties:
+        protocol:
+          type: string
+          minLength: 1
+        user_key:
+          type: string
+          minLength: 1
+        tenant:
+          type: string
+        listener:
+          type: string
+        service_name:
+          type: string
+        backend_pool:
+          type: string
+        client_ip:
+          type: string
+        attributes:
+          type: object
+          additionalProperties:
+            type: array
+            items:
+              type: string
+    RouteLookupResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - selected_backend
+        - reason
+        - healthy
+        - maintenance
+        - shard_tag
+      properties:
+        selected_backend:
+          type: string
+        reason:
+          type: string
+        healthy:
+          type: boolean
+        maintenance:
+          type: boolean
+        shard_tag:
+          type: string
+        routing_generation:
+          type: string
+    RuntimeReasonRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        reason:
+          type: string
+          minLength: 1
+    SessionDetail:
+      type: object
+      additionalProperties: false
+      required:
+        - session_id
+        - user_key
+        - protocol
+        - backend
+        - shard_tag
+        - expires_at
+      properties:
+        session_id:
+          type: string
+        user_key:
+          type: string
+        protocol:
+          type: string
+        backend:
+          type: string
+        shard_tag:
+          type: string
+        expires_at:
+          type: string
+          format: date-time
+    SessionListResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - sessions
+      properties:
+        sessions:
+          type: array
+          items:
+            $ref: "#/components/schemas/SessionDetail"
+    StatusResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - status
+      properties:
+        status:
+          type: string
+          minLength: 1
+        checks:
+          type: object
+          additionalProperties:
+            type: string
+    UserAffinity:
+      type: object
+      additionalProperties: false
+      required:
+        - user_key
+        - shard_tag
+        - active_sessions
+      properties:
+        user_key:
+          type: string
+        shard_tag:
+          type: string
+        generation:
+          type: string
+        active_sessions:
+          type: integer
+          minimum: 0
+        expires_at:
+          type: string
+          format: date-time
+    AffinityUpdateRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - shard_tag
+        - reason
+      properties:
+        shard_tag:
+          type: string
+          minLength: 1
+        reason:
+          type: string
+          minLength: 1
+    UserDetail:
+      type: object
+      additionalProperties: false
+      required:
+        - user_key
+        - active_sessions
+      properties:
+        user_key:
+          type: string
+        active_sessions:
+          type: integer
+          minimum: 0
+        affinity:
+          $ref: "#/components/schemas/UserAffinity"
+    UserKickRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - reason
+      properties:
+        reason:
+          type: string
+          minLength: 1
+    UserListResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - users
+      properties:
+        users:
+          type: array
+          items:
+            $ref: "#/components/schemas/UserDetail"
+    UserMoveRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - to_shard
+        - strategy
+        - reason
+      properties:
+        to_shard:
+          type: string
+          minLength: 1
+        strategy:
+          type: string
+          enum:
+            - preserve_existing
+            - kick_existing
+        reason:
+          type: string
+          minLength: 1
+    VersionResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - component
+        - version
+        - api_version
+      properties:
+        component:
+          type: string
+        version:
+          type: string
+        api_version:
+          type: string

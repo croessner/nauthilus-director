@@ -1015,9 +1015,9 @@ Integration tests:
 
 E2E tests:
 
-- run through `make e2e`
-- use fake or containerized Nauthilus authorities over HTTP and gRPC
-- use fake IMAP, LMTP, ManageSieve and POP3 backends that expose protocol-level observations
+- keep a deterministic guardrail lane through `make e2e`
+- use fake Nauthilus authorities over HTTP and gRPC in the guardrail lane
+- use fake IMAP, LMTP, ManageSieve and POP3 backends in the guardrail lane so tests can force protocol observations, backend failures, maintenance state, slow responses and secret-safe log assertions
 - use real Redis or a Redis-compatible test service for active affinity and runtime overrides
 - authenticate through the public protocol listener, then assert backend routing externally
 - verify `auth_attribute` routing from Nauthilus-provided attributes
@@ -1026,6 +1026,17 @@ E2E tests:
 - verify TLS/STARTTLS and backend TLS/SNI behavior with test certificates
 - scrape Prometheus metrics and optionally receive OTLP traces where the test environment provides collectors
 - keep credentials and SASL bearer material out of test logs
+
+Docker interoperability smoke tests:
+
+- live beside the deterministic fake-service E2E lane and must not replace it
+- may use a separate Makefile target such as `make e2e-interop` or `make e2e-docker`
+- use pinned container images or digests so local runs and CI do not drift silently
+- use `chrroessner/postfix` for Postfix-backed protocol peer scenarios where Postfix behavior is part of the externally visible contract
+- use Dovecot project-provided Docker assets for IMAP, POP3, LMTP and ManageSieve backend interoperability once those protocol entrypoints exist
+- use real Redis or the same Redis-compatible service policy as the guardrail lane
+- skip with an explicit, stable message when Docker is unavailable or the corresponding production protocol entrypoint does not exist yet
+- prove interoperability with real server behavior, packaging assumptions, listener exposure and TLS/backend-auth settings, while fake services continue to prove edge cases and deterministic director semantics
 
 Local quality gate:
 
@@ -1039,6 +1050,11 @@ make guardrails
 
 ### M0: Repository hygiene and foundation
 
+Status: completed. The production root module, typed configuration loader,
+Nauthilus auth boundary, routing resolver foundation, Redis state foundations,
+OpenAPI workflow, CLI generated-client boundary, E2E harness scaffold and
+`make guardrails` gate are in place for the IMAP MVP to start.
+
 - keep the old implementation isolated under `poc/` as reference material only
 - finalize package layout
 - create the new production Go module skeleton under the root package layout
@@ -1049,6 +1065,7 @@ make guardrails
 - align the director-side Nauthilus request/response models with the real HTTP JSON and gRPC contracts
 - create the initial routing resolver abstraction and document `auth_attribute` plus hash fallback semantics
 - create the E2E harness entrypoint and fake service structure so later protocol work can add externally observable tests immediately
+- document the future Docker interoperability smoke lane without requiring Postfix or Dovecot containers before protocol entrypoints exist
 
 ### M1: IMAP MVP
 
@@ -1060,7 +1077,7 @@ make guardrails
 - backend connect
 - transparent proxy loop
 - basic metrics/logging/tracing
-- E2E proof for successful IMAP auth, routing resolver behavior, backend selection, active stickiness and secret-safe observable output
+- E2E proof for successful IMAP auth, routing resolver behavior, backend selection, active stickiness and secret-safe observable output, using deterministic fakes first and adding a Dovecot-backed Docker interoperability smoke when the Docker lane is available
 
 ### M2: Backend runtime
 
@@ -1143,13 +1160,10 @@ Known future decisions:
 ## 24. Immediate next steps
 
 1. Keep this architecture roadmap healthy and aligned with `docs/config/nauthilus-director.target.yml`.
-2. Create `docs/specs/implementation/M0_FOUNDATION_SPEC.md` before starting broad implementation.
-3. Create the new production Go module skeleton under the root package layout.
-4. Add the approved foundation dependencies and tool pins to the production module.
-5. Implement typed config loading, canonical defaults, redacted/non-redacted dumps and validator-based validation.
-6. Add the routing resolver package with `auth_attribute` and deterministic hash fallback support.
-7. Add the initial OpenAPI specification under `docs/specs/openapi/nauthilus-director.yaml` and wire reproducible generation/check targets.
-8. Build the E2E harness with fake Nauthilus and fake backend test servers before expanding production protocol code.
-9. Implement the IMAP MVP end-to-end with Redis-backed active affinity, basic metrics, structured logs, trace boundaries and externally observable E2E coverage.
+2. Create `docs/specs/implementation/M1_IMAP_MVP_SPEC.md` before starting broad IMAP implementation.
+3. Define the M1 protocol package boundaries, listener lifecycle, IMAP pre-auth command subset and proxy transition rules.
+4. Specify how M1 wires configured Nauthilus HTTP/gRPC auth, routing facts, backend selection and Redis-backed active affinity into one externally observable session flow.
+5. Extend the fake-service E2E harness for IMAP, Redis-backed stickiness, route lookup safety and secret-safe logs before adding a Docker interoperability smoke.
+6. Implement the IMAP MVP end-to-end with basic metrics, structured logs, trace boundaries and `make guardrails` as the final local gate.
 
 The project should evolve as a small, sharp director: protocol-aware only where necessary, authenticated through Nauthilus, routed through director-owned facts and selectors, observable by default, and operationally safe enough to sit in front of real mail backends.
