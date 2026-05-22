@@ -51,7 +51,8 @@ In scope:
   conventions needed by active affinity and runtime overrides.
 - Establish structured logging, trace boundaries and metric label policy.
 - Add the first E2E harness entrypoint and fake service scaffolding so M1 can
-  prove behavior through public sockets and commands.
+  prove behavior through public sockets and commands, and document the separate
+  future Docker interoperability smoke lane.
 
 Out of scope:
 
@@ -885,6 +886,8 @@ visible protocol behavior without internal package shortcuts.
   - LMTP backend
   - ManageSieve backend
   - POP3 backend
+- Document the future Docker interoperability smoke lane as separate from the
+  deterministic fake-service guardrail lane.
 - Use real Redis or a Redis-compatible test service for active affinity and
   runtime overrides.
 - Ensure E2E tests start real binaries or test processes and talk to public
@@ -899,6 +902,8 @@ visible protocol behavior without internal package shortcuts.
 - Replacing unit tests with internal-only E2E shortcuts.
 - Printing credentials, SASL blobs or bearer tokens in test logs.
 - Making Redis optional for production active affinity semantics.
+- Requiring Postfix or Dovecot Docker interoperability runs before the
+  corresponding production protocol entrypoints exist.
 
 ### Expected Files or Packages
 
@@ -911,6 +916,7 @@ test/e2e/fakes/imap_backend/
 test/e2e/fakes/lmtp_backend/
 test/e2e/fakes/managesieve_backend/
 test/e2e/fakes/pop3_backend/
+test/e2e/interop/README.md
 internal/state/keys.go
 internal/state/scripts/
 internal/observability/policy.go
@@ -924,6 +930,22 @@ internal/observability/policy.go
   specification without those files is not sufficient for M0 acceptance.
 - Fake services should expose observable counters or request logs that omit
   credentials.
+- E2E must use two clearly documented lanes:
+  - the default guardrail lane runs through `make e2e`, uses deterministic fake
+    Nauthilus and fake protocol backends, and remains suitable for local
+    guardrails;
+  - the future Docker interoperability lane may use a target such as
+    `make e2e-interop` or `make e2e-docker`, uses pinned container images or
+    digests, and skips explicitly when Docker or production protocol entrypoints
+    are unavailable.
+- The Docker interoperability lane should use `chrroessner/postfix` when
+  Postfix behavior is part of the externally visible scenario, and
+  Dovecot project-provided Docker assets for IMAP, POP3, LMTP and ManageSieve
+  backend interoperability once those protocol entrypoints exist.
+- Docker interoperability tests validate real server behavior, packaging
+  assumptions, listener exposure and TLS/backend-auth settings. They do not
+  replace fake-service tests for forced edge cases, deterministic routing and
+  secret-safe observability assertions.
 - Redis test setup must exercise the same key builder and script loader used by
   production code.
 - Redis key groups use Cluster hash tags derived from the normalized affinity
@@ -1000,7 +1022,7 @@ raw_error
 - Trace span names are prepared for auth, routing, backend selection, REST and
   later protocol sessions.
 - E2E runner exits successfully when no runnable scenarios exist yet and says
-  what was skipped.
+  what was skipped, including deferred Docker interoperability scenarios.
 
 ### Required Integration or E2E Tests
 
@@ -1010,6 +1032,9 @@ raw_error
   production config.
 - Call public REST endpoints and CLI commands when the control server exists.
 - Assert fake service logs do not contain credentials or bearer material.
+- Document the Docker interoperability smoke lane; M0 does not need to start
+  Postfix or Dovecot containers until matching production protocol entrypoints
+  exist.
 
 ### Acceptance Criteria
 
@@ -1088,6 +1113,8 @@ M0 is complete only when all items below are true:
 - [ ] E2E harness entrypoint exists and is executable.
 - [ ] Fake Nauthilus HTTP/gRPC authorities and fake IMAP, LMTP, ManageSieve and
       POP3 backend test scaffolds exist.
+- [ ] Docker interoperability smoke lane is documented separately from the
+      deterministic fake-service guardrail lane.
 - [ ] E2E tests use public sockets, REST endpoints and CLI commands where
       applicable.
 - [ ] E2E tests keep credentials and SASL bearer material out of logs.
