@@ -292,6 +292,99 @@ func TestReplaySecretsAreClearedBeforeProxyMode(t *testing.T) {
 	}
 }
 
+// TestBackendConnectFailureClosesRegisteredSession verifies placement rollback after attach.
+func TestBackendConnectFailureClosesRegisteredSession(t *testing.T) {
+	credentials := plainCredentialsForBackendTest(t)
+	defer credentials.Clear()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+
+	store := &recordingSessionStore{}
+	session := newPlacedTransitionSession(t, server, store)
+	session.backendConnector = &recordingBackendConnector{err: errors.New("connect failed")}
+
+	_, err := session.transitionAuthenticatedSession(context.Background(), "A001", credentials)
+	if err != nil {
+		t.Fatalf("transitionAuthenticatedSession returned transport error: %v", err)
+	}
+
+	if store.closeCalls != 1 {
+		t.Fatalf("close calls after connect failure = %d, want 1", store.closeCalls)
+	}
+}
+
+// TestBackendAuthFailureClosesRegisteredSession verifies backend auth rollback after attach.
+func TestBackendAuthFailureClosesRegisteredSession(t *testing.T) {
+	credentials := plainCredentialsForBackendTest(t)
+	defer credentials.Clear()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+
+	store := &recordingSessionStore{}
+	session := newPlacedTransitionSession(t, server, store)
+	session.backendConnector = &recordingBackendConnector{authResponse: "NO backend auth rejected"}
+
+	_, err := session.transitionAuthenticatedSession(context.Background(), "A001", credentials)
+	if err != nil {
+		t.Fatalf("transitionAuthenticatedSession returned transport error: %v", err)
+	}
+
+	if store.closeCalls != 1 {
+		t.Fatalf("close calls after backend auth failure = %d, want 1", store.closeCalls)
+	}
+}
+
+// TestSessionLeaseLifecycleClosesRedisLeaseOnce verifies proxy cleanup is idempotent.
+func TestSessionLeaseLifecycleClosesRedisLeaseOnce(t *testing.T) {
+	store := &recordingSessionStore{}
+	lease := &sessionLeaseLifecycle{
+		store:     store,
+		key:       state.AffinityKey{Tenant: defaultTenantName, AccountKey: "alice@example.test"},
+		sessionID: "session-1",
+		ttl:       time.Second,
+	}
+
+	if err := lease.Close(context.Background()); err != nil {
+		t.Fatalf("first Close returned error: %v", err)
+	}
+	if err := lease.Close(context.Background()); err != nil {
+		t.Fatalf("second Close returned error: %v", err)
+	}
+	if store.closeCalls != 1 {
+		t.Fatalf("close calls = %d, want 1", store.closeCalls)
+	}
+}
+
+// newPlacedTransitionSession creates a session positioned after Redis attach.
+func newPlacedTransitionSession(t *testing.T, conn net.Conn, store *recordingSessionStore) *Session {
+	t.Helper()
+
+	session, err := NewSession(pipelineSessionConfig(
+		&recordingAuthenticator{},
+		&recordingRoutingResolver{},
+		store,
+		&recordingBackendSelector{},
+	), conn)
+	if err != nil {
+		t.Fatalf("NewSession returned error: %v", err)
+	}
+
+	session.sessionStore = store
+	session.proxyRunner = &recordingProxyRunner{}
+	session.placement = Placement{
+		Routing: routing.RoutingResult{Tenant: defaultTenantName, AccountKey: "alice@example.test"},
+		Affinity: state.AffinityRecord{
+			Key: state.AffinityKey{Tenant: defaultTenantName, AccountKey: "alice@example.test"},
+		},
+		Backend: backend.SelectionResult{Backend: defaultPipelineBackend("selected-imap")},
+	}
+	session.placed = true
+
+	return session
+}
+
 // assertAuthenticatedPipelineCalls verifies the auth, routing, session and selector requests.
 func assertAuthenticatedPipelineCalls(
 	t *testing.T,
@@ -706,14 +799,19 @@ func readPipeLine(t *testing.T, conn net.Conn) string {
 
 // recordingBackendConnector returns an already prepared fake backend connection.
 type recordingBackendConnector struct {
-	calls  int
-	target backend.Backend
+	calls        int
+	target       backend.Backend
+	err          error
+	authResponse string
 }
 
 // Connect records the selected backend and prepares a fake auth-capable stream.
 func (c *recordingBackendConnector) Connect(_ context.Context, target backend.Backend, _ time.Duration) (*BackendConnection, error) {
 	c.calls++
 	c.target = target
+	if c.err != nil {
+		return nil, c.err
+	}
 
 	client, server := net.Pipe()
 	connection := newBackendConnection(client)
@@ -721,13 +819,13 @@ func (c *recordingBackendConnector) Connect(_ context.Context, target backend.Ba
 	connection.tlsActive = true
 	connection.tlsVerified = true
 
-	go serveOneBackendAuthCommand(server)
+	go serveOneBackendAuthCommand(server, c.authResponse)
 
 	return connection, nil
 }
 
 // serveOneBackendAuthCommand accepts one backend auth command and then waits for proxy close.
-func serveOneBackendAuthCommand(conn net.Conn) {
+func serveOneBackendAuthCommand(conn net.Conn, response string) {
 	defer func() { _ = conn.Close() }()
 
 	reader := bufio.NewReader(conn)
@@ -741,7 +839,11 @@ func serveOneBackendAuthCommand(conn net.Conn) {
 		return
 	}
 
-	_, _ = io.WriteString(conn, tag+" OK backend auth completed\r\n")
+	if response == "" {
+		response = "OK backend auth completed"
+	}
+
+	_, _ = io.WriteString(conn, tag+" "+response+"\r\n")
 	_, _ = io.Copy(io.Discard, reader)
 }
 

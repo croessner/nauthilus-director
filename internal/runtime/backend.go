@@ -17,9 +17,12 @@
 package runtime
 
 import (
+	"context"
+	"strconv"
 	"strings"
 
 	"github.com/croessner/nauthilus-director/internal/backend"
+	"github.com/croessner/nauthilus-director/internal/state"
 )
 
 const (
@@ -76,10 +79,162 @@ type ClearBackendRuntimeRequest struct {
 
 // BackendMutationResult describes a runtime backend mutation outcome.
 type BackendMutationResult struct {
-	BackendIdentifier string
-	Override          backend.RuntimeOverride
-	EffectiveState    backend.EffectiveBackendState
-	Audit             AuditMetadata
+	BackendIdentifier  string
+	Override           backend.RuntimeOverride
+	EffectiveState     backend.EffectiveBackendState
+	MarkedSessionCount int
+	Audit              AuditMetadata
+}
+
+// BackendStateStore persists Redis-backed backend runtime mutations.
+type BackendStateStore interface {
+	SetBackendRuntime(ctx context.Context, mutation state.BackendRuntimeMutation) (state.BackendRuntimeRecord, error)
+	ClearBackendRuntime(ctx context.Context, request state.BackendRuntimeClearRequest) (state.BackendRuntimeRecord, error)
+}
+
+// BackendService coordinates backend runtime operations with local session acceleration.
+type BackendService struct {
+	store BackendStateStore
+	local *LocalSessionRegistry
+}
+
+// NewBackendService creates the runtime backend operation service.
+func NewBackendService(store BackendStateStore, local *LocalSessionRegistry) *BackendService {
+	return &BackendService{store: store, local: local}
+}
+
+// SetInService changes the runtime in/out overlay without terminating active sessions.
+func (s *BackendService) SetInService(ctx context.Context, request SetBackendInServiceRequest) (BackendMutationResult, error) {
+	if err := request.Validate(); err != nil {
+		return BackendMutationResult{}, err
+	}
+
+	record, err := s.setRuntime(ctx, state.BackendRuntimeMutation{
+		BackendIdentifier: strings.TrimSpace(request.BackendIdentifier),
+		InService:         &request.InService,
+		Reason:            request.Reason,
+		Actor:             actorAuditValue(request.Actor),
+	})
+	if err != nil {
+		return BackendMutationResult{}, err
+	}
+
+	return s.backendMutationResult(ctx, AuditOperationBackendRuntimeSet, request.Reason, request.Actor, request.RuntimeOverride(), record, nil)
+}
+
+// SetWeight changes the runtime weight overlay without terminating active sessions.
+func (s *BackendService) SetWeight(
+	ctx context.Context,
+	request SetBackendWeightRequest,
+	policy backend.RuntimeOverridePolicy,
+) (BackendMutationResult, error) {
+	if err := request.Validate(policy); err != nil {
+		return BackendMutationResult{}, err
+	}
+
+	record, err := s.setRuntime(ctx, state.BackendRuntimeMutation{
+		BackendIdentifier: strings.TrimSpace(request.BackendIdentifier),
+		Weight:            &request.Weight,
+		Reason:            request.Reason,
+		Actor:             actorAuditValue(request.Actor),
+	})
+	if err != nil {
+		return BackendMutationResult{}, err
+	}
+
+	return s.backendMutationResult(ctx, AuditOperationBackendRuntimeSet, request.Reason, request.Actor, request.RuntimeOverride(), record, nil)
+}
+
+// SetMaintenance changes runtime maintenance and closes local streams for hard maintenance.
+func (s *BackendService) SetMaintenance(
+	ctx context.Context,
+	request SetBackendMaintenanceRequest,
+) (BackendMutationResult, error) {
+	if err := request.Validate(); err != nil {
+		return BackendMutationResult{}, err
+	}
+
+	maintenance, err := request.Maintenance.Normalize(backend.MaintenanceModeDisabled)
+	if err != nil {
+		return BackendMutationResult{}, err
+	}
+
+	record, err := s.setRuntime(ctx, state.BackendRuntimeMutation{
+		BackendIdentifier: strings.TrimSpace(request.BackendIdentifier),
+		MaintenanceMode:   string(maintenance.Mode),
+		Reason:            request.Reason,
+		Actor:             actorAuditValue(request.Actor),
+	})
+	if err != nil {
+		return BackendMutationResult{}, err
+	}
+
+	closeLocal := maintenance.Mode == backend.MaintenanceModeHard
+
+	return s.backendMutationResult(
+		ctx,
+		AuditOperationBackendMaintenance,
+		request.Reason,
+		request.Actor,
+		request.RuntimeOverride(),
+		record,
+		closeLocalControl(closeLocal, "hard_maintenance", request.Reason),
+	)
+}
+
+// StartDrain starts an auditable backend drain and closes local attached streams.
+func (s *BackendService) StartDrain(ctx context.Context, request StartBackendDrainRequest) (BackendMutationResult, error) {
+	if err := request.Validate(); err != nil {
+		return BackendMutationResult{}, err
+	}
+
+	drain, err := request.Drain.Normalize()
+	if err != nil {
+		return BackendMutationResult{}, err
+	}
+
+	record, err := s.setRuntime(ctx, state.BackendRuntimeMutation{
+		BackendIdentifier: strings.TrimSpace(request.BackendIdentifier),
+		DrainEnabled:      drain.Enabled,
+		DrainMode:         string(drain.Mode),
+		Reason:            request.Reason,
+		Actor:             actorAuditValue(request.Actor),
+	})
+	if err != nil {
+		return BackendMutationResult{}, err
+	}
+
+	return s.backendMutationResult(
+		ctx,
+		AuditOperationBackendDrain,
+		request.Reason,
+		request.Actor,
+		request.RuntimeOverride(),
+		record,
+		closeLocalControl(record.MarkedSessionCount > 0, "drain", request.Reason),
+	)
+}
+
+// ClearRuntime removes runtime-only backend overrides without touching active sessions.
+func (s *BackendService) ClearRuntime(ctx context.Context, request ClearBackendRuntimeRequest) (BackendMutationResult, error) {
+	if err := request.Validate(); err != nil {
+		return BackendMutationResult{}, err
+	}
+
+	if s == nil || s.store == nil {
+		return BackendMutationResult{}, newRuntimeError(ErrorKindInvalidRequest, operationBackendRuntimeClear, "backend store required")
+	}
+
+	record, err := s.store.ClearBackendRuntime(ctx, state.BackendRuntimeClearRequest{
+		BackendIdentifier: strings.TrimSpace(request.BackendIdentifier),
+		Reason:            request.Reason,
+		Actor:             actorAuditValue(request.Actor),
+	})
+	if err != nil {
+		return BackendMutationResult{}, err
+	}
+
+	return s.backendMutationResult(ctx, AuditOperationBackendRuntimeClear, request.Reason, request.Actor, backend.RuntimeOverride{}, record, nil)
 }
 
 // Validate checks the in/out request before it crosses a persistence boundary.
@@ -188,4 +343,67 @@ func requireBackendIdentifier(operation string, identifier string) error {
 	}
 
 	return nil
+}
+
+// setRuntime applies one Redis-backed backend runtime mutation.
+func (s *BackendService) setRuntime(
+	ctx context.Context,
+	mutation state.BackendRuntimeMutation,
+) (state.BackendRuntimeRecord, error) {
+	if s == nil || s.store == nil {
+		return state.BackendRuntimeRecord{}, newRuntimeError(ErrorKindInvalidRequest, operationBackendInOut, "backend store required")
+	}
+
+	return s.store.SetBackendRuntime(ctx, mutation)
+}
+
+// backendMutationResult maps Redis mutation output into runtime domain state.
+func (s *BackendService) backendMutationResult(
+	ctx context.Context,
+	operation AuditOperation,
+	reason string,
+	actor Actor,
+	override backend.RuntimeOverride,
+	record state.BackendRuntimeRecord,
+	localControl *LocalSessionControl,
+) (BackendMutationResult, error) {
+	audit, err := NewAuditMetadata(AuditInput{
+		Operation:         operation,
+		Reason:            reason,
+		Actor:             actor,
+		Generation:        record.Generation,
+		ServerTime:        record.ServerTime,
+		BackendIdentifier: record.BackendIdentifier,
+		Fields: map[string]string{
+			auditFieldActiveSessionCount: strconv.Itoa(record.ActiveSessionCount),
+			auditFieldMarkedSessionCount: strconv.Itoa(record.MarkedSessionCount),
+			auditFieldStatus:             record.Status,
+		},
+	})
+	if err != nil {
+		return BackendMutationResult{}, err
+	}
+
+	if localControl != nil && s.local != nil {
+		_, closeErr := s.local.CloseBackend(ctx, record.BackendIdentifier, *localControl)
+		if closeErr != nil {
+			return BackendMutationResult{}, closeErr
+		}
+	}
+
+	return BackendMutationResult{
+		BackendIdentifier:  record.BackendIdentifier,
+		Override:           override,
+		MarkedSessionCount: record.MarkedSessionCount,
+		Audit:              audit,
+	}, nil
+}
+
+// closeLocalControl returns a local close request when a backend operation affects streams.
+func closeLocalControl(enabled bool, action string, reason string) *LocalSessionControl {
+	if !enabled {
+		return nil
+	}
+
+	return &LocalSessionControl{Action: action, Reason: reason}
 }

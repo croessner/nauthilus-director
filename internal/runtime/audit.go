@@ -83,12 +83,29 @@ const (
 	AuditOperationBackendRuntimeSet AuditOperation = "backend_runtime_set"
 	// AuditOperationSessionKill records a session kill mutation.
 	AuditOperationSessionKill AuditOperation = "session_kill"
+	// AuditOperationSessionReap records an expired-session repair pass.
+	AuditOperationSessionReap AuditOperation = "session_reap"
 	// AuditOperationUserAffinityClear records a user affinity clear mutation.
 	AuditOperationUserAffinityClear AuditOperation = "user_affinity_clear"
 	// AuditOperationUserKick records a user kick mutation.
 	AuditOperationUserKick AuditOperation = "user_kick"
 	// AuditOperationUserMove records a user move mutation.
 	AuditOperationUserMove AuditOperation = "user_move"
+)
+
+const (
+	auditFieldActiveSessionCount = "active_session_count"
+	auditFieldAllowActiveClear   = "allow_active_clear"
+	auditFieldControlAction      = "control_action"
+	auditFieldExpiredSessions    = "expired_sessions"
+	auditFieldMarkedSessionCount = "marked_session_count"
+	auditFieldRepairedBackends   = "repaired_backends"
+	auditFieldScannedSessions    = "scanned_sessions"
+	auditFieldStatus             = "status"
+	auditFieldStrategy           = "strategy"
+	auditFieldTargetShard        = "target_shard"
+	auditValueFalse              = "false"
+	auditValueTrue               = "true"
 )
 
 // Actor carries the control-plane caller identity when available.
@@ -200,4 +217,26 @@ func newRuntimeError(kind ErrorKind, operation string, message string) *Error {
 		Operation: operation,
 		Message:   message,
 	}
+}
+
+// actorAuditValue serializes non-secret actor context for Redis script metadata.
+func actorAuditValue(actor Actor) string {
+	actor = normalizeActor(actor)
+	if actor.ID != "" {
+		return actor.ID
+	}
+
+	return actor.AuthMethod
+}
+
+// firstNonEmpty returns the first non-blank value for audit generation fallbacks.
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			return value
+		}
+	}
+
+	return ""
 }

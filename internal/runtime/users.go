@@ -17,8 +17,11 @@
 package runtime
 
 import (
+	"context"
 	"strings"
 	"time"
+
+	"github.com/croessner/nauthilus-director/internal/state"
 )
 
 const (
@@ -91,6 +94,144 @@ type UserMutationResult struct {
 	Audit AuditMetadata
 }
 
+// UserStateStore persists Redis-backed user runtime operations.
+type UserStateStore interface {
+	MoveUser(ctx context.Context, request state.UserMoveRequest) (state.UserRuntimeRecord, error)
+	KickUser(ctx context.Context, request state.UserKickRequest) (state.UserRuntimeRecord, error)
+	ClearUserAffinity(ctx context.Context, request state.UserClearRequest) (state.UserRuntimeRecord, error)
+}
+
+// UserService coordinates user runtime operations with local session acceleration.
+type UserService struct {
+	store UserStateStore
+	local *LocalSessionRegistry
+}
+
+// NewUserService creates the runtime user operation service.
+func NewUserService(store UserStateStore, local *LocalSessionRegistry) *UserService {
+	return &UserService{store: store, local: local}
+}
+
+// MoveUser records a placement move and locally closes streams for kick-existing moves.
+func (s *UserService) MoveUser(ctx context.Context, request MoveUserRequest) (UserMutationResult, error) {
+	request.Key = request.Key.Normalize()
+	if err := request.Validate(); err != nil {
+		return UserMutationResult{}, err
+	}
+
+	request.Strategy = MoveStrategy(strings.TrimSpace(string(request.Strategy)))
+	request.TargetShard = strings.TrimSpace(request.TargetShard)
+
+	if s == nil || s.store == nil {
+		return UserMutationResult{}, newRuntimeError(ErrorKindInvalidRequest, operationUserMove, "user store required")
+	}
+
+	record, err := s.store.MoveUser(ctx, state.UserMoveRequest{
+		Key:         request.Key.affinityKey(),
+		TargetShard: request.TargetShard,
+		Strategy:    strings.TrimSpace(string(request.Strategy)),
+		Reason:      request.Reason,
+		Actor:       actorAuditValue(request.Actor),
+	})
+	if err != nil {
+		return UserMutationResult{}, err
+	}
+
+	audit, err := userAuditMetadata(AuditOperationUserMove, request.Reason, request.Actor, record, map[string]string{
+		auditFieldStrategy:    string(request.Strategy),
+		auditFieldTargetShard: strings.TrimSpace(request.TargetShard),
+		auditFieldStatus:      record.Status,
+	})
+	if err != nil {
+		return UserMutationResult{}, err
+	}
+
+	if request.Strategy == MoveStrategyKickExisting && s.local != nil {
+		_, closeErr := s.local.CloseUser(ctx, request.Key, LocalSessionControl{
+			Action: string(record.ControlAction),
+			Reason: request.Reason,
+		})
+		if closeErr != nil {
+			return UserMutationResult{}, closeErr
+		}
+	}
+
+	return UserMutationResult{State: userRuntimeStateFromRecord(record), Audit: audit}, nil
+}
+
+// KickUser marks all active sessions for one affinity key and closes local streams promptly.
+func (s *UserService) KickUser(ctx context.Context, request KickUserRequest) (UserMutationResult, error) {
+	request.Key = request.Key.Normalize()
+	if err := request.Validate(); err != nil {
+		return UserMutationResult{}, err
+	}
+
+	if s == nil || s.store == nil {
+		return UserMutationResult{}, newRuntimeError(ErrorKindInvalidRequest, operationUserKick, "user store required")
+	}
+
+	record, err := s.store.KickUser(ctx, state.UserKickRequest{
+		Key:    request.Key.affinityKey(),
+		Reason: request.Reason,
+		Actor:  actorAuditValue(request.Actor),
+	})
+	if err != nil {
+		return UserMutationResult{}, err
+	}
+
+	audit, err := userAuditMetadata(AuditOperationUserKick, request.Reason, request.Actor, record, map[string]string{
+		auditFieldControlAction: string(record.ControlAction),
+		auditFieldStatus:        record.Status,
+	})
+	if err != nil {
+		return UserMutationResult{}, err
+	}
+
+	if s.local != nil {
+		_, closeErr := s.local.CloseUser(ctx, request.Key, LocalSessionControl{
+			Action: string(record.ControlAction),
+			Reason: request.Reason,
+		})
+		if closeErr != nil {
+			return UserMutationResult{}, closeErr
+		}
+	}
+
+	return UserMutationResult{State: userRuntimeStateFromRecord(record), Audit: audit}, nil
+}
+
+// ClearUserAffinity clears inactive affinity state without closing active sessions.
+func (s *UserService) ClearUserAffinity(ctx context.Context, request ClearUserAffinityRequest) (UserMutationResult, error) {
+	request.Key = request.Key.Normalize()
+	if err := request.Validate(); err != nil {
+		return UserMutationResult{}, err
+	}
+
+	if s == nil || s.store == nil {
+		return UserMutationResult{}, newRuntimeError(ErrorKindInvalidRequest, operationUserAffinityClear, "user store required")
+	}
+
+	record, err := s.store.ClearUserAffinity(ctx, state.UserClearRequest{
+		Key:              request.Key.affinityKey(),
+		AllowActiveClear: request.AllowActiveClear,
+		Reason:           request.Reason,
+		Actor:            actorAuditValue(request.Actor),
+	})
+	if err != nil {
+		return UserMutationResult{}, err
+	}
+
+	audit, err := userAuditMetadata(AuditOperationUserAffinityClear, request.Reason, request.Actor, record, map[string]string{
+		auditFieldAllowActiveClear: boolAuditValue(request.AllowActiveClear),
+		auditFieldStatus:           record.Status,
+	})
+	if err != nil {
+		return UserMutationResult{}, err
+	}
+
+	return UserMutationResult{State: userRuntimeStateFromRecord(record), Audit: audit}, nil
+}
+
 // Validate checks the move request before it crosses a persistence boundary.
 func (r MoveUserRequest) Validate() error {
 	if err := r.Key.Validate(operationUserMove); err != nil {
@@ -147,6 +288,11 @@ func (k UserKey) Normalize() UserKey {
 	return k
 }
 
+// affinityKey adapts the runtime user key to the Redis affinity key.
+func (k UserKey) affinityKey() state.AffinityKey {
+	return state.AffinityKey{Tenant: k.Tenant, AccountKey: k.UserHash}
+}
+
 // validMoveStrategy reports whether a strategy matches the public runtime vocabulary.
 func validMoveStrategy(strategy MoveStrategy) bool {
 	switch MoveStrategy(strings.TrimSpace(string(strategy))) {
@@ -155,4 +301,57 @@ func validMoveStrategy(strategy MoveStrategy) bool {
 	default:
 		return false
 	}
+}
+
+// userRuntimeStateFromRecord maps Redis mutation output into runtime domain state.
+func userRuntimeStateFromRecord(record state.UserRuntimeRecord) UserRuntimeState {
+	runtimeState := UserRuntimeState{
+		Key: UserKey{
+			Tenant:   record.Key.Tenant,
+			UserHash: record.Key.AccountKey,
+		}.Normalize(),
+		ActiveShard:        record.ShardTag,
+		PendingShard:       record.TargetShard,
+		MoveStrategy:       MoveStrategy(record.Strategy),
+		ActiveSessionCount: record.ActiveSessionCount,
+		Generation:         record.Generation,
+		UpdatedAt:          record.ServerTime,
+	}
+
+	switch record.ControlAction {
+	case state.ControlActionKick:
+		runtimeState.KickGeneration = record.Generation
+	case state.ControlActionMoveGenerationChanged:
+		runtimeState.MoveGeneration = record.Generation
+	}
+
+	return runtimeState
+}
+
+// userAuditMetadata creates secret-safe audit metadata for a user mutation.
+func userAuditMetadata(
+	operation AuditOperation,
+	reason string,
+	actor Actor,
+	record state.UserRuntimeRecord,
+	fields map[string]string,
+) (AuditMetadata, error) {
+	return NewAuditMetadata(AuditInput{
+		Operation:  operation,
+		Reason:     reason,
+		Actor:      actor,
+		Generation: record.Generation,
+		ServerTime: record.ServerTime,
+		UserHash:   record.Key.AccountKey,
+		Fields:     fields,
+	})
+}
+
+// boolAuditValue serializes booleans for audit metadata.
+func boolAuditValue(value bool) string {
+	if value {
+		return auditValueTrue
+	}
+
+	return auditValueFalse
 }

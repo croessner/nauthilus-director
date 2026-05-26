@@ -798,6 +798,15 @@ every implemented handler through explicit runtime domain services.
   implementation.
 - Regenerate server and client artifacts after schema changes.
 - Keep `make generate-openapi` and `make check-openapi` authoritative.
+- Introduce generated config documentation guardrails before or alongside the
+  config REST endpoints:
+  - add a small Go helper that reflects the typed config model and
+    `DefaultConfig()`
+  - add human-authored config path metadata under `docs/config/metadata.yml`
+  - generate committed config references under `docs/reference/`
+  - add `make generate-docs` and `make check-docs`
+  - make `docs-check` and therefore `make guardrails` fail on stale generated
+    config documentation
 - Implement:
   - `GET /healthz`
   - `GET /readyz`
@@ -850,6 +859,9 @@ every implemented handler through explicit runtime domain services.
 docs/specs/openapi/nauthilus-director.yaml
 docs/specs/openapi/oapi-codegen.server.yml
 docs/specs/openapi/oapi-codegen.client.yml
+docs/config/metadata.yml
+docs/reference/config-defaults.yaml
+docs/reference/config-paths.md
 internal/rest/server.go
 internal/rest/auth.go
 internal/rest/adapters/handler.go
@@ -858,6 +870,9 @@ internal/rest/generated/server.gen.go
 internal/client/generated/client.gen.go
 scripts/generate-openapi.sh
 scripts/check-openapi.sh
+scripts/generate-docs.sh
+scripts/check-docs.sh
+tools/configdoc/
 ```
 
 ### Implementation Notes
@@ -886,6 +901,21 @@ scripts/check-openapi.sh
 - Protected config reads must be audited with actor, operation, config view,
   generation when available and request outcome. Audit events must not include
   the protected values themselves.
+- Config documentation generation must use Go code, not ad hoc parsing of Go
+  source text. The helper should import the typed config package, reflect config
+  tags and defaults, derive environment override names through the same rules as
+  the loader and mark protected values from the shared secret metadata.
+- `docs/config/metadata.yml` is the human-owned layer for stable config-path
+  descriptions, section grouping and stability notes. The generator may create
+  TODO stubs for new paths, but `make check-docs` must fail for TODO
+  descriptions on stable config paths.
+- `docs/reference/config-defaults.yaml` must be generated from the same behavior
+  as `nauthilus-director config dump -d --format yaml`.
+- `docs/reference/config-paths.md` must list at least path, type, default,
+  stability, protected status, environment override name and description for
+  stable config paths.
+- Metadata must be validated both ways: every stable config path needs metadata,
+  and metadata for removed or unknown paths must fail the check.
 - Reload should:
   1. parse new config
   2. validate new config
@@ -910,6 +940,10 @@ scripts/check-openapi.sh
 
 - OpenAPI contract tests cover all implemented paths.
 - `make check-openapi` detects stale generated output after schema changes.
+- `make check-docs` detects stale generated config references.
+- Stable config paths without metadata or with TODO descriptions fail
+  `make check-docs`.
+- Metadata for removed or unknown config paths fails `make check-docs`.
 - Handler adapters do not leak generated DTOs into domain packages.
 - Mutating handlers reject missing reasons.
 - REST errors map domain classifications to stable status codes.
@@ -925,6 +959,8 @@ scripts/check-openapi.sh
   documented deferral agreed before closeout.
 - Runtime mutation endpoints change Redis-backed runtime state only.
 - Generated OpenAPI server and client artifacts are reproducible.
+- Generated config documentation artifacts are reproducible and guarded by
+  `make check-docs`.
 - REST handlers share the same runtime domain as IMAP placement and CLI.
 
 ### Review Checklist
@@ -932,6 +968,8 @@ scripts/check-openapi.sh
 - Verify no non-OpenAPI control endpoint exists.
 - Verify no handler rewrites YAML config.
 - Verify generated code is not manually edited.
+- Verify generated config references are current and metadata has no stable-path
+  TODO descriptions.
 - Verify route lookup still cannot call Nauthilus or mutate state.
 
 ## M2/M3.6 nauthilus-directorctl
@@ -980,6 +1018,10 @@ nauthilus-directorctl reload
 - Preserve `nauthilus-director config dump` as the local server-process
   inspection path and add matching `nauthilus-directorctl config dump` commands
   for remote Director inspection.
+- Add or update initial manpage sources under `docs/man/` for
+  `nauthilus-director(1)`, `nauthilus-directorctl(1)` and
+  `nauthilus-director.yaml(5)` once the M2/M3 command grammar, flags, output
+  modes, exit codes and stable config paths are clear enough to document.
 
 ### Out of Scope
 
@@ -994,6 +1036,7 @@ nauthilus-directorctl reload
 cmd/nauthilus-directorctl/main.go
 cmd/nauthilus-directorctl/main_test.go
 internal/client/generated/client.gen.go
+docs/man/
 ```
 
 ### Implementation Notes
@@ -1008,6 +1051,14 @@ internal/client/generated/client.gen.go
   errors when the Director rejects protected remote config output.
 - Text output should be compact and scriptable. JSON output should return the
   generated response body when practical.
+- Command manpages should document stable operator-facing command grammar, flags,
+  output formats, exit codes, protected config behavior and the distinction
+  between runtime-state mutations and YAML configuration changes.
+- The `nauthilus-director.yaml(5)` manpage should document the YAML config file
+  format, stable config path groups, include and patch behavior, `${NAME}`
+  placeholder expansion, `NAUTHILUS_DIRECTOR_*` environment overrides, redaction
+  and protected-value semantics. It may mention `.yml` as an accepted file
+  extension, but the canonical manual page name is `nauthilus-director.yaml(5)`.
 - Exit code guidance:
   - `0` success
   - `1` request reached the server but operation failed
@@ -1025,6 +1076,8 @@ internal/client/generated/client.gen.go
 - Config dump `-P` handles `403` without printing partial config output.
 - HTTP status mappings produce stable exit codes.
 - Text and JSON output are deterministic.
+- Manpage content matches implemented stable commands, flags, output modes, exit
+  code behavior and stable documented config paths.
 
 ### Acceptance Criteria
 
@@ -1032,12 +1085,16 @@ internal/client/generated/client.gen.go
 - CLI does not duplicate REST DTOs.
 - CLI command grammar stays nested and operator-oriented.
 - E2E tests prove CLI and REST operate on the same Redis-backed state.
+- Initial manpages cover the stable server/client operator command surfaces and
+  the YAML config file format.
 
 ### Review Checklist
 
 - Verify no command bypasses the generated client SDK.
 - Verify no CLI command writes YAML config.
 - Verify usage errors do not print secrets.
+- Verify manpages do not document commands, flags, output formats or stable
+  config paths that are not implemented.
 
 ## M2/M3.7 Route Lookup and Read-Only Diagnostics
 
@@ -1263,8 +1320,14 @@ M2/M3 is complete only when all items below are true:
 - [ ] All v1 REST endpoints in scope are implemented through generated OpenAPI
       server boundaries.
 - [ ] Generated OpenAPI artifacts pass stale-output checks.
+- [ ] Generated config documentation references pass stale-output checks, and
+      stable config paths have complete metadata without TODO descriptions.
 - [ ] `nauthilus-directorctl` uses the generated OpenAPI client SDK for every
       API call.
+- [ ] Initial manpages under `docs/man/` document
+      `nauthilus-director(1)`, `nauthilus-directorctl(1)` and
+      `nauthilus-director.yaml(5)` without advertising unimplemented commands,
+      flags, output formats or config paths.
 - [ ] Route lookup is side-effect-free, does not call Nauthilus and does not
       mutate Redis.
 - [ ] REST config endpoints are redacted by default and expose protected values
@@ -1299,11 +1362,13 @@ Before closing M2/M3, perform this review:
    models, non-OpenAPI control surfaces, false REST capability advertisement
    and vague acceptance criteria.
 10. Run `make check-openapi` after any OpenAPI schema or generated-code change.
-11. Run targeted runtime, Redis, selector, REST and CLI tests.
-12. Run `make guardrails` before any commit or pull request.
-13. Run and record `make e2e-interop` when IMAP backend/proxy behavior that
+11. Run `make check-docs` after any typed config, config metadata or generated
+    docs change.
+12. Run targeted runtime, Redis, selector, REST and CLI tests.
+13. Run `make guardrails` before any commit or pull request.
+14. Run and record `make e2e-interop` when IMAP backend/proxy behavior that
     real Dovecot interoperability can regress was changed.
-14. Record `git status --short` and the exact validation result in the
+15. Record `git status --short` and the exact validation result in the
     M2/M3 closeout.
 
 ## Decisions and Open Questions

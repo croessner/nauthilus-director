@@ -69,6 +69,7 @@ require_value(redis.call("HGET", state_key, "generation"), "state_generation_req
 
 local session_shard = require_value(redis.call("HGET", session_key, "shard_tag"), "session_shard_required")
 local idle_grace_ms = tonumber(require_value(redis.call("HGET", session_key, "idle_grace_ms"), "idle_grace_required"))
+local move_strategy = redis.call("HGET", state_key, "move_strategy") or ""
 
 if idle_grace_ms == nil or idle_grace_ms < 0 then
 	return ambiguous("idle_grace_invalid")
@@ -104,7 +105,7 @@ elseif state_control_generation > observed_generation then
 	control_action = require_value(redis.call("HGET", state_key, "control_action"), "state_control_action_required")
 end
 
-if session_shard ~= shard and control_action == "none" then
+if session_shard ~= shard and control_action == "none" and move_strategy ~= "drain_existing" then
 	return ambiguous("session_shard_conflict")
 end
 

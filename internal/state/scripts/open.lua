@@ -85,6 +85,8 @@ local state_exists = redis.call("EXISTS", state_key)
 local status = "created"
 local shard = requested_shard
 local control_generation = "0"
+local prior_active_count = redis.call("ZCARD", sessions_key)
+local clear_override = false
 
 local override_target = redis.call("HGET", override_key, "target_shard")
 local override_strategy = redis.call("HGET", override_key, "strategy")
@@ -97,6 +99,7 @@ if state_exists == 0 then
 	if override_target ~= false and override_target ~= nil and override_target ~= "" then
 		shard = override_target
 		status = "created_from_override"
+		clear_override = true
 	end
 
 	redis.call("HSET", state_key,
@@ -114,6 +117,17 @@ else
 	require_value(redis.call("HGET", state_key, "generation"), "state_generation_required")
 	control_generation = tostring(redis.call("HGET", state_key, "control_generation") or "0")
 	status = "reused"
+
+	if override_target ~= false and override_target ~= nil and override_target ~= "" then
+		if override_strategy == "drain_existing" then
+			shard = override_target
+			status = "drain_override"
+		elseif prior_active_count == 0 then
+			shard = override_target
+			status = "moved_from_override"
+			clear_override = true
+		end
+	end
 end
 
 if redis.call("EXISTS", session_key) == 1 then
@@ -181,8 +195,13 @@ redis.call("HSET", session_index_key, session_id, session_key)
 redis.call("SADD", user_index_key, affinity_hash)
 redis.call("SADD", user_sessions_key, session_id)
 
-if override_strategy == "new_sessions_only" and active_count == 0 then
+if clear_override then
 	redis.call("DEL", override_key)
+	redis.call("HDEL", state_key,
+		"move_strategy",
+		"move_target_shard",
+		"move_reason",
+		"move_actor")
 end
 
 return {

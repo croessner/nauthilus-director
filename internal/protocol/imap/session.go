@@ -34,6 +34,7 @@ import (
 	"github.com/croessner/nauthilus-director/internal/observability"
 	"github.com/croessner/nauthilus-director/internal/proxy"
 	"github.com/croessner/nauthilus-director/internal/routing"
+	runtimectl "github.com/croessner/nauthilus-director/internal/runtime"
 	"github.com/croessner/nauthilus-director/internal/state"
 )
 
@@ -47,7 +48,7 @@ var (
 	ErrPreauthLineTooLarge = errors.New("imap: preauth line exceeds configured limit")
 	// ErrPreauthLiteralTooLarge reports that a literal marker exceeded the configured boundary.
 	ErrPreauthLiteralTooLarge = errors.New("imap: preauth literal exceeds configured limit")
-	// ErrPreauthLiteralUnsupported reports that literal handling is not part of this session slice.
+	// ErrPreauthLiteralUnsupported reports that literal handling is outside the pre-auth boundary.
 	ErrPreauthLiteralUnsupported = errors.New("imap: preauth literals are not supported yet")
 	// ErrPreauthPartialCommand reports a connection closed before a command line was complete.
 	ErrPreauthPartialCommand = errors.New("imap: partial preauth command")
@@ -85,6 +86,7 @@ type Session struct {
 	backendSelector  backend.Selector
 	backendConnector BackendConnector
 	proxyRunner      proxy.Runner
+	localSessions    *runtimectl.LocalSessionRegistry
 	observability    observability.Recorder
 
 	tlsActive     bool
@@ -155,6 +157,7 @@ func NewSession(config SessionConfig, conn net.Conn) (*Session, error) {
 		backendSelector:  config.BackendSelector,
 		backendConnector: backendConnector,
 		proxyRunner:      proxyRunner,
+		localSessions:    config.LocalSessions,
 		observability:    observability.NormalizeRecorder(config.Observability),
 		tlsActive:        config.TLSMode == TLSModeImplicit,
 	}, nil

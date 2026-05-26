@@ -20,15 +20,37 @@ package app
 import (
 	"github.com/croessner/nauthilus-director/internal/backend"
 	"github.com/croessner/nauthilus-director/internal/listener"
+	"github.com/croessner/nauthilus-director/internal/runtime"
 	"go.uber.org/fx"
 )
 
 // Module returns the root application composition module.
 func Module() fx.Option {
 	return fx.Options(
+		fx.Provide(runtime.NewLocalSessionRegistry),
 		listener.Module(),
+		fx.Invoke(registerReaperLifecycle),
 		fx.Invoke(registerHealthRunnerLifecycle),
 	)
+}
+
+type reaperLifecycleParams struct {
+	fx.In
+
+	Lifecycle fx.Lifecycle
+	Reaper    *runtime.Reaper `optional:"true"`
+}
+
+// registerReaperLifecycle starts the expired-session repair loop when one is assembled.
+func registerReaperLifecycle(params reaperLifecycleParams) {
+	if params.Reaper == nil {
+		return
+	}
+
+	params.Lifecycle.Append(fx.Hook{
+		OnStart: params.Reaper.Start,
+		OnStop:  params.Reaper.Stop,
+	})
 }
 
 type healthRunnerLifecycleParams struct {

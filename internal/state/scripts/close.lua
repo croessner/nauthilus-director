@@ -89,13 +89,14 @@ local session_shard = require_value(redis.call("HGET", session_key, "shard_tag")
 local idle_grace_ms = tonumber(require_value(redis.call("HGET", session_key, "idle_grace_ms"), "idle_grace_required"))
 local backend_key = redis.call("HGET", session_key, "backend_runtime_key")
 local backend_sessions_key = redis.call("HGET", session_key, "backend_sessions_key")
+local move_strategy = redis.call("HGET", state_key, "move_strategy") or ""
 
 if idle_grace_ms == nil or idle_grace_ms < 0 then
 	return ambiguous("idle_grace_invalid")
 end
 
 local state_control_action = redis.call("HGET", state_key, "control_action") or "none"
-if session_shard ~= shard and state_control_action ~= "move_generation_changed" then
+if session_shard ~= shard and state_control_action ~= "move_generation_changed" and move_strategy ~= "drain_existing" then
 	return ambiguous("session_shard_conflict")
 end
 

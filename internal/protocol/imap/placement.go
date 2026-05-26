@@ -21,12 +21,14 @@ import (
 	"errors"
 	"net"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/croessner/nauthilus-director/internal/backend"
 	"github.com/croessner/nauthilus-director/internal/nauthilus"
 	"github.com/croessner/nauthilus-director/internal/proxy"
 	"github.com/croessner/nauthilus-director/internal/routing"
+	runtimectl "github.com/croessner/nauthilus-director/internal/runtime"
 	"github.com/croessner/nauthilus-director/internal/state"
 )
 
@@ -411,6 +413,10 @@ func (s *Session) transitionAuthenticatedSession(
 	}
 
 	handoff := s.BufferedProxyHandoff()
+
+	unregister := s.registerLocalProxySession(handoff.Frontend(), connection.Conn())
+	defer unregister()
+
 	proxyResult, err := s.proxyRunner.Run(ctx, proxy.PipeConfig{
 		Frontend:          handoff.Frontend(),
 		Backend:           connection.Conn(),
@@ -424,6 +430,37 @@ func (s *Session) transitionAuthenticatedSession(
 	s.recordProxyPipe(ctx, proxyResult, err)
 
 	return commandOutcome{closeSession: true, flushed: true}, err
+}
+
+// registerLocalProxySession exposes a local stream handle for runtime control actions.
+func (s *Session) registerLocalProxySession(frontend net.Conn, backendConn net.Conn) func() {
+	if s.localSessions == nil {
+		return func() {}
+	}
+
+	var closeOnce sync.Once
+
+	handle := runtimectl.LocalSessionHandleFunc(func(context.Context, runtimectl.LocalSessionControl) error {
+		closeOnce.Do(func() {
+			_ = frontend.Close()
+			_ = backendConn.Close()
+		})
+
+		return nil
+	})
+
+	unregister, err := s.localSessions.Register(runtimectl.LocalSessionInfo{
+		SessionID:         s.context.ID,
+		Tenant:            s.placementAffinityKey().Tenant,
+		UserHash:          s.placementAffinityKey().AccountKey,
+		BackendIdentifier: s.placement.Backend.Backend.Identifier,
+		DirectorInstance:  s.context.DirectorInstanceID,
+	}, handle)
+	if err != nil {
+		return func() {}
+	}
+
+	return unregister
 }
 
 // closePlacedSession closes a Redis lease when backend setup fails before proxy mode owns it.
@@ -488,6 +525,8 @@ type sessionLeaseLifecycle struct {
 	key       state.AffinityKey
 	sessionID string
 	ttl       time.Duration
+	closeOnce sync.Once
+	closeErr  error
 }
 
 // Heartbeat refreshes the active session lease while proxy mode is running.
@@ -510,7 +549,9 @@ func (l *sessionLeaseLifecycle) Heartbeat(ctx context.Context) error {
 
 // Close releases the active session lease at proxy end.
 func (l *sessionLeaseLifecycle) Close(ctx context.Context) error {
-	_, err := l.store.CloseSession(ctx, l.key, l.sessionID)
+	l.closeOnce.Do(func() {
+		_, l.closeErr = l.store.CloseSession(ctx, l.key, l.sessionID)
+	})
 
-	return err
+	return l.closeErr
 }

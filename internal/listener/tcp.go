@@ -107,6 +107,7 @@ func newManagedListener(
 			DefaultShard:        defaultShard,
 			SessionLeaseTTL:     runtime.Timeouts.ProxyIdle.Std(),
 			SessionIdleGrace:    sessionIdleGrace,
+			LocalSessions:       options.localSessions,
 			Observability:       options.observability,
 		}),
 		proxyProtocol: proxyPolicy,

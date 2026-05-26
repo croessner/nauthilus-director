@@ -17,9 +17,12 @@
 package state
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"net"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"testing"
@@ -35,10 +38,138 @@ const (
 	testKickSessionID    = "kick-session"
 	testKillSessionID    = "kill-session"
 	testOperatorClear    = "operator clear"
+	testOperatorActor    = "test-operator"
 	testProtocolIMAP     = "imap"
 	testRuntimeSessionID = "runtime-session"
+	testClearStatus      = "cleared"
 	testShardA           = "mailstore-a"
+	testShardB           = "mailstore-b"
+	testShardC           = "mailstore-c"
 )
+
+var packageRedisAddr string
+
+// TestMain starts a package-scoped Redis-compatible service when available.
+func TestMain(m *testing.M) {
+	code := runStateTests(m)
+	os.Exit(code)
+}
+
+// runStateTests keeps package test setup outside the special TestMain entrypoint.
+func runStateTests(m *testing.M) int {
+	addr := os.Getenv("NAUTHILUS_DIRECTOR_REDIS_ADDR")
+	if addr == "" {
+		addr = os.Getenv("REDIS_ADDR")
+	}
+
+	if addr == "" {
+		addr = packageRedisAddr
+	}
+
+	if addr != "" {
+		packageRedisAddr = addr
+
+		return m.Run()
+	}
+
+	startedAddr, cleanup, err := startPackageValkey()
+	if err != nil {
+		return m.Run()
+	}
+
+	packageRedisAddr = startedAddr
+
+	defer cleanup()
+
+	return m.Run()
+}
+
+// startPackageValkey starts a local Valkey server for Redis script integration tests.
+func startPackageValkey() (string, func(), error) {
+	path, err := exec.LookPath("valkey-server")
+	if err != nil {
+		return "", func() {}, err
+	}
+
+	addr, port, err := reservePackageRedisAddress()
+	if err != nil {
+		return "", func() {}, err
+	}
+
+	var output bytes.Buffer
+
+	cmd := exec.Command(
+		path,
+		"--bind", "127.0.0.1",
+		"--port", port,
+		"--save", "",
+		"--appendonly", "no",
+		"--dir", os.TempDir(),
+		"--loglevel", "warning",
+	)
+	cmd.Stdout = &output
+	cmd.Stderr = &output
+
+	if err := cmd.Start(); err != nil {
+		return "", func() {}, err
+	}
+
+	client := redis.NewClient(&redis.Options{Addr: addr, Protocol: 2})
+	cleanup := func() {
+		_ = client.Close()
+
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+
+		_ = cmd.Wait()
+	}
+
+	if waitForPackageValkey(client) {
+		return addr, cleanup, nil
+	}
+
+	cleanup()
+
+	return "", func() {}, errors.New(output.String())
+}
+
+// reservePackageRedisAddress reserves a loopback port long enough to configure Valkey.
+func reservePackageRedisAddress() (string, string, error) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return "", "", err
+	}
+
+	addr := listener.Addr().String()
+	_ = listener.Close()
+
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return "", "", err
+	}
+
+	return addr, port, nil
+}
+
+// waitForPackageValkey waits until the package-scoped Redis-compatible server accepts commands.
+func waitForPackageValkey(client *redis.Client) bool {
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		err := client.Ping(ctx).Err()
+
+		cancel()
+
+		if err == nil {
+			return true
+		}
+
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	return false
+}
 
 // TestKeyBuilderCreatesClusterHashTaggedAffinityKeys verifies Cluster-safe affinity key shape.
 func TestKeyBuilderCreatesClusterHashTaggedAffinityKeys(t *testing.T) {
@@ -287,7 +418,7 @@ func TestRedisSessionLifecycleScripts(t *testing.T) {
 
 	second := first
 	second.ID = "session-2"
-	second.ShardTag = "mailstore-b"
+	second.ShardTag = testShardB
 
 	reused, err := store.OpenSession(context.Background(), second)
 	if err != nil {
@@ -391,6 +522,31 @@ func TestRedisKickAndSessionKillAreObservedByHeartbeat(t *testing.T) {
 		}
 	}
 
+	if _, err := store.KillSession(context.Background(), SessionKillRequest{
+		SessionID: testKillSessionID,
+		Reason:    "operator killed one session",
+	}); err != nil {
+		t.Fatalf("KillSession returned error: %v", err)
+	}
+
+	otherHeartbeat, err := store.HeartbeatSession(context.Background(), key, testKickSessionID, time.Second)
+	if err != nil {
+		t.Fatalf("HeartbeatSession for non-killed session returned error: %v", err)
+	}
+
+	if otherHeartbeat.ControlAction != ControlActionNone {
+		t.Fatalf("heartbeat action for non-killed session = %q, want none", otherHeartbeat.ControlAction)
+	}
+
+	killHeartbeat, err := store.HeartbeatSession(context.Background(), key, testKillSessionID, time.Second)
+	if err != nil {
+		t.Fatalf("HeartbeatSession after session kill returned error: %v", err)
+	}
+
+	if killHeartbeat.ControlAction != ControlActionKick {
+		t.Fatalf("heartbeat control action for session kill = %q, want kick", killHeartbeat.ControlAction)
+	}
+
 	kicked, err := store.KickUser(context.Background(), UserKickRequest{Key: key, Reason: "operator requested reconnect"})
 	if err != nil {
 		t.Fatalf("KickUser returned error: %v", err)
@@ -407,22 +563,6 @@ func TestRedisKickAndSessionKillAreObservedByHeartbeat(t *testing.T) {
 
 	if heartbeat.ControlAction != ControlActionKick {
 		t.Fatalf("heartbeat control action = %q, want kick", heartbeat.ControlAction)
-	}
-
-	if _, err := store.KillSession(context.Background(), SessionKillRequest{
-		SessionID: testKillSessionID,
-		Reason:    "operator killed one session",
-	}); err != nil {
-		t.Fatalf("KillSession returned error: %v", err)
-	}
-
-	killHeartbeat, err := store.HeartbeatSession(context.Background(), key, testKillSessionID, time.Second)
-	if err != nil {
-		t.Fatalf("HeartbeatSession after session kill returned error: %v", err)
-	}
-
-	if killHeartbeat.ControlAction != ControlActionKick {
-		t.Fatalf("heartbeat control action for session kill = %q, want kick", killHeartbeat.ControlAction)
 	}
 }
 
@@ -467,6 +607,18 @@ func TestRedisReapRepairsExpiredSessions(t *testing.T) {
 	if count := redisBackendActiveCount(t, client, builder, backendID); count != 0 {
 		t.Fatalf("redis backend active count after reap = %d, want 0", count)
 	}
+
+	cleared, err := store.ClearUserAffinity(context.Background(), UserClearRequest{
+		Key:    key,
+		Reason: "operator clear after reap",
+	})
+	if err != nil {
+		t.Fatalf("ClearUserAffinity after reap returned error: %v", err)
+	}
+
+	if cleared.Status != testClearStatus {
+		t.Fatalf("clear after reap = %#v, want %q", cleared, testClearStatus)
+	}
 }
 
 // TestRedisMoveAndClearScripts verifies user move and inactive affinity clear behavior.
@@ -475,14 +627,67 @@ func TestRedisMoveAndClearScripts(t *testing.T) {
 	key := AffinityKey{Tenant: "blue", AccountKey: "runtime-move@example.test"}
 	backendID := testBackendIMAP
 
-	cleanupAffinity(t, client, builder, key, testRuntimeSessionID)
+	cleanupAffinity(t, client, builder, key, testRuntimeSessionID, "second-session", "third-session")
 	cleanupBackend(t, client, builder, backendID)
+
+	openAttachedSession(t, store, key, testRuntimeSessionID, backendID)
+
+	pendingMove, err := store.MoveUser(context.Background(), UserMoveRequest{
+		Key:         key,
+		TargetShard: testShardB,
+		Strategy:    moveStrategyNewSessionsOnly,
+		Reason:      "operator pending move",
+		Actor:       testOperatorActor,
+	})
+	if err != nil {
+		t.Fatalf("MoveUser new_sessions_only returned error: %v", err)
+	}
+
+	if pendingMove.ControlAction != ControlActionNone || pendingMove.ActiveSessionCount != 1 {
+		t.Fatalf("pending move result = %#v, want no control action and one active session", pendingMove)
+	}
+
+	second := testSessionRecord(key, "second-session")
+	second.ShardTag = testShardB
+
+	secondAffinity, err := store.OpenSession(context.Background(), second)
+	if err != nil {
+		t.Fatalf("OpenSession during new_sessions_only returned error: %v", err)
+	}
+
+	if secondAffinity.ShardTag != testShardA {
+		t.Fatalf("new session during active pending move shard = %q, want old shard %q", secondAffinity.ShardTag, testShardA)
+	}
+
+	if _, err := store.CloseSession(context.Background(), key, testRuntimeSessionID); err != nil {
+		t.Fatalf("CloseSession first returned error: %v", err)
+	}
+
+	if _, err := store.CloseSession(context.Background(), key, "second-session"); err != nil {
+		t.Fatalf("CloseSession second returned error: %v", err)
+	}
+
+	third := testSessionRecord(key, "third-session")
+	third.ShardTag = testShardB
+
+	movedAfterIdle, err := store.OpenSession(context.Background(), third)
+	if err != nil {
+		t.Fatalf("OpenSession after pending move returned error: %v", err)
+	}
+
+	if movedAfterIdle.ShardTag != testShardB {
+		t.Fatalf("new session after active count reached zero shard = %q, want %q", movedAfterIdle.ShardTag, testShardB)
+	}
+
+	if _, err := store.CloseSession(context.Background(), key, "third-session"); err != nil {
+		t.Fatalf("CloseSession third returned error: %v", err)
+	}
 
 	openAttachedSession(t, store, key, testRuntimeSessionID, backendID)
 
 	moved, err := store.MoveUser(context.Background(), UserMoveRequest{
 		Key:         key,
-		TargetShard: "mailstore-b",
+		TargetShard: testShardC,
 		Strategy:    moveStrategyKickExisting,
 		Reason:      "operator move",
 	})
@@ -490,8 +695,17 @@ func TestRedisMoveAndClearScripts(t *testing.T) {
 		t.Fatalf("MoveUser returned error: %v", err)
 	}
 
-	if moved.ControlAction != ControlActionMoveGenerationChanged || moved.TargetShard != "mailstore-b" {
+	if moved.ControlAction != ControlActionMoveGenerationChanged || moved.TargetShard != testShardC {
 		t.Fatalf("move result = %#v", moved)
+	}
+
+	moveHeartbeat, err := store.HeartbeatSession(context.Background(), key, testRuntimeSessionID, time.Second)
+	if err != nil {
+		t.Fatalf("HeartbeatSession after kick_existing returned error: %v", err)
+	}
+
+	if moveHeartbeat.ControlAction != ControlActionMoveGenerationChanged {
+		t.Fatalf("kick_existing heartbeat action = %q, want move_generation_changed", moveHeartbeat.ControlAction)
 	}
 
 	_, err = store.ClearUserAffinity(context.Background(), UserClearRequest{Key: key, Reason: testOperatorClear})
@@ -508,8 +722,8 @@ func TestRedisMoveAndClearScripts(t *testing.T) {
 		t.Fatalf("ClearUserAffinity inactive returned error: %v", err)
 	}
 
-	if cleared.Status != "cleared" {
-		t.Fatalf("clear result = %#v", cleared)
+	if cleared.Status != testClearStatus {
+		t.Fatalf("clear result = %#v, want %q", cleared, testClearStatus)
 	}
 }
 
@@ -517,12 +731,15 @@ func TestRedisMoveAndClearScripts(t *testing.T) {
 func TestRedisBackendRuntimeScripts(t *testing.T) {
 	store, client, builder := redisIntegrationStore(t)
 	key := AffinityKey{Tenant: "blue", AccountKey: "runtime-backend@example.test"}
+	secondKey := AffinityKey{Tenant: "blue", AccountKey: "runtime-backend-second@example.test"}
 	backendID := testBackendIMAP
 
 	cleanupAffinity(t, client, builder, key, testRuntimeSessionID)
+	cleanupAffinity(t, client, builder, secondKey, "runtime-session-2")
 	cleanupBackend(t, client, builder, backendID)
 
 	openAttachedSession(t, store, key, testRuntimeSessionID, backendID)
+	openAttachedSession(t, store, secondKey, "runtime-session-2", backendID)
 
 	runtimeSet, err := store.SetBackendRuntime(context.Background(), BackendRuntimeMutation{
 		BackendIdentifier: backendID,
@@ -534,8 +751,8 @@ func TestRedisBackendRuntimeScripts(t *testing.T) {
 		t.Fatalf("SetBackendRuntime returned error: %v", err)
 	}
 
-	if runtimeSet.MarkedSessionCount != 1 {
-		t.Fatalf("marked sessions = %d, want 1", runtimeSet.MarkedSessionCount)
+	if runtimeSet.MarkedSessionCount != 2 {
+		t.Fatalf("marked sessions = %d, want 2", runtimeSet.MarkedSessionCount)
 	}
 
 	drainHeartbeat, err := store.HeartbeatSession(context.Background(), key, testRuntimeSessionID, time.Second)
@@ -547,6 +764,15 @@ func TestRedisBackendRuntimeScripts(t *testing.T) {
 		t.Fatalf("heartbeat control action after backend drain = %q, want drain", drainHeartbeat.ControlAction)
 	}
 
+	secondDrainHeartbeat, err := store.HeartbeatSession(context.Background(), secondKey, "runtime-session-2", time.Second)
+	if err != nil {
+		t.Fatalf("second HeartbeatSession after backend drain returned error: %v", err)
+	}
+
+	if secondDrainHeartbeat.ControlAction != ControlActionDrain {
+		t.Fatalf("second heartbeat control action after backend drain = %q, want drain", secondDrainHeartbeat.ControlAction)
+	}
+
 	runtimeClear, err := store.ClearBackendRuntime(context.Background(), BackendRuntimeClearRequest{
 		BackendIdentifier: backendID,
 		Reason:            "host drain finished",
@@ -555,12 +781,157 @@ func TestRedisBackendRuntimeScripts(t *testing.T) {
 		t.Fatalf("ClearBackendRuntime returned error: %v", err)
 	}
 
-	if runtimeClear.ActiveSessionCount != 1 {
-		t.Fatalf("active count after runtime clear = %d, want preserved count 1", runtimeClear.ActiveSessionCount)
+	if runtimeClear.ActiveSessionCount != 2 {
+		t.Fatalf("active count after runtime clear = %d, want preserved count 2", runtimeClear.ActiveSessionCount)
 	}
 
 	if _, err := store.CloseSession(context.Background(), key, testRuntimeSessionID); err != nil {
 		t.Fatalf("CloseSession returned error: %v", err)
+	}
+
+	if _, err := store.CloseSession(context.Background(), secondKey, "runtime-session-2"); err != nil {
+		t.Fatalf("second CloseSession returned error: %v", err)
+	}
+}
+
+// TestRedisDrainExistingMoveAllowsAuditedSplit verifies explicit drain split semantics.
+func TestRedisDrainExistingMoveAllowsAuditedSplit(t *testing.T) {
+	const (
+		oldSessionID = "old-session"
+		newSessionID = "new-session"
+	)
+
+	store, client, builder := redisIntegrationStore(t)
+	key := AffinityKey{Tenant: "blue", AccountKey: "runtime-drain-move@example.test"}
+	backendID := testBackendIMAP
+
+	cleanupAffinity(t, client, builder, key, oldSessionID, newSessionID)
+	cleanupBackend(t, client, builder, backendID)
+
+	openAttachedSession(t, store, key, oldSessionID, backendID)
+
+	moved, err := store.MoveUser(context.Background(), UserMoveRequest{
+		Key:         key,
+		TargetShard: testShardB,
+		Strategy:    moveStrategyDrainExisting,
+		Reason:      "operator drain move",
+		Actor:       testOperatorActor,
+	})
+	if err != nil {
+		t.Fatalf("MoveUser drain_existing returned error: %v", err)
+	}
+
+	if moved.ControlAction != ControlActionNone || moved.TargetShard != testShardB {
+		t.Fatalf("drain move result = %#v", moved)
+	}
+
+	assertDrainExistingOverride(t, client, builder, key)
+	assertHeartbeatAction(t, store, key, oldSessionID, ControlActionNone)
+	assertOpenDrainSessionShard(t, store, key, newSessionID)
+
+	if _, err := store.CloseSession(context.Background(), key, oldSessionID); err != nil {
+		t.Fatalf("CloseSession old returned error: %v", err)
+	}
+
+	if _, err := store.CloseSession(context.Background(), key, newSessionID); err != nil {
+		t.Fatalf("CloseSession new returned error: %v", err)
+	}
+}
+
+// assertDrainExistingOverride verifies the audited override fields for a drain split.
+func assertDrainExistingOverride(t *testing.T, client *redis.Client, builder KeyBuilder, key AffinityKey) {
+	t.Helper()
+
+	keys, err := builder.AffinityKeys(key.Tenant, key.AccountKey)
+	if err != nil {
+		t.Fatalf("AffinityKeys returned error: %v", err)
+	}
+
+	override := client.HGetAll(context.Background(), keys.Override).Val()
+	if override["strategy"] != moveStrategyDrainExisting || override["target_shard"] != testShardB {
+		t.Fatalf("override = %#v, want drain_existing target", override)
+	}
+}
+
+// assertHeartbeatAction verifies one session heartbeat control decision.
+func assertHeartbeatAction(
+	t *testing.T,
+	store *RedisSessionStore,
+	key AffinityKey,
+	sessionID string,
+	want ControlAction,
+) {
+	t.Helper()
+
+	heartbeat, err := store.HeartbeatSession(context.Background(), key, sessionID, time.Second)
+	if err != nil {
+		t.Fatalf("HeartbeatSession returned error: %v", err)
+	}
+
+	if heartbeat.ControlAction != want {
+		t.Fatalf("heartbeat action = %q, want %q", heartbeat.ControlAction, want)
+	}
+}
+
+// assertOpenDrainSessionShard verifies a new drain-split session uses the target shard.
+func assertOpenDrainSessionShard(t *testing.T, store *RedisSessionStore, key AffinityKey, sessionID string) {
+	t.Helper()
+
+	newRecord := testSessionRecord(key, sessionID)
+	newRecord.ShardTag = testShardB
+
+	newAffinity, err := store.OpenSession(context.Background(), newRecord)
+	if err != nil {
+		t.Fatalf("OpenSession during drain_existing returned error: %v", err)
+	}
+
+	if newAffinity.ShardTag != testShardB {
+		t.Fatalf("new drain session shard = %q, want %q", newAffinity.ShardTag, testShardB)
+	}
+}
+
+// TestRedisHardMaintenanceMarksBackendSessions verifies hard maintenance bulk control.
+func TestRedisHardMaintenanceMarksBackendSessions(t *testing.T) {
+	store, client, builder := redisIntegrationStore(t)
+	firstKey := AffinityKey{Tenant: "blue", AccountKey: "hard-maintenance-a@example.test"}
+	secondKey := AffinityKey{Tenant: "blue", AccountKey: "hard-maintenance-b@example.test"}
+	backendID := testBackendIMAP
+
+	cleanupAffinity(t, client, builder, firstKey, "hard-session-a")
+	cleanupAffinity(t, client, builder, secondKey, "hard-session-b")
+	cleanupBackend(t, client, builder, backendID)
+
+	openAttachedSession(t, store, firstKey, "hard-session-a", backendID)
+	openAttachedSession(t, store, secondKey, "hard-session-b", backendID)
+
+	runtimeSet, err := store.SetBackendRuntime(context.Background(), BackendRuntimeMutation{
+		BackendIdentifier: backendID,
+		MaintenanceMode:   "hard",
+		Reason:            "hard maintenance",
+	})
+	if err != nil {
+		t.Fatalf("SetBackendRuntime hard maintenance returned error: %v", err)
+	}
+
+	if runtimeSet.MarkedSessionCount != 2 {
+		t.Fatalf("marked sessions = %d, want 2", runtimeSet.MarkedSessionCount)
+	}
+
+	for _, item := range []struct {
+		key       AffinityKey
+		sessionID string
+	}{
+		{key: firstKey, sessionID: "hard-session-a"},
+		{key: secondKey, sessionID: "hard-session-b"},
+	} {
+		heartbeat, err := store.HeartbeatSession(context.Background(), item.key, item.sessionID, time.Second)
+		if err != nil {
+			t.Fatalf("HeartbeatSession %s returned error: %v", item.sessionID, err)
+		}
+
+		if heartbeat.ControlAction != ControlActionDrain {
+			t.Fatalf("heartbeat action %s = %q, want drain", item.sessionID, heartbeat.ControlAction)
+		}
 	}
 }
 
@@ -773,6 +1144,10 @@ func redisIntegrationStore(t *testing.T) (*RedisSessionStore, *redis.Client, Key
 	addr := os.Getenv("NAUTHILUS_DIRECTOR_REDIS_ADDR")
 	if addr == "" {
 		addr = os.Getenv("REDIS_ADDR")
+	}
+
+	if addr == "" {
+		addr = packageRedisAddr
 	}
 
 	if addr == "" {

@@ -810,10 +810,15 @@ Repository layout:
 docs/specs/openapi/nauthilus-director.yaml
 docs/specs/implementation/
 docs/man/
+docs/config/metadata.yml
+docs/reference/
 internal/rest/generated/
 internal/rest/adapters/
 internal/client/generated/
 scripts/generate-openapi.sh
+scripts/generate-docs.sh
+scripts/check-docs.sh
+tools/configdoc/
 ```
 
 Expected Makefile targets once the REST contract exists:
@@ -821,7 +826,17 @@ Expected Makefile targets once the REST contract exists:
 ```text
 make generate-openapi
 make check-openapi
+make generate-docs
+make check-docs
 ```
+
+Configuration documentation should be coupled to the typed config model rather
+than maintained only as prose. A small Go helper should reflect the typed config
+and `DefaultConfig()` to generate committed config reference artifacts, while
+`docs/config/metadata.yml` supplies human-authored descriptions for stable
+config paths. `make check-docs` must fail when generated config references are
+stale, when stable config paths lack metadata, when metadata points to removed
+paths or when stable path descriptions are left as placeholders.
 
 Generated code must not own mail protocol state machines, backend registry, selector, health model, routing resolver implementation or Nauthilus transport implementation. Those remain explicit domain objects with hand-written tests.
 
@@ -1108,6 +1123,9 @@ E2E lane and pinned Dovecot interoperability lane are in place.
 - route lookup
 - reload
 - `nauthilus-directorctl`
+- generated config documentation and stale-doc guardrails
+- initial manpages for stable server/client command surfaces and the config file
+  format
 - E2E proof for REST and CLI managing the same Redis-backed runtime state
 
 ### M4: Observability

@@ -26,6 +26,7 @@ import (
 	"github.com/croessner/nauthilus-director/internal/observability"
 	"github.com/croessner/nauthilus-director/internal/proxy"
 	"github.com/croessner/nauthilus-director/internal/routing"
+	runtimectl "github.com/croessner/nauthilus-director/internal/runtime"
 	"github.com/croessner/nauthilus-director/internal/state"
 )
 
@@ -86,6 +87,7 @@ type SessionConfig struct {
 	BackendSelector        backend.Selector
 	BackendConnector       BackendConnector
 	ProxyRunner            proxy.Runner
+	LocalSessions          *runtimectl.LocalSessionRegistry
 	Observability          observability.Recorder
 }
 

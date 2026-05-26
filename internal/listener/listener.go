@@ -31,6 +31,7 @@ import (
 	"github.com/croessner/nauthilus-director/internal/nauthilus"
 	"github.com/croessner/nauthilus-director/internal/observability"
 	"github.com/croessner/nauthilus-director/internal/protocol/imap"
+	runtimectl "github.com/croessner/nauthilus-director/internal/runtime"
 	"go.uber.org/fx"
 )
 
@@ -69,6 +70,7 @@ type SessionOptions struct {
 	SessionLeaseTTL     time.Duration
 	SessionIdleGrace    time.Duration
 	FrontendTLSConfig   *tls.Config
+	LocalSessions       *runtimectl.LocalSessionRegistry
 	Observability       observability.Recorder
 }
 
@@ -100,6 +102,7 @@ type managerOptions struct {
 	handlerFactory    SessionHandlerFactory
 	authClientFactory NauthilusClientFactory
 	listenConfig      net.ListenConfig
+	localSessions     *runtimectl.LocalSessionRegistry
 	observability     observability.Recorder
 }
 
@@ -120,8 +123,8 @@ func RegisterLifecycle(lifecycle fx.Lifecycle, manager *Manager) {
 }
 
 // NewManager creates a listener manager from the immutable typed config snapshot.
-func NewManager(snapshot config.Snapshot) (*Manager, error) {
-	return NewManagerWithConfig(snapshot.Config)
+func NewManager(snapshot config.Snapshot, localSessions *runtimectl.LocalSessionRegistry) (*Manager, error) {
+	return NewManagerWithConfig(snapshot.Config, WithLocalSessionRegistry(localSessions))
 }
 
 // NewManagerWithConfig creates a listener manager from typed config and optional test hooks.
@@ -194,6 +197,13 @@ func WithNauthilusClientFactory(factory NauthilusClientFactory) ManagerOption {
 func WithObservabilityRecorder(recorder observability.Recorder) ManagerOption {
 	return func(options *managerOptions) {
 		options.observability = observability.NormalizeRecorder(recorder)
+	}
+}
+
+// WithLocalSessionRegistry installs the process-local active-session accelerator.
+func WithLocalSessionRegistry(registry *runtimectl.LocalSessionRegistry) ManagerOption {
+	return func(options *managerOptions) {
+		options.localSessions = registry
 	}
 }
 
@@ -312,6 +322,7 @@ func defaultSessionHandlerFactory(options SessionOptions) SessionHandler {
 		MaxPreauthLineBytes:    options.Security.MaxPreauthLineBytes,
 		MaxPreauthLiteralBytes: options.Security.MaxPreauthLiteralBytes,
 		Authenticator:          options.Authenticator,
+		LocalSessions:          options.LocalSessions,
 		Observability:          options.Observability,
 	})
 }
