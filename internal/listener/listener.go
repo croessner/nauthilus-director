@@ -64,6 +64,7 @@ type SessionOptions struct {
 	Authenticator       nauthilus.Authenticator
 	BearerTokenMaxBytes int
 	DefaultTenant       string
+	DefaultShard        string
 	SessionLeaseTTL     time.Duration
 	SessionIdleGrace    time.Duration
 	FrontendTLSConfig   *tls.Config
@@ -124,6 +125,8 @@ func NewManager(snapshot config.Snapshot) (*Manager, error) {
 
 // NewManagerWithConfig creates a listener manager from typed config and optional test hooks.
 func NewManagerWithConfig(cfg config.Config, opts ...ManagerOption) (*Manager, error) {
+	cfg = cfg.Normalize()
+
 	options := managerOptions{
 		handlerFactory:    defaultSessionHandlerFactory,
 		authClientFactory: defaultNauthilusClientFactory,
@@ -151,6 +154,7 @@ func NewManagerWithConfig(cfg config.Config, opts ...ManagerOption) (*Manager, e
 			cfg.Runtime,
 			cfg.Director.Security,
 			cfg.Director.Affinity.ActiveUserPinning.Key.Tenant,
+			cfg.Director.Routing.EffectiveDefaultShard(),
 			cfg.Director.Affinity.ActiveUserPinning.IdleGrace.Std(),
 			options,
 		)
@@ -290,6 +294,7 @@ func defaultSessionHandlerFactory(options SessionOptions) SessionHandler {
 		Network:                options.Config.Network,
 		BackendPool:            options.Config.BackendPool,
 		DefaultTenant:          options.DefaultTenant,
+		DefaultShard:           options.DefaultShard,
 		TLSMode:                options.Config.TLS.Mode,
 		Capabilities:           capabilities,
 		AuthMechanisms:         authMechanisms,

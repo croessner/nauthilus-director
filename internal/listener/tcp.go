@@ -60,6 +60,7 @@ func newManagedListener(
 	runtime config.RuntimeConfig,
 	security config.DirectorSecurityConfig,
 	defaultTenant string,
+	defaultShard string,
 	sessionIdleGrace time.Duration,
 	options managerOptions,
 ) (*managedListener, error) {
@@ -102,6 +103,7 @@ func newManagedListener(
 			Authenticator:       authenticator,
 			BearerTokenMaxBytes: authority.Mechanisms.Bearer.TokenMaxBytes,
 			DefaultTenant:       defaultTenant,
+			DefaultShard:        defaultShard,
 			SessionLeaseTTL:     runtime.Timeouts.ProxyIdle.Std(),
 			SessionIdleGrace:    sessionIdleGrace,
 			Observability:       options.observability,

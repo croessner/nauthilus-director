@@ -123,6 +123,8 @@ func (s *Session) placeAuthenticatedSession(
 		return err
 	}
 
+	routingResult = s.withEffectiveDefaultShard(routingResult)
+
 	if !routingResult.Complete() {
 		s.recordRoutingResolve(ctx, observationResultFailure, "incomplete", routingResult.RoutingSource)
 
@@ -167,6 +169,17 @@ func (s *Session) placeAuthenticatedSession(
 	s.placed = true
 
 	return nil
+}
+
+// withEffectiveDefaultShard fills an omitted route shard from the immutable config snapshot.
+func (s *Session) withEffectiveDefaultShard(result routing.RoutingResult) routing.RoutingResult {
+	if normalizedRoutingFact(result.ShardTag) != "" {
+		return result
+	}
+
+	result.ShardTag = s.context.DefaultShard
+
+	return result
 }
 
 // routingRequest builds the side-effect-free routing input from authenticated facts.

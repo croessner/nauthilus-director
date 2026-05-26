@@ -444,6 +444,43 @@ func TestAuthAttributeAndHashFallbackPlacement(t *testing.T) {
 	}
 }
 
+// TestRoutingWithoutShardUsesEffectiveDefaultShard verifies placement fallback semantics.
+func TestRoutingWithoutShardUsesEffectiveDefaultShard(t *testing.T) {
+	authenticator := &recordingAuthenticator{
+		result: nauthilus.AuthResult{
+			Decision: nauthilus.DecisionAuthenticated,
+			Account:  "alice@example.test",
+			Attributes: map[string][]string{
+				"account": {"alice@example.test"},
+				"tenant":  {defaultTenantName},
+			},
+		},
+	}
+	router := &recordingRoutingResolver{
+		result: routing.RoutingResult{
+			AccountKey:    "alice@example.test",
+			Tenant:        defaultTenantName,
+			RoutingSource: "test",
+		},
+	}
+	store := &recordingSessionStore{}
+	selector := &recordingBackendSelector{result: backend.SelectionResult{Backend: backend.Backend{Identifier: "selected-imap"}}}
+	config := pipelineSessionConfig(authenticator, router, store, selector)
+	config.DefaultShard = "fallback-shard"
+	harness := startTestSession(t, config)
+
+	harness.expectLine(t, greetingLine)
+	harness.write(t, `A001 LOGIN "alice@example.test" "secret-password"`+"\r\n")
+	harness.expectLine(t, "A001 OK Authentication completed\r\n")
+
+	if store.record.ShardTag != "fallback-shard" {
+		t.Fatalf("session shard = %q, want fallback-shard", store.record.ShardTag)
+	}
+	if selector.request.ShardTag != "fallback-shard" {
+		t.Fatalf("selector shard = %q, want fallback-shard", selector.request.ShardTag)
+	}
+}
+
 type recordingAuthenticator struct {
 	requests []nauthilus.AuthRequest
 	result   nauthilus.AuthResult

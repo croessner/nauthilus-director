@@ -80,6 +80,7 @@ func (l *Loader) Load(options LoadOptions) (*Snapshot, error) {
 	if err != nil {
 		return nil, err
 	}
+	config = config.Normalize()
 
 	if err := l.Validate(config); err != nil {
 		return nil, err

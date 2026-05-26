@@ -350,6 +350,7 @@ type LMTPClientAuthConfig struct {
 
 type RoutingConfig struct {
 	DefaultSelector string         `mapstructure:"default_selector" yaml:"default_selector" validate:"required"`
+	DefaultShard    string         `mapstructure:"default_shard" yaml:"default_shard"`
 	HashKey         string         `mapstructure:"hash_key" yaml:"hash_key" validate:"required"`
 	LMTPHashKey     string         `mapstructure:"lmtp_hash_key" yaml:"lmtp_hash_key"`
 	Failover        FailoverConfig `mapstructure:"failover" yaml:"failover" validate:"required"`
@@ -440,7 +441,7 @@ type BackendPoolConfig struct {
 
 type BackendConfig struct {
 	Protocol       string              `mapstructure:"protocol" yaml:"protocol" validate:"required"`
-	ShardTag       string              `mapstructure:"shard_tag" yaml:"shard_tag" validate:"required"`
+	ShardTag       string              `mapstructure:"shard_tag" yaml:"shard_tag"`
 	Address        string              `mapstructure:"address" yaml:"address" validate:"required"`
 	Weight         int                 `mapstructure:"weight" yaml:"weight"`
 	MaxConnections int                 `mapstructure:"max_connections" yaml:"max_connections"`

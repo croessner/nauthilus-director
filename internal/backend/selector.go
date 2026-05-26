@@ -26,6 +26,7 @@ import (
 
 const (
 	protocolIMAP           = "imap"
+	selectorDefaultShard   = "default"
 	selectorRendezvousHash = "rendezvous_hash"
 )
 
@@ -41,10 +42,11 @@ type SelectionRequest struct {
 
 // SelectionResult contains the concrete backend chosen after policy checks.
 type SelectionResult struct {
-	Backend        Backend
-	Reason         string
-	Generation     string
-	ActiveAffinity bool
+	Backend          Backend
+	EffectiveBackend EffectiveBackendState
+	Reason           string
+	Generation       string
+	ActiveAffinity   bool
 }
 
 // Selector selects concrete backends after routing facts are known.
@@ -55,6 +57,8 @@ type Selector interface {
 // SelectionPolicy configures static maintenance handling for backend selection.
 type SelectionPolicy struct {
 	SoftAllowsActivePins bool
+	DefaultShard         string
+	EffectiveBackend     EffectiveBackendPolicy
 }
 
 // StaticSelector chooses static config-backed IMAP backends.
@@ -69,7 +73,7 @@ func NewStaticSelector(registry Registry, policy SelectionPolicy) (*StaticSelect
 		return nil, newBackendError(ErrorKindConfig, "selector", "registry required", nil)
 	}
 
-	return &StaticSelector{registry: registry, policy: policy}, nil
+	return &StaticSelector{registry: registry, policy: policy.Normalize()}, nil
 }
 
 // Select maps a final shard tag to one concrete IMAP backend.
@@ -78,7 +82,7 @@ func (s *StaticSelector) Select(ctx context.Context, request SelectionRequest) (
 		return SelectionResult{}, newBackendError(ErrorKindConfig, "selector", "selector unavailable", nil)
 	}
 
-	request = normalizeSelectionRequest(request)
+	request = s.normalizeSelectionRequest(request)
 	if err := validateSelectionRequest(request); err != nil {
 		return SelectionResult{}, err
 	}
@@ -105,7 +109,10 @@ func (s *StaticSelector) Select(ctx context.Context, request SelectionRequest) (
 		return SelectionResult{}, err
 	}
 
-	eligible := s.eligibleBackends(candidates, request.ActiveAffinity)
+	eligible, err := s.eligibleBackends(candidates, request.ActiveAffinity)
+	if err != nil {
+		return SelectionResult{}, err
+	}
 	if len(eligible) == 0 {
 		return SelectionResult{}, newBackendError(ErrorKindNoBackend, "selector", "no eligible "+formatBackendCount(len(candidates)), nil)
 	}
@@ -113,39 +120,54 @@ func (s *StaticSelector) Select(ctx context.Context, request SelectionRequest) (
 	selected := selectRendezvousBackend(request, eligible)
 
 	return SelectionResult{
-		Backend:        selected,
-		Reason:         selectionReason(request.ActiveAffinity),
-		ActiveAffinity: request.ActiveAffinity,
+		Backend:          selected.Backend,
+		EffectiveBackend: selected,
+		Reason:           selectionReason(request.ActiveAffinity),
+		ActiveAffinity:   request.ActiveAffinity,
 	}, nil
 }
 
 // eligibleBackends applies static maintenance and weight rules.
-func (s *StaticSelector) eligibleBackends(backends []Backend, activeAffinity bool) []Backend {
-	eligible := make([]Backend, 0, len(backends))
-	for _, backend := range backends {
-		if backend.MaintenanceMode == MaintenanceModeHard {
-			continue
+func (s *StaticSelector) eligibleBackends(backends []Backend, activeAffinity bool) ([]EffectiveBackendState, error) {
+	eligible := make([]EffectiveBackendState, 0, len(backends))
+	for _, candidate := range backends {
+		effective, err := NewEffectiveBackendState(EffectiveBackendInput{
+			Backend: candidate,
+			Policy:  s.policy.EffectiveBackend,
+		})
+		if err != nil {
+			return nil, err
 		}
 
-		if backend.MaintenanceMode == MaintenanceModeSoft && (!activeAffinity || !s.policy.SoftAllowsActivePins) {
-			continue
+		if effective.Eligible(activeAffinity) {
+			eligible = append(eligible, effective)
 		}
-
-		if !activeAffinity && backend.Weight == 0 {
-			continue
-		}
-
-		eligible = append(eligible, backend)
 	}
 
-	return eligible
+	return eligible, nil
 }
 
-// normalizeSelectionRequest trims and canonicalizes selector input.
-func normalizeSelectionRequest(request SelectionRequest) SelectionRequest {
+// Normalize applies safe defaults to selection policy.
+func (p SelectionPolicy) Normalize() SelectionPolicy {
+	p.DefaultShard = strings.TrimSpace(p.DefaultShard)
+	if p.DefaultShard == "" {
+		p.DefaultShard = selectorDefaultShard
+	}
+
+	p.EffectiveBackend = p.EffectiveBackend.Normalize()
+	p.EffectiveBackend.SoftAllowsActivePins = p.SoftAllowsActivePins
+
+	return p
+}
+
+// normalizeSelectionRequest trims, canonicalizes and defaults selector input.
+func (s *StaticSelector) normalizeSelectionRequest(request SelectionRequest) SelectionRequest {
 	request.AccountKey = strings.TrimSpace(request.AccountKey)
 	request.Tenant = strings.TrimSpace(request.Tenant)
 	request.ShardTag = strings.TrimSpace(request.ShardTag)
+	if request.ShardTag == "" {
+		request.ShardTag = s.policy.DefaultShard
+	}
 	request.Protocol = normalizeProtocol(request.Protocol)
 	request.BackendPool = strings.TrimSpace(request.BackendPool)
 
@@ -178,9 +200,9 @@ func validateSelectionRequest(request SelectionRequest) error {
 }
 
 // selectRendezvousBackend chooses the highest weighted rendezvous score.
-func selectRendezvousBackend(request SelectionRequest, backends []Backend) Backend {
+func selectRendezvousBackend(request SelectionRequest, backends []EffectiveBackendState) EffectiveBackendState {
 	var (
-		selected Backend
+		selected EffectiveBackendState
 		best     float64
 	)
 
@@ -196,12 +218,12 @@ func selectRendezvousBackend(request SelectionRequest, backends []Backend) Backe
 }
 
 // rendezvousScore returns a deterministic score without exposing account input.
-func rendezvousScore(request SelectionRequest, backend Backend) float64 {
+func rendezvousScore(request SelectionRequest, backend EffectiveBackendState) float64 {
 	sum := sha256.Sum256([]byte(request.Tenant + "\x00" + request.AccountKey + "\x00" + request.ShardTag + "\x00" + backend.Identifier))
 	raw := binary.BigEndian.Uint64(sum[:8])
 	unit := (float64(raw) + 1) / (float64(^uint64(0)) + 1)
 
-	weight := backend.Weight
+	weight := backend.EffectiveWeight
 	if weight <= 0 {
 		weight = 1
 	}

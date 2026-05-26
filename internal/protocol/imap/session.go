@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"time"
 
 	"github.com/croessner/nauthilus-director/internal/backend"
@@ -125,6 +126,7 @@ func NewSession(config SessionConfig, conn net.Conn) (*Session, error) {
 			Network:                config.Network,
 			BackendPool:            config.BackendPool,
 			DefaultTenant:          defaultTenant(config.DefaultTenant),
+			DefaultShard:           defaultShard(config.DefaultShard),
 			TLSMode:                config.TLSMode,
 			LocalAddr:              conn.LocalAddr(),
 			RemoteAddr:             conn.RemoteAddr(),
@@ -379,6 +381,16 @@ func newSessionID() (string, error) {
 
 // defaultTenant returns the configured tenant fallback used before auth attributes override it.
 func defaultTenant(value string) string {
+	if value != "" {
+		return value
+	}
+
+	return defaultTenantName
+}
+
+// defaultShard returns the configured effective shard fallback for incomplete routing.
+func defaultShard(value string) string {
+	value = strings.TrimSpace(value)
 	if value != "" {
 		return value
 	}

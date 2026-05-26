@@ -28,18 +28,6 @@ import (
 	"github.com/croessner/nauthilus-director/internal/config"
 )
 
-// MaintenanceMode describes runtime backend placement eligibility.
-type MaintenanceMode string
-
-const (
-	// MaintenanceModeDisabled permits normal placement.
-	MaintenanceModeDisabled MaintenanceMode = "disabled"
-	// MaintenanceModeHard rejects new sessions and may terminate active sessions.
-	MaintenanceModeHard MaintenanceMode = "hard"
-	// MaintenanceModeSoft excludes new initial placements but preserves pins.
-	MaintenanceModeSoft MaintenanceMode = "soft"
-)
-
 // Backend describes one protocol-specific backend entry.
 type Backend struct {
 	Identifier      string
@@ -52,6 +40,7 @@ type Backend struct {
 	MaintenanceMode MaintenanceMode
 	Weight          int
 	MaxConnections  int
+	HealthEnabled   bool
 }
 
 // TLSConfig describes the transport security policy for one backend connection.
@@ -183,6 +172,8 @@ type registryKey struct {
 
 // NewStaticRegistry builds a fail-closed static backend registry from typed config.
 func NewStaticRegistry(director config.DirectorConfig) (*StaticRegistry, error) {
+	director = director.Normalize()
+
 	registry := &StaticRegistry{
 		pools:    make(map[string]Pool, len(director.BackendPools)),
 		backends: make(map[string]Backend, len(director.Backends)),
@@ -390,6 +381,7 @@ func newBackend(poolName string, identifier string, backend config.BackendConfig
 		MaintenanceMode: mode,
 		Weight:          backend.Weight,
 		MaxConnections:  backend.MaxConnections,
+		HealthEnabled:   backend.HealthCheck.Enabled,
 	}, nil
 }
 

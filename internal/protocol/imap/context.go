@@ -64,6 +64,7 @@ type SessionConfig struct {
 	Network                string
 	BackendPool            string
 	DefaultTenant          string
+	DefaultShard           string
 	TLSMode                string
 	Capabilities           []string
 	AuthMechanisms         []string
@@ -96,6 +97,7 @@ type Context struct {
 	Network                string
 	BackendPool            string
 	DefaultTenant          string
+	DefaultShard           string
 	TLSMode                string
 	LocalAddr              net.Addr
 	RemoteAddr             net.Addr
