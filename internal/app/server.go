@@ -262,6 +262,7 @@ func provideControlHandle(
 		return controlHandle{}, nil
 	}
 
+	runtimeReader := runtimectl.NewRedisRuntimeReader(store)
 	handler := rest.NewServer(rest.Options{
 		Version:    options.Version,
 		ConfigPath: options.ConfigPath,
@@ -272,7 +273,9 @@ func provideControlHandle(
 			Snapshot:       snapshot,
 			BackendReader:  backendReader,
 			BackendMutator: runtimectl.NewBackendService(store, localSessions, runtimectl.WithObservabilityRecorder(recorder)),
+			SessionReader:  runtimeReader,
 			SessionMutator: runtimectl.NewSessionService(store, localSessions, runtimectl.WithObservabilityRecorder(recorder)),
+			UserReader:     runtimeReader,
 			UserMutator:    runtimectl.NewUserService(store, localSessions, runtimectl.WithObservabilityRecorder(recorder)),
 			RouteLookup:    routeLookup,
 			Reload:         safeReloadService(cfg, loader, options.ConfigPath, recorder),
