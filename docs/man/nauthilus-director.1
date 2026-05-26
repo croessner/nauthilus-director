@@ -6,9 +6,18 @@
 nauthilus-director \- run and inspect the Nauthilus Director server process
 .SH SYNOPSIS
 .B nauthilus-director
+.RB [ --config
+.IR path ]
+.br
+.B nauthilus-director
 .RB [ --version ]
 .RB [ --config
 .IR path ]
+.br
+.B nauthilus-director
+.RB [ --config
+.IR path ]
+.B serve
 .br
 .B nauthilus-director
 .RB [ --config
@@ -28,8 +37,11 @@ nauthilus-director \- run and inspect the Nauthilus Director server process
 .SH DESCRIPTION
 .B nauthilus-director
 is the server binary for the Director process.
-The stable command surface currently implemented by the binary is version
-printing and local process configuration inspection.
+Without a subcommand it starts the production server process, including the
+configured IMAP listeners and the in-process control API when enabled.
+The explicit
+.B serve
+subcommand is an alias for the same server startup path.
 .PP
 Runtime backend, session, user, route lookup and reload operations are managed
 through
@@ -44,8 +56,12 @@ Print the binary version and exit.
 .BR --config " " \fIpath\fR ", " -c " " \fIpath\fR
 Read configuration from
 .IR path
-for commands that inspect local server configuration.
+for server startup and commands that inspect local server configuration.
 .SH COMMANDS
+.TP
+.B serve
+Start the production server process explicitly.
+When no subcommand is supplied this is the default behavior.
 .TP
 .B config dump -d
 Print canonical default configuration for the server process.

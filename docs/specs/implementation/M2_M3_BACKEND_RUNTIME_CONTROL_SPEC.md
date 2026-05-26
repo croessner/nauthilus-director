@@ -3,7 +3,9 @@
 Status: completed. The backend runtime and generated REST/CLI control
 implementation is in place. `make guardrails` and `make e2e-interop` passed on
 2026-05-26; the real-server interoperability lane used pinned
-`dovecot/dovecot:2.4.3-dev`.
+`dovecot/dovecot:2.4.3-dev`. A 2026-05-26 closeout correction wired the
+production `nauthilus-director` server entrypoint and added real-binary E2E
+proof for IMAP startup plus REST/CLI state parity through the running process.
 
 This document combines the backend runtime milestone and the REST/CLI control
 milestone for `nauthilus-director`. The split in the roadmap is conceptually
@@ -1238,6 +1240,10 @@ Makefile
 - E2E assertions should observe backend routing through fake backend behavior,
   REST responses, CLI output and Redis-visible effects only through public
   system boundaries.
+- At least one fast E2E assertion must start the production
+  `nauthilus-director` binary and prove the public IMAP entrypoint. REST/CLI
+  parity proof must include a running production server process, not only an
+  in-process handler.
 - E2E tests must not import internal packages to mutate runtime state.
 - E2E tests should use the same Redis-compatible policy as M1.
 - If Docker is unavailable, `make e2e-interop` may skip with its established
@@ -1265,6 +1271,8 @@ Makefile
 - Reap repairs stale Redis sessions after an unclean disconnect or process
   termination.
 - REST and CLI perform equivalent mutations against the same Redis-backed state.
+- The production `nauthilus-director` binary starts IMAP and control listeners
+  from typed config.
 - Route lookup reads runtime state without calling Nauthilus or mutating Redis.
 - Reload applies safe changes or rejects unsafe changes cleanly.
 - Secret-safe logs do not include credentials, tokens or SASL blobs.
@@ -1357,9 +1365,14 @@ coverage and secret-safe runtime/control observability.
 
 The deterministic fake-service E2E lane proves runtime/control behavior through
 public IMAP sockets, generated REST endpoints and real
-`nauthilus-directorctl` commands. Reap repair is covered by Redis/runtime
-guardrail tests because no public reap command exists in the stable v1 control
-surface. Real-server interoperability passed against pinned Dovecot.
+`nauthilus-directorctl` commands. The corrected binary-entry E2E additionally
+starts the production `nauthilus-director` process, verifies IMAP login and
+proxy handoff through its public listener, and proves CLI and REST observe the
+same Redis-backed backend runtime state in that running process. Reap repair is
+covered by Redis/runtime guardrail tests because no public reap command exists
+in the stable v1 control surface. Real-server interoperability passed against
+pinned Dovecot and now uses the production server binary as its director
+entrypoint.
 
 ## Required M2/M3 Review Pass
 

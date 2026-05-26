@@ -28,6 +28,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"io"
 	"math/big"
 	"net"
@@ -74,6 +75,7 @@ const (
 	e2eTenant        = "default"
 	e2eToken         = "e2e-bearer-token"
 	fakeBackendReady = "* OK fake IMAP backend ready\r\n"
+	serverBinaryEnv  = "NAUTHILUS_DIRECTOR_E2E_SERVER_BINARY"
 )
 
 // TestFakeHTTPAuthorityPublicIMAPFlow proves the guardrail lane uses public sockets.
@@ -126,6 +128,92 @@ func TestFakeHTTPAuthorityPublicIMAPFlow(t *testing.T) {
 	)
 }
 
+// TestServerBinaryPublicIMAPFlow proves the real server binary owns the public IMAP entrypoint.
+func TestServerBinaryPublicIMAPFlow(t *testing.T) {
+	binary := e2eServerBinary(t)
+	redisFixture := startValkeySessionStore(t)
+	authority := startFakeHTTPAuthority(t, map[string][]string{
+		"account":   {e2eAccount},
+		"tenant":    {e2eTenant},
+		"mailShard": {e2eShardTag},
+	})
+	fakeBackend := startFakeIMAPBackend(t, fakeBackendOptions{})
+	directorAddress := net.JoinHostPort("127.0.0.1", strconv.Itoa(reserveLoopbackPort(t)))
+	configPath := writeProcessConfig(t, processConfigOptions{
+		RedisAddress:    redisFixture.addr,
+		AuthorityURL:    authority.URL(),
+		DirectorAddress: directorAddress,
+		BackendAddress:  fakeBackend.Address(),
+		BackendTLS: config.BackendTLSConfig{
+			Mode:          "plaintext",
+			MinTLSVersion: "TLS1.2",
+		},
+		BackendAuth: masterUserBackendAuth(),
+	})
+	process := startDirectorProcess(t, binary, configPath)
+
+	waitForDirectorGreeting(t, directorAddress, process)
+
+	client := dialPlain(t, directorAddress)
+	defer func() { _ = client.Close() }()
+
+	reader := bufio.NewReader(client)
+	expectLine(t, reader, "* OK nauthilus-director IMAP session ready\r\n")
+	writeLine(t, client, `A001 LOGIN "`+e2eAccount+`" "`+e2ePassword+`"`)
+	expectLine(t, reader, "A001 OK Authentication completed\r\n")
+	writeLine(t, client, "A002 NOOP")
+	expectLine(t, reader, "A002 OK backend noop\r\n")
+
+	fakeBackend.ExpectProxyLine(t, "A002 NOOP")
+	authority.ExpectRequest(t, e2eProtocol, "login", "")
+}
+
+// TestServerBinaryControlRESTCLIParity proves the real process exposes shared REST and CLI state.
+func TestServerBinaryControlRESTCLIParity(t *testing.T) {
+	binary := e2eServerBinary(t)
+	ctl := buildDirectorctl(t)
+	redisFixture := startValkeySessionStore(t)
+	authority := startFakeHTTPAuthority(t, map[string][]string{
+		"account":   {e2eAccount},
+		"tenant":    {e2eTenant},
+		"mailShard": {e2eShardTag},
+	})
+	fakeBackend := startFakeIMAPBackend(t, fakeBackendOptions{})
+	directorAddress := net.JoinHostPort("127.0.0.1", strconv.Itoa(reserveLoopbackPort(t)))
+	controlAddress := net.JoinHostPort("127.0.0.1", strconv.Itoa(reserveLoopbackPort(t)))
+	controlURL := "http://" + controlAddress
+	configPath := writeProcessConfig(t, processConfigOptions{
+		RedisAddress:    redisFixture.addr,
+		AuthorityURL:    authority.URL(),
+		DirectorAddress: directorAddress,
+		ControlAddress:  controlAddress,
+		ControlEnabled:  true,
+		BackendAddress:  fakeBackend.Address(),
+		BackendTLS: config.BackendTLSConfig{
+			Mode:          "plaintext",
+			MinTLSVersion: "TLS1.2",
+		},
+		BackendAuth: masterUserBackendAuth(),
+	})
+	process := startDirectorProcess(t, binary, configPath)
+
+	waitForDirectorGreeting(t, directorAddress, process)
+
+	runDirectorctl(t, ctl, controlURL, "backends", "out", e2eBackendAID, "--reason", "real process parity")
+	detail := getBackendDetail(t, controlURL, e2eBackendAID)
+	if detail.Runtime.InService {
+		t.Fatalf("REST backend state in_service = true after CLI out: %#v", detail.Runtime)
+	}
+
+	postAccepted(t, controlURL+"/api/v1/backends/"+e2eBackendAID+"/runtime/in", generated.RuntimeReasonRequest{
+		Reason: "real process parity restore",
+	})
+	output := runDirectorctl(t, ctl, controlURL, "backends", "show", e2eBackendAID)
+	if !strings.Contains(output, "in_service=true") {
+		t.Fatalf("CLI backend state after REST in = %q", output)
+	}
+}
+
 // TestFakeHTTPAuthorityUsesRedisLeaseStore proves active affinity through Redis-compatible state.
 func TestFakeHTTPAuthorityUsesRedisLeaseStore(t *testing.T) {
 	fixture := startValkeySessionStore(t)
@@ -163,6 +251,60 @@ func TestFakeHTTPAuthorityUsesRedisLeaseStore(t *testing.T) {
 	_ = client.Close()
 
 	expectAffinityReleased(t, fixture.store, key)
+}
+
+// TestMaxConnectionsPreventOverbookingThroughPublicIMAP proves capacity limits at the public IMAP boundary.
+func TestMaxConnectionsPreventOverbookingThroughPublicIMAP(t *testing.T) {
+	redisFixture := startValkeySessionStore(t)
+	store := newTrackingSessionStore(redisFixture.store)
+	localSessions := runtimectl.NewLocalSessionRegistry()
+	recorder := newCapturedRecorder()
+	authority := startFakeHTTPAuthority(t, map[string][]string{
+		"account":   {e2eAccount},
+		"tenant":    {e2eTenant},
+		"mailShard": {e2eShardTag},
+	})
+	fakeBackend := startFakeIMAPBackend(t, fakeBackendOptions{})
+	options := directorOptions{
+		Authenticator:  newHTTPAuthenticator(t, authority.URL()),
+		BackendAuth:    masterUserBackendAuth(),
+		BackendAddress: fakeBackend.Address(),
+		BackendMaxSessions: map[string]int{
+			e2eBackendAID: 1,
+		},
+		LocalSessions: localSessions,
+		Recorder:      recorder,
+		SessionStore:  store,
+		TLSMode:       imap.TLSModeStartTLS,
+	}
+	cfg := e2eConfig(options)
+	selector := mustRuntimeSelector(t, cfg, store)
+	options.BackendSelector = selector
+
+	director := startDirector(t, options)
+	defer director.Stop(t)
+
+	control := startE2EControlPlane(t, cfg, store, selector, localSessions, recorder)
+	defer control.Close()
+
+	firstClient, firstReader := loginIMAP(t, director.Address(), e2eAccount)
+	defer func() { _ = firstClient.Close() }()
+	expectBackendProxy(t, firstClient, firstReader, fakeBackend, "A002")
+	waitForSessionIDs(t, store, 1)
+
+	route := lookupRoute(t, control.URL(), "bob@example.test", false)
+	if !route.FailClosed || !route.AffectedBy.MaxConnections {
+		t.Fatalf("capacity route = %#v, want fail-closed max-connection proof", route)
+	}
+
+	secondClient := dialPlain(t, director.Address())
+	defer func() { _ = secondClient.Close() }()
+	secondReader := bufio.NewReader(secondClient)
+	expectLine(t, secondReader, "* OK nauthilus-director IMAP session ready\r\n")
+	writeLine(t, secondClient, `A001 LOGIN "bob@example.test" "`+e2ePassword+`"`)
+	expectLine(t, secondReader, "A001 NO [UNAVAILABLE] Authentication service temporarily unavailable\r\n")
+	waitForSessionIDs(t, store, 1)
+	recorder.AssertSafe(t)
 }
 
 // TestFakeGRPCAuthorityPublicIMAPFlow covers the scaffolded gRPC authority path.
@@ -283,10 +425,12 @@ func TestRuntimeControlPublicBoundaries(t *testing.T) {
 		BackendShards: map[string]string{
 			"mailstore-c-imap": e2eShardTagB,
 		},
-		LocalSessions: localSessions,
-		Recorder:      recorder,
-		SessionStore:  store,
-		TLSMode:       imap.TLSModeStartTLS,
+		LocalSessions:    localSessions,
+		ProxyIdleTimeout: 10 * time.Second,
+		Recorder:         recorder,
+		SessionLeaseTTL:  10 * time.Second,
+		SessionStore:     store,
+		TLSMode:          imap.TLSModeStartTLS,
 	}
 	cfg := e2eConfig(options)
 	selector := mustRuntimeSelector(t, cfg, store)
@@ -335,14 +479,16 @@ func TestRuntimeControlPublicBoundaries(t *testing.T) {
 
 	secondClient, secondReader := loginIMAP(t, director.Address(), e2eAccount)
 	defer func() { _ = secondClient.Close() }()
-	waitForSessionIDs(t, store, 2)
+	sessionIDs := waitForSessionIDs(t, store, 2)
+	secondID := otherSessionID(sessionIDs, firstID)
+	secondBackendID := waitForSessionBackend(t, store, secondID)
 
-	runDirectorctl(t, ctl, control.URL(), "backends", "out", otherID, "--reason", "capacity proof")
-	capacityRoute := lookupRoute(t, control.URL(), "bob@example.test", false)
-	if !capacityRoute.FailClosed || !capacityRoute.AffectedBy.MaxConnections || !capacityRoute.AffectedBy.RuntimeOverride {
-		t.Fatalf("max-connection route = %#v, want fail-closed max-connection/runtime proof", capacityRoute)
+	runDirectorctl(t, ctl, control.URL(), "backends", "out", otherID, "--reason", "runtime out proof")
+	outRoute := lookupRoute(t, control.URL(), "bob@example.test", false)
+	if !outRoute.AffectedBy.RuntimeOverride || !routeHasBackendExclusion(outRoute, otherID, "runtime_out") {
+		t.Fatalf("runtime-out route = %#v, want excluded backend %q with runtime effect", outRoute, otherID)
 	}
-	runDirectorctl(t, ctl, control.URL(), "backends", "in", otherID, "--reason", "capacity proof done")
+	runDirectorctl(t, ctl, control.URL(), "backends", "in", otherID, "--reason", "runtime out proof done")
 
 	clearPath := control.URL() + "/api/v1/users/" + escapedUserPath(e2eAccount) + "/affinity"
 	activeClearStatus := requestStatus(t, http.MethodDelete, clearPath, generated.RuntimeReasonRequest{Reason: "active clear should fail"})
@@ -352,7 +498,7 @@ func TestRuntimeControlPublicBoundaries(t *testing.T) {
 
 	deleteAccepted(t, control.URL()+"/api/v1/sessions/"+firstID, generated.RuntimeReasonRequest{Reason: "targeted kill"})
 	expectSessionClosed(t, firstClient, firstReader)
-	expectBackendProxy(t, secondClient, secondReader, backends[selectedID], "B002")
+	expectBackendProxy(t, secondClient, secondReader, backends[secondBackendID], "B002")
 
 	runDirectorctl(t, ctl, control.URL(), "users", "kick", e2eAccount, "--reason", "kick remaining active session")
 	expectSessionClosed(t, secondClient, secondReader)
@@ -464,7 +610,9 @@ type directorOptions struct {
 	ListenerCertPath   string
 	ListenerKeyPath    string
 	LocalSessions      *runtimectl.LocalSessionRegistry
+	ProxyIdleTimeout   time.Duration
 	Recorder           observability.Recorder
+	SessionLeaseTTL    time.Duration
 	SessionStore       state.SessionStore
 	TLSMode            string
 	UsePlacementStubs  bool
@@ -492,6 +640,245 @@ func (d directorInstance) Stop(t *testing.T) {
 	}
 }
 
+type directorProcess struct {
+	command *exec.Cmd
+	output  *bytes.Buffer
+	done    chan error
+}
+
+type processConfigOptions struct {
+	RedisAddress    string
+	AuthorityURL    string
+	DirectorAddress string
+	ControlAddress  string
+	ControlEnabled  bool
+	BackendAddress  string
+	BackendTLS      config.BackendTLSConfig
+	BackendAuth     backend.AuthConfig
+}
+
+// e2eServerBinary returns the real server binary built by the E2E runner.
+func e2eServerBinary(t *testing.T) string {
+	t.Helper()
+
+	binary := os.Getenv(serverBinaryEnv)
+	if binary == "" {
+		t.Skipf("%s is required for real-binary E2E", serverBinaryEnv)
+	}
+
+	return binary
+}
+
+// startDirectorProcess starts the server binary as an external process.
+func startDirectorProcess(t *testing.T, binary string, configPath string) *directorProcess {
+	t.Helper()
+
+	output := &bytes.Buffer{}
+	cmd := exec.Command(binary, "--config", configPath)
+	cmd.Stdout = output
+	cmd.Stderr = output
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start director process: %v", err)
+	}
+
+	process := &directorProcess{command: cmd, output: output, done: make(chan error, 1)}
+	go func() {
+		process.done <- cmd.Wait()
+	}()
+
+	t.Cleanup(func() {
+		stopDirectorProcess(t, process)
+	})
+
+	return process
+}
+
+// stopDirectorProcess terminates the external server process.
+func stopDirectorProcess(t *testing.T, process *directorProcess) {
+	t.Helper()
+
+	select {
+	case <-process.done:
+		return
+	default:
+	}
+
+	if process.command.Process != nil {
+		_ = process.command.Process.Signal(os.Interrupt)
+	}
+
+	select {
+	case <-process.done:
+	case <-time.After(time.Second):
+		if process.command.Process != nil {
+			_ = process.command.Process.Kill()
+		}
+		<-process.done
+	}
+}
+
+// waitForDirectorGreeting waits until the process exposes its public IMAP socket.
+func waitForDirectorGreeting(t *testing.T, address string, process *directorProcess) {
+	t.Helper()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		conn, err := net.DialTimeout("tcp", address, 100*time.Millisecond)
+		if err == nil {
+			_ = conn.SetDeadline(time.Now().Add(time.Second))
+			line, readErr := bufio.NewReader(conn).ReadString('\n')
+			_ = conn.Close()
+			if readErr == nil && line == "* OK nauthilus-director IMAP session ready\r\n" {
+				return
+			}
+		}
+
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	t.Fatalf("director process did not expose IMAP at %s:\n%s", address, process.output.String())
+}
+
+// writeProcessConfig writes a minimal production config for real-binary E2E.
+func writeProcessConfig(t *testing.T, options processConfigOptions) string {
+	t.Helper()
+
+	backendTLS := options.BackendTLS
+	if strings.TrimSpace(backendTLS.Mode) == "" {
+		backendTLS = config.BackendTLSConfig{Mode: "plaintext", MinTLSVersion: "TLS1.2"}
+	}
+
+	backendAuth := options.BackendAuth
+	if strings.TrimSpace(backendAuth.Mode) == "" {
+		backendAuth = masterUserBackendAuth()
+	}
+
+	controlAddress := options.ControlAddress
+	if controlAddress == "" {
+		controlAddress = "127.0.0.1:0"
+	}
+
+	content := fmt.Sprintf(`patch:
+  - op: remove
+    path: director.listeners
+    value: [imaps, lmtp, lmtps]
+  - op: remove
+    path: director.backend_pools
+    value: [lmtp-default]
+  - op: remove
+    path: director.backends
+    value: [mailstore-b-imap, mailstore-a-lmtp, mailstore-b-lmtp]
+runtime:
+  instance_name: "e2e-director"
+  process:
+    shutdown_timeout: 2s
+  servers:
+    control:
+      enabled: %t
+      address: %q
+  timeouts:
+    preauth: 2s
+    auth: 2s
+    nauthilus: 2s
+    backend_connect: 2s
+    proxy_idle: 2s
+storage:
+  redis:
+    protocol: 2
+    key_prefix: "nauthilus-director-e2e-process"
+    standalone:
+      address: %q
+    auth:
+      username: ""
+      password_file: ""
+    tls:
+      enabled: false
+auth:
+  authorities:
+    default:
+      http:
+        endpoint: %q
+        basic_auth:
+          password_file: "unused"
+director:
+  listeners:
+    imap:
+      address: %q
+      tls:
+        mode: starttls
+      imap:
+        capabilities: [IMAP4rev1, ID, SASL-IR, STARTTLS, AUTH=PLAIN]
+        auth_mechanisms: [plain]
+  backend_pools:
+    imap-default:
+      backends: [mailstore-a-imap]
+  backends:
+    mailstore-a-imap:
+      address: %q
+      shard_tag: %q
+      tls:
+        mode: %q
+        ca_file: %q
+        cert: %q
+        key: %q
+        server_name: %q
+        min_tls_version: %q
+        insecure_skip_verify: %t
+      auth:
+        mode: %q
+        master_user:
+          username: %q
+          password_file: %q
+          user_format: %q
+          mechanism: %q
+        credential_replay:
+          require_backend_tls: %t
+          preserve_mechanism: %t
+          allowed_mechanisms: [%s]
+      health_check:
+        enabled: false
+`, options.ControlEnabled,
+		controlAddress,
+		options.RedisAddress,
+		options.AuthorityURL,
+		options.DirectorAddress,
+		options.BackendAddress,
+		e2eShardTag,
+		backendTLS.Mode,
+		backendTLS.CAFile,
+		backendTLS.Cert,
+		backendTLS.Key.Value(),
+		backendTLS.ServerName,
+		backendTLS.MinTLSVersion,
+		backendTLS.InsecureSkipVerify,
+		backendAuth.Mode,
+		backendAuth.MasterUser.Username,
+		backendAuth.MasterUser.Password.Value(),
+		backendAuth.MasterUser.UserFormat,
+		backendAuth.MasterUser.Mechanism,
+		backendAuth.CredentialReplay.RequireBackendTLS,
+		backendAuth.CredentialReplay.PreserveMechanism,
+		quotedYAMLStrings(backendAuth.CredentialReplay.AllowedMechanisms),
+	)
+
+	path := filepath.Join(t.TempDir(), "nauthilus-director.yml")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write process config: %v", err)
+	}
+
+	return path
+}
+
+// quotedYAMLStrings renders a small inline string sequence.
+func quotedYAMLStrings(values []string) string {
+	quoted := make([]string, 0, len(values))
+	for _, value := range values {
+		quoted = append(quoted, fmt.Sprintf("%q", value))
+	}
+
+	return strings.Join(quoted, ", ")
+}
+
 // startDirector starts the production listener/session stack on public sockets.
 func startDirector(t *testing.T, options directorOptions) directorInstance {
 	t.Helper()
@@ -509,6 +896,14 @@ func startDirector(t *testing.T, options directorOptions) directorInstance {
 	proxyRunner := proxy.Runner(proxy.NewPipe())
 	if options.UseProxyRunnerStub {
 		proxyRunner = stubProxyRunner{}
+	}
+	sessionLeaseTTL := options.SessionLeaseTTL
+	if sessionLeaseTTL <= 0 {
+		sessionLeaseTTL = time.Second
+	}
+	proxyIdleTimeout := options.ProxyIdleTimeout
+	if proxyIdleTimeout <= 0 {
+		proxyIdleTimeout = time.Second
 	}
 
 	manager, err := listener.NewManagerWithConfig(
@@ -530,12 +925,12 @@ func startDirector(t *testing.T, options directorOptions) directorInstance {
 				Capabilities:           listenerOptions.Config.IMAP.Capabilities,
 				AuthMechanisms:         listenerOptions.Config.IMAP.AuthMechanisms,
 				MaxBearerTokenBytes:    listenerOptions.BearerTokenMaxBytes,
-				SessionLeaseTTL:        time.Second,
+				SessionLeaseTTL:        sessionLeaseTTL,
 				SessionIdleGrace:       0,
 				PreauthTimeout:         time.Second,
 				AuthTimeout:            time.Second,
 				BackendConnectTimeout:  time.Second,
-				ProxyIdleTimeout:       time.Second,
+				ProxyIdleTimeout:       proxyIdleTimeout,
 				MaxPreauthLineBytes:    8192,
 				MaxPreauthLiteralBytes: 16,
 				FrontendTLSConfig:      options.FrontendTLSConfig,
@@ -747,6 +1142,7 @@ func mustRoutingResolver(t *testing.T) routing.RoutingResolver {
 
 type redisSessionFixture struct {
 	store *state.RedisSessionStore
+	addr  string
 }
 
 // startValkeySessionStore starts a Redis-compatible server for public-socket E2E state.
@@ -775,7 +1171,8 @@ func startValkeySessionStore(t *testing.T) redisSessionFixture {
 		t.Fatalf("start valkey-server: %v", err)
 	}
 
-	client := redis.NewClient(&redis.Options{Addr: net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), Protocol: 2})
+	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+	client := redis.NewClient(&redis.Options{Addr: addr, Protocol: 2})
 	t.Cleanup(func() {
 		_ = client.Close()
 		if cmd.Process != nil {
@@ -795,7 +1192,7 @@ func startValkeySessionStore(t *testing.T) redisSessionFixture {
 		t.Fatalf("NewRedisSessionStore: %v", err)
 	}
 
-	return redisSessionFixture{store: store}
+	return redisSessionFixture{store: store, addr: addr}
 }
 
 // reserveLoopbackPort reserves and releases one local TCP port for a child server.
@@ -1274,6 +1671,33 @@ func lookupRoute(t *testing.T, baseURL string, userKey string, includeAffinity b
 	return response
 }
 
+// routeHasBackendExclusion reports whether route lookup explained a backend exclusion.
+func routeHasBackendExclusion(response generated.RouteLookupResponse, backendID string, reason string) bool {
+	for _, summary := range response.Backends {
+		if summary.Identifier != backendID {
+			continue
+		}
+
+		for _, exclusion := range summary.Exclusions {
+			if exclusion.Reason == reason {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+// getBackendDetail reads one backend through the public REST boundary.
+func getBackendDetail(t *testing.T, baseURL string, backendID string) generated.BackendDetail {
+	t.Helper()
+
+	var response generated.BackendDetail
+	requestJSON(t, http.MethodGet, baseURL+"/api/v1/backends/"+backendID, nil, http.StatusOK, &response)
+
+	return response
+}
+
 // postAccepted posts one generated JSON body and expects an accepted response.
 func postAccepted(t *testing.T, target string, body any) {
 	t.Helper()
@@ -1491,6 +1915,35 @@ func waitForSessionIDs(t *testing.T, store *trackingSessionStore, count int) []s
 	return nil
 }
 
+// otherSessionID returns the active session id that does not match the excluded id.
+func otherSessionID(ids []string, excluded string) string {
+	for _, id := range ids {
+		if id != excluded {
+			return id
+		}
+	}
+
+	return ""
+}
+
+// waitForSessionBackend waits until the REST-visible session has selected-backend metadata.
+func waitForSessionBackend(t *testing.T, store *trackingSessionStore, sessionID string) string {
+	t.Helper()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		session, err := store.GetSession(context.Background(), sessionID)
+		if err == nil && strings.TrimSpace(session.BackendIdentifier) != "" {
+			return session.BackendIdentifier
+		}
+
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	t.Fatalf("session %q did not record a selected backend", sessionID)
+	return ""
+}
+
 // escapedUserPath returns a safe user-key path segment.
 func escapedUserPath(userKey string) string {
 	return url.PathEscape(userKey)
@@ -1556,7 +2009,7 @@ func (f *fakeHTTPAuthority) ExpectRequest(t *testing.T, protocol string, method 
 		t.Fatalf("fake authority requests = %d, want 1", len(f.requests))
 	}
 	request := f.requests[0]
-	if request["protocol"] != protocol || request["method"] != method || request["client_id"] != clientID {
+	if request["protocol"] != protocol || request["method"] != method || !matchesOptionalString(request["client_id"], clientID) {
 		t.Fatalf("fake authority request = %#v", request)
 	}
 	for _, forbidden := range []string{"backend_identifier", "listener", "session_id", "routing_hint"} {
@@ -1564,6 +2017,15 @@ func (f *fakeHTTPAuthority) ExpectRequest(t *testing.T, protocol string, method 
 			t.Fatalf("fake authority received forbidden field %q: %#v", forbidden, request)
 		}
 	}
+}
+
+// matchesOptionalString treats an omitted optional JSON field as an empty string.
+func matchesOptionalString(value any, want string) bool {
+	if want == "" && value == nil {
+		return true
+	}
+
+	return value == want
 }
 
 // RequestCount returns how often the fake authority was called.

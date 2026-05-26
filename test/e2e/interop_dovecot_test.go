@@ -22,6 +22,7 @@ import (
 	"bufio"
 	"context"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -33,26 +34,36 @@ const interopBackendAddressEnv = "NAUTHILUS_DIRECTOR_INTEROP_BACKEND_ADDR"
 
 // TestDovecotCredentialReplayInterop proves public director login and proxy handoff to real Dovecot.
 func TestDovecotCredentialReplayInterop(t *testing.T) {
+	binary := e2eServerBinary(t)
 	backendAddress := os.Getenv(interopBackendAddressEnv)
 	if backendAddress == "" {
 		t.Skipf("%s is required for real IMAP interop", interopBackendAddressEnv)
 	}
 
-	director := startDirector(t, directorOptions{
-		Authenticator:  staticInteropAuthenticator{},
-		BackendAuth:    credentialReplayBackendAuth(false),
-		BackendAddress: backendAddress,
+	redisFixture := startValkeySessionStore(t)
+	authority := startFakeHTTPAuthority(t, map[string][]string{
+		"account":   {e2eAccount},
+		"tenant":    {e2eTenant},
+		"mailShard": {e2eShardTag},
+	})
+	directorAddress := "127.0.0.1:" + strconv.Itoa(reserveLoopbackPort(t))
+	configPath := writeProcessConfig(t, processConfigOptions{
+		RedisAddress:    redisFixture.addr,
+		AuthorityURL:    authority.URL(),
+		DirectorAddress: directorAddress,
+		BackendAddress:  backendAddress,
+		BackendAuth:     credentialReplayBackendAuth(false),
 		BackendTLS: config.BackendTLSConfig{
 			Mode:               "starttls",
 			MinTLSVersion:      "TLS1.2",
 			InsecureSkipVerify: true,
 		},
-		Recorder: newCapturedRecorder(),
-		TLSMode:  "starttls",
 	})
-	defer director.Stop(t)
+	process := startDirectorProcess(t, binary, configPath)
 
-	client := dialPlain(t, director.Address())
+	waitForDirectorGreeting(t, directorAddress, process)
+
+	client := dialPlain(t, directorAddress)
 	defer func() { _ = client.Close() }()
 
 	reader := bufio.NewReader(client)
@@ -65,6 +76,8 @@ func TestDovecotCredentialReplayInterop(t *testing.T) {
 	if !strings.HasPrefix(response, "A002 OK") {
 		t.Fatalf("Dovecot post-auth response = %q, want tagged OK", response)
 	}
+
+	authority.ExpectRequest(t, e2eProtocol, "login", "")
 }
 
 type staticInteropAuthenticator struct{}

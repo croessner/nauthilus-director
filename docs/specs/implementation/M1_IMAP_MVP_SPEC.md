@@ -2,7 +2,9 @@
 
 Status: completed. The IMAP MVP implementation is in place. `make guardrails`
 and `make e2e-interop` passed on 2026-05-22; the real-server interoperability
-lane used pinned `dovecot/dovecot:2.4.3-dev` with backend STARTTLS.
+lane used pinned `dovecot/dovecot:2.4.3-dev` with backend STARTTLS. A
+2026-05-26 closeout correction wired the production `nauthilus-director`
+server entrypoint and added real-binary E2E proof for the public IMAP listener.
 
 This document defines the first externally usable IMAP/IMAPS implementation
 phase for `nauthilus-director`. M1 starts configured IMAP listeners,
@@ -905,7 +907,9 @@ raw_error
 
 Fake-service guardrail lane:
 
-- Start the real `nauthilus-director` binary or test process.
+- Start the real `nauthilus-director` binary for at least one public IMAP
+  entrypoint proof; additional deterministic edge cases may use test processes
+  when they still cross public sockets.
 - Listen on public IMAP and IMAPS sockets from test config.
 - Start fake Nauthilus HTTP and gRPC authorities on public test sockets.
 - Start fake IMAP backend test processes on public test sockets.
@@ -935,7 +939,8 @@ Real-server interoperability lane:
 - Another real IMAP server is acceptable only when the implementation spec or
   closeout justifies it and pins the image or artifact.
 - Prove at least one successful end-to-end IMAP login and post-auth proxy
-  handoff against the real backend through the public director listener.
+  handoff against the real backend through the public director listener
+  started by the production `nauthilus-director` binary.
 - Cover both configured backend auth modes where the selected real IMAP backend
   supports them. If a mode is unsupported by the selected real server setup, M1
   acceptance requires an equivalent real-server proof before closeout.
