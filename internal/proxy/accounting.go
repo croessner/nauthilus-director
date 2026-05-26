@@ -35,6 +35,8 @@ const (
 	ResultStateFailed = "state_failed"
 	// ResultTimeout classifies proxy end caused by idle deadline expiry.
 	ResultTimeout = "timeout"
+	// ResultControlAction classifies proxy end caused by heartbeat-observed control action.
+	ResultControlAction = "control_action"
 )
 
 // Accounting records byte totals in both transparent proxy directions.

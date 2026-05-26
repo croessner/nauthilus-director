@@ -125,6 +125,7 @@ func NewSession(config SessionConfig, conn net.Conn) (*Session, error) {
 			ServiceName:            config.ServiceName,
 			Network:                config.Network,
 			BackendPool:            config.BackendPool,
+			DirectorInstanceID:     config.DirectorInstanceID,
 			DefaultTenant:          defaultTenant(config.DefaultTenant),
 			DefaultShard:           defaultShard(config.DefaultShard),
 			TLSMode:                config.TLSMode,

@@ -153,6 +153,19 @@ func (s *Session) placeAuthenticatedSession(
 	backendResult, err := s.backendSelector.Select(ctx, s.selectionRequest(routingResult, selectedShardTag, affinity))
 	if err != nil {
 		s.recordBackendSelect(ctx, observationResultFailure, reasonClass(err), selectedShardTag)
+		_, _ = s.sessionStore.CloseSession(context.Background(), sessionRecord.Key, s.context.ID)
+
+		return err
+	}
+
+	if _, err := s.sessionStore.AttachSelectedBackend(ctx, state.SessionBackendAttachment{
+		Key:               sessionRecord.Key,
+		SessionID:         s.context.ID,
+		BackendIdentifier: backendResult.Backend.Identifier,
+		MaxConnections:    backendResult.Backend.MaxConnections,
+	}); err != nil {
+		s.recordBackendSelect(ctx, observationResultFailure, reasonClass(err), selectedShardTag)
+		_, _ = s.sessionStore.CloseSession(context.Background(), sessionRecord.Key, s.context.ID)
 
 		return err
 	}
@@ -229,10 +242,13 @@ func (s *Session) sessionRecord(result routing.RoutingResult) state.SessionRecor
 			Tenant:     normalizedRoutingFact(result.Tenant),
 			AccountKey: normalizedAccount(result.AccountKey),
 		},
-		Protocol:  protocolIMAP,
-		ShardTag:  normalizedRoutingFact(result.ShardTag),
-		LeaseTTL:  ttl,
-		IdleGrace: s.context.SessionIdleGrace,
+		Protocol:           protocolIMAP,
+		ListenerName:       s.context.ListenerName,
+		ServiceName:        s.context.ServiceName,
+		ShardTag:           normalizedRoutingFact(result.ShardTag),
+		DirectorInstanceID: s.context.DirectorInstanceID,
+		LeaseTTL:           ttl,
+		IdleGrace:          s.context.SessionIdleGrace,
 	}
 }
 
@@ -439,9 +455,20 @@ type sessionLeaseLifecycle struct {
 
 // Heartbeat refreshes the active session lease while proxy mode is running.
 func (l *sessionLeaseLifecycle) Heartbeat(ctx context.Context) error {
-	_, err := l.store.HeartbeatSession(ctx, l.key, l.sessionID, l.ttl)
+	record, err := l.store.HeartbeatSession(ctx, l.key, l.sessionID, l.ttl)
+	if err != nil {
+		return err
+	}
 
-	return err
+	switch record.ControlAction {
+	case "", state.ControlActionNone:
+		return nil
+	case state.ControlActionKick, state.ControlActionDrain, state.ControlActionMoveGenerationChanged:
+		return proxy.NewControlActionError(string(record.ControlAction))
+	default:
+		return errors.New("imap: ambiguous heartbeat control action")
+	}
+
 }
 
 // Close releases the active session lease at proxy end.

@@ -364,6 +364,14 @@ func assertSessionOpenRequest(t *testing.T, store *recordingSessionStore) {
 	if store.record.ShardTag != "mailstore-a" {
 		t.Fatalf("session shard = %q, want routing shard mailstore-a", store.record.ShardTag)
 	}
+
+	if store.attachCalls != 1 {
+		t.Fatalf("backend attach calls = %d, want 1", store.attachCalls)
+	}
+
+	if store.attachment.BackendIdentifier != "mailstore-b-imap" || store.attachment.MaxConnections <= 0 {
+		t.Fatalf("backend attachment = %#v", store.attachment)
+	}
 }
 
 // assertBackendSelectionRequest verifies active affinity drives backend selection.
@@ -481,6 +489,28 @@ func TestRoutingWithoutShardUsesEffectiveDefaultShard(t *testing.T) {
 	}
 }
 
+// TestSessionLeaseLifecycleReturnsControlAction verifies heartbeat actions propagate to proxy mode.
+func TestSessionLeaseLifecycleReturnsControlAction(t *testing.T) {
+	store := &recordingSessionStore{
+		heartbeatResult: state.AffinityRecord{ControlAction: state.ControlActionDrain},
+	}
+	lease := &sessionLeaseLifecycle{
+		store:     store,
+		key:       state.AffinityKey{Tenant: defaultTenantName, AccountKey: "alice@example.test"},
+		sessionID: "session-1",
+		ttl:       time.Second,
+	}
+
+	err := lease.Heartbeat(context.Background())
+	if !proxy.IsControlActionError(err) {
+		t.Fatalf("heartbeat error = %v, want proxy control action", err)
+	}
+
+	if store.heartbeatCalls != 1 {
+		t.Fatalf("heartbeat calls = %d, want 1", store.heartbeatCalls)
+	}
+}
+
 type recordingAuthenticator struct {
 	requests []nauthilus.AuthRequest
 	result   nauthilus.AuthResult
@@ -515,12 +545,18 @@ func (r *recordingRoutingResolver) Resolve(_ context.Context, request routing.Ro
 }
 
 type recordingSessionStore struct {
-	calls          int
-	heartbeatCalls int
-	closeCalls     int
-	record         state.SessionRecord
-	result         state.AffinityRecord
-	err            error
+	calls           int
+	attachCalls     int
+	heartbeatCalls  int
+	closeCalls      int
+	record          state.SessionRecord
+	attachment      state.SessionBackendAttachment
+	result          state.AffinityRecord
+	attachResult    state.SessionBackendRecord
+	heartbeatResult state.AffinityRecord
+	err             error
+	attachErr       error
+	heartbeatErr    error
 }
 
 // OpenSession records the session-open request and returns the configured affinity.
@@ -534,6 +570,20 @@ func (s *recordingSessionStore) OpenSession(_ context.Context, record state.Sess
 	return s.result, s.err
 }
 
+// AttachSelectedBackend records selected-backend registration after placement.
+func (s *recordingSessionStore) AttachSelectedBackend(
+	_ context.Context,
+	attachment state.SessionBackendAttachment,
+) (state.SessionBackendRecord, error) {
+	s.attachCalls++
+	s.attachment = attachment
+	if s.attachResult.BackendIdentifier == "" {
+		s.attachResult.BackendIdentifier = attachment.BackendIdentifier
+	}
+
+	return s.attachResult, s.attachErr
+}
+
 // HeartbeatSession is unused by the auth pipeline tests.
 func (s *recordingSessionStore) HeartbeatSession(
 	context.Context,
@@ -543,7 +593,7 @@ func (s *recordingSessionStore) HeartbeatSession(
 ) (state.AffinityRecord, error) {
 	s.heartbeatCalls++
 
-	return state.AffinityRecord{}, nil
+	return s.heartbeatResult, s.heartbeatErr
 }
 
 // CloseSession records terminal lease release during fake proxy mode.
@@ -580,6 +630,7 @@ func pipelineSessionConfig(
 ) SessionConfig {
 	config := testPreauthConfig(TLSModeStartTLS, false)
 	config.BackendPool = "imap-default"
+	config.DirectorInstanceID = "pipeline-director"
 	config.DefaultTenant = defaultTenantName
 	config.SessionLeaseTTL = time.Minute
 	config.AuthTimeout = 20 * time.Millisecond
@@ -600,9 +651,10 @@ func defaultPipelineBackend(identifier string) backend.Backend {
 	}
 
 	return backend.Backend{
-		Identifier: identifier,
-		Protocol:   backendProtocol,
-		Address:    "127.0.0.1:1143",
+		Identifier:     identifier,
+		Protocol:       backendProtocol,
+		Address:        "127.0.0.1:1143",
+		MaxConnections: 100,
 		TLS: backend.TLSConfig{
 			Mode:          backendTLSStartTLS,
 			ServerName:    "mailstore.example.test",

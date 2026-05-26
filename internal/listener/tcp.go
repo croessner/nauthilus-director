@@ -102,6 +102,7 @@ func newManagedListener(
 			Security:            security,
 			Authenticator:       authenticator,
 			BearerTokenMaxBytes: authority.Mechanisms.Bearer.TokenMaxBytes,
+			DirectorInstanceID:  runtime.InstanceName,
 			DefaultTenant:       defaultTenant,
 			DefaultShard:        defaultShard,
 			SessionLeaseTTL:     runtime.Timeouts.ProxyIdle.Std(),

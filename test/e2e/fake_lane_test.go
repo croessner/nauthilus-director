@@ -306,6 +306,7 @@ func startDirector(t *testing.T, options directorOptions) directorInstance {
 				ServiceName:            listenerOptions.Config.ServiceName,
 				Network:                listenerOptions.Config.Network,
 				BackendPool:            listenerOptions.Config.BackendPool,
+				DirectorInstanceID:     listenerOptions.DirectorInstanceID,
 				DefaultTenant:          e2eTenant,
 				TLSMode:                listenerOptions.Config.TLS.Mode,
 				Capabilities:           listenerOptions.Config.IMAP.Capabilities,
@@ -898,16 +899,18 @@ func (b *fakeIMAPBackend) handleBackendAuth(conn net.Conn, reader *bufio.Reader,
 }
 
 type memorySessionStore struct {
-	mu      sync.Mutex
-	records map[state.AffinityKey]state.AffinityRecord
-	counts  map[state.AffinityKey]int
+	mu          sync.Mutex
+	records     map[state.AffinityKey]state.AffinityRecord
+	counts      map[state.AffinityKey]int
+	attachments map[string]state.SessionBackendAttachment
 }
 
 // newMemorySessionStore creates deterministic lease semantics for the fake lane.
 func newMemorySessionStore() *memorySessionStore {
 	return &memorySessionStore{
-		records: make(map[state.AffinityKey]state.AffinityRecord),
-		counts:  make(map[state.AffinityKey]int),
+		records:     make(map[state.AffinityKey]state.AffinityRecord),
+		counts:      make(map[state.AffinityKey]int),
+		attachments: make(map[string]state.SessionBackendAttachment),
 	}
 }
 
@@ -930,6 +933,23 @@ func (s *memorySessionStore) OpenSession(_ context.Context, record state.Session
 	return current, nil
 }
 
+// AttachSelectedBackend records selected-backend metadata for fake-lane sessions.
+func (s *memorySessionStore) AttachSelectedBackend(
+	_ context.Context,
+	attachment state.SessionBackendAttachment,
+) (state.SessionBackendRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.attachments[attachment.SessionID] = attachment
+
+	return state.SessionBackendRecord{
+		Status:             "attached",
+		BackendIdentifier:  attachment.BackendIdentifier,
+		BackendActiveCount: len(s.attachments),
+	}, nil
+}
+
 // HeartbeatSession refreshes an active in-memory lease.
 func (s *memorySessionStore) HeartbeatSession(_ context.Context, key state.AffinityKey, _ string, _ time.Duration) (state.AffinityRecord, error) {
 	s.mu.Lock()
@@ -939,9 +959,11 @@ func (s *memorySessionStore) HeartbeatSession(_ context.Context, key state.Affin
 }
 
 // CloseSession releases an active in-memory lease.
-func (s *memorySessionStore) CloseSession(_ context.Context, key state.AffinityKey, _ string) (state.AffinityRecord, error) {
+func (s *memorySessionStore) CloseSession(_ context.Context, key state.AffinityKey, sessionID string) (state.AffinityRecord, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	delete(s.attachments, sessionID)
 
 	current := s.records[key]
 	if s.counts[key] > 0 {

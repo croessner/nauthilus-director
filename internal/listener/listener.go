@@ -63,6 +63,7 @@ type SessionOptions struct {
 	Security            config.DirectorSecurityConfig
 	Authenticator       nauthilus.Authenticator
 	BearerTokenMaxBytes int
+	DirectorInstanceID  string
 	DefaultTenant       string
 	DefaultShard        string
 	SessionLeaseTTL     time.Duration
@@ -293,6 +294,7 @@ func defaultSessionHandlerFactory(options SessionOptions) SessionHandler {
 		ServiceName:            options.Config.ServiceName,
 		Network:                options.Config.Network,
 		BackendPool:            options.Config.BackendPool,
+		DirectorInstanceID:     options.DirectorInstanceID,
 		DefaultTenant:          options.DefaultTenant,
 		DefaultShard:           options.DefaultShard,
 		TLSMode:                options.Config.TLS.Mode,

@@ -63,6 +63,7 @@ type SessionConfig struct {
 	ServiceName            string
 	Network                string
 	BackendPool            string
+	DirectorInstanceID     string
 	DefaultTenant          string
 	DefaultShard           string
 	TLSMode                string
@@ -96,6 +97,7 @@ type Context struct {
 	ServiceName            string
 	Network                string
 	BackendPool            string
+	DirectorInstanceID     string
 	DefaultTenant          string
 	DefaultShard           string
 	TLSMode                string
