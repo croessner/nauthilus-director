@@ -1,0 +1,124 @@
+.\" Copyright (C) 2026 Christian Rößner
+.\"
+.\" SPDX-License-Identifier: AGPL-3.0-only
+.TH NAUTHILUS-DIRECTOR.YAML 5 "2026-05-26" "nauthilus-director" "File Formats"
+.SH NAME
+nauthilus-director.yaml \- Nauthilus Director YAML configuration format
+.SH DESCRIPTION
+.B nauthilus-director.yaml
+is the canonical name for the Director configuration file format.
+Files ending in
+.B .yml
+are also accepted.
+.PP
+The default format is YAML.
+The loader also supports common Viper formats where practical, but operator
+documentation and examples use YAML.
+.SH STABLE PATH GROUPS
+.TP
+.B runtime
+Process identity, shutdown timing, client timeouts and listener groups.
+.TP
+.B runtime.servers.control
+The in-process control API listener, control authentication and control TLS.
+.TP
+.B observability
+Logging, metrics, tracing and diagnostic profiles.
+.TP
+.B storage.redis
+Central Redis connection, security, Cluster, Sentinel, namespace and health
+settings for production runtime coordination.
+.TP
+.B auth.authorities
+Nauthilus authentication authorities, HTTP and gRPC transport settings,
+mechanism policy and protected caller credentials.
+.TP
+.B director.listeners
+Public protocol listeners, TLS, PROXY protocol, service names, authorities and
+backend-pool bindings.
+.TP
+.B director.routing
+Selector defaults, hash inputs, default shard and failover policy.
+.TP
+.B director.affinity
+Active user pinning, affinity key construction, release timing, failover and
+local cache behavior.
+.TP
+.B director.runtime_overrides
+Runtime control permissions for backend and user operations.
+.TP
+.B director.health
+Backend health timing, jitter and transition thresholds.
+.TP
+.B director.maintenance
+Default maintenance mode, drain timing, hard-kill grace and audit behavior.
+.TP
+.B director.backend_pools
+Backend pool protocol, selector and backend membership.
+.TP
+.B director.backends
+Backend protocol, shard, address, weight, max connections, maintenance baseline,
+transport security, authentication and health checks.
+.SH INCLUDES AND PATCHES
+Loader-only keys
+.BR includes ,
+.B env
+and
+.B patch
+are processed before typed validation and are not present in the final runtime
+snapshot or config dump output.
+.PP
+.B includes
+supports required, optional and environment-specific include lists.
+Relative include paths are resolved from the declaring file directory.
+Recursive include cycles fail closed.
+Missing required includes fail loading; missing optional includes are ignored.
+.PP
+.B patch
+is a list of operations with
+.BR op ,
+.B path
+and
+.B value .
+Supported operations are
+.BR add ,
+.B replace
+and
+.BR remove .
+Patches from included files are collected before patches from the including
+file and are applied before placeholder expansion.
+.SH PLACEHOLDERS
+Scalar values may use
+.B ${NAME}
+placeholders.
+Expansion happens before mapstructure decoding and typed validation.
+Map keys are never expanded.
+Missing variables fail closed.
+Ordinary dollar signs remain literal, and
+.B $${NAME}
+escapes a placeholder.
+.SH ENVIRONMENT OVERRIDES
+Stable scalar config paths can be overridden with
+.B NAUTHILUS_DIRECTOR_
+environment variables derived from the config path.
+For example,
+.B runtime.servers.control.address
+maps to
+.BR NAUTHILUS_DIRECTOR_RUNTIME_SERVERS_CONTROL_ADDRESS .
+Overrides are applied after placeholder expansion and before typed validation.
+.SH REDACTION AND PROTECTED VALUES
+Passwords, token files, private keys and other secret-bearing fields are marked
+as protected in the typed config model.
+Config dump output is redacted by default.
+Local
+.B nauthilus-director config dump -P
+and remote
+.B nauthilus-directorctl config dump -P
+are the explicit protected-value paths.
+Remote protected output additionally requires the Director to authorize the
+protected config request; a
+.B 403
+response means no protected output is printed.
+.SH SEE ALSO
+.BR nauthilus-director (1),
+.BR nauthilus-directorctl (1)

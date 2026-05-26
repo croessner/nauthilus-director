@@ -16,7 +16,6 @@ Generated config reference material should live under `docs/reference/` and be
 guarded by `make check-docs`. The config-format manpage may explain and link to
 those generated references instead of duplicating every default value by hand.
 
-Initial manpages are part of the M3 REST API and client milestone, once the
-operator command grammar, flags, output modes, exit codes and stable config
-paths are clear enough to document. M8 production hardening may expand this area
-with broader operational and failure-mode documentation.
+Initial manpages now document the implemented server binary, generated-client
+operator CLI and YAML configuration format. Future production hardening may
+expand this area with broader operational and failure-mode documentation.

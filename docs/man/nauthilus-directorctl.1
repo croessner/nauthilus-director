@@ -1,0 +1,169 @@
+.\" Copyright (C) 2026 Christian Rößner
+.\"
+.\" SPDX-License-Identifier: AGPL-3.0-only
+.TH NAUTHILUS-DIRECTORCTL 1 "2026-05-26" "nauthilus-director" "User Commands"
+.SH NAME
+nauthilus-directorctl \- control a running Nauthilus Director
+.SH SYNOPSIS
+.B nauthilus-directorctl
+.RB [ --address
+.IR url ]
+.RB [ --timeout
+.IR duration ]
+.RB [ --output
+.IR text|json ]
+.IR command
+.RI [ arguments ]
+.SH DESCRIPTION
+.B nauthilus-directorctl
+is the operator CLI for the Director control API.
+Every HTTP request is sent through the generated OpenAPI client SDK.
+The default output mode is compact key-value text for scripts.
+JSON output returns generated response bodies where practical.
+.PP
+Mutation commands manage runtime state in the running Director.
+They do not edit or rewrite YAML configuration files.
+.SH GLOBAL OPTIONS
+.TP
+.BR --address " " \fIurl\fR
+Control API base URL.
+The default is
+.BR http://127.0.0.1:9090 .
+A bare host:port value is interpreted as HTTP.
+.TP
+.BR --timeout " " \fIduration\fR
+Request timeout as a Go duration.
+The default is
+.BR 5s .
+.TP
+.BR --output " " \fItext|json\fR
+Select output mode.
+.TP
+.BR --format " " \fItext|json\fR
+Alias for
+.BR --output
+when used before the command name.
+For
+.B config dump
+the command-local
+.B --format
+flag selects YAML or JSON config serialization.
+.TP
+.B --version
+Print the client version and exit.
+.SH COMMANDS
+.TP
+.B status
+Show health, readiness, binary version and API version.
+.TP
+.B backends list
+List backend runtime state.
+.TP
+.BI "backends show " identifier
+Show one backend.
+.TP
+.BI "backends maintenance enable " identifier " --reason " text
+Enable soft maintenance by default.
+Use
+.BI "--mode " soft|hard
+to select maintenance mode and
+.BI "--grace-seconds " seconds
+when hard maintenance needs an explicit grace value.
+.TP
+.BI "backends maintenance disable " identifier " --reason " text
+Disable backend maintenance.
+.TP
+.BI "backends out " identifier " --reason " text
+Exclude a backend from new runtime placement.
+.TP
+.BI "backends in " identifier " --reason " text
+Return a backend to runtime placement.
+.TP
+.BI "backends drain " identifier " --mode " soft|hard " --reason " text
+Drain a backend.
+Use
+.BI "--grace-seconds " seconds
+to send an explicit grace value.
+.TP
+.BI "backends runtime clear " identifier " --reason " text
+Clear runtime overrides for one backend.
+.TP
+.B config dump -d
+Read canonical default configuration from the running Director.
+.TP
+.B config dump -n
+Read non-default effective configuration from the running Director.
+.TP
+.B config dump -d|-n -P
+Request protected config output from the running Director by sending the
+generated protected config request flag.
+If the Director returns
+.B 403
+the command fails clearly and prints no partial config output.
+.TP
+.BI "config dump -d|-n --format " yaml|json
+Select config document serialization.
+YAML is the default.
+.TP
+.B sessions list --protocol imap
+List active sessions, optionally filtered by protocol.
+.TP
+.BI "sessions show " session-id
+Show one active session.
+.TP
+.BI "sessions kill " session-id " --reason " text
+Terminate one active session.
+.TP
+.B users list
+List users with runtime state.
+.TP
+.BI "users show " user-key
+Show one user's runtime state.
+.TP
+.BI "users sessions " user-key
+List sessions for one user.
+.TP
+.BI "users affinity show " user-key
+Show active affinity for one user.
+.TP
+.BI "users affinity set " user-key " --shard " shard " --reason " text
+Set user affinity for future sessions.
+.TP
+.BI "users affinity clear " user-key " --reason " text
+Clear inactive user affinity.
+.TP
+.BI "users move " user-key " --to-shard " shard " --strategy " strategy " --reason " text
+Move future user placement.
+Supported strategies are
+.BR new_sessions_only ,
+.BR kick_existing
+and
+.BR drain_existing .
+.TP
+.BI "users kick " user-key " --reason " text
+Terminate active sessions for one user.
+.TP
+.BI "route lookup --protocol imap --user " user-key
+Run a side-effect-free route lookup diagnostic.
+Optional flags are
+.BI "--listener " name
+and repeated
+.BI "--attribute " k=v .
+Credential-bearing attributes are rejected before the request is sent.
+.TP
+.B reload
+Request a safe runtime reload from the running Director.
+.SH EXIT STATUS
+.TP
+.B 0
+The command succeeded.
+.TP
+.B 1
+The request was sent through the generated client and the server-side operation
+failed, or the generated client could not complete the request.
+.TP
+.B 2
+The command line or local client configuration was invalid.
+.SH SEE ALSO
+.BR nauthilus-director (1),
+.BR nauthilus-director.yaml (5)
