@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"unicode"
 )
 
 const (
@@ -61,6 +62,13 @@ const (
 	fieldTraceID           = "trace_id"
 	fieldUserHash          = "user_hash"
 	fieldUsername          = "username"
+
+	reasonClassOK                     = "ok"
+	reasonClassOther                  = "other"
+	reasonClassRuntimeHardMaintenance = "runtime_hard_maintenance"
+	reasonClassRuntimeOut             = "runtime_out"
+	reasonClassStaticHardMaintenance  = "static_hard_maintenance"
+	reasonClassStaticSoftMaintenance  = "static_soft_maintenance"
 )
 
 var allowedMetricLabels = map[string]struct{}{
@@ -109,6 +117,48 @@ var secretFieldFragments = []string{
 	fieldSASL,
 	fieldSecret,
 	fieldToken,
+}
+
+var allowedReasonClasses = map[string]struct{}{
+	"active_affinity":                 {},
+	"ambiguous_state":                 {},
+	"attach_retry":                    {},
+	"backend_connect":                 {},
+	"backend_runtime":                 {},
+	"cleared":                         {},
+	"closed":                          {},
+	"config":                          {},
+	"conflict":                        {},
+	"drain":                           {},
+	"health":                          {},
+	"healthy":                         {},
+	"hard_maintenance":                {},
+	"initial_placement":               {},
+	"invalid_request":                 {},
+	"kicked":                          {},
+	"max_connections":                 {},
+	"moved":                           {},
+	"no_backend":                      {},
+	"not_found":                       {},
+	reasonClassOK:                     {},
+	reasonClassOther:                  {},
+	"protected_config":                {},
+	"reap":                            {},
+	"reload_safe":                     {},
+	"reload_unsafe":                   {},
+	"runtime_drain":                   {},
+	reasonClassRuntimeHardMaintenance: {},
+	reasonClassRuntimeOut:             {},
+	"runtime_soft_maintenance":        {},
+	"selected":                        {},
+	"session_kill":                    {},
+	"soft_maintenance":                {},
+	reasonClassStaticHardMaintenance:  {},
+	reasonClassStaticSoftMaintenance:  {},
+	"unavailable":                     {},
+	"unknown":                         {},
+	"unhealthy":                       {},
+	"weight_zero":                     {},
 }
 
 // AllowedMetricLabels returns the stable low-cardinality metric label names.
@@ -178,11 +228,72 @@ func IsSafeRoutingAttribute(name string) bool {
 	return !IsSecretFieldName(name) && !IsHighCardinalityFieldName(name)
 }
 
+// NormalizeReasonClass maps runtime reasons into bounded metric-safe classes.
+func NormalizeReasonClass(value string) string {
+	normalized := normalizeReasonToken(value)
+	if _, ok := allowedReasonClasses[normalized]; ok {
+		return normalized
+	}
+
+	return reasonClassOther
+}
+
 // normalizeFieldName canonicalizes diagnostic field names for policy checks.
 func normalizeFieldName(name string) string {
 	replacer := strings.NewReplacer("-", "_", ".", "_", " ", "_")
 
 	return strings.ToLower(strings.TrimSpace(replacer.Replace(name)))
+}
+
+// normalizeReasonToken canonicalizes reason values without preserving raw text.
+func normalizeReasonToken(value string) string {
+	value = strings.TrimSpace(strings.ToLower(value))
+	if value == "" {
+		return reasonClassOther
+	}
+
+	normalized, ok := normalizedReasonToken(value)
+	if !ok {
+		return reasonClassOther
+	}
+
+	if normalized == "" || IsSecretFieldName(normalized) || IsHighCardinalityFieldName(normalized) {
+		return reasonClassOther
+	}
+
+	return normalized
+}
+
+// normalizedReasonToken returns a tokenized reason class and rejects raw text.
+func normalizedReasonToken(value string) (string, bool) {
+	var builder strings.Builder
+
+	lastUnderscore := false
+
+	for _, token := range value {
+		switch {
+		case token >= 'a' && token <= 'z':
+			builder.WriteRune(token)
+
+			lastUnderscore = false
+		case token >= '0' && token <= '9':
+			builder.WriteRune(token)
+
+			lastUnderscore = false
+		case token == '_' || token == '-' || unicode.IsSpace(token):
+			if !lastUnderscore && builder.Len() > 0 {
+				builder.WriteByte('_')
+
+				lastUnderscore = true
+			}
+		default:
+			return "", false
+		}
+	}
+
+	normalized := strings.Trim(builder.String(), "_")
+
+	return normalized, true
 }
 
 // sortedKeys returns a deterministic sorted list for policy reporting.

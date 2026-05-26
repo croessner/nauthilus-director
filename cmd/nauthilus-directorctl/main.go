@@ -282,6 +282,8 @@ func (app application) runBackends(args []string) int {
 		return app.runBackendsIn(args[1:])
 	case "drain":
 		return app.runBackendsDrain(args[1:])
+	case "weight":
+		return app.runBackendsWeight(args[1:])
 	case "runtime":
 		return app.runBackendRuntime(args[1:])
 	default:
@@ -440,11 +442,14 @@ func (app application) runBackendRuntime(args []string) int {
 	if len(args) == 0 {
 		return app.usageError("backends runtime requires a subcommand")
 	}
-	if args[0] != "clear" {
+	switch args[0] {
+	case "clear":
+		return app.runBackendRuntimeClear(args[1:])
+	case "weight":
+		return app.runBackendsWeight(args[1:])
+	default:
 		return app.usageError("unknown backends runtime subcommand %q", args[0])
 	}
-
-	return app.runBackendRuntimeClear(args[1:])
 }
 
 // backendRuntimeReasonArgs parses an identifier and mandatory reason.
@@ -555,6 +560,53 @@ func (app application) runBackendsOut(args []string) int {
 	}
 
 	return app.handleMarkBackendOutResponse(response)
+}
+
+// runBackendsWeight changes one backend's runtime placement weight.
+func (app application) runBackendsWeight(args []string) int {
+	line, err := parseCommandLine(args, []commandFlag{
+		valueFlag("weight"),
+		valueFlag("reason"),
+	})
+	if err != nil {
+		return app.usageError("%v", err)
+	}
+	if len(line.positionals) != 1 {
+		return app.usageError("backends weight requires exactly one backend identifier")
+	}
+
+	reason, ok := requiredValue(line, "reason")
+	if !ok {
+		return app.usageError("backends weight requires --reason")
+	}
+
+	weightText, ok := requiredValue(line, "weight")
+	if !ok {
+		return app.usageError("backends weight requires --weight")
+	}
+
+	weight, err := strconv.Atoi(weightText)
+	if err != nil || weight < 0 {
+		return app.usageError("backends weight requires a non-negative integer --weight")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), app.options.Timeout)
+	defer cancel()
+
+	client, code := app.client()
+	if code != 0 {
+		return code
+	}
+
+	response, err := client.SetBackendWeightWithResponse(ctx, line.positionals[0], generated.SetBackendWeightJSONRequestBody{
+		Reason: reason,
+		Weight: weight,
+	})
+	if err != nil {
+		return app.requestError("backends weight", err)
+	}
+
+	return app.handleSetBackendWeightResponse(response)
 }
 
 // runBackendsDrain drains one backend with an explicit mode and reason.
@@ -1330,6 +1382,14 @@ func (app application) handleMarkBackendInResponse(response *generated.MarkBacke
 func (app application) handleMarkBackendOutResponse(response *generated.MarkBackendOutResponse) int {
 	if response.StatusCode() != http.StatusAccepted {
 		return app.serverError("backends out", response.StatusCode(), response.JSONDefault)
+	}
+	return app.writeAccepted(response.JSON202)
+}
+
+// handleSetBackendWeightResponse renders a backend weight override response.
+func (app application) handleSetBackendWeightResponse(response *generated.SetBackendWeightResponse) int {
+	if response.StatusCode() != http.StatusAccepted {
+		return app.serverError("backends weight", response.StatusCode(), response.JSONDefault)
 	}
 	return app.writeAccepted(response.JSON202)
 }

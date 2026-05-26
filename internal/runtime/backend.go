@@ -22,6 +22,7 @@ import (
 	"strings"
 
 	"github.com/croessner/nauthilus-director/internal/backend"
+	"github.com/croessner/nauthilus-director/internal/observability"
 	"github.com/croessner/nauthilus-director/internal/state"
 )
 
@@ -94,13 +95,16 @@ type BackendStateStore interface {
 
 // BackendService coordinates backend runtime operations with local session acceleration.
 type BackendService struct {
-	store BackendStateStore
-	local *LocalSessionRegistry
+	store    BackendStateStore
+	local    *LocalSessionRegistry
+	recorder observability.Recorder
 }
 
 // NewBackendService creates the runtime backend operation service.
-func NewBackendService(store BackendStateStore, local *LocalSessionRegistry) *BackendService {
-	return &BackendService{store: store, local: local}
+func NewBackendService(store BackendStateStore, local *LocalSessionRegistry, options ...ServiceOption) *BackendService {
+	applied := applyServiceOptions(options)
+
+	return &BackendService{store: store, local: local, recorder: applied.recorder}
 }
 
 // SetInService changes the runtime in/out overlay without terminating active sessions.
@@ -119,7 +123,19 @@ func (s *BackendService) SetInService(ctx context.Context, request SetBackendInS
 		return BackendMutationResult{}, err
 	}
 
-	return s.backendMutationResult(ctx, AuditOperationBackendRuntimeSet, request.Reason, request.Actor, request.RuntimeOverride(), record, nil)
+	result, err := s.backendMutationResult(ctx, AuditOperationBackendRuntimeSet, request.Reason, request.Actor, request.RuntimeOverride(), record, nil)
+	if err != nil {
+		return BackendMutationResult{}, err
+	}
+
+	reasonClass := runtimeObservationReasonBackendRuntime
+	if !request.InService {
+		reasonClass = "runtime_out"
+	}
+
+	s.recordBackendOperation(ctx, observability.EventBackendRuntimeOperation, operationBackendInOut, runtimeObservationResultOK, reasonClass, record, nil)
+
+	return result, nil
 }
 
 // SetWeight changes the runtime weight overlay without terminating active sessions.
@@ -142,7 +158,19 @@ func (s *BackendService) SetWeight(
 		return BackendMutationResult{}, err
 	}
 
-	return s.backendMutationResult(ctx, AuditOperationBackendRuntimeSet, request.Reason, request.Actor, request.RuntimeOverride(), record, nil)
+	result, err := s.backendMutationResult(ctx, AuditOperationBackendRuntimeSet, request.Reason, request.Actor, request.RuntimeOverride(), record, nil)
+	if err != nil {
+		return BackendMutationResult{}, err
+	}
+
+	reasonClass := runtimeObservationReasonBackendRuntime
+	if request.Weight == 0 {
+		reasonClass = "weight_zero"
+	}
+
+	s.recordBackendOperation(ctx, observability.EventBackendRuntimeOperation, operationBackendWeight, runtimeObservationResultOK, reasonClass, record, nil)
+
+	return result, nil
 }
 
 // SetMaintenance changes runtime maintenance and closes local streams for hard maintenance.
@@ -171,7 +199,7 @@ func (s *BackendService) SetMaintenance(
 
 	closeLocal := maintenance.Mode == backend.MaintenanceModeHard
 
-	return s.backendMutationResult(
+	result, err := s.backendMutationResult(
 		ctx,
 		AuditOperationBackendMaintenance,
 		request.Reason,
@@ -180,6 +208,15 @@ func (s *BackendService) SetMaintenance(
 		record,
 		closeLocalControl(closeLocal, "hard_maintenance", request.Reason),
 	)
+	if err != nil {
+		return BackendMutationResult{}, err
+	}
+
+	s.recordBackendOperation(ctx, observability.EventBackendMaintenanceOperation, operationBackendMaintenance, runtimeObservationResultOK, maintenanceReasonClass(maintenance.Mode), record, map[string]string{
+		runtimeObservationFieldMaintenanceMode: string(maintenance.Mode),
+	})
+
+	return result, nil
 }
 
 // StartDrain starts an auditable backend drain and closes local attached streams.
@@ -204,7 +241,7 @@ func (s *BackendService) StartDrain(ctx context.Context, request StartBackendDra
 		return BackendMutationResult{}, err
 	}
 
-	return s.backendMutationResult(
+	result, err := s.backendMutationResult(
 		ctx,
 		AuditOperationBackendDrain,
 		request.Reason,
@@ -213,6 +250,15 @@ func (s *BackendService) StartDrain(ctx context.Context, request StartBackendDra
 		record,
 		closeLocalControl(record.MarkedSessionCount > 0, "drain", request.Reason),
 	)
+	if err != nil {
+		return BackendMutationResult{}, err
+	}
+
+	s.recordBackendOperation(ctx, observability.EventBackendDrain, operationBackendDrain, runtimeObservationResultOK, "drain", record, map[string]string{
+		runtimeObservationFieldMaintenanceMode: string(drain.Mode),
+	})
+
+	return result, nil
 }
 
 // ClearRuntime removes runtime-only backend overrides without touching active sessions.
@@ -234,7 +280,15 @@ func (s *BackendService) ClearRuntime(ctx context.Context, request ClearBackendR
 		return BackendMutationResult{}, err
 	}
 
-	return s.backendMutationResult(ctx, AuditOperationBackendRuntimeClear, request.Reason, request.Actor, backend.RuntimeOverride{}, record, nil)
+	result, err := s.backendMutationResult(ctx, AuditOperationBackendRuntimeClear, request.Reason, request.Actor, backend.RuntimeOverride{}, record, nil)
+	if err != nil {
+		return BackendMutationResult{}, err
+	}
+
+	s.recordBackendOperation(ctx, observability.EventBackendRuntimeOperation, operationBackendRuntimeClear, runtimeObservationResultOK, runtimeObservationReasonCleared, record, nil)
+	s.recordBackendOperation(ctx, observability.EventBackendDrain, operationBackendRuntimeClear, runtimeObservationResultOK, runtimeObservationReasonCleared, record, nil)
+
+	return result, nil
 }
 
 // Validate checks the in/out request before it crosses a persistence boundary.
@@ -406,4 +460,40 @@ func closeLocalControl(enabled bool, action string, reason string) *LocalSession
 	}
 
 	return &LocalSessionControl{Action: action, Reason: reason}
+}
+
+// maintenanceReasonClass maps maintenance mode into bounded observability classes.
+func maintenanceReasonClass(mode backend.MaintenanceMode) string {
+	switch mode {
+	case backend.MaintenanceModeHard:
+		return "hard_maintenance"
+	case backend.MaintenanceModeSoft:
+		return "soft_maintenance"
+	default:
+		return runtimeObservationReasonCleared
+	}
+}
+
+// recordBackendOperation emits one secret-safe backend runtime observation.
+func (s *BackendService) recordBackendOperation(
+	ctx context.Context,
+	event string,
+	operation string,
+	result string,
+	reasonClass string,
+	record state.BackendRuntimeRecord,
+	labels map[string]string,
+) {
+	if s == nil {
+		return
+	}
+
+	recordRuntimeObservation(ctx, s.recorder, event, observability.TraceBoundaryRESTRequest, operation, result, reasonClass, map[string]string{
+		runtimeObservationFieldActiveSessions:    strconv.Itoa(record.ActiveSessionCount),
+		runtimeObservationFieldBackendID:         record.BackendIdentifier,
+		auditFieldMarkedSessionCount:             strconv.Itoa(record.MarkedSessionCount),
+		runtimeObservationFieldRuntimeGeneration: record.Generation,
+		runtimeObservationFieldRuntimeStatus:     record.Status,
+		runtimeObservationFieldServerTime:        boolAuditValue(!record.ServerTime.IsZero()),
+	}, labels)
 }

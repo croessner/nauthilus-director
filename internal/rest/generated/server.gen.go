@@ -339,6 +339,12 @@ type RuntimeReasonRequest struct {
 	Reason string `json:"reason"`
 }
 
+// RuntimeWeightRequest defines model for RuntimeWeightRequest.
+type RuntimeWeightRequest struct {
+	Reason string `json:"reason"`
+	Weight int    `json:"weight"`
+}
+
 // SessionDetail defines model for SessionDetail.
 type SessionDetail struct {
 	Backend   string    `json:"backend"`
@@ -480,6 +486,9 @@ type MarkBackendInJSONRequestBody = RuntimeReasonRequest
 // MarkBackendOutJSONRequestBody defines body for MarkBackendOut for application/json ContentType.
 type MarkBackendOutJSONRequestBody = RuntimeReasonRequest
 
+// SetBackendWeightJSONRequestBody defines body for SetBackendWeight for application/json ContentType.
+type SetBackendWeightJSONRequestBody = RuntimeWeightRequest
+
 // LookupRouteJSONRequestBody defines body for LookupRoute for application/json ContentType.
 type LookupRouteJSONRequestBody = RouteLookupRequest
 
@@ -524,6 +533,9 @@ type ServerInterface interface {
 	// Mark a backend out of service for new runtime placement.
 	// (POST /api/v1/backends/{identifier}/runtime/out)
 	MarkBackendOut(w http.ResponseWriter, r *http.Request, identifier Identifier)
+	// Override backend runtime placement weight.
+	// (POST /api/v1/backends/{identifier}/runtime/weight)
+	SetBackendWeight(w http.ResponseWriter, r *http.Request, identifier Identifier)
 	// Return canonical default configuration.
 	// (GET /api/v1/config/defaults)
 	GetDefaultConfig(w http.ResponseWriter, r *http.Request, params GetDefaultConfigParams)
@@ -782,6 +794,32 @@ func (siw *ServerInterfaceWrapper) MarkBackendOut(w http.ResponseWriter, r *http
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.MarkBackendOut(w, r, identifier)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// SetBackendWeight operation middleware
+func (siw *ServerInterfaceWrapper) SetBackendWeight(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "identifier" -------------
+	var identifier Identifier
+
+	err = runtime.BindStyledParameterWithOptions("simple", "identifier", r.PathValue("identifier"), &identifier, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "identifier", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.SetBackendWeight(w, r, identifier)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -1422,6 +1460,7 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/api/v1/backends/{identifier}/runtime/drain", wrapper.DrainBackend)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/api/v1/backends/{identifier}/runtime/in", wrapper.MarkBackendIn)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/api/v1/backends/{identifier}/runtime/out", wrapper.MarkBackendOut)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/api/v1/backends/{identifier}/runtime/weight", wrapper.SetBackendWeight)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/config/defaults", wrapper.GetDefaultConfig)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/config/effective", wrapper.GetEffectiveConfig)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/config/non-default", wrapper.GetNonDefaultConfig)
@@ -1756,6 +1795,46 @@ type MarkBackendOutdefaultJSONResponse struct {
 }
 
 func (response MarkBackendOutdefaultJSONResponse) VisitMarkBackendOutResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type SetBackendWeightRequestObject struct {
+	Identifier Identifier `json:"identifier"`
+	Body       *SetBackendWeightJSONRequestBody
+}
+
+type SetBackendWeightResponseObject interface {
+	VisitSetBackendWeightResponse(w http.ResponseWriter) error
+}
+
+type SetBackendWeight202JSONResponse AcceptedResponse
+
+func (response SetBackendWeight202JSONResponse) VisitSetBackendWeightResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(202)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type SetBackendWeightdefaultJSONResponse struct {
+	Body       ErrorResponse
+	StatusCode int
+}
+
+func (response SetBackendWeightdefaultJSONResponse) VisitSetBackendWeightResponse(w http.ResponseWriter) error {
 
 	var buf bytes.Buffer
 	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
@@ -2597,6 +2676,9 @@ type StrictServerInterface interface {
 	// Mark a backend out of service for new runtime placement.
 	// (POST /api/v1/backends/{identifier}/runtime/out)
 	MarkBackendOut(ctx context.Context, request MarkBackendOutRequestObject) (MarkBackendOutResponseObject, error)
+	// Override backend runtime placement weight.
+	// (POST /api/v1/backends/{identifier}/runtime/weight)
+	SetBackendWeight(ctx context.Context, request SetBackendWeightRequestObject) (SetBackendWeightResponseObject, error)
 	// Return canonical default configuration.
 	// (GET /api/v1/config/defaults)
 	GetDefaultConfig(ctx context.Context, request GetDefaultConfigRequestObject) (GetDefaultConfigResponseObject, error)
@@ -2929,6 +3011,39 @@ func (sh *strictHandler) MarkBackendOut(w http.ResponseWriter, r *http.Request, 
 		sh.options.ResponseErrorHandlerFunc(w, r, err)
 	} else if validResponse, ok := response.(MarkBackendOutResponseObject); ok {
 		if err := validResponse.VisitMarkBackendOutResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// SetBackendWeight operation middleware
+func (sh *strictHandler) SetBackendWeight(w http.ResponseWriter, r *http.Request, identifier Identifier) {
+	var request SetBackendWeightRequestObject
+
+	request.Identifier = identifier
+
+	var body SetBackendWeightJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.SetBackendWeight(ctx, request.(SetBackendWeightRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "SetBackendWeight")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(SetBackendWeightResponseObject); ok {
+		if err := validResponse.VisitSetBackendWeightResponse(w); err != nil {
 			sh.options.ResponseErrorHandlerFunc(w, r, err)
 		}
 	} else if response != nil {

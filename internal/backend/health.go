@@ -21,6 +21,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/croessner/nauthilus-director/internal/observability"
 )
 
 // HealthStatus describes the published backend health result.
@@ -35,6 +37,17 @@ const (
 	HealthStatusUnknown HealthStatus = "unknown"
 	// HealthStatusUnhealthy excludes placement because checks failed.
 	HealthStatusUnhealthy HealthStatus = "unhealthy"
+)
+
+const (
+	healthObservationFieldBackendID      = "backend_identifier"
+	healthObservationFieldHealthStatus   = "health_status"
+	healthObservationFieldOperation      = "operation"
+	healthObservationFieldPreviousStatus = "previous_status"
+	healthObservationFieldReasonClass    = "reason_class"
+	healthObservationFieldResult         = "result"
+	healthObservationOperation           = "backend_health"
+	healthObservationResultTransition    = "transition"
 )
 
 // HealthState carries one secret-safe backend health observation.
@@ -116,6 +129,7 @@ type HealthRunnerConfig struct {
 	OwnerLeaseTTL time.Duration
 	StateTTL      time.Duration
 	Thresholds    HealthThresholds
+	Observability observability.Recorder
 }
 
 // HealthRunner owns periodic backend health checks for one director instance.
@@ -124,6 +138,7 @@ type HealthRunner struct {
 	coordinator HealthCoordinator
 	checker     HealthChecker
 	config      HealthRunnerConfig
+	recorder    observability.Recorder
 	mu          sync.RWMutex
 	local       map[string]HealthState
 	transitions map[string]*HealthTransitionTracker
@@ -260,6 +275,7 @@ func NewHealthRunner(registry Registry, coordinator HealthCoordinator, checker H
 		coordinator: coordinator,
 		checker:     checker,
 		config:      config,
+		recorder:    observability.NormalizeRecorder(config.Observability),
 		local:       make(map[string]HealthState),
 		transitions: make(map[string]*HealthTransitionTracker),
 	}, nil
@@ -466,7 +482,11 @@ func (r *HealthRunner) storeLocal(identifier string, result HealthCheckResult) H
 	}
 
 	state := tracker.Observe(result.Healthy, result.ReasonClass, now, r.config.StateTTL)
+	previous := r.local[identifier]
 	r.local[identifier] = state
+	if previous.Status != state.Status {
+		r.recordHealthTransition(context.Background(), identifier, previous, state)
+	}
 
 	return state
 }
@@ -481,4 +501,30 @@ func (r *HealthRunner) nextDelay() time.Duration {
 	offset := time.Duration(time.Now().UnixNano() % int64(r.config.Jitter))
 
 	return delay + offset
+}
+
+// recordHealthTransition emits a classified backend health transition.
+func (r *HealthRunner) recordHealthTransition(ctx context.Context, identifier string, previous HealthState, current HealthState) {
+	reasonClass := current.ReasonClass
+	if strings.TrimSpace(reasonClass) == "" {
+		reasonClass = string(current.Status)
+	}
+
+	event, err := observability.NewEvent(observability.EventBackendHealthTransition, observability.TraceBoundaryBackendSelect, map[string]string{
+		healthObservationFieldBackendID:      strings.TrimSpace(identifier),
+		healthObservationFieldHealthStatus:   string(current.Status),
+		healthObservationFieldOperation:      healthObservationOperation,
+		healthObservationFieldPreviousStatus: string(previous.Status),
+		healthObservationFieldReasonClass:    observability.NormalizeReasonClass(reasonClass),
+		healthObservationFieldResult:         healthObservationResultTransition,
+	}, map[string]string{
+		healthObservationFieldOperation:   healthObservationOperation,
+		healthObservationFieldReasonClass: observability.NormalizeReasonClass(reasonClass),
+		healthObservationFieldResult:      healthObservationResultTransition,
+	})
+	if err != nil {
+		return
+	}
+
+	observability.NormalizeRecorder(r.recorder).Record(ctx, event)
 }

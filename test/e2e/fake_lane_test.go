@@ -14,7 +14,7 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-//nolint:funlen,goconst,wsl_v5 // E2E fixtures keep the public socket transcript visible.
+//nolint:funlen,goconst,gocyclo,wsl_v5 // E2E fixtures keep the public socket transcript visible.
 package e2e
 
 import (
@@ -32,8 +32,12 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -47,18 +51,25 @@ import (
 	"github.com/croessner/nauthilus-director/internal/observability"
 	"github.com/croessner/nauthilus-director/internal/protocol/imap"
 	"github.com/croessner/nauthilus-director/internal/proxy"
+	"github.com/croessner/nauthilus-director/internal/rest"
+	"github.com/croessner/nauthilus-director/internal/rest/adapters"
+	"github.com/croessner/nauthilus-director/internal/rest/generated"
 	"github.com/croessner/nauthilus-director/internal/routing"
+	runtimectl "github.com/croessner/nauthilus-director/internal/runtime"
 	"github.com/croessner/nauthilus-director/internal/state"
 	"github.com/redis/go-redis/v9"
 )
 
 const (
 	e2eAccount       = "alice@example.test"
+	e2eBackendAID    = "mailstore-a-imap"
+	e2eBackendBID    = "mailstore-b-imap"
 	e2eBackendPool   = "imap-default"
 	e2eListenerName  = "imap"
 	e2ePassword      = "e2e-secret-password"
 	e2eProtocol      = "imap"
 	e2eService       = "imap"
+	e2eShardTagB     = "mailstore-b"
 	e2eShardTag      = "mailstore-a"
 	e2eTenant        = "default"
 	e2eToken         = "e2e-bearer-token"
@@ -100,6 +111,7 @@ func TestFakeHTTPAuthorityPublicIMAPFlow(t *testing.T) {
 
 	authority.ExpectRequest(t, "imap", "login", "e2e-client")
 	fakeBackend.ExpectProxyLine(t, "A003 NOOP")
+	_ = client.Close()
 	recorder.AssertSafe(t)
 	recorder.ExpectEvents(t,
 		observability.EventSessionStart,
@@ -241,14 +253,217 @@ func TestPublicSTARTTLSAndImplicitTLSSockets(t *testing.T) {
 	expectLine(t, bufio.NewReader(implicit), "* OK nauthilus-director IMAP session ready\r\n")
 }
 
+// TestRuntimeControlPublicBoundaries proves runtime control behavior through IMAP, REST and CLI.
+func TestRuntimeControlPublicBoundaries(t *testing.T) {
+	redisFixture := startValkeySessionStore(t)
+	store := newTrackingSessionStore(redisFixture.store)
+	localSessions := runtimectl.NewLocalSessionRegistry()
+	recorder := newCapturedRecorder()
+	authority := startFakeHTTPAuthority(t, map[string][]string{
+		"account":   {e2eAccount},
+		"tenant":    {e2eTenant},
+		"mailShard": {e2eShardTag},
+	})
+	backendA := startFakeIMAPBackend(t, fakeBackendOptions{})
+	backendB := startFakeIMAPBackend(t, fakeBackendOptions{})
+	backendC := startFakeIMAPBackend(t, fakeBackendOptions{})
+	options := directorOptions{
+		Authenticator: newHTTPAuthenticator(t, authority.URL()),
+		BackendAuth:   masterUserBackendAuth(),
+		BackendAddresses: map[string]string{
+			e2eBackendAID:      backendA.Address(),
+			e2eBackendBID:      backendB.Address(),
+			"mailstore-c-imap": backendC.Address(),
+		},
+		BackendMaxSessions: map[string]int{
+			e2eBackendAID:      2,
+			e2eBackendBID:      2,
+			"mailstore-c-imap": 2,
+		},
+		BackendShards: map[string]string{
+			"mailstore-c-imap": e2eShardTagB,
+		},
+		LocalSessions: localSessions,
+		Recorder:      recorder,
+		SessionStore:  store,
+		TLSMode:       imap.TLSModeStartTLS,
+	}
+	cfg := e2eConfig(options)
+	selector := mustRuntimeSelector(t, cfg, store)
+	options.BackendSelector = selector
+
+	director := startDirector(t, options)
+	defer director.Stop(t)
+
+	control := startE2EControlPlane(t, cfg, store, selector, localSessions, recorder)
+	defer control.Close()
+
+	ctl := buildDirectorctl(t)
+	backends := map[string]*fakeIMAPBackend{
+		e2eBackendAID:      backendA,
+		e2eBackendBID:      backendB,
+		"mailstore-c-imap": backendC,
+	}
+
+	initial := lookupRoute(t, control.URL(), e2eAccount, true)
+	if initial.SelectedBackend != e2eBackendAID && initial.SelectedBackend != e2eBackendBID {
+		t.Fatalf("initial selected backend = %q, want same-shard backend", initial.SelectedBackend)
+	}
+	selectedID := initial.SelectedBackend
+	otherID := e2eBackendAID
+	if selectedID == e2eBackendAID {
+		otherID = e2eBackendBID
+	}
+
+	firstClient, firstReader := loginIMAP(t, director.Address(), e2eAccount)
+	defer func() { _ = firstClient.Close() }()
+	expectBackendProxy(t, firstClient, firstReader, backends[selectedID], "A002")
+	firstID := waitForSessionIDs(t, store, 1)[0]
+
+	authCalls := authority.RequestCount()
+	idsBeforeLookup := strings.Join(store.snapshotSessionIDs(), ",")
+	diagnostic := lookupRoute(t, control.URL(), e2eAccount, true)
+	if authority.RequestCount() != authCalls {
+		t.Fatal("route lookup called the fake Nauthilus authority")
+	}
+	if strings.Join(store.snapshotSessionIDs(), ",") != idsBeforeLookup {
+		t.Fatal("route lookup mutated session state")
+	}
+	if diagnostic.Affinity == nil || !diagnostic.Affinity.Present {
+		t.Fatalf("route lookup did not report read-only affinity: %#v", diagnostic.Affinity)
+	}
+
+	secondClient, secondReader := loginIMAP(t, director.Address(), e2eAccount)
+	defer func() { _ = secondClient.Close() }()
+	waitForSessionIDs(t, store, 2)
+
+	runDirectorctl(t, ctl, control.URL(), "backends", "out", otherID, "--reason", "capacity proof")
+	capacityRoute := lookupRoute(t, control.URL(), "bob@example.test", false)
+	if !capacityRoute.FailClosed || !capacityRoute.AffectedBy.MaxConnections || !capacityRoute.AffectedBy.RuntimeOverride {
+		t.Fatalf("max-connection route = %#v, want fail-closed max-connection/runtime proof", capacityRoute)
+	}
+	runDirectorctl(t, ctl, control.URL(), "backends", "in", otherID, "--reason", "capacity proof done")
+
+	clearPath := control.URL() + "/api/v1/users/" + escapedUserPath(e2eAccount) + "/affinity"
+	activeClearStatus := requestStatus(t, http.MethodDelete, clearPath, generated.RuntimeReasonRequest{Reason: "active clear should fail"})
+	if activeClearStatus == http.StatusAccepted {
+		t.Fatal("affinity clear succeeded while sessions were active")
+	}
+
+	deleteAccepted(t, control.URL()+"/api/v1/sessions/"+firstID, generated.RuntimeReasonRequest{Reason: "targeted kill"})
+	expectSessionClosed(t, firstClient, firstReader)
+	expectBackendProxy(t, secondClient, secondReader, backends[selectedID], "B002")
+
+	runDirectorctl(t, ctl, control.URL(), "users", "kick", e2eAccount, "--reason", "kick remaining active session")
+	expectSessionClosed(t, secondClient, secondReader)
+	waitForSessionIDs(t, store, 0)
+	deleteAccepted(t, clearPath, generated.RuntimeReasonRequest{Reason: "inactive clear"})
+
+	postAccepted(t, control.URL()+"/api/v1/backends/"+selectedID+"/runtime/weight", generated.RuntimeWeightRequest{
+		Reason: "weight zero placement proof",
+		Weight: 0,
+	})
+	weighted := lookupRoute(t, control.URL(), e2eAccount, false)
+	if weighted.SelectedBackend != otherID || !weighted.AffectedBy.RuntimeOverride {
+		t.Fatalf("weight-zero route selected %q affected=%#v, want %q with runtime effect", weighted.SelectedBackend, weighted.AffectedBy, otherID)
+	}
+	weightedClient, weightedReader := loginIMAP(t, director.Address(), e2eAccount)
+	expectBackendProxy(t, weightedClient, weightedReader, backends[otherID], "C002")
+	_ = weightedClient.Close()
+	waitForSessionIDs(t, store, 0)
+
+	runDirectorctl(t, ctl, control.URL(), "backends", "weight", selectedID, "--weight", "100", "--reason", "restore weight")
+	runDirectorctl(t, ctl, control.URL(), "backends", "out", otherID, "--reason", "rest cli parity")
+	parity := lookupRoute(t, control.URL(), e2eAccount, false)
+	if parity.SelectedBackend != selectedID {
+		t.Fatalf("REST/CLI parity route selected %q, want restored backend %q", parity.SelectedBackend, selectedID)
+	}
+	runDirectorctl(t, ctl, control.URL(), "backends", "in", otherID, "--reason", "restore in service")
+
+	postAccepted(t, control.URL()+"/api/v1/backends/"+selectedID+"/runtime/drain", generated.DrainRequest{
+		Mode:   generated.DrainModeSoft,
+		Reason: "drain placement proof",
+	})
+	drained := lookupRoute(t, control.URL(), e2eAccount, false)
+	if drained.SelectedBackend != otherID || !drained.AffectedBy.RuntimeOverride {
+		t.Fatalf("drain route selected %q affected=%#v, want %q with runtime effect", drained.SelectedBackend, drained.AffectedBy, otherID)
+	}
+	deleteAccepted(t, control.URL()+"/api/v1/backends/"+selectedID+"/runtime", generated.RuntimeReasonRequest{Reason: "clear drain"})
+
+	postAccepted(t, control.URL()+"/api/v1/backends/"+selectedID+"/maintenance", generated.MaintenanceRequest{
+		Mode:   generated.MaintenanceModeSoft,
+		Reason: "maintenance placement proof",
+	})
+	maintenance := lookupRoute(t, control.URL(), e2eAccount, false)
+	if maintenance.SelectedBackend != otherID || !maintenance.AffectedBy.Maintenance {
+		t.Fatalf("maintenance route selected %q affected=%#v, want %q with maintenance effect", maintenance.SelectedBackend, maintenance.AffectedBy, otherID)
+	}
+	runDirectorctl(t, ctl, control.URL(), "backends", "maintenance", "disable", selectedID, "--reason", "maintenance done")
+
+	postAccepted(t, control.URL()+"/api/v1/users/"+escapedUserPath(e2eAccount)+"/move", generated.UserMoveRequest{
+		Reason:   "move to second shard",
+		Strategy: generated.NewSessionsOnly,
+		ToShard:  e2eShardTagB,
+	})
+	movedClient, movedReader := loginIMAP(t, director.Address(), e2eAccount)
+	expectBackendProxy(t, movedClient, movedReader, backendC, "D002")
+	_ = movedClient.Close()
+	waitForSessionIDs(t, store, 0)
+
+	code, output := runDirectorctlStatus(t, ctl, control.URL(), "config", "dump", "-d", "-P")
+	if code != 1 {
+		t.Fatalf("protected config dump exit = %d, want 1; output=%s", code, output)
+	}
+	if control.audit.Count() == 0 {
+		t.Fatal("protected config request was not audited")
+	}
+
+	safeReload := cfg
+	backendConfig := safeReload.Director.Backends[selectedID]
+	backendConfig.Weight = 101
+	safeReload.Director.Backends[selectedID] = backendConfig
+	control.reload.SetNext(safeReload)
+	postAccepted(t, control.URL()+"/api/v1/reload", nil)
+
+	unsafeReload := safeReload
+	unsafeReload.Runtime.Servers.Control.Address = "127.0.0.1:19090"
+	control.reload.SetNext(unsafeReload)
+	reloadStatus := requestStatus(t, http.MethodPost, control.URL()+"/api/v1/reload", nil)
+	if reloadStatus != http.StatusConflict {
+		t.Fatalf("unsafe reload status = %d, want %d", reloadStatus, http.StatusConflict)
+	}
+
+	recorder.ExpectEvents(t,
+		observability.EventBackendEffectiveState,
+		observability.EventBackendMaintenanceOperation,
+		observability.EventBackendRuntimeOperation,
+		observability.EventBackendDrain,
+		observability.EventSelectorExclusion,
+		observability.EventSessionAttach,
+		observability.EventSessionClose,
+		observability.EventSessionKill,
+		observability.EventUserKick,
+		observability.EventAffinityClear,
+		observability.EventUserMove,
+		observability.EventRouteLookup,
+		observability.EventReload,
+	)
+	recorder.AssertSafe(t)
+}
+
 type directorOptions struct {
 	Authenticator      nauthilus.Authenticator
 	BackendAuth        backend.AuthConfig
 	BackendAddress     string
+	BackendAddresses   map[string]string
+	BackendMaxSessions map[string]int
+	BackendSelector    backend.Selector
+	BackendShards      map[string]string
 	BackendTLS         config.BackendTLSConfig
 	FrontendTLSConfig  *tls.Config
 	ListenerCertPath   string
 	ListenerKeyPath    string
+	LocalSessions      *runtimectl.LocalSessionRegistry
 	Recorder           observability.Recorder
 	SessionStore       state.SessionStore
 	TLSMode            string
@@ -287,7 +502,10 @@ func startDirector(t *testing.T, options directorOptions) directorInstance {
 		store = newMemorySessionStore()
 	}
 	resolver := mustRoutingResolver(t)
-	selector := mustBackendSelector(t, cfg)
+	selector := options.BackendSelector
+	if selector == nil {
+		selector = mustBackendSelector(t, cfg)
+	}
 	proxyRunner := proxy.Runner(proxy.NewPipe())
 	if options.UseProxyRunnerStub {
 		proxyRunner = stubProxyRunner{}
@@ -327,6 +545,7 @@ func startDirector(t *testing.T, options directorOptions) directorInstance {
 				BackendSelector:        selector,
 				BackendConnector:       imap.NewTCPBackendConnector(nil),
 				ProxyRunner:            proxyRunner,
+				LocalSessions:          options.LocalSessions,
 				Observability:          options.Recorder,
 			}
 			if options.UsePlacementStubs {
@@ -372,7 +591,7 @@ func e2eConfig(options directorOptions) config.Config {
 		e2eBackendPool: {
 			Protocol: "imap",
 			Selector: "rendezvous_hash",
-			Backends: []string{"mailstore-a-imap"},
+			Backends: e2eBackendIdentifiers(options),
 		},
 	}
 	backendTLS := options.BackendTLS
@@ -382,23 +601,61 @@ func e2eConfig(options directorOptions) config.Config {
 			MinTLSVersion: "TLS1.2",
 		}
 	}
-	cfg.Director.Backends = map[string]config.BackendConfig{
-		"mailstore-a-imap": {
+	cfg.Director.Backends = make(map[string]config.BackendConfig, len(cfg.Director.BackendPools[e2eBackendPool].Backends))
+	for _, identifier := range cfg.Director.BackendPools[e2eBackendPool].Backends {
+		maxConnections := 100
+		if options.BackendMaxSessions != nil && options.BackendMaxSessions[identifier] > 0 {
+			maxConnections = options.BackendMaxSessions[identifier]
+		}
+		cfg.Director.Backends[identifier] = config.BackendConfig{
 			Protocol:       "imap",
-			ShardTag:       e2eShardTag,
-			Address:        options.BackendAddress,
+			ShardTag:       e2eBackendShard(options, identifier),
+			Address:        e2eBackendAddress(options, identifier),
 			Weight:         100,
-			MaxConnections: 100,
+			MaxConnections: maxConnections,
 			Maintenance:    "disabled",
 			TLS:            backendTLS,
 			Auth:           backendAuthConfig(options.BackendAuth),
 			HealthCheck: config.BackendHealthConfig{
 				Enabled: false,
 			},
-		},
+		}
 	}
 
 	return cfg
+}
+
+// e2eBackendIdentifiers returns configured backend identifiers in deterministic order.
+func e2eBackendIdentifiers(options directorOptions) []string {
+	if len(options.BackendAddresses) == 0 {
+		return []string{e2eBackendAID}
+	}
+
+	identifiers := make([]string, 0, len(options.BackendAddresses))
+	for identifier := range options.BackendAddresses {
+		identifiers = append(identifiers, identifier)
+	}
+	sort.Strings(identifiers)
+
+	return identifiers
+}
+
+// e2eBackendAddress returns the fake backend address for one configured backend.
+func e2eBackendAddress(options directorOptions, identifier string) string {
+	if len(options.BackendAddresses) == 0 {
+		return options.BackendAddress
+	}
+
+	return options.BackendAddresses[identifier]
+}
+
+// e2eBackendShard returns the effective shard for one fake backend.
+func e2eBackendShard(options directorOptions, identifier string) string {
+	if options.BackendShards != nil && strings.TrimSpace(options.BackendShards[identifier]) != "" {
+		return strings.TrimSpace(options.BackendShards[identifier])
+	}
+
+	return e2eShardTag
 }
 
 // backendAuthConfig maps backend-domain auth settings back into typed config.
@@ -607,6 +864,649 @@ func expectAffinityReleased(t *testing.T, store state.AffinityStore, key state.A
 	t.Fatalf("affinity %v was not released", key)
 }
 
+type trackingSessionStore struct {
+	*state.RedisSessionStore
+	mu       sync.Mutex
+	sessions map[string]runtimectl.SessionRuntimeState
+}
+
+// newTrackingSessionStore adds REST-readable session projections around Redis state.
+func newTrackingSessionStore(store *state.RedisSessionStore) *trackingSessionStore {
+	return &trackingSessionStore{
+		RedisSessionStore: store,
+		sessions:          make(map[string]runtimectl.SessionRuntimeState),
+	}
+}
+
+// OpenSession records the public runtime session view after Redis accepts a lease.
+func (s *trackingSessionStore) OpenSession(ctx context.Context, record state.SessionRecord) (state.AffinityRecord, error) {
+	affinity, err := s.RedisSessionStore.OpenSession(ctx, record)
+	if err != nil {
+		return state.AffinityRecord{}, err
+	}
+
+	now := time.Now().UTC()
+	s.mu.Lock()
+	s.sessions[record.ID] = runtimectl.SessionRuntimeState{
+		SessionID:         record.ID,
+		UserHash:          record.Key.AccountKey,
+		Tenant:            record.Key.Tenant,
+		Protocol:          record.Protocol,
+		ListenerName:      record.ListenerName,
+		ServiceName:       record.ServiceName,
+		EffectiveShardTag: affinity.ShardTag,
+		DirectorInstance:  record.DirectorInstanceID,
+		OpenedAt:          now,
+		LeaseExpiresAt:    now.Add(record.LeaseTTL),
+		Status:            runtimectl.SessionStatusActive,
+	}
+	s.mu.Unlock()
+
+	return affinity, nil
+}
+
+// AttachSelectedBackend records the selected backend in the public runtime view.
+func (s *trackingSessionStore) AttachSelectedBackend(
+	ctx context.Context,
+	attachment state.SessionBackendAttachment,
+) (state.SessionBackendRecord, error) {
+	record, err := s.RedisSessionStore.AttachSelectedBackend(ctx, attachment)
+	if err != nil {
+		return state.SessionBackendRecord{}, err
+	}
+
+	s.mu.Lock()
+	session := s.sessions[attachment.SessionID]
+	session.BackendIdentifier = attachment.BackendIdentifier
+	session.ControlGeneration = record.ControlGeneration
+	if !record.LeaseExpiresAt.IsZero() {
+		session.LeaseExpiresAt = record.LeaseExpiresAt
+	}
+	s.sessions[attachment.SessionID] = session
+	s.mu.Unlock()
+
+	return record, nil
+}
+
+// HeartbeatSession refreshes Redis and mirrors the lease expiry for REST reads.
+func (s *trackingSessionStore) HeartbeatSession(
+	ctx context.Context,
+	key state.AffinityKey,
+	sessionID string,
+	ttl time.Duration,
+) (state.AffinityRecord, error) {
+	record, err := s.RedisSessionStore.HeartbeatSession(ctx, key, sessionID, ttl)
+	if err != nil {
+		return state.AffinityRecord{}, err
+	}
+
+	s.mu.Lock()
+	session := s.sessions[sessionID]
+	session.LeaseExpiresAt = time.Now().UTC().Add(ttl)
+	session.ControlGeneration = record.ControlGeneration
+	s.sessions[sessionID] = session
+	s.mu.Unlock()
+
+	return record, nil
+}
+
+// CloseSession removes a REST-visible session after Redis closes its lease.
+func (s *trackingSessionStore) CloseSession(ctx context.Context, key state.AffinityKey, sessionID string) (state.AffinityRecord, error) {
+	record, err := s.RedisSessionStore.CloseSession(ctx, key, sessionID)
+	if err != nil {
+		return state.AffinityRecord{}, err
+	}
+
+	s.mu.Lock()
+	delete(s.sessions, sessionID)
+	s.mu.Unlock()
+
+	return record, nil
+}
+
+// ListSessions returns active sessions visible through the REST control API.
+func (s *trackingSessionStore) ListSessions(_ context.Context, protocol string) ([]runtimectl.SessionRuntimeState, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	protocol = strings.ToLower(strings.TrimSpace(protocol))
+	sessions := make([]runtimectl.SessionRuntimeState, 0, len(s.sessions))
+	for _, session := range s.sessions {
+		if protocol != "" && session.Protocol != protocol {
+			continue
+		}
+		sessions = append(sessions, session.Normalize())
+	}
+
+	sort.Slice(sessions, func(left int, right int) bool {
+		return sessions[left].SessionID < sessions[right].SessionID
+	})
+
+	return sessions, nil
+}
+
+// GetSession returns one active REST-visible session.
+func (s *trackingSessionStore) GetSession(_ context.Context, sessionID string) (runtimectl.SessionRuntimeState, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	session, ok := s.sessions[strings.TrimSpace(sessionID)]
+	if !ok {
+		return runtimectl.SessionRuntimeState{}, &runtimectl.Error{Kind: runtimectl.ErrorKindNotFound, Operation: "session", Message: "session not found"}
+	}
+
+	return session.Normalize(), nil
+}
+
+// ListUserSessions returns active REST-visible sessions for one user key.
+func (s *trackingSessionStore) ListUserSessions(_ context.Context, key runtimectl.UserKey) ([]runtimectl.SessionRuntimeState, error) {
+	key = key.Normalize()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	sessions := make([]runtimectl.SessionRuntimeState, 0, len(s.sessions))
+	for _, session := range s.sessions {
+		if session.Tenant == key.Tenant && session.UserHash == key.UserHash {
+			sessions = append(sessions, session.Normalize())
+		}
+	}
+
+	return sessions, nil
+}
+
+// ListUsers returns users that currently have REST-visible sessions.
+func (s *trackingSessionStore) ListUsers(context.Context) ([]runtimectl.UserRuntimeState, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	users := make(map[runtimectl.UserKey]runtimectl.UserRuntimeState)
+	for _, session := range s.sessions {
+		key := runtimectl.UserKey{Tenant: session.Tenant, UserHash: session.UserHash}.Normalize()
+		user := users[key]
+		user.Key = key
+		user.ActiveShard = session.EffectiveShardTag
+		user.ActiveSessionCount++
+		users[key] = user
+	}
+
+	result := make([]runtimectl.UserRuntimeState, 0, len(users))
+	for _, user := range users {
+		result = append(result, user)
+	}
+
+	return result, nil
+}
+
+// GetUser returns one active user view from REST-visible sessions.
+func (s *trackingSessionStore) GetUser(ctx context.Context, key runtimectl.UserKey) (runtimectl.UserRuntimeState, error) {
+	return s.GetUserAffinity(ctx, key)
+}
+
+// GetUserAffinity reads one user affinity through Redis without refreshing it.
+func (s *trackingSessionStore) GetUserAffinity(ctx context.Context, key runtimectl.UserKey) (runtimectl.UserRuntimeState, error) {
+	key = key.Normalize()
+	record, err := s.LookupAffinity(ctx, state.AffinityKey{Tenant: key.Tenant, AccountKey: key.UserHash})
+	if err != nil {
+		return runtimectl.UserRuntimeState{}, err
+	}
+
+	if !record.Present {
+		return runtimectl.UserRuntimeState{}, &runtimectl.Error{Kind: runtimectl.ErrorKindNotFound, Operation: "user_affinity", Message: "user affinity not found"}
+	}
+
+	return runtimectl.UserRuntimeState{
+		Key:                key,
+		ActiveShard:        record.ShardTag,
+		ActiveSessionCount: record.ActiveSessionCount,
+		Generation:         record.Generation,
+		UpdatedAt:          record.ServerTime,
+	}, nil
+}
+
+// snapshotSessionIDs returns active session IDs for public-control assertions.
+func (s *trackingSessionStore) snapshotSessionIDs() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	ids := make([]string, 0, len(s.sessions))
+	for id := range s.sessions {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+
+	return ids
+}
+
+type e2eControlPlane struct {
+	server *httptest.Server
+	audit  *recordingProtectedConfigAudit
+	reload *switchingReloadService
+}
+
+// URL returns the public control API base URL.
+func (p *e2eControlPlane) URL() string {
+	return p.server.URL
+}
+
+// Close stops the public control API listener.
+func (p *e2eControlPlane) Close() {
+	p.server.Close()
+}
+
+// startE2EControlPlane starts the generated REST control boundary on localhost.
+func startE2EControlPlane(
+	t *testing.T,
+	cfg config.Config,
+	store *trackingSessionStore,
+	selector backend.Selector,
+	localSessions *runtimectl.LocalSessionRegistry,
+	recorder observability.Recorder,
+) *e2eControlPlane {
+	t.Helper()
+
+	registry, err := backend.NewStaticRegistry(cfg.Director)
+	if err != nil {
+		t.Fatalf("NewStaticRegistry: %v", err)
+	}
+
+	reader, err := runtimectl.NewBackendReadService(runtimectl.BackendReadServiceOptions{
+		Registry:      registry,
+		Snapshots:     store,
+		Policy:        backend.NewEffectiveBackendPolicy(cfg.Director),
+		Observability: recorder,
+	})
+	if err != nil {
+		t.Fatalf("NewBackendReadService: %v", err)
+	}
+
+	lookup, err := runtimectl.NewRouteLookupService(runtimectl.RouteLookupServiceOptions{
+		Resolver:     mustRoutingResolver(t),
+		Selector:     selector,
+		BackendRead:  reader,
+		AffinityRead: store,
+		ListenerContexts: []runtimectl.RouteLookupListenerContext{{
+			Name:        e2eListenerName,
+			Protocol:    e2eProtocol,
+			ServiceName: e2eService,
+			BackendPool: e2eBackendPool,
+		}},
+		DefaultPool:   e2eBackendPool,
+		DefaultShard:  e2eShardTag,
+		DefaultTenant: e2eTenant,
+		Observability: recorder,
+	})
+	if err != nil {
+		t.Fatalf("NewRouteLookupService: %v", err)
+	}
+
+	reload := &switchingReloadService{current: cfg, next: cfg, recorder: recorder}
+	audit := &recordingProtectedConfigAudit{}
+	server := rest.NewServer(rest.Options{HandlerOptions: adapters.HandlerOptions{
+		BackendReader:             reader,
+		BackendMutator:            runtimectl.NewBackendService(store, localSessions, runtimectl.WithObservabilityRecorder(recorder)),
+		SessionReader:             store,
+		SessionMutator:            runtimectl.NewSessionService(store, localSessions, runtimectl.WithObservabilityRecorder(recorder)),
+		UserReader:                store,
+		UserMutator:               runtimectl.NewUserService(store, localSessions, runtimectl.WithObservabilityRecorder(recorder)),
+		RouteLookup:               lookup,
+		Reload:                    reload,
+		Observability:             recorder,
+		ProtectedConfigAudit:      audit,
+		ProtectedConfigAuthorizer: deniedProtectedConfigAuthorizer{},
+	}})
+
+	return &e2eControlPlane{
+		server: httptest.NewServer(server),
+		audit:  audit,
+		reload: reload,
+	}
+}
+
+type deniedProtectedConfigAuthorizer struct{}
+
+// AuthorizeProtectedConfig denies protected config export for explicit E2E proof.
+func (deniedProtectedConfigAuthorizer) AuthorizeProtectedConfig(context.Context, adapters.ProtectedConfigRequest) (bool, error) {
+	return false, nil
+}
+
+type recordingProtectedConfigAudit struct {
+	mu     sync.Mutex
+	events []adapters.ProtectedConfigAuditEvent
+}
+
+// AuditProtectedConfigRead records protected config reads without config values.
+func (r *recordingProtectedConfigAudit) AuditProtectedConfigRead(_ context.Context, event adapters.ProtectedConfigAuditEvent) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.events = append(r.events, event)
+
+	return nil
+}
+
+// Count returns the number of protected config audit events.
+func (r *recordingProtectedConfigAudit) Count() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	return len(r.events)
+}
+
+type switchingReloadService struct {
+	mu       sync.Mutex
+	current  config.Config
+	next     config.Config
+	err      error
+	recorder observability.Recorder
+}
+
+// Reload applies a test-controlled safe reload or returns a classified conflict.
+func (s *switchingReloadService) Reload(ctx context.Context) (runtimectl.ReloadResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.err != nil {
+		return runtimectl.ReloadResult{}, s.err
+	}
+
+	service := runtimectl.NewSafeReloadService(s.current, func(context.Context) (config.Config, error) {
+		return s.next, nil
+	}, runtimectl.WithObservabilityRecorder(s.recorder))
+	result, err := service.Reload(ctx)
+	if err != nil {
+		return runtimectl.ReloadResult{}, err
+	}
+
+	s.current = s.next
+
+	return result, nil
+}
+
+// SetNext sets the next reload snapshot for public reload E2E calls.
+func (s *switchingReloadService) SetNext(next config.Config) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.next = next
+	s.err = nil
+}
+
+// mustRuntimeSelector creates the runtime-aware selector used by IMAP and route lookup E2E.
+func mustRuntimeSelector(t *testing.T, cfg config.Config, snapshots backend.RuntimeSnapshotReader) backend.Selector {
+	t.Helper()
+
+	registry, err := backend.NewStaticRegistry(cfg.Director)
+	if err != nil {
+		t.Fatalf("NewStaticRegistry: %v", err)
+	}
+
+	policy := backend.SelectionPolicy{
+		SoftAllowsActivePins: true,
+		DefaultShard:         cfg.Director.Routing.EffectiveDefaultShard(),
+		EffectiveBackend:     backend.NewEffectiveBackendPolicy(cfg.Director),
+	}
+	policy.EffectiveBackend.EnforceHealth = false
+
+	selector, err := backend.NewRuntimeSelector(registry, snapshots, policy)
+	if err != nil {
+		t.Fatalf("NewRuntimeSelector: %v", err)
+	}
+
+	return selector
+}
+
+// lookupRoute posts one public route lookup request.
+func lookupRoute(t *testing.T, baseURL string, userKey string, includeAffinity bool) generated.RouteLookupResponse {
+	t.Helper()
+
+	listenerName := e2eListenerName
+	body := generated.LookupRouteJSONRequestBody{
+		IncludeAffinity: &includeAffinity,
+		Listener:        &listenerName,
+		Protocol:        e2eProtocol,
+		UserKey:         userKey,
+	}
+
+	var response generated.RouteLookupResponse
+	requestJSON(t, http.MethodPost, baseURL+"/api/v1/route/lookup", body, http.StatusOK, &response)
+
+	return response
+}
+
+// postAccepted posts one generated JSON body and expects an accepted response.
+func postAccepted(t *testing.T, target string, body any) {
+	t.Helper()
+
+	var accepted generated.AcceptedResponse
+	requestJSON(t, http.MethodPost, target, body, http.StatusAccepted, &accepted)
+}
+
+// deleteAccepted sends one generated JSON body and expects an accepted response.
+func deleteAccepted(t *testing.T, target string, body any) {
+	t.Helper()
+
+	var accepted generated.AcceptedResponse
+	requestJSON(t, http.MethodDelete, target, body, http.StatusAccepted, &accepted)
+}
+
+// requestJSON sends a JSON request to a public control endpoint.
+func requestJSON(t *testing.T, method string, target string, body any, wantStatus int, out any) {
+	t.Helper()
+
+	var reader io.Reader
+	if body != nil {
+		payload, err := json.Marshal(body)
+		if err != nil {
+			t.Fatalf("marshal request body: %v", err)
+		}
+		reader = bytes.NewReader(payload)
+	}
+
+	request, err := http.NewRequest(method, target, reader)
+	if err != nil {
+		t.Fatalf("new request %s %s: %v", method, target, err)
+	}
+	if body != nil {
+		request.Header.Set("Content-Type", "application/json")
+	}
+
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("request %s %s: %v", method, target, err)
+	}
+	defer func() { _ = response.Body.Close() }()
+
+	data, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("read response body: %v", err)
+	}
+
+	if response.StatusCode != wantStatus {
+		t.Fatalf("%s %s status = %d, want %d, body=%s", method, target, response.StatusCode, wantStatus, data)
+	}
+
+	if out != nil && len(data) > 0 {
+		if err := json.Unmarshal(data, out); err != nil {
+			t.Fatalf("decode response body %s: %v", data, err)
+		}
+	}
+}
+
+// requestStatus sends JSON and returns only the HTTP status for negative assertions.
+func requestStatus(t *testing.T, method string, target string, body any) int {
+	t.Helper()
+
+	var reader io.Reader
+	if body != nil {
+		payload, err := json.Marshal(body)
+		if err != nil {
+			t.Fatalf("marshal request body: %v", err)
+		}
+		reader = bytes.NewReader(payload)
+	}
+
+	request, err := http.NewRequest(method, target, reader)
+	if err != nil {
+		t.Fatalf("new request %s %s: %v", method, target, err)
+	}
+	if body != nil {
+		request.Header.Set("Content-Type", "application/json")
+	}
+
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("request %s %s: %v", method, target, err)
+	}
+	defer func() { _ = response.Body.Close() }()
+	_, _ = io.Copy(io.Discard, response.Body)
+
+	return response.StatusCode
+}
+
+// buildDirectorctl builds the real CLI binary for public-boundary parity tests.
+func buildDirectorctl(t *testing.T) string {
+	t.Helper()
+
+	root := repoRoot(t)
+	binary := filepath.Join(t.TempDir(), "nauthilus-directorctl")
+	cmd := exec.Command("go", "build", "-mod=vendor", "-o", binary, "./cmd/nauthilus-directorctl")
+	cmd.Dir = root
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("build nauthilus-directorctl: %v\n%s", err, output)
+	}
+
+	return binary
+}
+
+// runDirectorctl runs the real CLI binary against the public control API.
+func runDirectorctl(t *testing.T, binary string, baseURL string, args ...string) string {
+	t.Helper()
+
+	fullArgs := append([]string{"--address", baseURL}, args...)
+	cmd := exec.Command(binary, fullArgs...)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("nauthilus-directorctl %v failed: %v\n%s", args, err, output)
+	}
+
+	rendered := string(output)
+	assertNoSecretText(t, rendered)
+
+	return rendered
+}
+
+// runDirectorctlStatus runs the real CLI and returns its exit code and output.
+func runDirectorctlStatus(t *testing.T, binary string, baseURL string, args ...string) (int, string) {
+	t.Helper()
+
+	fullArgs := append([]string{"--address", baseURL}, args...)
+	cmd := exec.Command(binary, fullArgs...)
+	output, err := cmd.CombinedOutput()
+	code := 0
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			code = exitErr.ExitCode()
+		} else {
+			t.Fatalf("nauthilus-directorctl %v failed without exit status: %v\n%s", args, err, output)
+		}
+	}
+
+	rendered := string(output)
+	assertNoSecretText(t, rendered)
+
+	return code, rendered
+}
+
+// repoRoot finds the repository root from the E2E package directory.
+func repoRoot(t *testing.T) string {
+	t.Helper()
+
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("get working directory: %v", err)
+	}
+
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir
+		}
+
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatal("repository root with go.mod was not found")
+		}
+		dir = parent
+	}
+}
+
+// loginIMAP authenticates one public IMAP client and leaves it in proxy mode.
+func loginIMAP(t *testing.T, address string, account string) (net.Conn, *bufio.Reader) {
+	t.Helper()
+
+	client := dialPlain(t, address)
+	reader := bufio.NewReader(client)
+	expectLine(t, reader, "* OK nauthilus-director IMAP session ready\r\n")
+	writeLine(t, client, `A001 LOGIN "`+account+`" "`+e2ePassword+`"`)
+	expectLine(t, reader, "A001 OK Authentication completed\r\n")
+
+	return client, reader
+}
+
+// expectBackendProxy sends one NOOP and verifies the expected fake backend observed it.
+func expectBackendProxy(t *testing.T, client net.Conn, reader *bufio.Reader, backend *fakeIMAPBackend, tag string) {
+	t.Helper()
+
+	writeLine(t, client, tag+" NOOP")
+	expectLine(t, reader, tag+" OK backend noop\r\n")
+	backend.ExpectProxyLine(t, tag+" NOOP")
+}
+
+// expectSessionClosed waits for a connection to be closed by runtime control.
+func expectSessionClosed(t *testing.T, client net.Conn, reader *bufio.Reader) {
+	t.Helper()
+
+	_ = client.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, err := reader.ReadString('\n')
+	if err == nil {
+		t.Fatal("session stayed readable after runtime control close")
+	}
+}
+
+// waitForSessionIDs waits until the control reader sees the requested count.
+func waitForSessionIDs(t *testing.T, store *trackingSessionStore, count int) []string {
+	t.Helper()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		ids := store.snapshotSessionIDs()
+		if len(ids) == count {
+			return ids
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	t.Fatalf("session count did not become %d; ids=%v", count, store.snapshotSessionIDs())
+	return nil
+}
+
+// escapedUserPath returns a safe user-key path segment.
+func escapedUserPath(userKey string) string {
+	return url.PathEscape(userKey)
+}
+
+// assertNoSecretText fails if output contains credential-bearing E2E values.
+func assertNoSecretText(t *testing.T, output string) {
+	t.Helper()
+
+	for _, secret := range []string{e2ePassword, e2eToken, "sasl_blob"} {
+		if strings.Contains(output, secret) {
+			t.Fatalf("output leaked secret %q: %s", secret, output)
+		}
+	}
+}
+
 type fakeHTTPAuthority struct {
 	server       *http.Server
 	listener     net.Listener
@@ -664,6 +1564,14 @@ func (f *fakeHTTPAuthority) ExpectRequest(t *testing.T, protocol string, method 
 			t.Fatalf("fake authority received forbidden field %q: %#v", forbidden, request)
 		}
 	}
+}
+
+// RequestCount returns how often the fake authority was called.
+func (f *fakeHTTPAuthority) RequestCount() int {
+	f.requestsLock.Lock()
+	defer f.requestsLock.Unlock()
+
+	return len(f.requests)
 }
 
 // handle maps one JSON auth request into a successful Nauthilus-shaped response.
@@ -886,16 +1794,17 @@ func (b *fakeIMAPBackend) handleBackendStartTLS(conn net.Conn, tag string) (net.
 // handleBackendAuth accepts backend auth and records the first proxied command.
 func (b *fakeIMAPBackend) handleBackendAuth(conn net.Conn, reader *bufio.Reader, tag string, authLine string) bool {
 	_, _ = io.WriteString(conn, tag+" OK backend auth completed\r\n")
-	proxyLine, err := reader.ReadString('\n')
-	if err != nil {
-		return true
+	for {
+		proxyLine, err := reader.ReadString('\n')
+		if err != nil {
+			return true
+		}
+
+		proxyTag, _, _ := strings.Cut(strings.TrimSpace(proxyLine), " ")
+		_, _ = io.WriteString(conn, proxyTag+" OK backend noop\r\n")
+		b.observations <- fakeBackendObservation{authLine: authLine, proxyLine: proxyLine}
 	}
 
-	proxyTag, _, _ := strings.Cut(strings.TrimSpace(proxyLine), " ")
-	_, _ = io.WriteString(conn, proxyTag+" OK backend noop\r\n")
-	b.observations <- fakeBackendObservation{authLine: authLine, proxyLine: proxyLine}
-
-	return true
 }
 
 type memorySessionStore struct {

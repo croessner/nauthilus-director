@@ -19,12 +19,14 @@ package runtime
 import (
 	"context"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/croessner/nauthilus-director/internal/backend"
 	"github.com/croessner/nauthilus-director/internal/config"
+	"github.com/croessner/nauthilus-director/internal/observability"
 )
 
 const (
@@ -35,10 +37,11 @@ const (
 
 // BackendReadServiceOptions configures backend inventory projection.
 type BackendReadServiceOptions struct {
-	Registry  backend.Registry
-	Snapshots backend.RuntimeSnapshotReader
-	Policy    backend.EffectiveBackendPolicy
-	Now       func() time.Time
+	Registry      backend.Registry
+	Snapshots     backend.RuntimeSnapshotReader
+	Policy        backend.EffectiveBackendPolicy
+	Now           func() time.Time
+	Observability observability.Recorder
 }
 
 // BackendReadService projects config plus runtime state into effective backends.
@@ -47,6 +50,7 @@ type BackendReadService struct {
 	snapshots backend.RuntimeSnapshotReader
 	policy    backend.EffectiveBackendPolicy
 	now       func() time.Time
+	recorder  observability.Recorder
 }
 
 // NewBackendReadService creates a runtime-aware backend read service.
@@ -64,6 +68,7 @@ func NewBackendReadService(options BackendReadServiceOptions) (*BackendReadServi
 		snapshots: options.Snapshots,
 		policy:    options.Policy.Normalize(),
 		now:       options.Now,
+		recorder:  observability.NormalizeRecorder(options.Observability),
 	}, nil
 }
 
@@ -118,7 +123,7 @@ func (s *BackendReadService) effectiveBackend(ctx context.Context, entry backend
 		}
 	}
 
-	return backend.NewEffectiveBackendState(backend.EffectiveBackendInput{
+	state, err := backend.NewEffectiveBackendState(backend.EffectiveBackendInput{
 		Backend:         entry,
 		RuntimeOverride: snapshot.RuntimeOverride,
 		Health:          snapshot.Health,
@@ -126,6 +131,13 @@ func (s *BackendReadService) effectiveBackend(ctx context.Context, entry backend
 		Policy:          s.policy,
 		Now:             s.now().UTC(),
 	})
+	if err != nil {
+		return backend.EffectiveBackendState{}, err
+	}
+
+	s.recordEffectiveBackend(ctx, state)
+
+	return state, nil
 }
 
 // SafeReloadLoader loads and validates the next config snapshot for reload.
@@ -143,13 +155,17 @@ type SafeReloadService struct {
 	current    config.Config
 	load       SafeReloadLoader
 	generation int
+	recorder   observability.Recorder
 }
 
 // NewSafeReloadService creates a safe-reload domain service.
-func NewSafeReloadService(current config.Config, load SafeReloadLoader) *SafeReloadService {
+func NewSafeReloadService(current config.Config, load SafeReloadLoader, options ...ServiceOption) *SafeReloadService {
+	applied := applyServiceOptions(options)
+
 	return &SafeReloadService{
-		current: current.Normalize(),
-		load:    load,
+		current:  current.Normalize(),
+		load:     load,
+		recorder: applied.recorder,
 	}
 }
 
@@ -161,6 +177,8 @@ func (s *SafeReloadService) Reload(ctx context.Context) (ReloadResult, error) {
 
 	next, err := s.load(ctx)
 	if err != nil {
+		s.recordReload(ctx, runtimeObservationResultFailure, "invalid_request", nil)
+
 		return ReloadResult{}, newRuntimeError(ErrorKindInvalidRequest, operationReload, err.Error())
 	}
 
@@ -170,6 +188,10 @@ func (s *SafeReloadService) Reload(ctx context.Context) (ReloadResult, error) {
 	defer s.mu.Unlock()
 
 	if rejected := unsafeReloadChanges(s.current, next); len(rejected) > 0 {
+		s.recordReload(ctx, runtimeObservationResultFailure, "reload_unsafe", map[string]string{
+			runtimeObservationFieldRejectedChanges: strings.Join(rejected, ";"),
+		})
+
 		return ReloadResult{}, newRuntimeError(ErrorKindConflict, operationReload, strings.Join(rejected, "; "))
 	}
 
@@ -177,7 +199,13 @@ func (s *SafeReloadService) Reload(ctx context.Context) (ReloadResult, error) {
 	s.current = next
 	s.generation++
 
-	return ReloadResult{Generation: reloadGeneration(s.generation), Applied: applied}, nil
+	result := ReloadResult{Generation: reloadGeneration(s.generation), Applied: applied}
+	s.recordReload(ctx, runtimeObservationResultOK, "reload_safe", map[string]string{
+		runtimeObservationFieldAppliedChanges:    strings.Join(applied, ","),
+		runtimeObservationFieldRuntimeGeneration: result.Generation,
+	})
+
+	return result, nil
 }
 
 // unsafeReloadChanges returns operator-readable reasons for unsupported live changes.
@@ -239,4 +267,62 @@ func safeReloadChanges(current config.Config, next config.Config) []string {
 // reloadGeneration formats the local applied snapshot generation.
 func reloadGeneration(value int) string {
 	return "reload-" + strings.TrimSpace(time.Unix(int64(value), 0).UTC().Format("20060102150405"))
+}
+
+// recordEffectiveBackend emits effective backend state and exclusion observations.
+func (s *BackendReadService) recordEffectiveBackend(ctx context.Context, state backend.EffectiveBackendState) {
+	result := runtimeObservationResultEligible
+	reasonClass := runtimeObservationResultOK
+
+	if !state.Eligible(false) {
+		result = runtimeObservationResultExcluded
+		reasonClass = runtimeObservationReasonOther
+	}
+
+	if state.FailClosed {
+		result = runtimeObservationResultFailClosed
+		reasonClass = string(state.FailClosedReason)
+	}
+
+	fields := map[string]string{
+		runtimeObservationFieldActiveSessions:    strconv.Itoa(state.ActiveSessions),
+		runtimeObservationFieldBackendID:         state.Identifier,
+		runtimeObservationFieldBackendPool:       state.BackendPool,
+		runtimeObservationFieldRuntimeGeneration: state.Generation,
+		runtimeObservationFieldShardTag:          state.EffectiveShardTag,
+	}
+	labels := map[string]string{
+		runtimeObservationFieldBackendPool: state.BackendPool,
+		runtimeObservationFieldProtocol:    state.Protocol,
+		runtimeObservationFieldShardTag:    state.EffectiveShardTag,
+	}
+	recordRuntimeObservation(ctx, s.recorder, observability.EventBackendEffectiveState, observability.TraceBoundaryBackendSelect, runtimeObservationOperationBackendEffective, result, reasonClass, fields, labels)
+
+	for _, exclusion := range state.Exclusions {
+		s.recordSelectorExclusion(ctx, state, exclusion)
+	}
+}
+
+// recordSelectorExclusion emits one classified selector exclusion observation.
+func (s *BackendReadService) recordSelectorExclusion(ctx context.Context, state backend.EffectiveBackendState, exclusion backend.EffectiveExclusion) {
+	recordRuntimeObservation(ctx, s.recorder, observability.EventSelectorExclusion, observability.TraceBoundaryBackendSelect, runtimeObservationOperationSelectorExclude, runtimeObservationResultExcluded, string(exclusion.Reason), map[string]string{
+		runtimeObservationFieldBackendID:       state.Identifier,
+		runtimeObservationFieldBackendPool:     state.BackendPool,
+		runtimeObservationFieldExclusionDetail: exclusion.Detail,
+		runtimeObservationFieldExclusionSource: exclusion.Source,
+		runtimeObservationFieldShardTag:        state.EffectiveShardTag,
+	}, map[string]string{
+		runtimeObservationFieldBackendPool: state.BackendPool,
+		runtimeObservationFieldProtocol:    state.Protocol,
+		runtimeObservationFieldShardTag:    state.EffectiveShardTag,
+	})
+}
+
+// recordReload emits one safe reload observation.
+func (s *SafeReloadService) recordReload(ctx context.Context, result string, reasonClass string, fields map[string]string) {
+	if s == nil {
+		return
+	}
+
+	recordRuntimeObservation(ctx, s.recorder, observability.EventReload, observability.TraceBoundaryRESTRequest, operationReload, result, reasonClass, fields, nil)
 }

@@ -72,7 +72,9 @@ func TestNestedCommandsUseGeneratedClient(t *testing.T) {
 		{name: "backends out", args: []string{"backends", "out", "backend-a", "--reason", "planned"}, wantCalls: []string{"MarkBackendOut"}},
 		{name: "backends in", args: []string{"backends", "in", "backend-a", "--reason", "done"}, wantCalls: []string{"MarkBackendIn"}},
 		{name: "backends drain", args: []string{"backends", "drain", "backend-a", "--mode", "soft", "--reason", "planned"}, wantCalls: []string{"DrainBackend"}},
+		{name: "backends weight", args: []string{"backends", "weight", "backend-a", "--weight", "0", "--reason", "drain placement"}, wantCalls: []string{"SetBackendWeight"}},
 		{name: "backends runtime clear", args: []string{"backends", "runtime", "clear", "backend-a", "--reason", "reset"}, wantCalls: []string{"ClearBackendRuntime"}},
+		{name: "backends runtime weight", args: []string{"backends", "runtime", "weight", "backend-a", "--weight", "100", "--reason", "restore"}, wantCalls: []string{"SetBackendWeight"}},
 		{name: "config dump defaults", args: []string{"config", "dump", "-d"}, wantCalls: []string{"GetDefaultConfig"}},
 		{name: "config dump non default", args: []string{"config", "dump", "-n", "-P", "--format", "json"}, wantCalls: []string{"GetNonDefaultConfig"}},
 		{name: "sessions list", args: []string{"sessions", "list", "--protocol", "imap"}, wantCalls: []string{"ListSessions"}},
@@ -112,6 +114,7 @@ func TestMutatingCommandsRequireReason(t *testing.T) {
 		{"backends", "out", "backend-a"},
 		{"backends", "in", "backend-a"},
 		{"backends", "drain", "backend-a", "--mode", "soft"},
+		{"backends", "weight", "backend-a", "--weight", "0"},
 		{"backends", "runtime", "clear", "backend-a"},
 		{"sessions", "kill", "session-a"},
 		{"users", "affinity", "set", "user-a", "--shard", "shard-a"},
@@ -605,6 +608,18 @@ func (fake *fakeControlClient) MarkBackendOutWithBodyWithResponse(context.Contex
 func (fake *fakeControlClient) MarkBackendOutWithResponse(context.Context, generated.Identifier, generated.MarkBackendOutJSONRequestBody, ...generated.RequestEditorFn) (*generated.MarkBackendOutResponse, error) {
 	fake.record("MarkBackendOut")
 	return &generated.MarkBackendOutResponse{HTTPResponse: httpResponse(http.StatusAccepted), JSON202: acceptedResponse()}, nil
+}
+
+// SetBackendWeightWithBodyWithResponse records unsupported raw-body usage.
+func (fake *fakeControlClient) SetBackendWeightWithBodyWithResponse(context.Context, generated.Identifier, string, io.Reader, ...generated.RequestEditorFn) (*generated.SetBackendWeightResponse, error) {
+	fake.record("SetBackendWeightWithBody")
+	return nil, nil
+}
+
+// SetBackendWeightWithResponse records and returns an accepted response.
+func (fake *fakeControlClient) SetBackendWeightWithResponse(context.Context, generated.Identifier, generated.SetBackendWeightJSONRequestBody, ...generated.RequestEditorFn) (*generated.SetBackendWeightResponse, error) {
+	fake.record("SetBackendWeight")
+	return &generated.SetBackendWeightResponse{HTTPResponse: httpResponse(http.StatusAccepted), JSON202: acceptedResponse()}, nil
 }
 
 // GetDefaultConfigWithResponse records and returns config defaults.

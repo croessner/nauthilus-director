@@ -85,6 +85,17 @@ Use
 .BI "--grace-seconds " seconds
 to send an explicit grace value.
 .TP
+.BI "backends weight " identifier " --weight " value " --reason " text
+Override the runtime placement weight for one backend.
+Use
+.B 0
+to exclude the backend from new weighted initial placement without terminating
+active pins.
+.TP
+.BI "backends runtime weight " identifier " --weight " value " --reason " text
+Alias for
+.BR "backends weight" .
+.TP
 .BI "backends runtime clear " identifier " --reason " text
 Clear runtime overrides for one backend.
 .TP

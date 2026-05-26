@@ -1101,6 +1101,11 @@ E2E lane and pinned Dovecot interoperability lane are in place.
 
 ### M2: Backend runtime
 
+Status: completed. Runtime-aware effective backend state, Redis-backed
+backend/session/user control operations, health, maintenance, drain,
+max-connection handling and deterministic fake-service E2E coverage are in
+place.
+
 - backend registry
 - Redis-backed active affinity registry
 - health checks
@@ -1112,6 +1117,11 @@ E2E lane and pinned Dovecot interoperability lane are in place.
 - E2E proof for backend weight `0`, in/out, drain, user move and user kick
 
 ### M3: REST API and client
+
+Status: completed. The v1 generated OpenAPI REST boundary, generated client
+SDK, `nauthilus-directorctl`, route lookup, safe reload, config documentation
+guardrails, manpages and REST/CLI parity proof are in place. The
+M3 route-lookup follow-up is closed by the M2/M3 implementation.
 
 - OpenAPI-first workflow
 - generated REST server boundary

@@ -21,6 +21,7 @@ import (
 	"strings"
 
 	"github.com/croessner/nauthilus-director/internal/backend"
+	"github.com/croessner/nauthilus-director/internal/observability"
 	"github.com/croessner/nauthilus-director/internal/routing"
 	"github.com/croessner/nauthilus-director/internal/state"
 )
@@ -115,6 +116,7 @@ type RouteLookupServiceOptions struct {
 	DefaultPool      string
 	DefaultShard     string
 	DefaultTenant    string
+	Observability    observability.Recorder
 }
 
 // RouteLookupService explains routing through shared resolver and selector domains.
@@ -127,6 +129,7 @@ type RouteLookupService struct {
 	defaultPool      string
 	defaultShard     string
 	defaultTenant    string
+	recorder         observability.Recorder
 }
 
 // NewRouteLookupService creates a side-effect-free route lookup service.
@@ -152,6 +155,7 @@ func NewRouteLookupService(options RouteLookupServiceOptions) (*RouteLookupServi
 		defaultPool:      strings.TrimSpace(options.DefaultPool),
 		defaultShard:     strings.TrimSpace(options.DefaultShard),
 		defaultTenant:    strings.TrimSpace(options.DefaultTenant),
+		recorder:         observability.NormalizeRecorder(options.Observability),
 	}, nil
 }
 
@@ -178,6 +182,8 @@ func (s *RouteLookupService) Lookup(ctx context.Context, request RouteLookupRequ
 
 	request = request.Normalize()
 	if err := s.applyDefaults(&request); err != nil {
+		s.recordRouteLookup(ctx, request, runtimeObservationResultFailure, "invalid_request", RouteLookupResponse{})
+
 		return RouteLookupResponse{}, err
 	}
 
@@ -193,6 +199,8 @@ func (s *RouteLookupService) Lookup(ctx context.Context, request RouteLookupRequ
 		ClientIP:          request.ClientIP,
 	})
 	if err != nil {
+		s.recordRouteLookup(ctx, request, runtimeObservationResultFailure, "other", RouteLookupResponse{})
+
 		return RouteLookupResponse{}, err
 	}
 
@@ -208,9 +216,12 @@ func (s *RouteLookupService) Lookup(ctx context.Context, request RouteLookupRequ
 		if backend.IsErrorKind(err, backend.ErrorKindNoBackend) {
 			response.FailClosed = true
 			response.ReasonClass = string(backend.ErrorKindNoBackend)
+			s.recordRouteLookup(ctx, request, runtimeObservationResultOK, response.ReasonClass, response)
 
 			return response, nil
 		}
+
+		s.recordRouteLookup(ctx, request, runtimeObservationResultFailure, "other", response)
 
 		return RouteLookupResponse{}, err
 	}
@@ -220,6 +231,8 @@ func (s *RouteLookupService) Lookup(ctx context.Context, request RouteLookupRequ
 	response.Routing.RoutingGeneration = firstNonEmpty(explanation.Result.Generation, routingResult.RoutingGeneration)
 	response.Routing.EffectiveShard = explanation.Result.EffectiveBackend.EffectiveShardTag
 	response.Effects = response.Effects.Merge(NewRouteLookupBackendState(explanation.Result.EffectiveBackend, selectionRequest.ActiveAffinity).Effects())
+
+	s.recordRouteLookup(ctx, request, runtimeObservationResultOK, response.ReasonClass, response)
 
 	return response, nil
 }
@@ -527,4 +540,85 @@ func cloneAttributes(attributes map[string][]string) map[string][]string {
 	}
 
 	return cloned
+}
+
+// recordRouteLookup emits one side-effect-free lookup observation.
+func (s *RouteLookupService) recordRouteLookup(
+	ctx context.Context,
+	request RouteLookupRequest,
+	result string,
+	reasonClass string,
+	response RouteLookupResponse,
+) {
+	if s == nil {
+		return
+	}
+
+	fields := map[string]string{
+		runtimeObservationFieldAccountKeyPresent: boolAuditValue(strings.TrimSpace(request.AccountKey) != ""),
+		runtimeObservationFieldBackendPool:       request.BackendPool,
+		runtimeObservationFieldListener:          request.ListenerName,
+		runtimeObservationFieldProtocol:          request.Protocol,
+		runtimeObservationFieldSelectedPresent:   boolAuditValue(strings.TrimSpace(response.SelectedBackend) != ""),
+		runtimeObservationFieldService:           request.ServiceName,
+		runtimeObservationFieldShardTag:          response.Routing.EffectiveShard,
+	}
+
+	labels := map[string]string{
+		runtimeObservationFieldBackendPool: request.BackendPool,
+		runtimeObservationFieldListener:    request.ListenerName,
+		runtimeObservationFieldProtocol:    request.Protocol,
+		runtimeObservationFieldService:     request.ServiceName,
+	}
+	if response.Routing.EffectiveShard != "" {
+		labels[runtimeObservationFieldShardTag] = response.Routing.EffectiveShard
+	}
+
+	recordRuntimeObservation(ctx, s.recorder, observability.EventRouteLookup, observability.TraceBoundaryRESTRequest, operationRouteLookup, result, reasonClass, fields, labels)
+
+	for _, state := range response.Backends {
+		s.recordRouteBackendState(ctx, request.Protocol, state)
+	}
+}
+
+// recordRouteBackendState emits the effective candidate state observed by route lookup.
+func (s *RouteLookupService) recordRouteBackendState(ctx context.Context, protocol string, state RouteLookupBackendState) {
+	result := runtimeObservationResultEligible
+	reasonClass := runtimeObservationResultOK
+
+	if !state.Eligible {
+		result = runtimeObservationResultExcluded
+
+		if len(state.Exclusions) > 0 {
+			reasonClass = string(state.Exclusions[0].Reason)
+		}
+	}
+
+	if state.FailClosed {
+		result = runtimeObservationResultFailClosed
+		reasonClass = string(state.FailClosedReason)
+	}
+
+	fields := map[string]string{
+		runtimeObservationFieldBackendID:         state.Identifier,
+		runtimeObservationFieldBackendPool:       state.BackendPool,
+		runtimeObservationFieldRuntimeGeneration: state.Generation,
+		runtimeObservationFieldShardTag:          state.EffectiveShard,
+	}
+	labels := map[string]string{
+		runtimeObservationFieldBackendPool: state.BackendPool,
+		runtimeObservationFieldProtocol:    protocol,
+		runtimeObservationFieldShardTag:    state.EffectiveShard,
+	}
+	recordRuntimeObservation(ctx, s.recorder, observability.EventBackendEffectiveState, observability.TraceBoundaryBackendSelect, runtimeObservationOperationBackendEffective, result, reasonClass, fields, labels)
+
+	for _, exclusion := range state.Exclusions {
+		recordRuntimeObservation(ctx, s.recorder, observability.EventSelectorExclusion, observability.TraceBoundaryBackendSelect, runtimeObservationOperationSelectorExclude, runtimeObservationResultExcluded, string(exclusion.Reason), map[string]string{
+			runtimeObservationFieldBackendID:       state.Identifier,
+			runtimeObservationFieldBackendPool:     state.BackendPool,
+			runtimeObservationFieldExclusionDetail: exclusion.Detail,
+			runtimeObservationFieldExclusionSource: exclusion.Source,
+			runtimeObservationFieldShardTag:        state.EffectiveShard,
+		}, labels)
+	}
 }

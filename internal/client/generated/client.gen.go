@@ -339,6 +339,12 @@ type RuntimeReasonRequest struct {
 	Reason string `json:"reason"`
 }
 
+// RuntimeWeightRequest defines model for RuntimeWeightRequest.
+type RuntimeWeightRequest struct {
+	Reason string `json:"reason"`
+	Weight int    `json:"weight"`
+}
+
 // SessionDetail defines model for SessionDetail.
 type SessionDetail struct {
 	Backend   string    `json:"backend"`
@@ -480,6 +486,9 @@ type MarkBackendInJSONRequestBody = RuntimeReasonRequest
 // MarkBackendOutJSONRequestBody defines body for MarkBackendOut for application/json ContentType.
 type MarkBackendOutJSONRequestBody = RuntimeReasonRequest
 
+// SetBackendWeightJSONRequestBody defines body for SetBackendWeight for application/json ContentType.
+type SetBackendWeightJSONRequestBody = RuntimeWeightRequest
+
 // LookupRouteJSONRequestBody defines body for LookupRoute for application/json ContentType.
 type LookupRouteJSONRequestBody = RouteLookupRequest
 
@@ -606,6 +615,11 @@ type ClientInterface interface {
 	MarkBackendOutWithBody(ctx context.Context, identifier Identifier, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	MarkBackendOut(ctx context.Context, identifier Identifier, body MarkBackendOutJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// SetBackendWeightWithBody request with any body
+	SetBackendWeightWithBody(ctx context.Context, identifier Identifier, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	SetBackendWeight(ctx context.Context, identifier Identifier, body SetBackendWeightJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetDefaultConfig request
 	GetDefaultConfig(ctx context.Context, params *GetDefaultConfigParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -838,6 +852,30 @@ func (c *Client) MarkBackendOutWithBody(ctx context.Context, identifier Identifi
 
 func (c *Client) MarkBackendOut(ctx context.Context, identifier Identifier, body MarkBackendOutJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewMarkBackendOutRequest(c.Server, identifier, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) SetBackendWeightWithBody(ctx context.Context, identifier Identifier, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewSetBackendWeightRequestWithBody(c.Server, identifier, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) SetBackendWeight(ctx context.Context, identifier Identifier, body SetBackendWeightJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewSetBackendWeightRequest(c.Server, identifier, body)
 	if err != nil {
 		return nil, err
 	}
@@ -1484,6 +1522,53 @@ func NewMarkBackendOutRequestWithBody(server string, identifier Identifier, cont
 	}
 
 	operationPath := fmt.Sprintf("/api/v1/backends/%s/runtime/out", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewSetBackendWeightRequest calls the generic SetBackendWeight builder with application/json body
+func NewSetBackendWeightRequest(server string, identifier Identifier, body SetBackendWeightJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewSetBackendWeightRequestWithBody(server, identifier, "application/json", bodyReader)
+}
+
+// NewSetBackendWeightRequestWithBody generates requests for SetBackendWeight with any type of body
+func NewSetBackendWeightRequestWithBody(server string, identifier Identifier, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "identifier", identifier, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/backends/%s/runtime/weight", pathParam0)
 	if operationPath[0] == '/' {
 		operationPath = "." + operationPath
 	}
@@ -2407,6 +2492,11 @@ type ClientWithResponsesInterface interface {
 
 	MarkBackendOutWithResponse(ctx context.Context, identifier Identifier, body MarkBackendOutJSONRequestBody, reqEditors ...RequestEditorFn) (*MarkBackendOutResponse, error)
 
+	// SetBackendWeightWithBodyWithResponse request with any body
+	SetBackendWeightWithBodyWithResponse(ctx context.Context, identifier Identifier, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SetBackendWeightResponse, error)
+
+	SetBackendWeightWithResponse(ctx context.Context, identifier Identifier, body SetBackendWeightJSONRequestBody, reqEditors ...RequestEditorFn) (*SetBackendWeightResponse, error)
+
 	// GetDefaultConfigWithResponse request
 	GetDefaultConfigWithResponse(ctx context.Context, params *GetDefaultConfigParams, reqEditors ...RequestEditorFn) (*GetDefaultConfigResponse, error)
 
@@ -2722,6 +2812,37 @@ func (r MarkBackendOutResponse) StatusCode() int {
 
 // ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
 func (r MarkBackendOutResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type SetBackendWeightResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON202      *AcceptedResponse
+	JSONDefault  *Error
+}
+
+// Status returns HTTPResponse.Status
+func (r SetBackendWeightResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r SetBackendWeightResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r SetBackendWeightResponse) ContentType() string {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.Header.Get("Content-Type")
 	}
@@ -3469,6 +3590,23 @@ func (c *ClientWithResponses) MarkBackendOutWithResponse(ctx context.Context, id
 	return ParseMarkBackendOutResponse(rsp)
 }
 
+// SetBackendWeightWithBodyWithResponse request with arbitrary body returning *SetBackendWeightResponse
+func (c *ClientWithResponses) SetBackendWeightWithBodyWithResponse(ctx context.Context, identifier Identifier, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SetBackendWeightResponse, error) {
+	rsp, err := c.SetBackendWeightWithBody(ctx, identifier, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseSetBackendWeightResponse(rsp)
+}
+
+func (c *ClientWithResponses) SetBackendWeightWithResponse(ctx context.Context, identifier Identifier, body SetBackendWeightJSONRequestBody, reqEditors ...RequestEditorFn) (*SetBackendWeightResponse, error) {
+	rsp, err := c.SetBackendWeight(ctx, identifier, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseSetBackendWeightResponse(rsp)
+}
+
 // GetDefaultConfigWithResponse request returning *GetDefaultConfigResponse
 func (c *ClientWithResponses) GetDefaultConfigWithResponse(ctx context.Context, params *GetDefaultConfigParams, reqEditors ...RequestEditorFn) (*GetDefaultConfigResponse, error) {
 	rsp, err := c.GetDefaultConfig(ctx, params, reqEditors...)
@@ -3937,6 +4075,39 @@ func ParseMarkBackendOutResponse(rsp *http.Response) (*MarkBackendOutResponse, e
 	}
 
 	response := &MarkBackendOutResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 202:
+		var dest AcceptedResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON202 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseSetBackendWeightResponse parses an HTTP response from a SetBackendWeightWithResponse call
+func ParseSetBackendWeightResponse(rsp *http.Response) (*SetBackendWeightResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &SetBackendWeightResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}

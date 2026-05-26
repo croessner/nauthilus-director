@@ -294,6 +294,29 @@ paths:
                 $ref: "#/components/schemas/AcceptedResponse"
         default:
           $ref: "#/components/responses/Error"
+  /api/v1/backends/{identifier}/runtime/weight:
+    parameters:
+      - $ref: "#/components/parameters/Identifier"
+    post:
+      operationId: setBackendWeight
+      tags:
+        - backends
+      summary: Override backend runtime placement weight.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RuntimeWeightRequest"
+      responses:
+        "202":
+          description: Runtime weight change was accepted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AcceptedResponse"
+        default:
+          $ref: "#/components/responses/Error"
   /api/v1/backends/{identifier}/runtime:
     parameters:
       - $ref: "#/components/parameters/Identifier"
@@ -950,6 +973,19 @@ components:
       required:
         - reason
       properties:
+        reason:
+          type: string
+          minLength: 1
+    RuntimeWeightRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - weight
+        - reason
+      properties:
+        weight:
+          type: integer
+          minimum: 0
         reason:
           type: string
           minLength: 1

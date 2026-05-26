@@ -24,6 +24,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/croessner/nauthilus-director/internal/observability"
 	"github.com/croessner/nauthilus-director/internal/state"
 )
 
@@ -99,8 +100,9 @@ type ReapSessionsResult struct {
 
 // SessionService coordinates Redis-backed session operations and local acceleration.
 type SessionService struct {
-	store SessionStateStore
-	local *LocalSessionRegistry
+	store    SessionStateStore
+	local    *LocalSessionRegistry
+	recorder observability.Recorder
 }
 
 // ReaperConfig configures lifecycle-managed expired-session repair.
@@ -121,8 +123,10 @@ type Reaper struct {
 }
 
 // NewSessionService creates the runtime session operation service.
-func NewSessionService(store SessionStateStore, local *LocalSessionRegistry) *SessionService {
-	return &SessionService{store: store, local: local}
+func NewSessionService(store SessionStateStore, local *LocalSessionRegistry, options ...ServiceOption) *SessionService {
+	applied := applyServiceOptions(options)
+
+	return &SessionService{store: store, local: local, recorder: applied.recorder}
 }
 
 // NewReaper creates a lifecycle-managed expired-session repair loop.
@@ -269,6 +273,13 @@ func (s *SessionService) KillSession(ctx context.Context, request KillSessionReq
 		}
 	}
 
+	s.recordSessionOperation(ctx, observability.EventSessionKill, operationSessionKill, runtimeObservationResultOK, "session_kill", map[string]string{
+		auditFieldControlAction:                  string(record.ControlAction),
+		runtimeObservationFieldRuntimeGeneration: record.ControlGeneration,
+		runtimeObservationFieldRuntimeStatus:     record.Status,
+		"session_id":                             record.SessionID,
+	})
+
 	return SessionMutationResult{
 		State: SessionRuntimeState{
 			SessionID:         record.SessionID,
@@ -311,6 +322,13 @@ func (s *SessionService) ReapSessions(ctx context.Context, request ReapSessionsR
 		return ReapSessionsResult{}, err
 	}
 
+	s.recordSessionOperation(ctx, observability.EventSessionReap, operationSessionReap, runtimeObservationResultOK, "reap", map[string]string{
+		auditFieldExpiredSessions:            strconv.Itoa(record.ExpiredSessions),
+		auditFieldRepairedBackends:           strconv.Itoa(record.RepairedBackends),
+		auditFieldScannedSessions:            strconv.Itoa(record.ScannedSessions),
+		runtimeObservationFieldRuntimeStatus: record.Status,
+	})
+
 	return ReapSessionsResult{
 		ScannedSessions:  record.ScannedSessions,
 		ExpiredSessions:  record.ExpiredSessions,
@@ -318,6 +336,22 @@ func (s *SessionService) ReapSessions(ctx context.Context, request ReapSessionsR
 		ServerTime:       record.ServerTime,
 		Audit:            audit,
 	}, nil
+}
+
+// recordSessionOperation emits one secret-safe session runtime observation.
+func (s *SessionService) recordSessionOperation(
+	ctx context.Context,
+	event string,
+	operation string,
+	result string,
+	reasonClass string,
+	fields map[string]string,
+) {
+	if s == nil {
+		return
+	}
+
+	recordRuntimeObservation(ctx, s.recorder, event, observability.TraceBoundaryRESTRequest, operation, result, reasonClass, fields, nil)
 }
 
 // LocalSessionInfo describes one locally proxied session for acceleration indexes.

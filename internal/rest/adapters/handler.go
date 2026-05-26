@@ -26,6 +26,7 @@ import (
 
 	"github.com/croessner/nauthilus-director/internal/backend"
 	"github.com/croessner/nauthilus-director/internal/config"
+	"github.com/croessner/nauthilus-director/internal/observability"
 	"github.com/croessner/nauthilus-director/internal/rest/generated"
 	"github.com/croessner/nauthilus-director/internal/routing"
 	"github.com/croessner/nauthilus-director/internal/runtime"
@@ -60,6 +61,7 @@ type BackendReader interface {
 // BackendMutator exposes Redis-backed backend runtime mutations to REST adapters.
 type BackendMutator interface {
 	SetInService(ctx context.Context, request runtime.SetBackendInServiceRequest) (runtime.BackendMutationResult, error)
+	SetWeight(ctx context.Context, request runtime.SetBackendWeightRequest, policy backend.RuntimeOverridePolicy) (runtime.BackendMutationResult, error)
 	SetMaintenance(ctx context.Context, request runtime.SetBackendMaintenanceRequest) (runtime.BackendMutationResult, error)
 	StartDrain(ctx context.Context, request runtime.StartBackendDrainRequest) (runtime.BackendMutationResult, error)
 	ClearRuntime(ctx context.Context, request runtime.ClearBackendRuntimeRequest) (runtime.BackendMutationResult, error)
@@ -147,6 +149,7 @@ type HandlerOptions struct {
 	RouteLookup               RouteLookupService
 	Reload                    ReloadService
 	Metrics                   MetricsProvider
+	Observability             observability.Recorder
 	ProtectedConfigAuthorizer ProtectedConfigAuthorizer
 	ProtectedConfigAudit      ProtectedConfigAuditSink
 }
@@ -304,6 +307,34 @@ func (h *Handler) DrainBackend(ctx context.Context, request generated.DrainBacke
 	}
 
 	return generated.DrainBackend202JSONResponse(accepted()), nil
+}
+
+// SetBackendWeight changes the runtime placement weight with an explicit reason.
+func (h *Handler) SetBackendWeight(ctx context.Context, request generated.SetBackendWeightRequestObject) (generated.SetBackendWeightResponseObject, error) {
+	if request.Body == nil {
+		return generated.SetBackendWeightdefaultJSONResponse{StatusCode: http.StatusBadRequest, Body: h.problem(http.StatusBadRequest, "invalid_request", "request body is required", "SetBackendWeight")}, nil
+	}
+
+	reason := strings.TrimSpace(request.Body.Reason)
+	if reason == "" {
+		return generated.SetBackendWeightdefaultJSONResponse{StatusCode: http.StatusBadRequest, Body: h.problem(http.StatusBadRequest, "invalid_request", "reason required", "SetBackendWeight")}, nil
+	}
+
+	if h.backendMutator == nil {
+		return generated.SetBackendWeightdefaultJSONResponse{StatusCode: http.StatusServiceUnavailable, Body: h.runtimeUnavailable("SetBackendWeight")}, nil
+	}
+
+	policy := backend.RuntimeOverridePolicy{Enabled: true, AllowWeightOverride: true}
+	if _, err := h.backendMutator.SetWeight(ctx, runtime.SetBackendWeightRequest{
+		BackendIdentifier: request.Identifier,
+		Weight:            request.Body.Weight,
+		Reason:            reason,
+		Actor:             actorFromContext(ctx),
+	}, policy); err != nil {
+		return generated.SetBackendWeightdefaultJSONResponse{StatusCode: statusForError(err), Body: h.problemFromError("SetBackendWeight", err)}, nil
+	}
+
+	return generated.SetBackendWeight202JSONResponse(accepted()), nil
 }
 
 // MarkBackendIn marks a backend available for new runtime placement.
@@ -868,7 +899,7 @@ func withDefaultDomainServices(options HandlerOptions) HandlerOptions {
 			}
 
 			return snapshot.Config, nil
-		})
+		}, runtime.WithObservabilityRecorder(options.Observability))
 	}
 
 	return options
@@ -881,8 +912,9 @@ func withDefaultBackendReader(
 	policy backend.EffectiveBackendPolicy,
 ) HandlerOptions {
 	reader, err := runtime.NewBackendReadService(runtime.BackendReadServiceOptions{
-		Registry: registry,
-		Policy:   policy,
+		Registry:      registry,
+		Policy:        policy,
+		Observability: options.Observability,
 	})
 	if err != nil {
 		options.ConfigLoadError = errors.Join(options.ConfigLoadError, err)
@@ -926,6 +958,7 @@ func withDefaultRouteLookup(
 		DefaultPool:      defaultBackendPool(cfg),
 		DefaultShard:     cfg.Director.Routing.EffectiveDefaultShard(),
 		DefaultTenant:    defaultTenant,
+		Observability:    options.Observability,
 	})
 	if err != nil {
 		options.ConfigLoadError = errors.Join(options.ConfigLoadError, err)

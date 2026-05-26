@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/croessner/nauthilus-director/internal/config"
+	"github.com/croessner/nauthilus-director/internal/observability"
 )
 
 const testBackendIDB = "mailstore-b-imap"
@@ -227,12 +228,14 @@ func TestHealthRunnerOnlyCurrentOwnerPerformsDeepCheck(t *testing.T) {
 	registry := mustStaticRegistry(t, cfg)
 	checker := &recordingHealthChecker{}
 	coordinator := &fakeHealthCoordinator{owned: false}
+	recorder := &recordingObservability{}
 
 	runner, err := NewHealthRunner(registry, coordinator, checker, HealthRunnerConfig{
-		InstanceID: "director-a",
-		Interval:   time.Second,
-		Timeout:    time.Second,
-		StateTTL:   time.Second,
+		InstanceID:    "director-a",
+		Interval:      time.Second,
+		Timeout:       time.Second,
+		StateTTL:      time.Second,
+		Observability: recorder,
 	})
 	if err != nil {
 		t.Fatalf("NewHealthRunner returned error: %v", err)
@@ -255,6 +258,10 @@ func TestHealthRunnerOnlyCurrentOwnerPerformsDeepCheck(t *testing.T) {
 	if checker.deepChecks != 1 || coordinator.published != 1 {
 		t.Fatalf("deep checks/published = %d/%d, want 1/1", checker.deepChecks, coordinator.published)
 	}
+
+	if !recorder.Has(observability.EventBackendHealthTransition) {
+		t.Fatal("backend health transition event was not recorded")
+	}
 }
 
 type fakeSnapshots map[string]RuntimeSnapshot
@@ -262,6 +269,26 @@ type fakeSnapshots map[string]RuntimeSnapshot
 // BackendSnapshot returns the configured runtime snapshot fixture.
 func (s fakeSnapshots) BackendSnapshot(_ context.Context, backendIdentifier string) (RuntimeSnapshot, error) {
 	return s[backendIdentifier], nil
+}
+
+type recordingObservability struct {
+	events []observability.Event
+}
+
+// Record captures one normalized event for health-runner tests.
+func (r *recordingObservability) Record(_ context.Context, event observability.Event) {
+	r.events = append(r.events, event)
+}
+
+// Has reports whether an event with the given name was captured.
+func (r *recordingObservability) Has(name string) bool {
+	for _, event := range r.events {
+		if event.Name == name {
+			return true
+		}
+	}
+
+	return false
 }
 
 type recordingHealthChecker struct {

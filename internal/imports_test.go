@@ -23,19 +23,19 @@ import (
 	"testing"
 )
 
-// TestProductionPackagesDoNotImportPOC keeps the archived proof-of-concept out of root code.
-func TestProductionPackagesDoNotImportPOC(t *testing.T) {
+// TestProductionPackagesDoNotImportArchivedPrototype keeps historical code out of root packages.
+func TestProductionPackagesDoNotImportArchivedPrototype(t *testing.T) {
 	for _, line := range packageImportLines(t) {
 		fields := strings.Fields(line)
 		importPath := fields[0]
 
 		if strings.Contains(importPath, "/poc") {
-			t.Fatalf("production module includes POC package %q", importPath)
+			t.Fatalf("production module includes archived package %q", importPath)
 		}
 
 		for _, imported := range fields[1:] {
 			if strings.Contains(imported, "/poc") {
-				t.Fatalf("production package %q imports POC package %q", importPath, imported)
+				t.Fatalf("production package %q imports archived package %q", importPath, imported)
 			}
 		}
 	}

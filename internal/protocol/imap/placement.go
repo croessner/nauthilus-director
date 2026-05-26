@@ -163,11 +163,13 @@ func (s *Session) placeAuthenticatedSession(
 	backendResult, err = s.attachSelectedBackend(ctx, sessionRecord.Key, s.selectionRequest(routingResult, selectedShardTag, affinity), backendResult)
 	if err != nil {
 		s.recordBackendSelect(ctx, observationResultFailure, reasonClass(err), selectedShardTag)
+		s.recordSessionAttach(ctx, observationResultFailure, reasonClass(err), backendResult.Backend.Identifier, selectedShardTag)
 		_, _ = s.sessionStore.CloseSession(context.Background(), sessionRecord.Key, s.context.ID)
 
 		return err
 	}
 
+	s.recordSessionAttach(ctx, observationResultOK, "", backendResult.Backend.Identifier, selectedShardTag)
 	s.recordBackendSelect(ctx, observationResultOK, "", selectedShardTag)
 
 	s.placement = Placement{
@@ -470,6 +472,7 @@ func (s *Session) closePlacedSession(ctx context.Context) error {
 	}
 
 	_, err := s.sessionStore.CloseSession(ctx, s.placementAffinityKey(), s.context.ID)
+	s.recordSessionClose(ctx, resultLabel(err), reasonClass(err))
 
 	return err
 }
@@ -481,10 +484,11 @@ func (s *Session) proxyLease() proxy.LeaseLifecycle {
 	}
 
 	return &sessionLeaseLifecycle{
-		store:     s.sessionStore,
-		key:       s.placementAffinityKey(),
-		sessionID: s.context.ID,
-		ttl:       s.context.SessionLeaseTTL,
+		store:       s.sessionStore,
+		key:         s.placementAffinityKey(),
+		sessionID:   s.context.ID,
+		ttl:         s.context.SessionLeaseTTL,
+		recordClose: s.recordSessionClose,
 	}
 }
 
@@ -521,12 +525,13 @@ func (s *Session) placementAffinityKey() state.AffinityKey {
 
 // sessionLeaseLifecycle adapts Redis session methods to the proxy lifecycle.
 type sessionLeaseLifecycle struct {
-	store     state.SessionStore
-	key       state.AffinityKey
-	sessionID string
-	ttl       time.Duration
-	closeOnce sync.Once
-	closeErr  error
+	store       state.SessionStore
+	key         state.AffinityKey
+	sessionID   string
+	ttl         time.Duration
+	recordClose func(context.Context, string, string)
+	closeOnce   sync.Once
+	closeErr    error
 }
 
 // Heartbeat refreshes the active session lease while proxy mode is running.
@@ -551,6 +556,9 @@ func (l *sessionLeaseLifecycle) Heartbeat(ctx context.Context) error {
 func (l *sessionLeaseLifecycle) Close(ctx context.Context) error {
 	l.closeOnce.Do(func() {
 		_, l.closeErr = l.store.CloseSession(ctx, l.key, l.sessionID)
+		if l.recordClose != nil {
+			l.recordClose(ctx, resultLabel(l.closeErr), reasonClass(l.closeErr))
+		}
 	})
 
 	return l.closeErr

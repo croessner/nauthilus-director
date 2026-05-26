@@ -1,7 +1,9 @@
 # M2/M3 Backend Runtime and Control Specification
 
-Status: draft implementation-ready M2/M3 specification pending open-question
-review.
+Status: completed. The backend runtime and generated REST/CLI control
+implementation is in place. `make guardrails` and `make e2e-interop` passed on
+2026-05-26; the real-server interoperability lane used pinned
+`dovecot/dovecot:2.4.3-dev`.
 
 This document combines the backend runtime milestone and the REST/CLI control
 milestone for `nauthilus-director`. The split in the roadmap is conceptually
@@ -1343,6 +1345,21 @@ M2/M3 is complete only when all items below are true:
       route lookup and REST/CLI parity through public system boundaries.
 - [ ] `make guardrails` is the final local gate before any commit or pull
       request that contains M2/M3 implementation work.
+
+### Completion Evidence
+
+M2/M3 closeout completed on 2026-05-26 after the required final review pass.
+The implementation includes the shared effective backend state model, Redis
+runtime/session operations, generated OpenAPI server/client boundaries,
+`nauthilus-directorctl` generated-client transport, side-effect-free route
+lookup, safe reload, generated config documentation guardrails, manpage
+coverage and secret-safe runtime/control observability.
+
+The deterministic fake-service E2E lane proves runtime/control behavior through
+public IMAP sockets, generated REST endpoints and real
+`nauthilus-directorctl` commands. Reap repair is covered by Redis/runtime
+guardrail tests because no public reap command exists in the stable v1 control
+surface. Real-server interoperability passed against pinned Dovecot.
 
 ## Required M2/M3 Review Pass
 

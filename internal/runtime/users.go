@@ -18,9 +18,12 @@ package runtime
 
 import (
 	"context"
+	"maps"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/croessner/nauthilus-director/internal/observability"
 	"github.com/croessner/nauthilus-director/internal/state"
 )
 
@@ -103,13 +106,16 @@ type UserStateStore interface {
 
 // UserService coordinates user runtime operations with local session acceleration.
 type UserService struct {
-	store UserStateStore
-	local *LocalSessionRegistry
+	store    UserStateStore
+	local    *LocalSessionRegistry
+	recorder observability.Recorder
 }
 
 // NewUserService creates the runtime user operation service.
-func NewUserService(store UserStateStore, local *LocalSessionRegistry) *UserService {
-	return &UserService{store: store, local: local}
+func NewUserService(store UserStateStore, local *LocalSessionRegistry, options ...ServiceOption) *UserService {
+	applied := applyServiceOptions(options)
+
+	return &UserService{store: store, local: local, recorder: applied.recorder}
 }
 
 // MoveUser records a placement move and locally closes streams for kick-existing moves.
@@ -156,6 +162,11 @@ func (s *UserService) MoveUser(ctx context.Context, request MoveUserRequest) (Us
 		}
 	}
 
+	s.recordUserOperation(ctx, observability.EventUserMove, operationUserMove, runtimeObservationResultOK, "moved", record, map[string]string{
+		auditFieldStrategy:    string(request.Strategy),
+		auditFieldTargetShard: strings.TrimSpace(request.TargetShard),
+	})
+
 	return UserMutationResult{State: userRuntimeStateFromRecord(record), Audit: audit}, nil
 }
 
@@ -197,6 +208,10 @@ func (s *UserService) KickUser(ctx context.Context, request KickUserRequest) (Us
 		}
 	}
 
+	s.recordUserOperation(ctx, observability.EventUserKick, operationUserKick, runtimeObservationResultOK, "kicked", record, map[string]string{
+		auditFieldControlAction: string(record.ControlAction),
+	})
+
 	return UserMutationResult{State: userRuntimeStateFromRecord(record), Audit: audit}, nil
 }
 
@@ -228,6 +243,10 @@ func (s *UserService) ClearUserAffinity(ctx context.Context, request ClearUserAf
 	if err != nil {
 		return UserMutationResult{}, err
 	}
+
+	s.recordUserOperation(ctx, observability.EventAffinityClear, operationUserAffinityClear, runtimeObservationResultOK, "cleared", record, map[string]string{
+		auditFieldAllowActiveClear: boolAuditValue(request.AllowActiveClear),
+	})
 
 	return UserMutationResult{State: userRuntimeStateFromRecord(record), Audit: audit}, nil
 }
@@ -354,4 +373,32 @@ func boolAuditValue(value bool) string {
 	}
 
 	return auditValueFalse
+}
+
+// recordUserOperation emits one secret-safe user runtime observation.
+func (s *UserService) recordUserOperation(
+	ctx context.Context,
+	event string,
+	operation string,
+	result string,
+	reasonClass string,
+	record state.UserRuntimeRecord,
+	fields map[string]string,
+) {
+	if s == nil {
+		return
+	}
+
+	eventFields := map[string]string{
+		auditFieldControlAction:                  string(record.ControlAction),
+		auditFieldTargetShard:                    record.TargetShard,
+		runtimeObservationFieldActiveSessions:    strconv.Itoa(record.ActiveSessionCount),
+		runtimeObservationFieldRuntimeGeneration: record.Generation,
+		runtimeObservationFieldRuntimeStatus:     record.Status,
+		runtimeObservationFieldShardTag:          record.ShardTag,
+		"user_hash":                              record.Key.AccountKey,
+	}
+	maps.Copy(eventFields, fields)
+
+	recordRuntimeObservation(ctx, s.recorder, event, observability.TraceBoundaryRESTRequest, operation, result, reasonClass, eventFields, nil)
 }

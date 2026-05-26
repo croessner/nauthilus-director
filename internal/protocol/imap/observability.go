@@ -34,6 +34,8 @@ const (
 	observationOperationPreAuth        = "pre_auth"
 	observationOperationProxy          = "proxy"
 	observationOperationRouting        = "routing"
+	observationOperationSessionAttach  = "session_attach"
+	observationOperationSessionClose   = "session_close"
 	observationOperationSession        = "session"
 
 	observationResultFailure = "failure"
@@ -105,6 +107,19 @@ func (s *Session) recordAffinityOpen(ctx context.Context, result string, reason 
 		obsFieldAffinitySource: source,
 		obsFieldShardTag:       shardTag,
 	})
+}
+
+// recordSessionAttach emits selected-backend attachment observations.
+func (s *Session) recordSessionAttach(ctx context.Context, result string, reason string, backendID string, shardTag string) {
+	s.recordObservation(ctx, observability.EventSessionAttach, observability.TraceBoundaryBackendSelect, observationOperationSessionAttach, result, reason, map[string]string{
+		obsFieldBackendIdentifier: strings.TrimSpace(backendID),
+		obsFieldShardTag:          strings.TrimSpace(shardTag),
+	})
+}
+
+// recordSessionClose emits Redis lease closure observations.
+func (s *Session) recordSessionClose(ctx context.Context, result string, reason string) {
+	s.recordObservation(ctx, observability.EventSessionClose, observability.TraceBoundarySession, observationOperationSessionClose, result, reason, nil)
 }
 
 // recordBackendSelect emits one concrete backend selection observation.
