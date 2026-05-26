@@ -200,6 +200,11 @@ func envNameForPath(path []string) string {
 	return strings.ToUpper(strings.Join(parts, "_"))
 }
 
+// EnvNameForConfigPath derives the public environment override name for one config path.
+func EnvNameForConfigPath(path []string) string {
+	return envNameForPath(path)
+}
+
 // sanitizeEnvPathPart keeps map keys representable in environment variable names.
 func sanitizeEnvPathPart(value string) string {
 	var builder strings.Builder

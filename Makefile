@@ -121,12 +121,19 @@ docs-check:
 	@test -d docs || { echo "docs/ is required"; exit 1; }
 	@test -d docs/specs || { echo "docs/specs/ is required for design documents"; exit 1; }
 	@test -d docs/man || { echo "docs/man/ is required for manpages"; exit 1; }
+	@$(MAKE) check-docs
 
 generate-openapi:
 	bash ./scripts/generate-openapi.sh
 
 check-openapi:
 	bash ./scripts/check-openapi.sh
+
+generate-docs:
+	bash ./scripts/generate-docs.sh
+
+check-docs:
+	bash ./scripts/check-docs.sh
 
 copyright-check:
 	sh ./scripts/check-go-headers.sh
@@ -152,4 +159,4 @@ poc-race:
 version:
 	@echo $(VERSION)
 
-.PHONY: all build build-check clean fix vet lint-config lint test race e2e e2e-interop docs-check generate-openapi check-openapi copyright-check guardrails poc-test poc-race version
+.PHONY: all build build-check clean fix vet lint-config lint test race e2e e2e-interop docs-check generate-openapi check-openapi generate-docs check-docs copyright-check guardrails poc-test poc-race version

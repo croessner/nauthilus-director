@@ -87,6 +87,9 @@ paths:
       tags:
         - config
       summary: Return the effective redacted configuration.
+      parameters:
+        - $ref: "#/components/parameters/ConfigFormat"
+        - $ref: "#/components/parameters/IncludeProtected"
       responses:
         "200":
           description: Effective configuration.
@@ -94,8 +97,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ConfigDocument"
-        "501":
-          $ref: "#/components/responses/NotImplemented"
         default:
           $ref: "#/components/responses/Error"
   /api/v1/config/defaults:
@@ -104,6 +105,9 @@ paths:
       tags:
         - config
       summary: Return canonical default configuration.
+      parameters:
+        - $ref: "#/components/parameters/ConfigFormat"
+        - $ref: "#/components/parameters/IncludeProtected"
       responses:
         "200":
           description: Default configuration.
@@ -111,8 +115,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ConfigDocument"
-        "501":
-          $ref: "#/components/responses/NotImplemented"
         default:
           $ref: "#/components/responses/Error"
   /api/v1/config/non-default:
@@ -121,6 +123,9 @@ paths:
       tags:
         - config
       summary: Return non-default effective configuration.
+      parameters:
+        - $ref: "#/components/parameters/ConfigFormat"
+        - $ref: "#/components/parameters/IncludeProtected"
       responses:
         "200":
           description: Non-default configuration.
@@ -128,8 +133,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ConfigDocument"
-        "501":
-          $ref: "#/components/responses/NotImplemented"
         default:
           $ref: "#/components/responses/Error"
   /api/v1/reload:
@@ -145,8 +148,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/AcceptedResponse"
-        "501":
-          $ref: "#/components/responses/NotImplemented"
         default:
           $ref: "#/components/responses/Error"
   /api/v1/backends:
@@ -162,8 +163,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/BackendListResponse"
-        "501":
-          $ref: "#/components/responses/NotImplemented"
         default:
           $ref: "#/components/responses/Error"
   /api/v1/backends/{identifier}:
@@ -181,8 +180,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/BackendDetail"
-        "501":
-          $ref: "#/components/responses/NotImplemented"
         default:
           $ref: "#/components/responses/Error"
   /api/v1/backends/{identifier}/maintenance:
@@ -206,8 +203,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/AcceptedResponse"
-        "501":
-          $ref: "#/components/responses/NotImplemented"
         default:
           $ref: "#/components/responses/Error"
     delete:
@@ -215,6 +210,12 @@ paths:
       tags:
         - backends
       summary: Clear backend maintenance.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RuntimeReasonRequest"
       responses:
         "202":
           description: Maintenance clear was accepted.
@@ -222,8 +223,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/AcceptedResponse"
-        "501":
-          $ref: "#/components/responses/NotImplemented"
         default:
           $ref: "#/components/responses/Error"
   /api/v1/backends/{identifier}/runtime/in:
@@ -235,7 +234,7 @@ paths:
         - backends
       summary: Mark a backend in service for runtime placement.
       requestBody:
-        required: false
+        required: true
         content:
           application/json:
             schema:
@@ -247,8 +246,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/AcceptedResponse"
-        "501":
-          $ref: "#/components/responses/NotImplemented"
         default:
           $ref: "#/components/responses/Error"
   /api/v1/backends/{identifier}/runtime/out:
@@ -272,8 +269,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/AcceptedResponse"
-        "501":
-          $ref: "#/components/responses/NotImplemented"
         default:
           $ref: "#/components/responses/Error"
   /api/v1/backends/{identifier}/runtime/drain:
@@ -297,8 +292,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/AcceptedResponse"
-        "501":
-          $ref: "#/components/responses/NotImplemented"
         default:
           $ref: "#/components/responses/Error"
   /api/v1/backends/{identifier}/runtime:
@@ -309,6 +302,12 @@ paths:
       tags:
         - backends
       summary: Clear runtime overrides for a backend.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RuntimeReasonRequest"
       responses:
         "202":
           description: Runtime clear was accepted.
@@ -316,8 +315,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/AcceptedResponse"
-        "501":
-          $ref: "#/components/responses/NotImplemented"
         default:
           $ref: "#/components/responses/Error"
   /api/v1/sessions:
@@ -339,8 +336,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SessionListResponse"
-        "501":
-          $ref: "#/components/responses/NotImplemented"
         default:
           $ref: "#/components/responses/Error"
   /api/v1/sessions/{session_id}:
@@ -358,8 +353,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SessionDetail"
-        "501":
-          $ref: "#/components/responses/NotImplemented"
         default:
           $ref: "#/components/responses/Error"
     delete:
@@ -367,6 +360,12 @@ paths:
       tags:
         - sessions
       summary: Terminate one frontend session.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RuntimeReasonRequest"
       responses:
         "202":
           description: Session termination was accepted.
@@ -374,8 +373,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/AcceptedResponse"
-        "501":
-          $ref: "#/components/responses/NotImplemented"
         default:
           $ref: "#/components/responses/Error"
   /api/v1/users:
@@ -391,8 +388,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/UserListResponse"
-        "501":
-          $ref: "#/components/responses/NotImplemented"
         default:
           $ref: "#/components/responses/Error"
   /api/v1/users/{user_key}:
@@ -410,8 +405,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/UserDetail"
-        "501":
-          $ref: "#/components/responses/NotImplemented"
         default:
           $ref: "#/components/responses/Error"
   /api/v1/users/{user_key}/sessions:
@@ -429,8 +422,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SessionListResponse"
-        "501":
-          $ref: "#/components/responses/NotImplemented"
         default:
           $ref: "#/components/responses/Error"
   /api/v1/users/{user_key}/affinity:
@@ -448,8 +439,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/UserAffinity"
-        "501":
-          $ref: "#/components/responses/NotImplemented"
         default:
           $ref: "#/components/responses/Error"
     put:
@@ -470,8 +459,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/AcceptedResponse"
-        "501":
-          $ref: "#/components/responses/NotImplemented"
         default:
           $ref: "#/components/responses/Error"
     delete:
@@ -479,6 +466,12 @@ paths:
       tags:
         - users
       summary: Clear active affinity for one user key.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RuntimeReasonRequest"
       responses:
         "202":
           description: Affinity clear was accepted.
@@ -486,8 +479,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/AcceptedResponse"
-        "501":
-          $ref: "#/components/responses/NotImplemented"
         default:
           $ref: "#/components/responses/Error"
   /api/v1/users/{user_key}/move:
@@ -511,8 +502,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/AcceptedResponse"
-        "501":
-          $ref: "#/components/responses/NotImplemented"
         default:
           $ref: "#/components/responses/Error"
   /api/v1/users/{user_key}/kick:
@@ -536,8 +525,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/AcceptedResponse"
-        "501":
-          $ref: "#/components/responses/NotImplemented"
         default:
           $ref: "#/components/responses/Error"
   /api/v1/route/lookup:
@@ -565,8 +552,6 @@ paths:
                 $ref: "#/components/schemas/RouteLookupResponse"
         "400":
           $ref: "#/components/responses/BadRequest"
-        "501":
-          $ref: "#/components/responses/NotImplemented"
         default:
           $ref: "#/components/responses/Error"
   /metrics:
@@ -582,12 +567,31 @@ paths:
             text/plain:
               schema:
                 type: string
-        "501":
-          $ref: "#/components/responses/NotImplemented"
         default:
           $ref: "#/components/responses/Error"
 components:
   parameters:
+    ConfigFormat:
+      name: format
+      in: query
+      required: false
+      schema:
+        type: string
+        enum:
+          - yaml
+          - json
+        default: yaml
+    IncludeProtected:
+      name: include_protected
+      in: query
+      required: false
+      description: >
+        Requests protected config values. Requires explicit protected-config
+        authorization and an audit event; ordinary control authentication is
+        not sufficient.
+      schema:
+        type: boolean
+        default: false
     Identifier:
       name: identifier
       in: path
@@ -618,12 +622,6 @@ components:
             $ref: "#/components/schemas/ErrorResponse"
     Error:
       description: Structured error response.
-      content:
-        application/json:
-          schema:
-            $ref: "#/components/schemas/ErrorResponse"
-    NotImplemented:
-      description: The route is reserved but the domain behavior is not implemented.
       content:
         application/json:
           schema:
@@ -820,6 +818,8 @@ components:
     RuntimeReasonRequest:
       type: object
       additionalProperties: false
+      required:
+        - reason
       properties:
         reason:
           type: string
@@ -951,8 +951,9 @@ components:
         strategy:
           type: string
           enum:
-            - preserve_existing
+            - new_sessions_only
             - kick_existing
+            - drain_existing
         reason:
           type: string
           minLength: 1

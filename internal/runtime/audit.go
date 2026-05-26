@@ -32,6 +32,16 @@ type ErrorKind string
 const (
 	// ErrorKindInvalidRequest reports missing or unsupported operator input.
 	ErrorKindInvalidRequest ErrorKind = "invalid_request"
+	// ErrorKindNotFound reports a known absent runtime object.
+	ErrorKindNotFound ErrorKind = "not_found"
+	// ErrorKindConflict reports a runtime state conflict.
+	ErrorKindConflict ErrorKind = "conflict"
+	// ErrorKindUnauthorized reports missing control-plane authentication.
+	ErrorKindUnauthorized ErrorKind = "unauthorized"
+	// ErrorKindForbidden reports authenticated but unauthorized control access.
+	ErrorKindForbidden ErrorKind = "forbidden"
+	// ErrorKindUnavailable reports ambiguous or unavailable runtime state.
+	ErrorKindUnavailable ErrorKind = "unavailable"
 )
 
 // Error is a secret-safe runtime domain failure.

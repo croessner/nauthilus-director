@@ -17,6 +17,7 @@
 package rest_test
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -33,15 +34,13 @@ const (
 	pathVersion            = "/api/v1/version"
 	pathBackends           = "/api/v1/backends"
 	pathRouteLookup        = "/api/v1/route/lookup"
-	codeNotImplemented     = "not_implemented"
 	codeCredentialRejected = "credential_input_rejected"
 	secretLeakSentinel     = "do-not-leak"
 )
 
 // TestServerFoundationEndpoints verifies completed control API endpoints.
 func TestServerFoundationEndpoints(t *testing.T) {
-	server := httptest.NewServer(rest.NewServer(rest.Options{Version: testVersion}).Handler())
-	t.Cleanup(server.Close)
+	server := rest.NewServer(rest.Options{Version: testVersion})
 
 	tests := []struct {
 		name string
@@ -54,51 +53,33 @@ func TestServerFoundationEndpoints(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			response := get(t, server, tt.path)
-			defer closeBody(t, response)
+			response := request(t, server, http.MethodGet, tt.path, "")
 
-			if response.StatusCode != http.StatusOK {
-				t.Fatalf("%s status = %d, want %d", tt.path, response.StatusCode, http.StatusOK)
+			if response.Code != http.StatusOK {
+				t.Fatalf("%s status = %d, want %d", tt.path, response.Code, http.StatusOK)
 			}
 		})
 	}
 }
 
-// TestServerReturnsStructuredNotImplemented keeps planned routes registered.
-func TestServerReturnsStructuredNotImplemented(t *testing.T) {
-	server := httptest.NewServer(rest.NewServer(rest.Options{Version: testVersion}).Handler())
-	t.Cleanup(server.Close)
+// TestServerBackendListIsImplemented keeps the generated backend route active.
+func TestServerBackendListIsImplemented(t *testing.T) {
+	server := rest.NewServer(rest.Options{Version: testVersion})
 
-	response := get(t, server, pathBackends)
-	defer closeBody(t, response)
+	response := request(t, server, http.MethodGet, pathBackends, "")
 
-	if response.StatusCode != http.StatusNotImplemented {
-		t.Fatalf("status = %d, want %d", response.StatusCode, http.StatusNotImplemented)
-	}
-
-	problem := decodeProblem(t, response)
-	if problem.Code != codeNotImplemented || problem.Status != http.StatusNotImplemented {
-		t.Fatalf("problem = %#v, want structured not_implemented 501", problem)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusOK)
 	}
 }
 
 // TestRouteLookupRejectsCredentialBearingInput enforces diagnostic-only input.
 func TestRouteLookupRejectsCredentialBearingInput(t *testing.T) {
-	server := httptest.NewServer(rest.NewServer(rest.Options{Version: testVersion}).Handler())
-	t.Cleanup(server.Close)
+	server := rest.NewServer(rest.Options{Version: testVersion})
+	response := request(t, server, http.MethodPost, pathRouteLookup, `{"protocol":"imap","user_key":"user@example.org","password":"`+secretLeakSentinel+`"}`)
 
-	response, err := server.Client().Post(
-		server.URL+pathRouteLookup,
-		"application/json",
-		strings.NewReader(`{"protocol":"imap","user_key":"user@example.org","password":"`+secretLeakSentinel+`"}`),
-	)
-	if err != nil {
-		t.Fatalf("post route lookup: %v", err)
-	}
-	defer closeBody(t, response)
-
-	if response.StatusCode != http.StatusBadRequest {
-		t.Fatalf("status = %d, want %d", response.StatusCode, http.StatusBadRequest)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusBadRequest)
 	}
 
 	problem := decodeProblem(t, response)
@@ -111,49 +92,38 @@ func TestRouteLookupRejectsCredentialBearingInput(t *testing.T) {
 	}
 }
 
-// TestRouteLookupWithoutCredentialsStaysDomainIncomplete keeps lookup side-effect-free while domain behavior is incomplete.
-func TestRouteLookupWithoutCredentialsStaysDomainIncomplete(t *testing.T) {
-	server := httptest.NewServer(rest.NewServer(rest.Options{Version: testVersion}).Handler())
-	t.Cleanup(server.Close)
+// TestRouteLookupWithoutCredentialsIsImplemented keeps lookup side-effect-free and non-stubbed.
+func TestRouteLookupWithoutCredentialsIsImplemented(t *testing.T) {
+	server := rest.NewServer(rest.Options{Version: testVersion})
+	response := request(t, server, http.MethodPost, pathRouteLookup, `{"protocol":"imap","user_key":"user@example.org"}`)
 
-	response, err := server.Client().Post(
-		server.URL+pathRouteLookup,
-		"application/json",
-		strings.NewReader(`{"protocol":"imap","user_key":"user@example.org"}`),
-	)
-	if err != nil {
-		t.Fatalf("post route lookup: %v", err)
-	}
-	defer closeBody(t, response)
-
-	if response.StatusCode != http.StatusNotImplemented {
-		t.Fatalf("status = %d, want %d", response.StatusCode, http.StatusNotImplemented)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusOK)
 	}
 }
 
-// get performs a GET request with the test server client.
-func get(t *testing.T, server *httptest.Server, path string) *http.Response {
+// request performs an in-process HTTP request without binding a local port.
+func request(t *testing.T, server http.Handler, method string, path string, body string) *httptest.ResponseRecorder {
 	t.Helper()
 
-	response, err := server.Client().Get(server.URL + path)
-	if err != nil {
-		t.Fatalf("get %s: %v", path, err)
+	var reader io.Reader
+	if body != "" {
+		reader = strings.NewReader(body)
 	}
+
+	request := httptest.NewRequest(method, path, reader)
+	if body != "" {
+		request.Header.Set("Content-Type", "application/json")
+	}
+
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, request)
 
 	return response
 }
 
-// closeBody closes a response body and reports close failures.
-func closeBody(t *testing.T, response *http.Response) {
-	t.Helper()
-
-	if err := response.Body.Close(); err != nil {
-		t.Fatalf("close response body: %v", err)
-	}
-}
-
 // decodeProblem reads a generated problem response.
-func decodeProblem(t *testing.T, response *http.Response) generated.ErrorResponse {
+func decodeProblem(t *testing.T, response *httptest.ResponseRecorder) generated.ErrorResponse {
 	t.Helper()
 
 	var problem generated.ErrorResponse

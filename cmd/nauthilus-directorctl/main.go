@@ -38,6 +38,14 @@ const (
 	statusCommand         = "status"
 )
 
+var newStatusClient = newGeneratedStatusClient
+
+type statusClient interface {
+	GetHealthzWithResponse(ctx context.Context, reqEditors ...generated.RequestEditorFn) (*generated.GetHealthzResponse, error)
+	GetReadyzWithResponse(ctx context.Context, reqEditors ...generated.RequestEditorFn) (*generated.GetReadyzResponse, error)
+	GetVersionWithResponse(ctx context.Context, reqEditors ...generated.RequestEditorFn) (*generated.GetVersionResponse, error)
+}
+
 // main delegates to run so command behavior stays testable at the binary boundary.
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
@@ -79,7 +87,7 @@ func runStatus(address string, stdout io.Writer, stderr io.Writer) int {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	client, err := newGeneratedClient(address)
+	client, err := newStatusClient(address)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "status failed: %v\n", err)
 		return 2
@@ -129,6 +137,11 @@ func runStatus(address string, stdout io.Writer, stderr io.Writer) int {
 	_, _ = fmt.Fprintf(stdout, "api_version=%s\n", versionResponse.JSON200.APIVersion)
 
 	return 0
+}
+
+// newGeneratedStatusClient creates the generated status client adapter.
+func newGeneratedStatusClient(address string) (statusClient, error) {
+	return newGeneratedClient(address)
 }
 
 // newGeneratedClient creates the OpenAPI-generated client-with-responses SDK.

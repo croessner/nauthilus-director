@@ -1,0 +1,40 @@
+paths:
+  runtime.**:
+    stability: stable
+    description: Runtime process identity, control listener, timeout, and client behavior.
+  observability.**:
+    stability: stable
+    description: Logging, metrics, tracing, and local diagnostic profile settings.
+  storage.redis.**:
+    stability: stable
+    description: Central Redis connectivity, security, namespace, retry, and health settings.
+  auth.authorities.**:
+    stability: stable
+    description: Nauthilus authentication authority transport and mechanism configuration.
+  director.security.**:
+    stability: stable
+    description: Director fail-closed and protocol input safety limits.
+  director.listeners.**:
+    stability: stable
+    description: Public protocol listener, TLS, proxy protocol, authority, and backend-pool binding.
+  director.routing.**:
+    stability: stable
+    description: Director-owned routing selector, shard default, hash-key, and failover behavior.
+  director.affinity.**:
+    stability: stable
+    description: Active user affinity, pinning, failover, and local-cache behavior.
+  director.runtime_overrides.**:
+    stability: stable
+    description: Operator-controlled runtime override permissions and safety envelopes.
+  director.health.**:
+    stability: stable
+    description: Backend health timing, jitter, and transition threshold settings.
+  director.maintenance.**:
+    stability: stable
+    description: Static and runtime maintenance defaults, drain timing, and audit settings.
+  director.backend_pools.**:
+    stability: stable
+    description: Backend pool protocol, selector, and member backend configuration.
+  director.backends.**:
+    stability: stable
+    description: Backend protocol, shard, transport, authentication, health, and runtime baseline settings.

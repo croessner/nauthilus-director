@@ -18,13 +18,15 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"net/http"
 	"strings"
 	"testing"
 
-	"net/http/httptest"
-
-	"github.com/croessner/nauthilus-director/internal/rest"
+	"github.com/croessner/nauthilus-director/internal/client/generated"
 )
+
+const testStatusOK = "ok"
 
 // TestVersionOutput keeps the client version flag stable for operators.
 func TestVersionOutput(t *testing.T) {
@@ -53,15 +55,21 @@ func TestVersionOutput(t *testing.T) {
 
 // TestStatusCommandUsesGeneratedClient verifies the read-only SDK transport path.
 func TestStatusCommandUsesGeneratedClient(t *testing.T) {
-	server := httptest.NewServer(rest.NewServer(rest.Options{Version: "test-version"}).Handler())
-	t.Cleanup(server.Close)
+	previousClient := newStatusClient
+	newStatusClient = func(string) (statusClient, error) {
+		return fakeStatusClient{}, nil
+	}
+
+	t.Cleanup(func() {
+		newStatusClient = previousClient
+	})
 
 	var (
 		stdout bytes.Buffer
 		stderr bytes.Buffer
 	)
 
-	code := run([]string{"--address", server.URL, "status"}, &stdout, &stderr)
+	code := run([]string{"--address", "127.0.0.1:9090", "status"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("run returned exit code %d, want 0; stderr=%q", code, stderr.String())
 	}
@@ -72,4 +80,34 @@ func TestStatusCommandUsesGeneratedClient(t *testing.T) {
 			t.Fatalf("status output = %q, want to contain %q", output, want)
 		}
 	}
+}
+
+// fakeStatusClient returns generated response objects without binding a test port.
+type fakeStatusClient struct{}
+
+// GetHealthzWithResponse returns a successful generated health response.
+func (fakeStatusClient) GetHealthzWithResponse(context.Context, ...generated.RequestEditorFn) (*generated.GetHealthzResponse, error) {
+	return &generated.GetHealthzResponse{
+		HTTPResponse: &http.Response{StatusCode: http.StatusOK},
+		JSON200:      &generated.StatusResponse{Status: testStatusOK},
+	}, nil
+}
+
+// GetReadyzWithResponse returns a successful generated readiness response.
+func (fakeStatusClient) GetReadyzWithResponse(context.Context, ...generated.RequestEditorFn) (*generated.GetReadyzResponse, error) {
+	return &generated.GetReadyzResponse{
+		HTTPResponse: &http.Response{StatusCode: http.StatusOK},
+		JSON200:      &generated.StatusResponse{Status: testStatusOK},
+	}, nil
+}
+
+// GetVersionWithResponse returns a successful generated version response.
+func (fakeStatusClient) GetVersionWithResponse(context.Context, ...generated.RequestEditorFn) (*generated.GetVersionResponse, error) {
+	return &generated.GetVersionResponse{
+		HTTPResponse: &http.Response{StatusCode: http.StatusOK},
+		JSON200: &generated.VersionResponse{
+			APIVersion: "v1",
+			Version:    "test-version",
+		},
+	}, nil
 }

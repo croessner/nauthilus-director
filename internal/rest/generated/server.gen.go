@@ -11,7 +11,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"time"
 
@@ -35,16 +34,16 @@ func (e AcceptedResponseStatus) Valid() bool {
 
 // Defines values for ConfigDocumentFormat.
 const (
-	JSON ConfigDocumentFormat = "json"
-	Yaml ConfigDocumentFormat = "yaml"
+	ConfigDocumentFormatJSON ConfigDocumentFormat = "json"
+	ConfigDocumentFormatYaml ConfigDocumentFormat = "yaml"
 )
 
 // Valid indicates whether the value is a known member of the ConfigDocumentFormat enum.
 func (e ConfigDocumentFormat) Valid() bool {
 	switch e {
-	case JSON:
+	case ConfigDocumentFormatJSON:
 		return true
-	case Yaml:
+	case ConfigDocumentFormatYaml:
 		return true
 	default:
 		return false
@@ -92,16 +91,91 @@ func (e MaintenanceMode) Valid() bool {
 
 // Defines values for UserMoveRequestStrategy.
 const (
-	KickExisting     UserMoveRequestStrategy = "kick_existing"
-	PreserveExisting UserMoveRequestStrategy = "preserve_existing"
+	DrainExisting   UserMoveRequestStrategy = "drain_existing"
+	KickExisting    UserMoveRequestStrategy = "kick_existing"
+	NewSessionsOnly UserMoveRequestStrategy = "new_sessions_only"
 )
 
 // Valid indicates whether the value is a known member of the UserMoveRequestStrategy enum.
 func (e UserMoveRequestStrategy) Valid() bool {
 	switch e {
+	case DrainExisting:
+		return true
 	case KickExisting:
 		return true
-	case PreserveExisting:
+	case NewSessionsOnly:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ConfigFormat.
+const (
+	ConfigFormatJSON ConfigFormat = "json"
+	ConfigFormatYaml ConfigFormat = "yaml"
+)
+
+// Valid indicates whether the value is a known member of the ConfigFormat enum.
+func (e ConfigFormat) Valid() bool {
+	switch e {
+	case ConfigFormatJSON:
+		return true
+	case ConfigFormatYaml:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for GetDefaultConfigParamsFormat.
+const (
+	GetDefaultConfigParamsFormatJSON GetDefaultConfigParamsFormat = "json"
+	GetDefaultConfigParamsFormatYaml GetDefaultConfigParamsFormat = "yaml"
+)
+
+// Valid indicates whether the value is a known member of the GetDefaultConfigParamsFormat enum.
+func (e GetDefaultConfigParamsFormat) Valid() bool {
+	switch e {
+	case GetDefaultConfigParamsFormatJSON:
+		return true
+	case GetDefaultConfigParamsFormatYaml:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for GetEffectiveConfigParamsFormat.
+const (
+	GetEffectiveConfigParamsFormatJSON GetEffectiveConfigParamsFormat = "json"
+	GetEffectiveConfigParamsFormatYaml GetEffectiveConfigParamsFormat = "yaml"
+)
+
+// Valid indicates whether the value is a known member of the GetEffectiveConfigParamsFormat enum.
+func (e GetEffectiveConfigParamsFormat) Valid() bool {
+	switch e {
+	case GetEffectiveConfigParamsFormatJSON:
+		return true
+	case GetEffectiveConfigParamsFormatYaml:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for GetNonDefaultConfigParamsFormat.
+const (
+	JSON GetNonDefaultConfigParamsFormat = "json"
+	Yaml GetNonDefaultConfigParamsFormat = "yaml"
+)
+
+// Valid indicates whether the value is a known member of the GetNonDefaultConfigParamsFormat enum.
+func (e GetNonDefaultConfigParamsFormat) Valid() bool {
+	switch e {
+	case JSON:
+		return true
+	case Yaml:
 		return true
 	default:
 		return false
@@ -206,7 +280,7 @@ type RouteLookupResponse struct {
 
 // RuntimeReasonRequest defines model for RuntimeReasonRequest.
 type RuntimeReasonRequest struct {
-	Reason *string `json:"reason,omitempty"`
+	Reason string `json:"reason"`
 }
 
 // SessionDetail defines model for SessionDetail.
@@ -273,8 +347,14 @@ type VersionResponse struct {
 	Version    string `json:"version"`
 }
 
+// ConfigFormat defines model for ConfigFormat.
+type ConfigFormat string
+
 // Identifier defines model for Identifier.
 type Identifier = string
+
+// IncludeProtected defines model for IncludeProtected.
+type IncludeProtected = bool
 
 // SessionID defines model for SessionID.
 type SessionID = string
@@ -288,16 +368,52 @@ type BadRequest = ErrorResponse
 // Error defines model for Error.
 type Error = ErrorResponse
 
-// NotImplemented defines model for NotImplemented.
-type NotImplemented = ErrorResponse
+// GetDefaultConfigParams defines parameters for GetDefaultConfig.
+type GetDefaultConfigParams struct {
+	Format *GetDefaultConfigParamsFormat `form:"format,omitempty" json:"format,omitempty"`
+
+	// IncludeProtected Requests protected config values. Requires explicit protected-config authorization and an audit event; ordinary control authentication is not sufficient.
+	IncludeProtected *IncludeProtected `form:"include_protected,omitempty" json:"include_protected,omitempty"`
+}
+
+// GetDefaultConfigParamsFormat defines parameters for GetDefaultConfig.
+type GetDefaultConfigParamsFormat string
+
+// GetEffectiveConfigParams defines parameters for GetEffectiveConfig.
+type GetEffectiveConfigParams struct {
+	Format *GetEffectiveConfigParamsFormat `form:"format,omitempty" json:"format,omitempty"`
+
+	// IncludeProtected Requests protected config values. Requires explicit protected-config authorization and an audit event; ordinary control authentication is not sufficient.
+	IncludeProtected *IncludeProtected `form:"include_protected,omitempty" json:"include_protected,omitempty"`
+}
+
+// GetEffectiveConfigParamsFormat defines parameters for GetEffectiveConfig.
+type GetEffectiveConfigParamsFormat string
+
+// GetNonDefaultConfigParams defines parameters for GetNonDefaultConfig.
+type GetNonDefaultConfigParams struct {
+	Format *GetNonDefaultConfigParamsFormat `form:"format,omitempty" json:"format,omitempty"`
+
+	// IncludeProtected Requests protected config values. Requires explicit protected-config authorization and an audit event; ordinary control authentication is not sufficient.
+	IncludeProtected *IncludeProtected `form:"include_protected,omitempty" json:"include_protected,omitempty"`
+}
+
+// GetNonDefaultConfigParamsFormat defines parameters for GetNonDefaultConfig.
+type GetNonDefaultConfigParamsFormat string
 
 // ListSessionsParams defines parameters for ListSessions.
 type ListSessionsParams struct {
 	Protocol *string `form:"protocol,omitempty" json:"protocol,omitempty"`
 }
 
+// DisableBackendMaintenanceJSONRequestBody defines body for DisableBackendMaintenance for application/json ContentType.
+type DisableBackendMaintenanceJSONRequestBody = RuntimeReasonRequest
+
 // EnableBackendMaintenanceJSONRequestBody defines body for EnableBackendMaintenance for application/json ContentType.
 type EnableBackendMaintenanceJSONRequestBody = MaintenanceRequest
+
+// ClearBackendRuntimeJSONRequestBody defines body for ClearBackendRuntime for application/json ContentType.
+type ClearBackendRuntimeJSONRequestBody = RuntimeReasonRequest
 
 // DrainBackendJSONRequestBody defines body for DrainBackend for application/json ContentType.
 type DrainBackendJSONRequestBody = DrainRequest
@@ -310,6 +426,12 @@ type MarkBackendOutJSONRequestBody = RuntimeReasonRequest
 
 // LookupRouteJSONRequestBody defines body for LookupRoute for application/json ContentType.
 type LookupRouteJSONRequestBody = RouteLookupRequest
+
+// DeleteSessionJSONRequestBody defines body for DeleteSession for application/json ContentType.
+type DeleteSessionJSONRequestBody = RuntimeReasonRequest
+
+// ClearUserAffinityJSONRequestBody defines body for ClearUserAffinity for application/json ContentType.
+type ClearUserAffinityJSONRequestBody = RuntimeReasonRequest
 
 // SetUserAffinityJSONRequestBody defines body for SetUserAffinity for application/json ContentType.
 type SetUserAffinityJSONRequestBody = AffinityUpdateRequest
@@ -348,13 +470,13 @@ type ServerInterface interface {
 	MarkBackendOut(w http.ResponseWriter, r *http.Request, identifier Identifier)
 	// Return canonical default configuration.
 	// (GET /api/v1/config/defaults)
-	GetDefaultConfig(w http.ResponseWriter, r *http.Request)
+	GetDefaultConfig(w http.ResponseWriter, r *http.Request, params GetDefaultConfigParams)
 	// Return the effective redacted configuration.
 	// (GET /api/v1/config/effective)
-	GetEffectiveConfig(w http.ResponseWriter, r *http.Request)
+	GetEffectiveConfig(w http.ResponseWriter, r *http.Request, params GetEffectiveConfigParams)
 	// Return non-default effective configuration.
 	// (GET /api/v1/config/non-default)
-	GetNonDefaultConfig(w http.ResponseWriter, r *http.Request)
+	GetNonDefaultConfig(w http.ResponseWriter, r *http.Request, params GetNonDefaultConfigParams)
 	// Request configuration reload.
 	// (POST /api/v1/reload)
 	Reload(w http.ResponseWriter, r *http.Request)
@@ -616,8 +738,40 @@ func (siw *ServerInterfaceWrapper) MarkBackendOut(w http.ResponseWriter, r *http
 // GetDefaultConfig operation middleware
 func (siw *ServerInterfaceWrapper) GetDefaultConfig(w http.ResponseWriter, r *http.Request) {
 
+	var err error
+	_ = err
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params GetDefaultConfigParams
+
+	// ------------- Optional query parameter "format" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "format", r.URL.Query(), &params.Format, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "format"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "format", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "include_protected" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "include_protected", r.URL.Query(), &params.IncludeProtected, runtime.BindQueryParameterOptions{Type: "boolean", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "include_protected"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "include_protected", Err: err})
+		}
+		return
+	}
+
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		siw.Handler.GetDefaultConfig(w, r)
+		siw.Handler.GetDefaultConfig(w, r, params)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -630,8 +784,40 @@ func (siw *ServerInterfaceWrapper) GetDefaultConfig(w http.ResponseWriter, r *ht
 // GetEffectiveConfig operation middleware
 func (siw *ServerInterfaceWrapper) GetEffectiveConfig(w http.ResponseWriter, r *http.Request) {
 
+	var err error
+	_ = err
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params GetEffectiveConfigParams
+
+	// ------------- Optional query parameter "format" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "format", r.URL.Query(), &params.Format, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "format"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "format", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "include_protected" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "include_protected", r.URL.Query(), &params.IncludeProtected, runtime.BindQueryParameterOptions{Type: "boolean", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "include_protected"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "include_protected", Err: err})
+		}
+		return
+	}
+
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		siw.Handler.GetEffectiveConfig(w, r)
+		siw.Handler.GetEffectiveConfig(w, r, params)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -644,8 +830,40 @@ func (siw *ServerInterfaceWrapper) GetEffectiveConfig(w http.ResponseWriter, r *
 // GetNonDefaultConfig operation middleware
 func (siw *ServerInterfaceWrapper) GetNonDefaultConfig(w http.ResponseWriter, r *http.Request) {
 
+	var err error
+	_ = err
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params GetNonDefaultConfigParams
+
+	// ------------- Optional query parameter "format" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "format", r.URL.Query(), &params.Format, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "format"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "format", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "include_protected" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "include_protected", r.URL.Query(), &params.IncludeProtected, runtime.BindQueryParameterOptions{Type: "boolean", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "include_protected"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "include_protected", Err: err})
+		}
+		return
+	}
+
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		siw.Handler.GetNonDefaultConfig(w, r)
+		siw.Handler.GetNonDefaultConfig(w, r, params)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -1176,8 +1394,6 @@ type BadRequestJSONResponse ErrorResponse
 
 type ErrorJSONResponse ErrorResponse
 
-type NotImplementedJSONResponse ErrorResponse
-
 type ListBackendsRequestObject struct {
 }
 
@@ -1195,20 +1411,6 @@ func (response ListBackends200JSONResponse) VisitListBackendsResponse(w http.Res
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(200)
-	_, err := buf.WriteTo(w)
-	return err
-}
-
-type ListBackends501JSONResponse struct{ NotImplementedJSONResponse }
-
-func (response ListBackends501JSONResponse) VisitListBackendsResponse(w http.ResponseWriter) error {
-
-	var buf bytes.Buffer
-	if err := json.NewEncoder(&buf).Encode(response); err != nil {
-		return err
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(501)
 	_, err := buf.WriteTo(w)
 	return err
 }
@@ -1252,20 +1454,6 @@ func (response GetBackend200JSONResponse) VisitGetBackendResponse(w http.Respons
 	return err
 }
 
-type GetBackend501JSONResponse struct{ NotImplementedJSONResponse }
-
-func (response GetBackend501JSONResponse) VisitGetBackendResponse(w http.ResponseWriter) error {
-
-	var buf bytes.Buffer
-	if err := json.NewEncoder(&buf).Encode(response); err != nil {
-		return err
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(501)
-	_, err := buf.WriteTo(w)
-	return err
-}
-
 type GetBackenddefaultJSONResponse struct {
 	Body       ErrorResponse
 	StatusCode int
@@ -1285,6 +1473,7 @@ func (response GetBackenddefaultJSONResponse) VisitGetBackendResponse(w http.Res
 
 type DisableBackendMaintenanceRequestObject struct {
 	Identifier Identifier `json:"identifier"`
+	Body       *DisableBackendMaintenanceJSONRequestBody
 }
 
 type DisableBackendMaintenanceResponseObject interface {
@@ -1301,20 +1490,6 @@ func (response DisableBackendMaintenance202JSONResponse) VisitDisableBackendMain
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(202)
-	_, err := buf.WriteTo(w)
-	return err
-}
-
-type DisableBackendMaintenance501JSONResponse struct{ NotImplementedJSONResponse }
-
-func (response DisableBackendMaintenance501JSONResponse) VisitDisableBackendMaintenanceResponse(w http.ResponseWriter) error {
-
-	var buf bytes.Buffer
-	if err := json.NewEncoder(&buf).Encode(response); err != nil {
-		return err
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(501)
 	_, err := buf.WriteTo(w)
 	return err
 }
@@ -1359,20 +1534,6 @@ func (response EnableBackendMaintenance202JSONResponse) VisitEnableBackendMainte
 	return err
 }
 
-type EnableBackendMaintenance501JSONResponse struct{ NotImplementedJSONResponse }
-
-func (response EnableBackendMaintenance501JSONResponse) VisitEnableBackendMaintenanceResponse(w http.ResponseWriter) error {
-
-	var buf bytes.Buffer
-	if err := json.NewEncoder(&buf).Encode(response); err != nil {
-		return err
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(501)
-	_, err := buf.WriteTo(w)
-	return err
-}
-
 type EnableBackendMaintenancedefaultJSONResponse struct {
 	Body       ErrorResponse
 	StatusCode int
@@ -1392,6 +1553,7 @@ func (response EnableBackendMaintenancedefaultJSONResponse) VisitEnableBackendMa
 
 type ClearBackendRuntimeRequestObject struct {
 	Identifier Identifier `json:"identifier"`
+	Body       *ClearBackendRuntimeJSONRequestBody
 }
 
 type ClearBackendRuntimeResponseObject interface {
@@ -1408,20 +1570,6 @@ func (response ClearBackendRuntime202JSONResponse) VisitClearBackendRuntimeRespo
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(202)
-	_, err := buf.WriteTo(w)
-	return err
-}
-
-type ClearBackendRuntime501JSONResponse struct{ NotImplementedJSONResponse }
-
-func (response ClearBackendRuntime501JSONResponse) VisitClearBackendRuntimeResponse(w http.ResponseWriter) error {
-
-	var buf bytes.Buffer
-	if err := json.NewEncoder(&buf).Encode(response); err != nil {
-		return err
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(501)
 	_, err := buf.WriteTo(w)
 	return err
 }
@@ -1466,20 +1614,6 @@ func (response DrainBackend202JSONResponse) VisitDrainBackendResponse(w http.Res
 	return err
 }
 
-type DrainBackend501JSONResponse struct{ NotImplementedJSONResponse }
-
-func (response DrainBackend501JSONResponse) VisitDrainBackendResponse(w http.ResponseWriter) error {
-
-	var buf bytes.Buffer
-	if err := json.NewEncoder(&buf).Encode(response); err != nil {
-		return err
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(501)
-	_, err := buf.WriteTo(w)
-	return err
-}
-
 type DrainBackenddefaultJSONResponse struct {
 	Body       ErrorResponse
 	StatusCode int
@@ -1516,20 +1650,6 @@ func (response MarkBackendIn202JSONResponse) VisitMarkBackendInResponse(w http.R
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(202)
-	_, err := buf.WriteTo(w)
-	return err
-}
-
-type MarkBackendIn501JSONResponse struct{ NotImplementedJSONResponse }
-
-func (response MarkBackendIn501JSONResponse) VisitMarkBackendInResponse(w http.ResponseWriter) error {
-
-	var buf bytes.Buffer
-	if err := json.NewEncoder(&buf).Encode(response); err != nil {
-		return err
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(501)
 	_, err := buf.WriteTo(w)
 	return err
 }
@@ -1574,20 +1694,6 @@ func (response MarkBackendOut202JSONResponse) VisitMarkBackendOutResponse(w http
 	return err
 }
 
-type MarkBackendOut501JSONResponse struct{ NotImplementedJSONResponse }
-
-func (response MarkBackendOut501JSONResponse) VisitMarkBackendOutResponse(w http.ResponseWriter) error {
-
-	var buf bytes.Buffer
-	if err := json.NewEncoder(&buf).Encode(response); err != nil {
-		return err
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(501)
-	_, err := buf.WriteTo(w)
-	return err
-}
-
 type MarkBackendOutdefaultJSONResponse struct {
 	Body       ErrorResponse
 	StatusCode int
@@ -1606,6 +1712,7 @@ func (response MarkBackendOutdefaultJSONResponse) VisitMarkBackendOutResponse(w 
 }
 
 type GetDefaultConfigRequestObject struct {
+	Params GetDefaultConfigParams
 }
 
 type GetDefaultConfigResponseObject interface {
@@ -1622,20 +1729,6 @@ func (response GetDefaultConfig200JSONResponse) VisitGetDefaultConfigResponse(w 
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(200)
-	_, err := buf.WriteTo(w)
-	return err
-}
-
-type GetDefaultConfig501JSONResponse struct{ NotImplementedJSONResponse }
-
-func (response GetDefaultConfig501JSONResponse) VisitGetDefaultConfigResponse(w http.ResponseWriter) error {
-
-	var buf bytes.Buffer
-	if err := json.NewEncoder(&buf).Encode(response); err != nil {
-		return err
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(501)
 	_, err := buf.WriteTo(w)
 	return err
 }
@@ -1658,6 +1751,7 @@ func (response GetDefaultConfigdefaultJSONResponse) VisitGetDefaultConfigRespons
 }
 
 type GetEffectiveConfigRequestObject struct {
+	Params GetEffectiveConfigParams
 }
 
 type GetEffectiveConfigResponseObject interface {
@@ -1674,20 +1768,6 @@ func (response GetEffectiveConfig200JSONResponse) VisitGetEffectiveConfigRespons
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(200)
-	_, err := buf.WriteTo(w)
-	return err
-}
-
-type GetEffectiveConfig501JSONResponse struct{ NotImplementedJSONResponse }
-
-func (response GetEffectiveConfig501JSONResponse) VisitGetEffectiveConfigResponse(w http.ResponseWriter) error {
-
-	var buf bytes.Buffer
-	if err := json.NewEncoder(&buf).Encode(response); err != nil {
-		return err
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(501)
 	_, err := buf.WriteTo(w)
 	return err
 }
@@ -1710,6 +1790,7 @@ func (response GetEffectiveConfigdefaultJSONResponse) VisitGetEffectiveConfigRes
 }
 
 type GetNonDefaultConfigRequestObject struct {
+	Params GetNonDefaultConfigParams
 }
 
 type GetNonDefaultConfigResponseObject interface {
@@ -1726,20 +1807,6 @@ func (response GetNonDefaultConfig200JSONResponse) VisitGetNonDefaultConfigRespo
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(200)
-	_, err := buf.WriteTo(w)
-	return err
-}
-
-type GetNonDefaultConfig501JSONResponse struct{ NotImplementedJSONResponse }
-
-func (response GetNonDefaultConfig501JSONResponse) VisitGetNonDefaultConfigResponse(w http.ResponseWriter) error {
-
-	var buf bytes.Buffer
-	if err := json.NewEncoder(&buf).Encode(response); err != nil {
-		return err
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(501)
 	_, err := buf.WriteTo(w)
 	return err
 }
@@ -1778,20 +1845,6 @@ func (response Reload202JSONResponse) VisitReloadResponse(w http.ResponseWriter)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(202)
-	_, err := buf.WriteTo(w)
-	return err
-}
-
-type Reload501JSONResponse struct{ NotImplementedJSONResponse }
-
-func (response Reload501JSONResponse) VisitReloadResponse(w http.ResponseWriter) error {
-
-	var buf bytes.Buffer
-	if err := json.NewEncoder(&buf).Encode(response); err != nil {
-		return err
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(501)
 	_, err := buf.WriteTo(w)
 	return err
 }
@@ -1849,20 +1902,6 @@ func (response LookupRoute400JSONResponse) VisitLookupRouteResponse(w http.Respo
 	return err
 }
 
-type LookupRoute501JSONResponse struct{ NotImplementedJSONResponse }
-
-func (response LookupRoute501JSONResponse) VisitLookupRouteResponse(w http.ResponseWriter) error {
-
-	var buf bytes.Buffer
-	if err := json.NewEncoder(&buf).Encode(response); err != nil {
-		return err
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(501)
-	_, err := buf.WriteTo(w)
-	return err
-}
-
 type LookupRoutedefaultJSONResponse struct {
 	Body       ErrorResponse
 	StatusCode int
@@ -1902,20 +1941,6 @@ func (response ListSessions200JSONResponse) VisitListSessionsResponse(w http.Res
 	return err
 }
 
-type ListSessions501JSONResponse struct{ NotImplementedJSONResponse }
-
-func (response ListSessions501JSONResponse) VisitListSessionsResponse(w http.ResponseWriter) error {
-
-	var buf bytes.Buffer
-	if err := json.NewEncoder(&buf).Encode(response); err != nil {
-		return err
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(501)
-	_, err := buf.WriteTo(w)
-	return err
-}
-
 type ListSessionsdefaultJSONResponse struct {
 	Body       ErrorResponse
 	StatusCode int
@@ -1935,6 +1960,7 @@ func (response ListSessionsdefaultJSONResponse) VisitListSessionsResponse(w http
 
 type DeleteSessionRequestObject struct {
 	SessionID SessionID `json:"session_id"`
+	Body      *DeleteSessionJSONRequestBody
 }
 
 type DeleteSessionResponseObject interface {
@@ -1951,20 +1977,6 @@ func (response DeleteSession202JSONResponse) VisitDeleteSessionResponse(w http.R
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(202)
-	_, err := buf.WriteTo(w)
-	return err
-}
-
-type DeleteSession501JSONResponse struct{ NotImplementedJSONResponse }
-
-func (response DeleteSession501JSONResponse) VisitDeleteSessionResponse(w http.ResponseWriter) error {
-
-	var buf bytes.Buffer
-	if err := json.NewEncoder(&buf).Encode(response); err != nil {
-		return err
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(501)
 	_, err := buf.WriteTo(w)
 	return err
 }
@@ -2008,20 +2020,6 @@ func (response GetSession200JSONResponse) VisitGetSessionResponse(w http.Respons
 	return err
 }
 
-type GetSession501JSONResponse struct{ NotImplementedJSONResponse }
-
-func (response GetSession501JSONResponse) VisitGetSessionResponse(w http.ResponseWriter) error {
-
-	var buf bytes.Buffer
-	if err := json.NewEncoder(&buf).Encode(response); err != nil {
-		return err
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(501)
-	_, err := buf.WriteTo(w)
-	return err
-}
-
 type GetSessiondefaultJSONResponse struct {
 	Body       ErrorResponse
 	StatusCode int
@@ -2056,20 +2054,6 @@ func (response ListUsers200JSONResponse) VisitListUsersResponse(w http.ResponseW
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(200)
-	_, err := buf.WriteTo(w)
-	return err
-}
-
-type ListUsers501JSONResponse struct{ NotImplementedJSONResponse }
-
-func (response ListUsers501JSONResponse) VisitListUsersResponse(w http.ResponseWriter) error {
-
-	var buf bytes.Buffer
-	if err := json.NewEncoder(&buf).Encode(response); err != nil {
-		return err
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(501)
 	_, err := buf.WriteTo(w)
 	return err
 }
@@ -2113,20 +2097,6 @@ func (response GetUser200JSONResponse) VisitGetUserResponse(w http.ResponseWrite
 	return err
 }
 
-type GetUser501JSONResponse struct{ NotImplementedJSONResponse }
-
-func (response GetUser501JSONResponse) VisitGetUserResponse(w http.ResponseWriter) error {
-
-	var buf bytes.Buffer
-	if err := json.NewEncoder(&buf).Encode(response); err != nil {
-		return err
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(501)
-	_, err := buf.WriteTo(w)
-	return err
-}
-
 type GetUserdefaultJSONResponse struct {
 	Body       ErrorResponse
 	StatusCode int
@@ -2146,6 +2116,7 @@ func (response GetUserdefaultJSONResponse) VisitGetUserResponse(w http.ResponseW
 
 type ClearUserAffinityRequestObject struct {
 	UserKey UserKey `json:"user_key"`
+	Body    *ClearUserAffinityJSONRequestBody
 }
 
 type ClearUserAffinityResponseObject interface {
@@ -2162,20 +2133,6 @@ func (response ClearUserAffinity202JSONResponse) VisitClearUserAffinityResponse(
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(202)
-	_, err := buf.WriteTo(w)
-	return err
-}
-
-type ClearUserAffinity501JSONResponse struct{ NotImplementedJSONResponse }
-
-func (response ClearUserAffinity501JSONResponse) VisitClearUserAffinityResponse(w http.ResponseWriter) error {
-
-	var buf bytes.Buffer
-	if err := json.NewEncoder(&buf).Encode(response); err != nil {
-		return err
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(501)
 	_, err := buf.WriteTo(w)
 	return err
 }
@@ -2215,20 +2172,6 @@ func (response GetUserAffinity200JSONResponse) VisitGetUserAffinityResponse(w ht
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(200)
-	_, err := buf.WriteTo(w)
-	return err
-}
-
-type GetUserAffinity501JSONResponse struct{ NotImplementedJSONResponse }
-
-func (response GetUserAffinity501JSONResponse) VisitGetUserAffinityResponse(w http.ResponseWriter) error {
-
-	var buf bytes.Buffer
-	if err := json.NewEncoder(&buf).Encode(response); err != nil {
-		return err
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(501)
 	_, err := buf.WriteTo(w)
 	return err
 }
@@ -2273,20 +2216,6 @@ func (response SetUserAffinity202JSONResponse) VisitSetUserAffinityResponse(w ht
 	return err
 }
 
-type SetUserAffinity501JSONResponse struct{ NotImplementedJSONResponse }
-
-func (response SetUserAffinity501JSONResponse) VisitSetUserAffinityResponse(w http.ResponseWriter) error {
-
-	var buf bytes.Buffer
-	if err := json.NewEncoder(&buf).Encode(response); err != nil {
-		return err
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(501)
-	_, err := buf.WriteTo(w)
-	return err
-}
-
 type SetUserAffinitydefaultJSONResponse struct {
 	Body       ErrorResponse
 	StatusCode int
@@ -2323,20 +2252,6 @@ func (response KickUser202JSONResponse) VisitKickUserResponse(w http.ResponseWri
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(202)
-	_, err := buf.WriteTo(w)
-	return err
-}
-
-type KickUser501JSONResponse struct{ NotImplementedJSONResponse }
-
-func (response KickUser501JSONResponse) VisitKickUserResponse(w http.ResponseWriter) error {
-
-	var buf bytes.Buffer
-	if err := json.NewEncoder(&buf).Encode(response); err != nil {
-		return err
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(501)
 	_, err := buf.WriteTo(w)
 	return err
 }
@@ -2381,20 +2296,6 @@ func (response MoveUser202JSONResponse) VisitMoveUserResponse(w http.ResponseWri
 	return err
 }
 
-type MoveUser501JSONResponse struct{ NotImplementedJSONResponse }
-
-func (response MoveUser501JSONResponse) VisitMoveUserResponse(w http.ResponseWriter) error {
-
-	var buf bytes.Buffer
-	if err := json.NewEncoder(&buf).Encode(response); err != nil {
-		return err
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(501)
-	_, err := buf.WriteTo(w)
-	return err
-}
-
 type MoveUserdefaultJSONResponse struct {
 	Body       ErrorResponse
 	StatusCode int
@@ -2430,20 +2331,6 @@ func (response GetUserSessions200JSONResponse) VisitGetUserSessionsResponse(w ht
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(200)
-	_, err := buf.WriteTo(w)
-	return err
-}
-
-type GetUserSessions501JSONResponse struct{ NotImplementedJSONResponse }
-
-func (response GetUserSessions501JSONResponse) VisitGetUserSessionsResponse(w http.ResponseWriter) error {
-
-	var buf bytes.Buffer
-	if err := json.NewEncoder(&buf).Encode(response); err != nil {
-		return err
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(501)
 	_, err := buf.WriteTo(w)
 	return err
 }
@@ -2556,20 +2443,6 @@ func (response GetMetrics200TextResponse) VisitGetMetricsResponse(w http.Respons
 	w.WriteHeader(200)
 
 	_, err := w.Write([]byte(response))
-	return err
-}
-
-type GetMetrics501JSONResponse struct{ NotImplementedJSONResponse }
-
-func (response GetMetrics501JSONResponse) VisitGetMetricsResponse(w http.ResponseWriter) error {
-
-	var buf bytes.Buffer
-	if err := json.NewEncoder(&buf).Encode(response); err != nil {
-		return err
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(501)
-	_, err := buf.WriteTo(w)
 	return err
 }
 
@@ -2815,6 +2688,13 @@ func (sh *strictHandler) DisableBackendMaintenance(w http.ResponseWriter, r *htt
 
 	request.Identifier = identifier
 
+	var body DisableBackendMaintenanceJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
 	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
 		return sh.ssi.DisableBackendMaintenance(ctx, request.(DisableBackendMaintenanceRequestObject))
 	}
@@ -2873,6 +2753,13 @@ func (sh *strictHandler) ClearBackendRuntime(w http.ResponseWriter, r *http.Requ
 	var request ClearBackendRuntimeRequestObject
 
 	request.Identifier = identifier
+
+	var body ClearBackendRuntimeJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
 
 	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
 		return sh.ssi.ClearBackendRuntime(ctx, request.(ClearBackendRuntimeRequestObject))
@@ -2935,13 +2822,10 @@ func (sh *strictHandler) MarkBackendIn(w http.ResponseWriter, r *http.Request, i
 
 	var body MarkBackendInJSONRequestBody
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		if !errors.Is(err, io.EOF) {
-			sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
-			return
-		}
-	} else {
-		request.Body = &body
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
 	}
+	request.Body = &body
 
 	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
 		return sh.ssi.MarkBackendIn(ctx, request.(MarkBackendInRequestObject))
@@ -2997,8 +2881,10 @@ func (sh *strictHandler) MarkBackendOut(w http.ResponseWriter, r *http.Request, 
 }
 
 // GetDefaultConfig operation middleware
-func (sh *strictHandler) GetDefaultConfig(w http.ResponseWriter, r *http.Request) {
+func (sh *strictHandler) GetDefaultConfig(w http.ResponseWriter, r *http.Request, params GetDefaultConfigParams) {
 	var request GetDefaultConfigRequestObject
+
+	request.Params = params
 
 	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
 		return sh.ssi.GetDefaultConfig(ctx, request.(GetDefaultConfigRequestObject))
@@ -3021,8 +2907,10 @@ func (sh *strictHandler) GetDefaultConfig(w http.ResponseWriter, r *http.Request
 }
 
 // GetEffectiveConfig operation middleware
-func (sh *strictHandler) GetEffectiveConfig(w http.ResponseWriter, r *http.Request) {
+func (sh *strictHandler) GetEffectiveConfig(w http.ResponseWriter, r *http.Request, params GetEffectiveConfigParams) {
 	var request GetEffectiveConfigRequestObject
+
+	request.Params = params
 
 	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
 		return sh.ssi.GetEffectiveConfig(ctx, request.(GetEffectiveConfigRequestObject))
@@ -3045,8 +2933,10 @@ func (sh *strictHandler) GetEffectiveConfig(w http.ResponseWriter, r *http.Reque
 }
 
 // GetNonDefaultConfig operation middleware
-func (sh *strictHandler) GetNonDefaultConfig(w http.ResponseWriter, r *http.Request) {
+func (sh *strictHandler) GetNonDefaultConfig(w http.ResponseWriter, r *http.Request, params GetNonDefaultConfigParams) {
 	var request GetNonDefaultConfigRequestObject
+
+	request.Params = params
 
 	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
 		return sh.ssi.GetNonDefaultConfig(ctx, request.(GetNonDefaultConfigRequestObject))
@@ -3155,6 +3045,13 @@ func (sh *strictHandler) DeleteSession(w http.ResponseWriter, r *http.Request, s
 
 	request.SessionID = sessionID
 
+	var body DeleteSessionJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
 	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
 		return sh.ssi.DeleteSession(ctx, request.(DeleteSessionRequestObject))
 	}
@@ -3256,6 +3153,13 @@ func (sh *strictHandler) ClearUserAffinity(w http.ResponseWriter, r *http.Reques
 	var request ClearUserAffinityRequestObject
 
 	request.UserKey = userKey
+
+	var body ClearUserAffinityJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
 
 	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
 		return sh.ssi.ClearUserAffinity(ctx, request.(ClearUserAffinityRequestObject))
