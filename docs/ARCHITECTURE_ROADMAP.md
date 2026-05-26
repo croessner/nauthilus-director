@@ -1098,7 +1098,7 @@ interoperability lane are in place.
 - backend connect
 - transparent proxy loop
 - basic metrics/logging/tracing
-- E2E proof for successful IMAP auth, routing resolver behavior, backend selection, active stickiness and secret-safe observable output, using deterministic fakes, the production `nauthilus-director` binary and a Dovecot-backed Docker interoperability smoke when the Docker lane is available
+- E2E proof for successful IMAP auth, routing resolver behavior, backend selection, active stickiness and secret-safe observable output, using deterministic fakes, the production `nauthilus-director` binary and Dovecot-backed Docker interoperability when the Docker lane is available
 
 ### M2: Backend runtime
 
@@ -1106,7 +1106,10 @@ Status: completed. Runtime-aware effective backend state, Redis-backed
 backend/session/user control operations, health, maintenance, drain,
 max-connection handling and deterministic fake-service E2E coverage are in
 place. The production server binary now wires this runtime into the process
-entrypoint used by IMAP and the control API.
+entrypoint used by IMAP and the control API. The real-server interoperability
+lane additionally proves three Director processes sharing one Redis-compatible
+state service across six Dovecot IMAP backends, including untagged default
+backends, two explicit shards and distributed deep-health ownership.
 
 - backend registry
 - Redis-backed active affinity registry
@@ -1117,6 +1120,9 @@ entrypoint used by IMAP and the control API.
 - Redis-coordinated session registry
 - graceful shutdown
 - E2E proof for backend weight `0`, in/out, drain, user move and user kick
+- Docker interop proof for cross-process active affinity, deep health checks,
+  health-owner distribution, session kill, user kick, user move and hard
+  backend drain against real Dovecot backends
 
 ### M3: REST API and client
 
@@ -1125,7 +1131,8 @@ SDK, `nauthilus-directorctl`, route lookup, safe reload, config documentation
 guardrails, manpages and REST/CLI parity proof are in place. The
 M3 route-lookup follow-up is closed by the M2/M3 implementation. Binary-entry
 E2E proves CLI and REST state parity against the running
-`nauthilus-director` process.
+`nauthilus-director` process, and Docker interop proves the same control
+surface against six real Dovecot backends behind three Director processes.
 
 - OpenAPI-first workflow
 - generated REST server boundary
@@ -1205,7 +1212,8 @@ Known future decisions:
    exporter lifecycle, richer Prometheus registration and operator-facing
    observability documentation.
 4. Keep `make e2e-interop` as the real IMAP regression lane and run it whenever
-   IMAP backend/proxy/bootstrap-sensitive code changes.
+   IMAP backend/proxy/bootstrap-sensitive code, runtime control, route lookup
+   health ownership, or active-affinity behavior changes.
 5. Start later protocol milestones only after the binary-entry IMAP/control
    baseline remains green.
 

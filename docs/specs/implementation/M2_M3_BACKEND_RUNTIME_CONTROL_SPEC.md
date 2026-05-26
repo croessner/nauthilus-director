@@ -6,6 +6,12 @@ implementation is in place. `make guardrails` and `make e2e-interop` passed on
 `dovecot/dovecot:2.4.3-dev`. A 2026-05-26 closeout correction wired the
 production `nauthilus-director` server entrypoint and added real-binary E2E
 proof for IMAP startup plus REST/CLI state parity through the running process.
+A follow-up correction on the same date expands real-server interop to two
+Director processes sharing one Redis-compatible state service and two Dovecot
+backends, proving cross-process active affinity and runtime control operations.
+A later correction expands the same lane to three Director processes and six
+Dovecot backends covering untagged default placement, `test_shard1`,
+`test_shard2` and Redis-distributed deep health ownership.
 
 This document combines the backend runtime milestone and the REST/CLI control
 milestone for `nauthilus-director`. The split in the roadmap is conceptually
@@ -1207,6 +1213,9 @@ and externally visible E2E tests while keeping observability secret-safe.
 - Keep `make e2e` deterministic and Docker-independent.
 - Keep `make e2e-interop` as the real IMAP interoperability regression lane
   when M2/M3 changes IMAP backend/proxy behavior.
+- Prove the real-server interop path with at least three Director processes,
+  six Dovecot IMAP backends and one shared Redis-compatible state service when
+  runtime-control, affinity, shard selection or health behavior changes.
 - Run validation through Makefile targets.
 
 ### Out of Scope
@@ -1273,6 +1282,11 @@ Makefile
 - REST and CLI perform equivalent mutations against the same Redis-backed state.
 - The production `nauthilus-director` binary starts IMAP and control listeners
   from typed config.
+- The real interop lane proves cross-process active affinity, deep health
+  checks, distributed health ownership, untagged default backends, explicit
+  shard backends, parallel connections for one user, user move, user kick,
+  targeted session kill, hard backend drain and affinity clear against real
+  Dovecot backends.
 - Route lookup reads runtime state without calling Nauthilus or mutating Redis.
 - Reload applies safe changes or rejects unsafe changes cleanly.
 - Secret-safe logs do not include credentials, tokens or SASL blobs.
@@ -1372,7 +1386,13 @@ same Redis-backed backend runtime state in that running process. Reap repair is
 covered by Redis/runtime guardrail tests because no public reap command exists
 in the stable v1 control surface. Real-server interoperability passed against
 pinned Dovecot and now uses the production server binary as its director
-entrypoint.
+entrypoint. The interop lane also starts three production Director processes on
+one Redis-compatible state service with six Dovecot backends, then proves deep
+health checks, distributed Redis health ownership, untagged default placement,
+two explicit shards, same-user active affinity, parallel connections, route
+lookup, `sessions kill`, `users kick`, `users move --strategy
+new_sessions_only`, hard backend drain and affinity clear through public IMAP
+sockets and `nauthilus-directorctl`.
 
 ## Required M2/M3 Review Pass
 

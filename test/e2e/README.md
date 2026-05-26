@@ -49,3 +49,12 @@ runs through `make e2e-interop`. It is documented in
 `test/e2e/interop/README.md` and must not replace deterministic fake-service
 coverage for edge cases, forced failures, routing decisions, or secret-safe
 observability.
+
+The current Docker lane starts production `nauthilus-director` binaries and real
+Dovecot IMAP backends. Its cluster scenario shares one Redis-compatible state
+service across three Director processes and six Dovecot backends: two untagged
+default backends, two `test_shard1` backends and two `test_shard2` backends. It
+verifies deep health checks, health-owner distribution, active affinity,
+parallel connections for one user, route lookup, session kill, user kick, user
+move, hard backend drain and affinity clear through public sockets,
+Redis-backed runtime state and `nauthilus-directorctl`.

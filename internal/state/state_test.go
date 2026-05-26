@@ -442,6 +442,87 @@ func TestRedisSessionLifecycleScripts(t *testing.T) {
 	assertAffinityRecord(t, closedSecond, "idle", testShardA, 0)
 }
 
+// TestRedisRuntimeReadModelListsSessionsAndUsers verifies production control reads use Redis state.
+func TestRedisRuntimeReadModelListsSessionsAndUsers(t *testing.T) {
+	store, client, builder := redisIntegrationStore(t)
+	key := AffinityKey{Tenant: "default", AccountKey: "reader@example.test"}
+	cleanupAffinity(t, client, builder, key, "reader-session-1", "reader-session-2")
+	cleanupBackend(t, client, builder, testBackendIMAP)
+
+	openAttachedSession(t, store, key, "reader-session-1", testBackendIMAP)
+	openAttachedSession(t, store, key, "reader-session-2", testBackendIMAP)
+
+	assertRuntimeSessionList(t, store, key)
+	assertRuntimeSessionLookup(t, store, key)
+	assertRuntimeUserReads(t, store, key)
+}
+
+// assertRuntimeSessionList verifies indexed runtime session listing.
+func assertRuntimeSessionList(t *testing.T, store *RedisSessionStore, key AffinityKey) {
+	t.Helper()
+
+	sessions, err := store.ListRuntimeSessions(context.Background(), testProtocolIMAP)
+	if err != nil {
+		t.Fatalf("ListRuntimeSessions returned error: %v", err)
+	}
+
+	if len(sessions) != 2 {
+		t.Fatalf("ListRuntimeSessions returned %d sessions, want 2: %#v", len(sessions), sessions)
+	}
+
+	for _, session := range sessions {
+		if session.Key != key || session.BackendIdentifier != testBackendIMAP || session.ShardTag != testShardA {
+			t.Fatalf("runtime session mismatch: %#v", session)
+		}
+	}
+}
+
+// assertRuntimeSessionLookup verifies individual and user-scoped session reads.
+func assertRuntimeSessionLookup(t *testing.T, store *RedisSessionStore, key AffinityKey) {
+	t.Helper()
+
+	session, ok, err := store.GetRuntimeSession(context.Background(), "reader-session-1")
+	if err != nil {
+		t.Fatalf("GetRuntimeSession returned error: %v", err)
+	}
+
+	if !ok || session.SessionID != "reader-session-1" || session.Key.AccountKey != key.AccountKey {
+		t.Fatalf("GetRuntimeSession returned ok=%t session=%#v", ok, session)
+	}
+
+	userSessions, err := store.ListRuntimeSessionsForUser(context.Background(), key)
+	if err != nil {
+		t.Fatalf("ListRuntimeSessionsForUser returned error: %v", err)
+	}
+
+	if len(userSessions) != 2 {
+		t.Fatalf("ListRuntimeSessionsForUser returned %d sessions, want 2", len(userSessions))
+	}
+}
+
+// assertRuntimeUserReads verifies Redis-derived user runtime views.
+func assertRuntimeUserReads(t *testing.T, store *RedisSessionStore, key AffinityKey) {
+	t.Helper()
+
+	users, err := store.ListRuntimeUsers(context.Background())
+	if err != nil {
+		t.Fatalf("ListRuntimeUsers returned error: %v", err)
+	}
+
+	if len(users) != 1 || users[0].Key != key || users[0].ActiveSessionCount != 2 {
+		t.Fatalf("ListRuntimeUsers returned %#v", users)
+	}
+
+	user, ok, err := store.GetRuntimeUser(context.Background(), key)
+	if err != nil {
+		t.Fatalf("GetRuntimeUser returned error: %v", err)
+	}
+
+	if !ok || user.Key != key || user.ShardTag != testShardA || user.ActiveSessionCount != 2 {
+		t.Fatalf("GetRuntimeUser returned ok=%t user=%#v", ok, user)
+	}
+}
+
 // TestRedisBackendAttachAndCloseCountsExactlyOnce verifies selected-backend registration.
 func TestRedisBackendAttachAndCloseCountsExactlyOnce(t *testing.T) {
 	store, client, builder := redisIntegrationStore(t)

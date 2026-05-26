@@ -22,9 +22,10 @@ local idle_grace_ms = tonumber(ARGV[5])
 local schema_version = ARGV[6]
 local affinity_hash = ARGV[7]
 local tenant = ARGV[8]
-local listener_name = ARGV[9]
-local service_name = ARGV[10]
-local director_instance_id = ARGV[11]
+local account_key = ARGV[9]
+local listener_name = ARGV[10]
+local service_name = ARGV[11]
+local director_instance_id = ARGV[12]
 
 local function ambiguous(message)
 	error("NDAMBIGUOUS " .. message)
@@ -67,6 +68,7 @@ require_value(requested_shard, "shard_required")
 require_value(schema_version, "schema_version_required")
 require_value(affinity_hash, "affinity_hash_required")
 require_value(tenant, "tenant_required")
+require_value(account_key, "account_key_required")
 
 if lease_ms == nil or lease_ms <= 0 then
 	return ambiguous("lease_required")
@@ -110,6 +112,7 @@ if state_exists == 0 then
 		"control_action", "none",
 		"affinity_hash", affinity_hash,
 		"tenant", tenant,
+		"account_key", account_key,
 		"idle_grace_ms", idle_grace_ms,
 		"created_at_ms", now)
 else
@@ -156,6 +159,7 @@ redis.call("HSET", session_key,
 	"user_sessions_key", user_sessions_key,
 	"affinity_hash", affinity_hash,
 	"tenant", tenant,
+	"account_key", account_key,
 	"protocol", protocol,
 	"listener_name", listener_name,
 	"service_name", service_name,
@@ -184,6 +188,7 @@ redis.call("HSET", state_key,
 	"shard_tag", shard,
 	"affinity_hash", affinity_hash,
 	"tenant", tenant,
+	"account_key", account_key,
 	"idle_grace_ms", idle_grace_ms,
 	"active_session_count", active_count,
 	"updated_at_ms", now,

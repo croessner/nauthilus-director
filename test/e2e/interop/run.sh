@@ -95,51 +95,117 @@ if ! "$docker_cmd" info >/dev/null 2>&1; then
 	exit 0
 fi
 
-container_id="$(
-	"$docker_cmd" run \
-		--rm \
-		--detach \
-		--pull=missing \
-		--publish '127.0.0.1::31143' \
-		--env "USER_PASSWORD=${interop_password}" \
-		"$dovecot_image" 2>/dev/null
-)" || {
-	printf 'SKIP e2e-interop: could not start pinned Dovecot image %s\n' "$dovecot_image"
-	exit 0
-}
+containers=()
+last_container=""
+container_names=(
+	default_a
+	default_b
+	shard1_a
+	shard1_b
+	shard2_a
+	shard2_b
+)
 
 cleanup() {
-	"$docker_cmd" rm -f "$container_id" >/dev/null 2>&1 || true
+	if ((${#containers[@]} > 0)); then
+		"$docker_cmd" rm -f "${containers[@]}" >/dev/null 2>&1 || true
+	fi
 	rm -rf "$tmpdir"
 }
 trap cleanup EXIT HUP INT TERM
 
-mapped=""
-ready=""
-for _ in {1..80}; do
-	mapped="$("$docker_cmd" port "$container_id" 31143/tcp 2>/dev/null | head -n 1 || true)"
-	if [[ -n "$mapped" ]]; then
-		host="${mapped%:*}"
-		port="${mapped##*:}"
-		if imap_login_ready "$host" "$port" "$interop_password"; then
-			ready="yes"
-			break
-		fi
+start_dovecot() {
+	local name="$1"
+	local container
+
+	container="$(
+		"$docker_cmd" run \
+			--rm \
+			--detach \
+			--pull=missing \
+			--hostname "nauthilus-director-e2e-dovecot-${name//_/-}" \
+			--publish '127.0.0.1::31143' \
+			--env "USER_PASSWORD=${interop_password}" \
+			"$dovecot_image" 2>/dev/null
+	)" || return 1
+
+	containers+=("$container")
+	last_container="$container"
+}
+
+declare -A container_by_name=()
+for name in "${container_names[@]}"; do
+	if ! start_dovecot "$name"; then
+		printf 'SKIP e2e-interop: could not start pinned Dovecot image %s for %s\n' "$dovecot_image" "$name"
+		exit 0
 	fi
-	sleep 0.25
+	container_by_name["$name"]="$last_container"
 done
 
-if [[ -z "$mapped" || -z "$ready" ]]; then
-	printf 'FAIL e2e-interop: Dovecot container did not become IMAP-login ready on port 31143\n' >&2
-	exit 1
-fi
+wait_mapped_dovecot() {
+	local container="$1"
+	local mapped=""
+	local ready=""
+	local host
+	local port
 
-printf 'nauthilus-director e2e-interop: Dovecot IMAP mapped at %s\n' "$mapped"
+	for _ in {1..80}; do
+		mapped="$("$docker_cmd" port "$container" 31143/tcp 2>/dev/null | head -n 1 || true)"
+		if [[ -n "$mapped" ]]; then
+			host="${mapped%:*}"
+			port="${mapped##*:}"
+			if imap_login_ready "$host" "$port" "$interop_password"; then
+				ready="yes"
+				break
+			fi
+		fi
+		sleep 0.25
+	done
+
+	if [[ -z "$mapped" || -z "$ready" ]]; then
+		return 1
+	fi
+
+	printf '%s\n' "$mapped"
+}
+
+declare -A mapped_by_name=()
+for name in "${container_names[@]}"; do
+	mapped_by_name["$name"]="$(wait_mapped_dovecot "${container_by_name[$name]}")" || {
+		printf 'FAIL e2e-interop: Dovecot container %s did not become IMAP-login ready on port 31143\n' "$name" >&2
+		exit 1
+	}
+done
+
+printf 'nauthilus-director e2e-interop: Dovecot IMAP backends mapped as default=(%s,%s), test_shard1=(%s,%s), test_shard2=(%s,%s)\n' \
+	"${mapped_by_name[default_a]}" \
+	"${mapped_by_name[default_b]}" \
+	"${mapped_by_name[shard1_a]}" \
+	"${mapped_by_name[shard1_b]}" \
+	"${mapped_by_name[shard2_a]}" \
+	"${mapped_by_name[shard2_b]}"
+
+if ! "$docker_cmd" exec "${container_by_name[default_a]}" doveadm who >/dev/null 2>&1; then
+	printf 'nauthilus-director e2e-interop: doveadm who is unavailable; backend identity proof will use Director state only\n'
+fi
 
 "$go_cmd" build -mod=vendor -trimpath -o "$tmpdir/nauthilus-director" ./cmd/nauthilus-director
 
-NAUTHILUS_DIRECTOR_INTEROP_BACKEND_ADDR="$mapped" \
+NAUTHILUS_DIRECTOR_INTEROP_BACKEND_ADDR="${mapped_by_name[default_a]}" \
+	NAUTHILUS_DIRECTOR_INTEROP_DEFAULT_A_ADDR="${mapped_by_name[default_a]}" \
+	NAUTHILUS_DIRECTOR_INTEROP_DEFAULT_B_ADDR="${mapped_by_name[default_b]}" \
+	NAUTHILUS_DIRECTOR_INTEROP_SHARD1_A_ADDR="${mapped_by_name[shard1_a]}" \
+	NAUTHILUS_DIRECTOR_INTEROP_SHARD1_B_ADDR="${mapped_by_name[shard1_b]}" \
+	NAUTHILUS_DIRECTOR_INTEROP_SHARD2_A_ADDR="${mapped_by_name[shard2_a]}" \
+	NAUTHILUS_DIRECTOR_INTEROP_SHARD2_B_ADDR="${mapped_by_name[shard2_b]}" \
+	NAUTHILUS_DIRECTOR_INTEROP_DOCKER="$docker_cmd" \
+	NAUTHILUS_DIRECTOR_INTEROP_DEFAULT_A_CONTAINER="${container_by_name[default_a]}" \
+	NAUTHILUS_DIRECTOR_INTEROP_DEFAULT_B_CONTAINER="${container_by_name[default_b]}" \
+	NAUTHILUS_DIRECTOR_INTEROP_SHARD1_A_CONTAINER="${container_by_name[shard1_a]}" \
+	NAUTHILUS_DIRECTOR_INTEROP_SHARD1_B_CONTAINER="${container_by_name[shard1_b]}" \
+	NAUTHILUS_DIRECTOR_INTEROP_SHARD2_A_CONTAINER="${container_by_name[shard2_a]}" \
+	NAUTHILUS_DIRECTOR_INTEROP_SHARD2_B_CONTAINER="${container_by_name[shard2_b]}" \
 	NAUTHILUS_DIRECTOR_E2E_SERVER_BINARY="$tmpdir/nauthilus-director" \
-	"$go_cmd" test -mod=vendor -tags=interop -count=1 -run TestDovecotCredentialReplayInterop ./test/e2e
+	"$go_cmd" test -mod=vendor -tags=interop -count=1 -run 'TestDovecot(CredentialReplayInterop|ClusterRuntimeInterop)' ./test/e2e
 
-printf 'ok e2e-interop: real server binary, Dovecot login and post-auth proxy handoff passed\n'
+printf 'ok e2e-interop: real server binary, six Dovecot backends, health ownership, cluster affinity and runtime control passed\n'

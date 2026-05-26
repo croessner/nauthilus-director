@@ -88,6 +88,32 @@ type SessionBackendRecord struct {
 	ControlGeneration  string
 }
 
+// RuntimeSessionRecord describes one Redis-visible frontend session for control reads.
+type RuntimeSessionRecord struct {
+	SessionID         string
+	Key               AffinityKey
+	Protocol          string
+	ListenerName      string
+	ServiceName       string
+	ShardTag          string
+	BackendIdentifier string
+	DirectorInstance  string
+	OpenedAt          time.Time
+	LeaseExpiresAt    time.Time
+	ControlGeneration string
+	Status            string
+}
+
+// RuntimeUserReadRecord describes one Redis-visible user affinity for control reads.
+type RuntimeUserReadRecord struct {
+	Key                AffinityKey
+	ShardTag           string
+	ActiveSessionCount int
+	Generation         string
+	UpdatedAt          time.Time
+	Present            bool
+}
+
 // UserMoveRequest describes an atomic user move state mutation.
 type UserMoveRequest struct {
 	Key         AffinityKey

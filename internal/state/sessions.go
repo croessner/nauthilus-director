@@ -98,6 +98,7 @@ func (s *RedisSessionStore) OpenSession(ctx context.Context, record SessionRecor
 		s.keys.schemaVersion,
 		affinityHash,
 		normalizedStateValue(record.Key.Tenant),
+		normalizedStateValue(record.Key.AccountKey),
 		normalizedStateValue(record.ListenerName),
 		normalizedStateValue(record.ServiceName),
 		normalizedStateValue(record.DirectorInstanceID),
