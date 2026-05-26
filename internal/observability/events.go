@@ -41,6 +41,40 @@ const (
 	EventBackendConnect = "backend.connect"
 	// EventBackendAuth records selected backend authentication.
 	EventBackendAuth = "backend.auth"
+	// EventBackendHealth records backend health transition and ownership results.
+	EventBackendHealth = "backend.health"
+	// EventBackendHealthTransition records a classified backend health state change.
+	EventBackendHealthTransition = "backend.health.transition"
+	// EventBackendEffectiveState records an effective backend eligibility state change.
+	EventBackendEffectiveState = "backend.effective_state"
+	// EventBackendRuntimeOperation records an operator backend runtime override.
+	EventBackendRuntimeOperation = "backend.runtime.operation"
+	// EventBackendMaintenance records backend maintenance and drain transitions.
+	EventBackendMaintenance = "backend.maintenance"
+	// EventBackendMaintenanceOperation records an operator backend maintenance change.
+	EventBackendMaintenanceOperation = "backend.maintenance.operation"
+	// EventBackendDrain records backend drain start and terminal outcomes.
+	EventBackendDrain = "backend.drain"
+	// EventSelectorExclusion records a classified backend selector exclusion.
+	EventSelectorExclusion = "selector.exclusion"
+	// EventSessionAttach records selected-backend session attachment.
+	EventSessionAttach = "session.attach"
+	// EventSessionClose records session lease closure.
+	EventSessionClose = "session.close"
+	// EventSessionReap records expired-session repair.
+	EventSessionReap = "session.reap"
+	// EventSessionKill records an operator session kill.
+	EventSessionKill = "session.kill"
+	// EventUserMove records an operator user move.
+	EventUserMove = "user.move"
+	// EventUserKick records an operator user kick.
+	EventUserKick = "user.kick"
+	// EventAffinityClear records an operator affinity clear.
+	EventAffinityClear = "affinity.clear"
+	// EventRouteLookup records a side-effect-free route diagnostic.
+	EventRouteLookup = "route.lookup"
+	// EventReload records safe reload attempts and outcomes.
+	EventReload = "reload"
 	// EventProxyPipe records transparent proxy lifecycle completion.
 	EventProxyPipe = "proxy.pipe"
 )
@@ -83,6 +117,27 @@ func NormalizeRecorder(recorder Recorder) Recorder {
 	}
 
 	return recorder
+}
+
+// RuntimeEventNames returns the stable runtime/control event vocabulary.
+func RuntimeEventNames() []string {
+	return []string{
+		EventBackendHealthTransition,
+		EventBackendEffectiveState,
+		EventBackendRuntimeOperation,
+		EventBackendMaintenanceOperation,
+		EventBackendDrain,
+		EventSelectorExclusion,
+		EventSessionAttach,
+		EventSessionClose,
+		EventSessionReap,
+		EventSessionKill,
+		EventUserMove,
+		EventUserKick,
+		EventAffinityClear,
+		EventRouteLookup,
+		EventReload,
+	}
 }
 
 // NewEvent sanitizes log fields and validates metric labels before recording.

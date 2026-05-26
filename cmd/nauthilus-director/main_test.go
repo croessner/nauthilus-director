@@ -19,10 +19,14 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/croessner/nauthilus-director/internal/app"
 )
 
 // TestVersionOutput keeps the binary version flag stable for operators.
@@ -124,6 +128,79 @@ func TestConfigDumpMissingPlaceholderExitsNonZeroSafely(t *testing.T) {
 	}
 	if strings.Contains(errText, "do-not-leak") || strings.Contains(errText, "prefix-") {
 		t.Fatalf("stderr leaked raw or expanded value: %q", errText)
+	}
+}
+
+// TestServeCommandDelegatesToProductionRunner keeps the default server entrypoint wired.
+func TestServeCommandDelegatesToProductionRunner(t *testing.T) {
+	previousServe := serve
+	t.Cleanup(func() {
+		serve = previousServe
+	})
+
+	var captured app.Options
+	serve = func(_ context.Context, options app.Options) error {
+		captured = options
+
+		return nil
+	}
+
+	var (
+		stdout bytes.Buffer
+		stderr bytes.Buffer
+	)
+
+	code := runWithContext(context.Background(), []string{"--config", "/tmp/director.yml", "serve"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run returned exit code %d, want 0; stderr=%q", code, stderr.String())
+	}
+	if captured.ConfigPath != "/tmp/director.yml" {
+		t.Fatalf("serve config path = %q, want /tmp/director.yml", captured.ConfigPath)
+	}
+}
+
+// TestDefaultCommandStartsServer keeps no-subcommand behavior aligned with the daemon entrypoint.
+func TestDefaultCommandStartsServer(t *testing.T) {
+	previousServe := serve
+	t.Cleanup(func() {
+		serve = previousServe
+	})
+
+	called := false
+	serve = func(context.Context, app.Options) error {
+		called = true
+
+		return nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runWithContext(context.Background(), nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run returned exit code %d, want 0; stderr=%q", code, stderr.String())
+	}
+	if !called {
+		t.Fatal("default command did not start server")
+	}
+}
+
+// TestServeFailureReturnsRuntimeExitCode preserves operator-visible startup failures.
+func TestServeFailureReturnsRuntimeExitCode(t *testing.T) {
+	previousServe := serve
+	t.Cleanup(func() {
+		serve = previousServe
+	})
+
+	serve = func(context.Context, app.Options) error {
+		return errors.New("boom")
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runWithContext(context.Background(), []string{"serve"}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("run returned exit code %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "server failed: boom") {
+		t.Fatalf("stderr = %q, want server failure", stderr.String())
 	}
 }
 

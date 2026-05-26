@@ -80,6 +80,7 @@ func (l *Loader) Load(options LoadOptions) (*Snapshot, error) {
 	if err != nil {
 		return nil, err
 	}
+	config = config.Normalize()
 
 	if err := l.Validate(config); err != nil {
 		return nil, err
@@ -197,6 +198,11 @@ func envNameForPath(path []string) string {
 	}
 
 	return strings.ToUpper(strings.Join(parts, "_"))
+}
+
+// EnvNameForConfigPath derives the public environment override name for one config path.
+func EnvNameForConfigPath(path []string) string {
+	return envNameForPath(path)
 }
 
 // sanitizeEnvPathPart keeps map keys representable in environment variable names.

@@ -810,10 +810,15 @@ Repository layout:
 docs/specs/openapi/nauthilus-director.yaml
 docs/specs/implementation/
 docs/man/
+docs/config/metadata.yml
+docs/reference/
 internal/rest/generated/
 internal/rest/adapters/
 internal/client/generated/
 scripts/generate-openapi.sh
+scripts/generate-docs.sh
+scripts/check-docs.sh
+tools/configdoc/
 ```
 
 Expected Makefile targets once the REST contract exists:
@@ -821,7 +826,17 @@ Expected Makefile targets once the REST contract exists:
 ```text
 make generate-openapi
 make check-openapi
+make generate-docs
+make check-docs
 ```
+
+Configuration documentation should be coupled to the typed config model rather
+than maintained only as prose. A small Go helper should reflect the typed config
+and `DefaultConfig()` to generate committed config reference artifacts, while
+`docs/config/metadata.yml` supplies human-authored descriptions for stable
+config paths. `make check-docs` must fail when generated config references are
+stale, when stable config paths lack metadata, when metadata points to removed
+paths or when stable path descriptions are left as placeholders.
 
 Generated code must not own mail protocol state machines, backend registry, selector, health model, routing resolver implementation or Nauthilus transport implementation. Those remain explicit domain objects with hand-written tests.
 
@@ -1072,7 +1087,8 @@ OpenAPI workflow, CLI generated-client boundary, E2E harness scaffold and
 Status: completed. The IMAP listener/session/proxy path, Nauthilus auth
 boundary, director-owned routing, Redis-backed session affinity, backend
 selection/authentication, secret-safe observability, deterministic fake-service
-E2E lane and pinned Dovecot interoperability lane are in place.
+E2E lane, production server-binary entrypoint and pinned Dovecot
+interoperability lane are in place.
 
 - listener lifecycle
 - IMAP greeting/CAPABILITY/STARTTLS/LOGIN/AUTH PLAIN
@@ -1082,9 +1098,15 @@ E2E lane and pinned Dovecot interoperability lane are in place.
 - backend connect
 - transparent proxy loop
 - basic metrics/logging/tracing
-- E2E proof for successful IMAP auth, routing resolver behavior, backend selection, active stickiness and secret-safe observable output, using deterministic fakes first and adding a Dovecot-backed Docker interoperability smoke when the Docker lane is available
+- E2E proof for successful IMAP auth, routing resolver behavior, backend selection, active stickiness and secret-safe observable output, using deterministic fakes, the production `nauthilus-director` binary and a Dovecot-backed Docker interoperability smoke when the Docker lane is available
 
 ### M2: Backend runtime
+
+Status: completed. Runtime-aware effective backend state, Redis-backed
+backend/session/user control operations, health, maintenance, drain,
+max-connection handling and deterministic fake-service E2E coverage are in
+place. The production server binary now wires this runtime into the process
+entrypoint used by IMAP and the control API.
 
 - backend registry
 - Redis-backed active affinity registry
@@ -1098,6 +1120,13 @@ E2E lane and pinned Dovecot interoperability lane are in place.
 
 ### M3: REST API and client
 
+Status: completed. The v1 generated OpenAPI REST boundary, generated client
+SDK, `nauthilus-directorctl`, route lookup, safe reload, config documentation
+guardrails, manpages and REST/CLI parity proof are in place. The
+M3 route-lookup follow-up is closed by the M2/M3 implementation. Binary-entry
+E2E proves CLI and REST state parity against the running
+`nauthilus-director` process.
+
 - OpenAPI-first workflow
 - generated REST server boundary
 - reproducible OpenAPI generation and stale-output check
@@ -1108,6 +1137,9 @@ E2E lane and pinned Dovecot interoperability lane are in place.
 - route lookup
 - reload
 - `nauthilus-directorctl`
+- generated config documentation and stale-doc guardrails
+- initial manpages for stable server/client command surfaces and the config file
+  format
 - E2E proof for REST and CLI managing the same Redis-backed runtime state
 
 ### M4: Observability
@@ -1164,11 +1196,17 @@ Known future decisions:
 
 ## 24. Immediate next steps
 
-1. Keep this architecture roadmap healthy and aligned with `docs/config/nauthilus-director.target.yml`.
-2. Create `docs/specs/implementation/M1_IMAP_MVP_SPEC.md` before starting broad IMAP implementation.
-3. Define the M1 protocol package boundaries, listener lifecycle, IMAP pre-auth command subset and proxy transition rules.
-4. Specify how M1 wires configured Nauthilus HTTP/gRPC auth, routing facts, backend selection and Redis-backed active affinity into one externally observable session flow.
-5. Extend the fake-service E2E harness for IMAP, Redis-backed stickiness, route lookup safety and secret-safe logs before adding a Docker interoperability smoke.
-6. Implement the IMAP MVP end-to-end with basic metrics, structured logs, trace boundaries and `make guardrails` as the final local gate.
+1. Treat the production `nauthilus-director` binary as the mandatory service
+   entrypoint for future externally visible E2E and interoperability proof.
+2. Keep the fast fake-service lane deterministic, but add or preserve at least
+   one real-binary assertion whenever listener, control, routing, Redis or proxy
+   bootstrap changes.
+3. Proceed to M4 observability polish: OTLP exporter configuration, trace
+   exporter lifecycle, richer Prometheus registration and operator-facing
+   observability documentation.
+4. Keep `make e2e-interop` as the real IMAP regression lane and run it whenever
+   IMAP backend/proxy/bootstrap-sensitive code changes.
+5. Start later protocol milestones only after the binary-entry IMAP/control
+   baseline remains green.
 
 The project should evolve as a small, sharp director: protocol-aware only where necessary, authenticated through Nauthilus, routed through director-owned facts and selectors, observable by default, and operationally safe enough to sit in front of real mail backends.

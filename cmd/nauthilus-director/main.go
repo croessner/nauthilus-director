@@ -20,28 +20,42 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
+	"syscall"
 
+	"github.com/croessner/nauthilus-director/internal/app"
 	"github.com/croessner/nauthilus-director/internal/config"
 )
 
 var version = "dev"
+var serve = app.Run
 
 const (
 	configCommand = "config"
 	dumpCommand   = "dump"
+	serveCommand  = "serve"
 )
 
 // main delegates to run so command behavior stays testable at the binary boundary.
 func main() {
-	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	os.Exit(runWithContext(ctx, os.Args[1:], os.Stdout, os.Stderr))
 }
 
 // run parses global flags and dispatches supported top-level commands.
 func run(args []string, stdout io.Writer, stderr io.Writer) int {
+	return runWithContext(context.Background(), args, stdout, stderr)
+}
+
+// runWithContext parses global flags and dispatches supported top-level commands.
+func runWithContext(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer) int {
 	flags := flag.NewFlagSet("nauthilus-director", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 
@@ -59,15 +73,38 @@ func run(args []string, stdout io.Writer, stderr io.Writer) int {
 
 	remaining := flags.Args()
 	if len(remaining) == 0 {
-		return 0
+		return runServe(ctx, *configPath, stdout, stderr)
 	}
 
 	if len(remaining) >= 2 && remaining[0] == configCommand && remaining[1] == dumpCommand {
 		return runConfigDump(remaining[2:], *configPath, stdout, stderr)
 	}
 
+	if remaining[0] == serveCommand {
+		if len(remaining) != 1 {
+			_, _ = fmt.Fprintf(stderr, "unexpected serve argument %q\n", remaining[1])
+			return 2
+		}
+
+		return runServe(ctx, *configPath, stdout, stderr)
+	}
+
 	_, _ = fmt.Fprintf(stderr, "unknown command %q\n", remaining[0])
 	return 2
+}
+
+// runServe starts the production server process.
+func runServe(ctx context.Context, configPath string, _ io.Writer, stderr io.Writer) int {
+	err := serve(ctx, app.Options{
+		ConfigPath: configPath,
+		Version:    version,
+	})
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "server failed: %v\n", err)
+		return 1
+	}
+
+	return 0
 }
 
 // runConfigDump handles inspection-only config dump modes without mutating config files.

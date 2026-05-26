@@ -52,6 +52,11 @@ func (s SecretString) String() string {
 	return redactedSecret
 }
 
+// GoString deliberately returns only the redacted representation in diagnostics.
+func (s SecretString) GoString() string {
+	return s.String()
+}
+
 // MarshalYAML keeps direct YAML marshaling redaction-safe by default.
 func (s SecretString) MarshalYAML() (any, error) {
 	return s.String(), nil

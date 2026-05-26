@@ -42,9 +42,11 @@ done
 
 printf 'ok e2e: required fake-service and interoperability scaffold files exist\n'
 
-"$go_cmd" test -mod=vendor -count=1 ./test/e2e
+"$go_cmd" build -mod=vendor -trimpath -o "$tmpdir/nauthilus-director" ./cmd/nauthilus-director
+NAUTHILUS_DIRECTOR_E2E_SERVER_BINARY="$tmpdir/nauthilus-director" \
+	"$go_cmd" test -mod=vendor -count=1 ./test/e2e
 
-printf 'ok e2e: fake Nauthilus HTTP authority, scaffolded gRPC authority, fake IMAP backend, TLS and observability checks passed\n'
+printf 'ok e2e: fake Nauthilus HTTP authority, scaffolded gRPC authority, real server binary, fake IMAP backend, TLS and observability checks passed\n'
 
 "$go_cmd" run -mod=vendor ./cmd/nauthilus-director --version >"$tmpdir/nauthilus-director.version"
 "$go_cmd" run -mod=vendor ./cmd/nauthilus-directorctl --version >"$tmpdir/nauthilus-directorctl.version"

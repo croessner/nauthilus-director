@@ -21,12 +21,14 @@ import (
 	"errors"
 	"net"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/croessner/nauthilus-director/internal/backend"
 	"github.com/croessner/nauthilus-director/internal/nauthilus"
 	"github.com/croessner/nauthilus-director/internal/proxy"
 	"github.com/croessner/nauthilus-director/internal/routing"
+	runtimectl "github.com/croessner/nauthilus-director/internal/runtime"
 	"github.com/croessner/nauthilus-director/internal/state"
 )
 
@@ -123,6 +125,8 @@ func (s *Session) placeAuthenticatedSession(
 		return err
 	}
 
+	routingResult = s.withEffectiveDefaultShard(routingResult)
+
 	if !routingResult.Complete() {
 		s.recordRoutingResolve(ctx, observationResultFailure, "incomplete", routingResult.RoutingSource)
 
@@ -151,10 +155,21 @@ func (s *Session) placeAuthenticatedSession(
 	backendResult, err := s.backendSelector.Select(ctx, s.selectionRequest(routingResult, selectedShardTag, affinity))
 	if err != nil {
 		s.recordBackendSelect(ctx, observationResultFailure, reasonClass(err), selectedShardTag)
+		_, _ = s.sessionStore.CloseSession(context.Background(), sessionRecord.Key, s.context.ID)
 
 		return err
 	}
 
+	backendResult, err = s.attachSelectedBackend(ctx, sessionRecord.Key, s.selectionRequest(routingResult, selectedShardTag, affinity), backendResult)
+	if err != nil {
+		s.recordBackendSelect(ctx, observationResultFailure, reasonClass(err), selectedShardTag)
+		s.recordSessionAttach(ctx, observationResultFailure, reasonClass(err), backendResult.Backend.Identifier, selectedShardTag)
+		_, _ = s.sessionStore.CloseSession(context.Background(), sessionRecord.Key, s.context.ID)
+
+		return err
+	}
+
+	s.recordSessionAttach(ctx, observationResultOK, "", backendResult.Backend.Identifier, selectedShardTag)
 	s.recordBackendSelect(ctx, observationResultOK, "", selectedShardTag)
 
 	s.placement = Placement{
@@ -167,6 +182,57 @@ func (s *Session) placeAuthenticatedSession(
 	s.placed = true
 
 	return nil
+}
+
+// attachSelectedBackend registers backend counts and retries same-shard placement on attach races.
+func (s *Session) attachSelectedBackend(
+	ctx context.Context,
+	key state.AffinityKey,
+	request backend.SelectionRequest,
+	initial backend.SelectionResult,
+) (backend.SelectionResult, error) {
+	if _, err := s.sessionStore.AttachSelectedBackend(ctx, state.SessionBackendAttachment{
+		Key:               key,
+		SessionID:         s.context.ID,
+		BackendIdentifier: initial.Backend.Identifier,
+		MaxConnections:    initial.Backend.MaxConnections,
+	}); err != nil {
+		retrySelector, ok := s.backendSelector.(interface {
+			RetryAfterAttachFailure(context.Context, backend.SelectionRequest, string) (backend.SelectionResult, error)
+		})
+		if !ok {
+			return backend.SelectionResult{}, err
+		}
+
+		retry, retryErr := retrySelector.RetryAfterAttachFailure(ctx, request, initial.Backend.Identifier)
+		if retryErr != nil {
+			return backend.SelectionResult{}, retryErr
+		}
+
+		if _, attachErr := s.sessionStore.AttachSelectedBackend(ctx, state.SessionBackendAttachment{
+			Key:               key,
+			SessionID:         s.context.ID,
+			BackendIdentifier: retry.Backend.Identifier,
+			MaxConnections:    retry.Backend.MaxConnections,
+		}); attachErr != nil {
+			return backend.SelectionResult{}, attachErr
+		}
+
+		return retry, nil
+	}
+
+	return initial, nil
+}
+
+// withEffectiveDefaultShard fills an omitted route shard from the immutable config snapshot.
+func (s *Session) withEffectiveDefaultShard(result routing.RoutingResult) routing.RoutingResult {
+	if normalizedRoutingFact(result.ShardTag) != "" {
+		return result
+	}
+
+	result.ShardTag = s.context.DefaultShard
+
+	return result
 }
 
 // routingRequest builds the side-effect-free routing input from authenticated facts.
@@ -216,22 +282,26 @@ func (s *Session) sessionRecord(result routing.RoutingResult) state.SessionRecor
 			Tenant:     normalizedRoutingFact(result.Tenant),
 			AccountKey: normalizedAccount(result.AccountKey),
 		},
-		Protocol:  protocolIMAP,
-		ShardTag:  normalizedRoutingFact(result.ShardTag),
-		LeaseTTL:  ttl,
-		IdleGrace: s.context.SessionIdleGrace,
+		Protocol:           protocolIMAP,
+		ListenerName:       s.context.ListenerName,
+		ServiceName:        s.context.ServiceName,
+		ShardTag:           normalizedRoutingFact(result.ShardTag),
+		DirectorInstanceID: s.context.DirectorInstanceID,
+		LeaseTTL:           ttl,
+		IdleGrace:          s.context.SessionIdleGrace,
 	}
 }
 
 // selectionRequest builds the backend selector input from the final active shard.
 func (s *Session) selectionRequest(result routing.RoutingResult, shardTag string, affinity state.AffinityRecord) backend.SelectionRequest {
 	return backend.SelectionRequest{
-		AccountKey:     normalizedAccount(result.AccountKey),
-		Tenant:         normalizedRoutingFact(result.Tenant),
-		ShardTag:       normalizedRoutingFact(shardTag),
-		Protocol:       protocolIMAP,
-		BackendPool:    s.context.BackendPool,
-		ActiveAffinity: affinityActiveForSelection(result, affinity),
+		AccountKey:              normalizedAccount(result.AccountKey),
+		Tenant:                  normalizedRoutingFact(result.Tenant),
+		ShardTag:                normalizedRoutingFact(shardTag),
+		Protocol:                protocolIMAP,
+		BackendPool:             s.context.BackendPool,
+		ActiveAffinity:          affinityActiveForSelection(result, affinity),
+		PinnedBackendIdentifier: normalizedRoutingFact(affinity.BackendIdentifier),
 	}
 }
 
@@ -345,6 +415,10 @@ func (s *Session) transitionAuthenticatedSession(
 	}
 
 	handoff := s.BufferedProxyHandoff()
+
+	unregister := s.registerLocalProxySession(handoff.Frontend(), connection.Conn())
+	defer unregister()
+
 	proxyResult, err := s.proxyRunner.Run(ctx, proxy.PipeConfig{
 		Frontend:          handoff.Frontend(),
 		Backend:           connection.Conn(),
@@ -360,6 +434,37 @@ func (s *Session) transitionAuthenticatedSession(
 	return commandOutcome{closeSession: true, flushed: true}, err
 }
 
+// registerLocalProxySession exposes a local stream handle for runtime control actions.
+func (s *Session) registerLocalProxySession(frontend net.Conn, backendConn net.Conn) func() {
+	if s.localSessions == nil {
+		return func() {}
+	}
+
+	var closeOnce sync.Once
+
+	handle := runtimectl.LocalSessionHandleFunc(func(context.Context, runtimectl.LocalSessionControl) error {
+		closeOnce.Do(func() {
+			_ = frontend.Close()
+			_ = backendConn.Close()
+		})
+
+		return nil
+	})
+
+	unregister, err := s.localSessions.Register(runtimectl.LocalSessionInfo{
+		SessionID:         s.context.ID,
+		Tenant:            s.placementAffinityKey().Tenant,
+		UserHash:          s.placementAffinityKey().AccountKey,
+		BackendIdentifier: s.placement.Backend.Backend.Identifier,
+		DirectorInstance:  s.context.DirectorInstanceID,
+	}, handle)
+	if err != nil {
+		return func() {}
+	}
+
+	return unregister
+}
+
 // closePlacedSession closes a Redis lease when backend setup fails before proxy mode owns it.
 func (s *Session) closePlacedSession(ctx context.Context) error {
 	if s.sessionStore == nil || !s.placed {
@@ -367,6 +472,7 @@ func (s *Session) closePlacedSession(ctx context.Context) error {
 	}
 
 	_, err := s.sessionStore.CloseSession(ctx, s.placementAffinityKey(), s.context.ID)
+	s.recordSessionClose(ctx, resultLabel(err), reasonClass(err))
 
 	return err
 }
@@ -378,10 +484,11 @@ func (s *Session) proxyLease() proxy.LeaseLifecycle {
 	}
 
 	return &sessionLeaseLifecycle{
-		store:     s.sessionStore,
-		key:       s.placementAffinityKey(),
-		sessionID: s.context.ID,
-		ttl:       s.context.SessionLeaseTTL,
+		store:       s.sessionStore,
+		key:         s.placementAffinityKey(),
+		sessionID:   s.context.ID,
+		ttl:         s.context.SessionLeaseTTL,
+		recordClose: s.recordSessionClose,
 	}
 }
 
@@ -418,22 +525,41 @@ func (s *Session) placementAffinityKey() state.AffinityKey {
 
 // sessionLeaseLifecycle adapts Redis session methods to the proxy lifecycle.
 type sessionLeaseLifecycle struct {
-	store     state.SessionStore
-	key       state.AffinityKey
-	sessionID string
-	ttl       time.Duration
+	store       state.SessionStore
+	key         state.AffinityKey
+	sessionID   string
+	ttl         time.Duration
+	recordClose func(context.Context, string, string)
+	closeOnce   sync.Once
+	closeErr    error
 }
 
 // Heartbeat refreshes the active session lease while proxy mode is running.
 func (l *sessionLeaseLifecycle) Heartbeat(ctx context.Context) error {
-	_, err := l.store.HeartbeatSession(ctx, l.key, l.sessionID, l.ttl)
+	record, err := l.store.HeartbeatSession(ctx, l.key, l.sessionID, l.ttl)
+	if err != nil {
+		return err
+	}
 
-	return err
+	switch record.ControlAction {
+	case "", state.ControlActionNone:
+		return nil
+	case state.ControlActionKick, state.ControlActionDrain, state.ControlActionMoveGenerationChanged:
+		return proxy.NewControlActionError(string(record.ControlAction))
+	default:
+		return errors.New("imap: ambiguous heartbeat control action")
+	}
+
 }
 
 // Close releases the active session lease at proxy end.
 func (l *sessionLeaseLifecycle) Close(ctx context.Context) error {
-	_, err := l.store.CloseSession(ctx, l.key, l.sessionID)
+	l.closeOnce.Do(func() {
+		_, l.closeErr = l.store.CloseSession(ctx, l.key, l.sessionID)
+		if l.recordClose != nil {
+			l.recordClose(ctx, resultLabel(l.closeErr), reasonClass(l.closeErr))
+		}
+	})
 
-	return err
+	return l.closeErr
 }

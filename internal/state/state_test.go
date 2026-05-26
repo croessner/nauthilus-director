@@ -17,21 +17,159 @@
 package state
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"net"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/croessner/nauthilus-director/internal/backend"
 	"github.com/redis/go-redis/v9"
 )
 
 const (
-	testProtocolIMAP = "imap"
-	testShardA       = "mailstore-a"
+	testAttachSessionID  = "attach-session"
+	testBackendIMAP      = "mailstore-a-imap"
+	testKickSessionID    = "kick-session"
+	testKillSessionID    = "kill-session"
+	testOperatorClear    = "operator clear"
+	testOperatorActor    = "test-operator"
+	testProtocolIMAP     = "imap"
+	testRuntimeSessionID = "runtime-session"
+	testClearStatus      = "cleared"
+	testShardA           = "mailstore-a"
+	testShardB           = "mailstore-b"
+	testShardC           = "mailstore-c"
 )
+
+var packageRedisAddr string
+
+// TestMain starts a package-scoped Redis-compatible service when available.
+func TestMain(m *testing.M) {
+	code := runStateTests(m)
+	os.Exit(code)
+}
+
+// runStateTests keeps package test setup outside the special TestMain entrypoint.
+func runStateTests(m *testing.M) int {
+	addr := os.Getenv("NAUTHILUS_DIRECTOR_REDIS_ADDR")
+	if addr == "" {
+		addr = os.Getenv("REDIS_ADDR")
+	}
+
+	if addr == "" {
+		addr = packageRedisAddr
+	}
+
+	if addr != "" {
+		packageRedisAddr = addr
+
+		return m.Run()
+	}
+
+	startedAddr, cleanup, err := startPackageValkey()
+	if err != nil {
+		return m.Run()
+	}
+
+	packageRedisAddr = startedAddr
+
+	defer cleanup()
+
+	return m.Run()
+}
+
+// startPackageValkey starts a local Valkey server for Redis script integration tests.
+func startPackageValkey() (string, func(), error) {
+	path, err := exec.LookPath("valkey-server")
+	if err != nil {
+		return "", func() {}, err
+	}
+
+	addr, port, err := reservePackageRedisAddress()
+	if err != nil {
+		return "", func() {}, err
+	}
+
+	var output bytes.Buffer
+
+	cmd := exec.Command(
+		path,
+		"--bind", "127.0.0.1",
+		"--port", port,
+		"--save", "",
+		"--appendonly", "no",
+		"--dir", os.TempDir(),
+		"--loglevel", "warning",
+	)
+	cmd.Stdout = &output
+	cmd.Stderr = &output
+
+	if err := cmd.Start(); err != nil {
+		return "", func() {}, err
+	}
+
+	client := redis.NewClient(&redis.Options{Addr: addr, Protocol: 2})
+	cleanup := func() {
+		_ = client.Close()
+
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+
+		_ = cmd.Wait()
+	}
+
+	if waitForPackageValkey(client) {
+		return addr, cleanup, nil
+	}
+
+	cleanup()
+
+	return "", func() {}, errors.New(output.String())
+}
+
+// reservePackageRedisAddress reserves a loopback port long enough to configure Valkey.
+func reservePackageRedisAddress() (string, string, error) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return "", "", err
+	}
+
+	addr := listener.Addr().String()
+	_ = listener.Close()
+
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return "", "", err
+	}
+
+	return addr, port, nil
+}
+
+// waitForPackageValkey waits until the package-scoped Redis-compatible server accepts commands.
+func waitForPackageValkey(client *redis.Client) bool {
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		err := client.Ping(ctx).Err()
+
+		cancel()
+
+		if err == nil {
+			return true
+		}
+
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	return false
+}
 
 // TestKeyBuilderCreatesClusterHashTaggedAffinityKeys verifies Cluster-safe affinity key shape.
 func TestKeyBuilderCreatesClusterHashTaggedAffinityKeys(t *testing.T) {
@@ -96,12 +234,12 @@ func TestKeyBuilderDoesNotRequireRawUsernameInKeys(t *testing.T) {
 func TestBackendAndIndexKeysFollowRuntimeShape(t *testing.T) {
 	builder := mustKeyBuilder(t)
 
-	backendKey, err := builder.BackendRuntimeKey("mailstore-a-imap")
+	backendKey, err := builder.BackendRuntimeKey(testBackendIMAP)
 	if err != nil {
 		t.Fatalf("BackendRuntimeKey returned error: %v", err)
 	}
 
-	if backendKey != "nd:v1:runtime:backend:mailstore-a-imap" {
+	if backendKey != "nd:v1:runtime:backend:"+testBackendIMAP {
 		t.Fatalf("backend key = %q", backendKey)
 	}
 
@@ -111,6 +249,55 @@ func TestBackendAndIndexKeysFollowRuntimeShape(t *testing.T) {
 
 	if got := builder.BackendIndexKey(); got != "nd:v1:idx:backends" {
 		t.Fatalf("backend index key = %q", got)
+	}
+
+	instanceKey, err := builder.InstanceKey("director-a")
+	if err != nil {
+		t.Fatalf("InstanceKey returned error: %v", err)
+	}
+
+	if instanceKey != "nd:v1:runtime:instance:director-a" {
+		t.Fatalf("instance key = %q", instanceKey)
+	}
+
+	ownerKey, err := builder.HealthOwnerKey(testBackendIMAP)
+	if err != nil {
+		t.Fatalf("HealthOwnerKey returned error: %v", err)
+	}
+
+	if ownerKey != "nd:v1:health:backend:"+testBackendIMAP+":owner" {
+		t.Fatalf("health owner key = %q", ownerKey)
+	}
+
+	healthKey, err := builder.HealthStateKey(testBackendIMAP)
+	if err != nil {
+		t.Fatalf("HealthStateKey returned error: %v", err)
+	}
+
+	if healthKey != "nd:v1:health:backend:"+testBackendIMAP+":state" {
+		t.Fatalf("health state key = %q", healthKey)
+	}
+
+	backendSessions, err := builder.BackendSessionIndexKey(testBackendIMAP)
+	if err != nil {
+		t.Fatalf("BackendSessionIndexKey returned error: %v", err)
+	}
+
+	if backendSessions != "nd:v1:idx:backend:"+testBackendIMAP+":sessions" {
+		t.Fatalf("backend session index key = %q", backendSessions)
+	}
+
+	if got := builder.UserIndexKey(); got != "nd:v1:idx:users" {
+		t.Fatalf("user index key = %q", got)
+	}
+
+	userSessions, err := builder.UserSessionIndexKey("default", "user@example.org")
+	if err != nil {
+		t.Fatalf("UserSessionIndexKey returned error: %v", err)
+	}
+
+	if strings.Contains(userSessions, "user@example.org") || !strings.HasPrefix(userSessions, "nd:v1:idx:user:") {
+		t.Fatalf("user session index key = %q", userSessions)
 	}
 }
 
@@ -144,10 +331,45 @@ func TestScriptLoaderTracksSHAAndMissingScripts(t *testing.T) {
 		t.Fatal("missing script must remain fail-closed")
 	}
 
-	for _, name := range []string{"open", "heartbeat", "close", "lookup"} {
+	for _, name := range []string{
+		scriptAttach,
+		scriptBackendRuntimeClear,
+		scriptBackendRuntimeSet,
+		scriptClear,
+		scriptClose,
+		scriptHeartbeat,
+		scriptHealthOwnerAcquire,
+		scriptHealthOwnerRenew,
+		scriptHealthStatePublish,
+		scriptKick,
+		scriptLookup,
+		scriptMove,
+		scriptOpen,
+		scriptReap,
+		scriptSessionKill,
+	} {
 		if _, ok := registry.Get(name); !ok {
 			t.Fatalf("%s script missing; scripts=%v", name, registry.Names())
 		}
+	}
+}
+
+// TestAmbiguousScriptPayloadFailsClosed verifies parser-level control-action validation.
+func TestAmbiguousScriptPayloadFailsClosed(t *testing.T) {
+	_, err := parseAffinityRecord(AffinityKey{Tenant: "default", AccountKey: "hash"}, []any{
+		"status", scriptHeartbeat,
+		"present", "1",
+		"shard_tag", testShardA,
+		"generation", "1",
+		"control_generation", "1",
+		"control_action", "unknown",
+		"active_session_count", "1",
+		"server_time_ms", "1000",
+		"expires_at_ms", "2000",
+		"lease_expires_at_ms", "1500",
+	})
+	if !IsRedisErrorKind(err, RedisErrorKindAmbiguousState) {
+		t.Fatalf("parseAffinityRecord error = %v, want ambiguous_state", err)
 	}
 }
 
@@ -196,7 +418,7 @@ func TestRedisSessionLifecycleScripts(t *testing.T) {
 
 	second := first
 	second.ID = "session-2"
-	second.ShardTag = "mailstore-b"
+	second.ShardTag = testShardB
 
 	reused, err := store.OpenSession(context.Background(), second)
 	if err != nil {
@@ -218,6 +440,611 @@ func TestRedisSessionLifecycleScripts(t *testing.T) {
 	}
 
 	assertAffinityRecord(t, closedSecond, "idle", testShardA, 0)
+}
+
+// TestRedisBackendAttachAndCloseCountsExactlyOnce verifies selected-backend registration.
+func TestRedisBackendAttachAndCloseCountsExactlyOnce(t *testing.T) {
+	store, client, builder := redisIntegrationStore(t)
+	key := AffinityKey{Tenant: "blue", AccountKey: "attach@example.test"}
+	backendID := testBackendIMAP
+	sessionID := testAttachSessionID
+
+	cleanupAffinity(t, client, builder, key, sessionID)
+	cleanupBackend(t, client, builder, backendID)
+
+	record := testSessionRecord(key, sessionID)
+	if _, err := store.OpenSession(context.Background(), record); err != nil {
+		t.Fatalf("OpenSession returned error: %v", err)
+	}
+
+	firstAttach, err := store.AttachSelectedBackend(context.Background(), SessionBackendAttachment{
+		Key:               key,
+		SessionID:         sessionID,
+		BackendIdentifier: backendID,
+		MaxConnections:    10,
+	})
+	if err != nil {
+		t.Fatalf("AttachSelectedBackend returned error: %v", err)
+	}
+
+	if firstAttach.BackendActiveCount != 1 {
+		t.Fatalf("backend active count after attach = %d, want 1", firstAttach.BackendActiveCount)
+	}
+
+	secondAttach, err := store.AttachSelectedBackend(context.Background(), SessionBackendAttachment{
+		Key:               key,
+		SessionID:         sessionID,
+		BackendIdentifier: backendID,
+		MaxConnections:    10,
+	})
+	if err != nil {
+		t.Fatalf("second AttachSelectedBackend returned error: %v", err)
+	}
+
+	if secondAttach.BackendActiveCount != 1 {
+		t.Fatalf("backend active count after idempotent attach = %d, want 1", secondAttach.BackendActiveCount)
+	}
+
+	if count := redisBackendActiveCount(t, client, builder, backendID); count != 1 {
+		t.Fatalf("redis backend active count = %d, want 1", count)
+	}
+
+	if _, err := store.CloseSession(context.Background(), key, sessionID); err != nil {
+		t.Fatalf("CloseSession returned error: %v", err)
+	}
+
+	if count := redisBackendActiveCount(t, client, builder, backendID); count != 0 {
+		t.Fatalf("redis backend active count after close = %d, want 0", count)
+	}
+}
+
+// TestRedisKickAndSessionKillAreObservedByHeartbeat verifies control generations.
+func TestRedisKickAndSessionKillAreObservedByHeartbeat(t *testing.T) {
+	store, client, builder := redisIntegrationStore(t)
+	key := AffinityKey{Tenant: "blue", AccountKey: "kick@example.test"}
+	backendID := testBackendIMAP
+
+	cleanupAffinity(t, client, builder, key, testKickSessionID, testKillSessionID)
+	cleanupBackend(t, client, builder, backendID)
+
+	for _, sessionID := range []string{testKickSessionID, testKillSessionID} {
+		if _, err := store.OpenSession(context.Background(), testSessionRecord(key, sessionID)); err != nil {
+			t.Fatalf("OpenSession %s returned error: %v", sessionID, err)
+		}
+
+		if _, err := store.AttachSelectedBackend(context.Background(), SessionBackendAttachment{
+			Key:               key,
+			SessionID:         sessionID,
+			BackendIdentifier: backendID,
+			MaxConnections:    10,
+		}); err != nil {
+			t.Fatalf("AttachSelectedBackend %s returned error: %v", sessionID, err)
+		}
+	}
+
+	if _, err := store.KillSession(context.Background(), SessionKillRequest{
+		SessionID: testKillSessionID,
+		Reason:    "operator killed one session",
+	}); err != nil {
+		t.Fatalf("KillSession returned error: %v", err)
+	}
+
+	otherHeartbeat, err := store.HeartbeatSession(context.Background(), key, testKickSessionID, time.Second)
+	if err != nil {
+		t.Fatalf("HeartbeatSession for non-killed session returned error: %v", err)
+	}
+
+	if otherHeartbeat.ControlAction != ControlActionNone {
+		t.Fatalf("heartbeat action for non-killed session = %q, want none", otherHeartbeat.ControlAction)
+	}
+
+	killHeartbeat, err := store.HeartbeatSession(context.Background(), key, testKillSessionID, time.Second)
+	if err != nil {
+		t.Fatalf("HeartbeatSession after session kill returned error: %v", err)
+	}
+
+	if killHeartbeat.ControlAction != ControlActionKick {
+		t.Fatalf("heartbeat control action for session kill = %q, want kick", killHeartbeat.ControlAction)
+	}
+
+	kicked, err := store.KickUser(context.Background(), UserKickRequest{Key: key, Reason: "operator requested reconnect"})
+	if err != nil {
+		t.Fatalf("KickUser returned error: %v", err)
+	}
+
+	if kicked.ControlAction != ControlActionKick {
+		t.Fatalf("kick action = %q, want kick", kicked.ControlAction)
+	}
+
+	heartbeat, err := store.HeartbeatSession(context.Background(), key, testKickSessionID, time.Second)
+	if err != nil {
+		t.Fatalf("HeartbeatSession after kick returned error: %v", err)
+	}
+
+	if heartbeat.ControlAction != ControlActionKick {
+		t.Fatalf("heartbeat control action = %q, want kick", heartbeat.ControlAction)
+	}
+}
+
+// TestRedisReapRepairsExpiredSessions verifies expired session repair updates backend counts.
+func TestRedisReapRepairsExpiredSessions(t *testing.T) {
+	store, client, builder := redisIntegrationStore(t)
+	key := AffinityKey{Tenant: "blue", AccountKey: "reap@example.test"}
+	backendID := testBackendIMAP
+	sessionID := "reap-session"
+
+	cleanupAffinity(t, client, builder, key, sessionID)
+	cleanupBackend(t, client, builder, backendID)
+
+	record := testSessionRecord(key, sessionID)
+	record.LeaseTTL = 25 * time.Millisecond
+	record.IdleGrace = time.Second
+
+	if _, err := store.OpenSession(context.Background(), record); err != nil {
+		t.Fatalf("OpenSession returned error: %v", err)
+	}
+
+	if _, err := store.AttachSelectedBackend(context.Background(), SessionBackendAttachment{
+		Key:               key,
+		SessionID:         sessionID,
+		BackendIdentifier: backendID,
+		MaxConnections:    10,
+	}); err != nil {
+		t.Fatalf("AttachSelectedBackend returned error: %v", err)
+	}
+
+	time.Sleep(60 * time.Millisecond)
+
+	reaped, err := store.ReapSessions(context.Background(), ReapRequest{Limit: 100})
+	if err != nil {
+		t.Fatalf("ReapSessions returned error: %v", err)
+	}
+
+	if reaped.ExpiredSessions != 1 || reaped.RepairedBackends != 1 {
+		t.Fatalf("reap result = %#v, want one expired and one backend repair", reaped)
+	}
+
+	if count := redisBackendActiveCount(t, client, builder, backendID); count != 0 {
+		t.Fatalf("redis backend active count after reap = %d, want 0", count)
+	}
+
+	cleared, err := store.ClearUserAffinity(context.Background(), UserClearRequest{
+		Key:    key,
+		Reason: "operator clear after reap",
+	})
+	if err != nil {
+		t.Fatalf("ClearUserAffinity after reap returned error: %v", err)
+	}
+
+	if cleared.Status != testClearStatus {
+		t.Fatalf("clear after reap = %#v, want %q", cleared, testClearStatus)
+	}
+}
+
+// TestRedisMoveAndClearScripts verifies user move and inactive affinity clear behavior.
+func TestRedisMoveAndClearScripts(t *testing.T) {
+	store, client, builder := redisIntegrationStore(t)
+	key := AffinityKey{Tenant: "blue", AccountKey: "runtime-move@example.test"}
+	backendID := testBackendIMAP
+
+	cleanupAffinity(t, client, builder, key, testRuntimeSessionID, "second-session", "third-session")
+	cleanupBackend(t, client, builder, backendID)
+
+	openAttachedSession(t, store, key, testRuntimeSessionID, backendID)
+
+	pendingMove, err := store.MoveUser(context.Background(), UserMoveRequest{
+		Key:         key,
+		TargetShard: testShardB,
+		Strategy:    moveStrategyNewSessionsOnly,
+		Reason:      "operator pending move",
+		Actor:       testOperatorActor,
+	})
+	if err != nil {
+		t.Fatalf("MoveUser new_sessions_only returned error: %v", err)
+	}
+
+	if pendingMove.ControlAction != ControlActionNone || pendingMove.ActiveSessionCount != 1 {
+		t.Fatalf("pending move result = %#v, want no control action and one active session", pendingMove)
+	}
+
+	second := testSessionRecord(key, "second-session")
+	second.ShardTag = testShardB
+
+	secondAffinity, err := store.OpenSession(context.Background(), second)
+	if err != nil {
+		t.Fatalf("OpenSession during new_sessions_only returned error: %v", err)
+	}
+
+	if secondAffinity.ShardTag != testShardA {
+		t.Fatalf("new session during active pending move shard = %q, want old shard %q", secondAffinity.ShardTag, testShardA)
+	}
+
+	if _, err := store.CloseSession(context.Background(), key, testRuntimeSessionID); err != nil {
+		t.Fatalf("CloseSession first returned error: %v", err)
+	}
+
+	if _, err := store.CloseSession(context.Background(), key, "second-session"); err != nil {
+		t.Fatalf("CloseSession second returned error: %v", err)
+	}
+
+	third := testSessionRecord(key, "third-session")
+	third.ShardTag = testShardB
+
+	movedAfterIdle, err := store.OpenSession(context.Background(), third)
+	if err != nil {
+		t.Fatalf("OpenSession after pending move returned error: %v", err)
+	}
+
+	if movedAfterIdle.ShardTag != testShardB {
+		t.Fatalf("new session after active count reached zero shard = %q, want %q", movedAfterIdle.ShardTag, testShardB)
+	}
+
+	if _, err := store.CloseSession(context.Background(), key, "third-session"); err != nil {
+		t.Fatalf("CloseSession third returned error: %v", err)
+	}
+
+	openAttachedSession(t, store, key, testRuntimeSessionID, backendID)
+
+	moved, err := store.MoveUser(context.Background(), UserMoveRequest{
+		Key:         key,
+		TargetShard: testShardC,
+		Strategy:    moveStrategyKickExisting,
+		Reason:      "operator move",
+	})
+	if err != nil {
+		t.Fatalf("MoveUser returned error: %v", err)
+	}
+
+	if moved.ControlAction != ControlActionMoveGenerationChanged || moved.TargetShard != testShardC {
+		t.Fatalf("move result = %#v", moved)
+	}
+
+	moveHeartbeat, err := store.HeartbeatSession(context.Background(), key, testRuntimeSessionID, time.Second)
+	if err != nil {
+		t.Fatalf("HeartbeatSession after kick_existing returned error: %v", err)
+	}
+
+	if moveHeartbeat.ControlAction != ControlActionMoveGenerationChanged {
+		t.Fatalf("kick_existing heartbeat action = %q, want move_generation_changed", moveHeartbeat.ControlAction)
+	}
+
+	_, err = store.ClearUserAffinity(context.Background(), UserClearRequest{Key: key, Reason: testOperatorClear})
+	if !IsRedisErrorKind(err, RedisErrorKindAmbiguousState) {
+		t.Fatalf("ClearUserAffinity active error = %v, want ambiguous_state", err)
+	}
+
+	if _, err := store.CloseSession(context.Background(), key, testRuntimeSessionID); err != nil {
+		t.Fatalf("CloseSession returned error: %v", err)
+	}
+
+	cleared, err := store.ClearUserAffinity(context.Background(), UserClearRequest{Key: key, Reason: testOperatorClear})
+	if err != nil {
+		t.Fatalf("ClearUserAffinity inactive returned error: %v", err)
+	}
+
+	if cleared.Status != testClearStatus {
+		t.Fatalf("clear result = %#v, want %q", cleared, testClearStatus)
+	}
+}
+
+// TestRedisBackendRuntimeScripts verifies backend runtime drain and clear behavior.
+func TestRedisBackendRuntimeScripts(t *testing.T) {
+	store, client, builder := redisIntegrationStore(t)
+	key := AffinityKey{Tenant: "blue", AccountKey: "runtime-backend@example.test"}
+	secondKey := AffinityKey{Tenant: "blue", AccountKey: "runtime-backend-second@example.test"}
+	backendID := testBackendIMAP
+
+	cleanupAffinity(t, client, builder, key, testRuntimeSessionID)
+	cleanupAffinity(t, client, builder, secondKey, "runtime-session-2")
+	cleanupBackend(t, client, builder, backendID)
+
+	openAttachedSession(t, store, key, testRuntimeSessionID, backendID)
+	openAttachedSession(t, store, secondKey, "runtime-session-2", backendID)
+
+	runtimeSet, err := store.SetBackendRuntime(context.Background(), BackendRuntimeMutation{
+		BackendIdentifier: backendID,
+		DrainEnabled:      true,
+		DrainMode:         "hard",
+		Reason:            "host drain",
+	})
+	if err != nil {
+		t.Fatalf("SetBackendRuntime returned error: %v", err)
+	}
+
+	if runtimeSet.MarkedSessionCount != 2 {
+		t.Fatalf("marked sessions = %d, want 2", runtimeSet.MarkedSessionCount)
+	}
+
+	drainHeartbeat, err := store.HeartbeatSession(context.Background(), key, testRuntimeSessionID, time.Second)
+	if err != nil {
+		t.Fatalf("HeartbeatSession after backend drain returned error: %v", err)
+	}
+
+	if drainHeartbeat.ControlAction != ControlActionDrain {
+		t.Fatalf("heartbeat control action after backend drain = %q, want drain", drainHeartbeat.ControlAction)
+	}
+
+	secondDrainHeartbeat, err := store.HeartbeatSession(context.Background(), secondKey, "runtime-session-2", time.Second)
+	if err != nil {
+		t.Fatalf("second HeartbeatSession after backend drain returned error: %v", err)
+	}
+
+	if secondDrainHeartbeat.ControlAction != ControlActionDrain {
+		t.Fatalf("second heartbeat control action after backend drain = %q, want drain", secondDrainHeartbeat.ControlAction)
+	}
+
+	runtimeClear, err := store.ClearBackendRuntime(context.Background(), BackendRuntimeClearRequest{
+		BackendIdentifier: backendID,
+		Reason:            "host drain finished",
+	})
+	if err != nil {
+		t.Fatalf("ClearBackendRuntime returned error: %v", err)
+	}
+
+	if runtimeClear.ActiveSessionCount != 2 {
+		t.Fatalf("active count after runtime clear = %d, want preserved count 2", runtimeClear.ActiveSessionCount)
+	}
+
+	if _, err := store.CloseSession(context.Background(), key, testRuntimeSessionID); err != nil {
+		t.Fatalf("CloseSession returned error: %v", err)
+	}
+
+	if _, err := store.CloseSession(context.Background(), secondKey, "runtime-session-2"); err != nil {
+		t.Fatalf("second CloseSession returned error: %v", err)
+	}
+}
+
+// TestRedisDrainExistingMoveAllowsAuditedSplit verifies explicit drain split semantics.
+func TestRedisDrainExistingMoveAllowsAuditedSplit(t *testing.T) {
+	const (
+		oldSessionID = "old-session"
+		newSessionID = "new-session"
+	)
+
+	store, client, builder := redisIntegrationStore(t)
+	key := AffinityKey{Tenant: "blue", AccountKey: "runtime-drain-move@example.test"}
+	backendID := testBackendIMAP
+
+	cleanupAffinity(t, client, builder, key, oldSessionID, newSessionID)
+	cleanupBackend(t, client, builder, backendID)
+
+	openAttachedSession(t, store, key, oldSessionID, backendID)
+
+	moved, err := store.MoveUser(context.Background(), UserMoveRequest{
+		Key:         key,
+		TargetShard: testShardB,
+		Strategy:    moveStrategyDrainExisting,
+		Reason:      "operator drain move",
+		Actor:       testOperatorActor,
+	})
+	if err != nil {
+		t.Fatalf("MoveUser drain_existing returned error: %v", err)
+	}
+
+	if moved.ControlAction != ControlActionNone || moved.TargetShard != testShardB {
+		t.Fatalf("drain move result = %#v", moved)
+	}
+
+	assertDrainExistingOverride(t, client, builder, key)
+	assertHeartbeatAction(t, store, key, oldSessionID, ControlActionNone)
+	assertOpenDrainSessionShard(t, store, key, newSessionID)
+
+	if _, err := store.CloseSession(context.Background(), key, oldSessionID); err != nil {
+		t.Fatalf("CloseSession old returned error: %v", err)
+	}
+
+	if _, err := store.CloseSession(context.Background(), key, newSessionID); err != nil {
+		t.Fatalf("CloseSession new returned error: %v", err)
+	}
+}
+
+// assertDrainExistingOverride verifies the audited override fields for a drain split.
+func assertDrainExistingOverride(t *testing.T, client *redis.Client, builder KeyBuilder, key AffinityKey) {
+	t.Helper()
+
+	keys, err := builder.AffinityKeys(key.Tenant, key.AccountKey)
+	if err != nil {
+		t.Fatalf("AffinityKeys returned error: %v", err)
+	}
+
+	override := client.HGetAll(context.Background(), keys.Override).Val()
+	if override["strategy"] != moveStrategyDrainExisting || override["target_shard"] != testShardB {
+		t.Fatalf("override = %#v, want drain_existing target", override)
+	}
+}
+
+// assertHeartbeatAction verifies one session heartbeat control decision.
+func assertHeartbeatAction(
+	t *testing.T,
+	store *RedisSessionStore,
+	key AffinityKey,
+	sessionID string,
+	want ControlAction,
+) {
+	t.Helper()
+
+	heartbeat, err := store.HeartbeatSession(context.Background(), key, sessionID, time.Second)
+	if err != nil {
+		t.Fatalf("HeartbeatSession returned error: %v", err)
+	}
+
+	if heartbeat.ControlAction != want {
+		t.Fatalf("heartbeat action = %q, want %q", heartbeat.ControlAction, want)
+	}
+}
+
+// assertOpenDrainSessionShard verifies a new drain-split session uses the target shard.
+func assertOpenDrainSessionShard(t *testing.T, store *RedisSessionStore, key AffinityKey, sessionID string) {
+	t.Helper()
+
+	newRecord := testSessionRecord(key, sessionID)
+	newRecord.ShardTag = testShardB
+
+	newAffinity, err := store.OpenSession(context.Background(), newRecord)
+	if err != nil {
+		t.Fatalf("OpenSession during drain_existing returned error: %v", err)
+	}
+
+	if newAffinity.ShardTag != testShardB {
+		t.Fatalf("new drain session shard = %q, want %q", newAffinity.ShardTag, testShardB)
+	}
+}
+
+// TestRedisHardMaintenanceMarksBackendSessions verifies hard maintenance bulk control.
+func TestRedisHardMaintenanceMarksBackendSessions(t *testing.T) {
+	store, client, builder := redisIntegrationStore(t)
+	firstKey := AffinityKey{Tenant: "blue", AccountKey: "hard-maintenance-a@example.test"}
+	secondKey := AffinityKey{Tenant: "blue", AccountKey: "hard-maintenance-b@example.test"}
+	backendID := testBackendIMAP
+
+	cleanupAffinity(t, client, builder, firstKey, "hard-session-a")
+	cleanupAffinity(t, client, builder, secondKey, "hard-session-b")
+	cleanupBackend(t, client, builder, backendID)
+
+	openAttachedSession(t, store, firstKey, "hard-session-a", backendID)
+	openAttachedSession(t, store, secondKey, "hard-session-b", backendID)
+
+	runtimeSet, err := store.SetBackendRuntime(context.Background(), BackendRuntimeMutation{
+		BackendIdentifier: backendID,
+		MaintenanceMode:   "hard",
+		Reason:            "hard maintenance",
+	})
+	if err != nil {
+		t.Fatalf("SetBackendRuntime hard maintenance returned error: %v", err)
+	}
+
+	if runtimeSet.MarkedSessionCount != 2 {
+		t.Fatalf("marked sessions = %d, want 2", runtimeSet.MarkedSessionCount)
+	}
+
+	for _, item := range []struct {
+		key       AffinityKey
+		sessionID string
+	}{
+		{key: firstKey, sessionID: "hard-session-a"},
+		{key: secondKey, sessionID: "hard-session-b"},
+	} {
+		heartbeat, err := store.HeartbeatSession(context.Background(), item.key, item.sessionID, time.Second)
+		if err != nil {
+			t.Fatalf("HeartbeatSession %s returned error: %v", item.sessionID, err)
+		}
+
+		if heartbeat.ControlAction != ControlActionDrain {
+			t.Fatalf("heartbeat action %s = %q, want drain", item.sessionID, heartbeat.ControlAction)
+		}
+	}
+}
+
+// TestRedisHealthOwnershipAndFencing verifies owner lease renewal and stale write rejection.
+func TestRedisHealthOwnershipAndFencing(t *testing.T) {
+	store, client, builder := redisIntegrationStore(t)
+	backendID := testBackendIMAP
+	instanceA := "director-health-a"
+	instanceB := "director-health-b"
+
+	cleanupHealth(t, client, builder, backendID, instanceA, instanceB)
+	publishTestInstanceHeartbeat(t, store, instanceA)
+
+	ownerA := acquireTestHealthOwner(t, store, instanceA, backendID, 75*time.Millisecond)
+	if !ownerA.Owned || ownerA.FencingToken <= 0 {
+		t.Fatalf("owner A = %#v, want owned with token", ownerA)
+	}
+
+	renewed := renewTestHealthOwner(t, store, instanceA, backendID, ownerA.FencingToken, 75*time.Millisecond)
+	if renewed.FencingToken != ownerA.FencingToken {
+		t.Fatalf("renew token = %d, want %d", renewed.FencingToken, ownerA.FencingToken)
+	}
+
+	publishTestInstanceHeartbeat(t, store, instanceB)
+	time.Sleep(120 * time.Millisecond)
+
+	ownerB := acquireTestHealthOwner(t, store, instanceB, backendID, time.Second)
+	if !ownerB.Owned || ownerB.FencingToken <= ownerA.FencingToken {
+		t.Fatalf("owner B = %#v, want newer fencing token after takeover", ownerB)
+	}
+
+	assertStaleHealthPublishRejected(t, store, instanceA, backendID, ownerA.FencingToken)
+
+	published := publishTestHealthState(t, store, instanceB, backendID, ownerB.FencingToken)
+	if published.Status != backend.HealthStatusHealthy || published.Generation == "" {
+		t.Fatalf("published health = %#v", published)
+	}
+}
+
+// publishTestInstanceHeartbeat records an integration-test instance heartbeat.
+func publishTestInstanceHeartbeat(t *testing.T, store *RedisSessionStore, instanceID string) {
+	t.Helper()
+
+	if err := store.PublishInstanceHeartbeat(context.Background(), instanceID, time.Second); err != nil {
+		t.Fatalf("PublishInstanceHeartbeat %s returned error: %v", instanceID, err)
+	}
+}
+
+// acquireTestHealthOwner acquires a health-owner lease for integration tests.
+func acquireTestHealthOwner(t *testing.T, store *RedisSessionStore, instanceID string, backendID string, ttl time.Duration) HealthOwnershipRecord {
+	t.Helper()
+
+	owner, err := store.AcquireHealthOwner(context.Background(), HealthOwnershipRequest{
+		InstanceID:        instanceID,
+		BackendIdentifier: backendID,
+		LeaseTTL:          ttl,
+	})
+	if err != nil {
+		t.Fatalf("AcquireHealthOwner %s returned error: %v", instanceID, err)
+	}
+
+	return owner
+}
+
+// renewTestHealthOwner renews a health-owner lease for integration tests.
+func renewTestHealthOwner(t *testing.T, store *RedisSessionStore, instanceID string, backendID string, token int64, ttl time.Duration) HealthOwnershipRecord {
+	t.Helper()
+
+	owner, err := store.RenewHealthOwner(context.Background(), HealthOwnershipRequest{
+		InstanceID:        instanceID,
+		BackendIdentifier: backendID,
+		LeaseTTL:          ttl,
+		FencingToken:      token,
+	})
+	if err != nil {
+		t.Fatalf("RenewHealthOwner %s returned error: %v", instanceID, err)
+	}
+
+	return owner
+}
+
+// assertStaleHealthPublishRejected verifies fenced stale health writes fail closed.
+func assertStaleHealthPublishRejected(t *testing.T, store *RedisSessionStore, instanceID string, backendID string, token int64) {
+	t.Helper()
+
+	_, err := store.PublishHealthState(context.Background(), HealthPublishRequest{
+		InstanceID:        instanceID,
+		BackendIdentifier: backendID,
+		FencingToken:      token,
+		State:             backend.HealthState{Enabled: true, Status: backend.HealthStatusHealthy},
+		TTL:               time.Second,
+	})
+	if !IsRedisErrorKind(err, RedisErrorKindAmbiguousState) {
+		t.Fatalf("stale PublishHealthState error = %v, want ambiguous_state", err)
+	}
+}
+
+// publishTestHealthState publishes a healthy integration-test health record.
+func publishTestHealthState(t *testing.T, store *RedisSessionStore, instanceID string, backendID string, token int64) backend.HealthState {
+	t.Helper()
+
+	published, err := store.PublishHealthState(context.Background(), HealthPublishRequest{
+		InstanceID:        instanceID,
+		BackendIdentifier: backendID,
+		FencingToken:      token,
+		State:             backend.HealthState{Enabled: true, Status: backend.HealthStatusHealthy},
+		TTL:               time.Second,
+	})
+	if err != nil {
+		t.Fatalf("PublishHealthState %s returned error: %v", instanceID, err)
+	}
+
+	return published
 }
 
 // TestRedisCloseReleasesAffinityWithoutGrace verifies configured immediate release behavior.
@@ -320,6 +1147,10 @@ func redisIntegrationStore(t *testing.T) (*RedisSessionStore, *redis.Client, Key
 	}
 
 	if addr == "" {
+		addr = packageRedisAddr
+	}
+
+	if addr == "" {
 		t.Skip("Redis integration skipped: set NAUTHILUS_DIRECTOR_REDIS_ADDR or REDIS_ADDR")
 	}
 
@@ -355,6 +1186,13 @@ func cleanupAffinity(t *testing.T, client *redis.Client, builder KeyBuilder, key
 
 	redisKeys := []string{keys.State, keys.Sessions, keys.Override}
 
+	userSessionIndex, err := builder.UserSessionIndexKey(key.Tenant, key.AccountKey)
+	if err != nil {
+		t.Fatalf("UserSessionIndexKey returned error: %v", err)
+	}
+
+	redisKeys = append(redisKeys, userSessionIndex)
+
 	for _, sessionID := range sessionIDs {
 		sessionKey, err := builder.SessionKey(key.Tenant, key.AccountKey, sessionID)
 		if err != nil {
@@ -366,6 +1204,121 @@ func cleanupAffinity(t *testing.T, client *redis.Client, builder KeyBuilder, key
 
 	if err := client.Del(context.Background(), redisKeys...).Err(); err != nil {
 		t.Fatalf("cleanup redis keys: %v", err)
+	}
+
+	if len(sessionIDs) > 0 {
+		if err := client.HDel(context.Background(), builder.SessionIndexKey(), sessionIDs...).Err(); err != nil {
+			t.Fatalf("cleanup session index: %v", err)
+		}
+	}
+}
+
+// cleanupBackend deletes one backend runtime state and membership index.
+func cleanupBackend(t *testing.T, client *redis.Client, builder KeyBuilder, backendID string) {
+	t.Helper()
+
+	backendKey, err := builder.BackendRuntimeKey(backendID)
+	if err != nil {
+		t.Fatalf("BackendRuntimeKey returned error: %v", err)
+	}
+
+	backendSessionsKey, err := builder.BackendSessionIndexKey(backendID)
+	if err != nil {
+		t.Fatalf("BackendSessionIndexKey returned error: %v", err)
+	}
+
+	if err := client.Del(context.Background(), backendKey, backendSessionsKey).Err(); err != nil {
+		t.Fatalf("cleanup backend keys: %v", err)
+	}
+
+	if err := client.SRem(context.Background(), builder.BackendIndexKey(), backendID).Err(); err != nil {
+		t.Fatalf("cleanup backend index: %v", err)
+	}
+}
+
+// cleanupHealth deletes one backend health state and instance heartbeat keys.
+func cleanupHealth(t *testing.T, client *redis.Client, builder KeyBuilder, backendID string, instanceIDs ...string) {
+	t.Helper()
+
+	ownerKey, err := builder.HealthOwnerKey(backendID)
+	if err != nil {
+		t.Fatalf("HealthOwnerKey returned error: %v", err)
+	}
+
+	stateKey, err := builder.HealthStateKey(backendID)
+	if err != nil {
+		t.Fatalf("HealthStateKey returned error: %v", err)
+	}
+
+	keys := []string{ownerKey, stateKey}
+
+	for _, instanceID := range instanceIDs {
+		instanceKey, err := builder.InstanceKey(instanceID)
+		if err != nil {
+			t.Fatalf("InstanceKey returned error: %v", err)
+		}
+
+		keys = append(keys, instanceKey)
+	}
+
+	if err := client.Del(context.Background(), keys...).Err(); err != nil {
+		t.Fatalf("cleanup health keys: %v", err)
+	}
+}
+
+// redisBackendActiveCount reads the Redis-coordinated active session count.
+func redisBackendActiveCount(t *testing.T, client *redis.Client, builder KeyBuilder, backendID string) int {
+	t.Helper()
+
+	backendKey, err := builder.BackendRuntimeKey(backendID)
+	if err != nil {
+		t.Fatalf("BackendRuntimeKey returned error: %v", err)
+	}
+
+	count, err := client.HGet(context.Background(), backendKey, "active_session_count").Int()
+	if err != nil && !errors.Is(err, redis.Nil) {
+		t.Fatalf("read backend active count: %v", err)
+	}
+
+	return count
+}
+
+// openAttachedSession opens a lease and registers its selected backend.
+func openAttachedSession(
+	t *testing.T,
+	store *RedisSessionStore,
+	key AffinityKey,
+	sessionID string,
+	backendID string,
+) {
+	t.Helper()
+
+	if _, err := store.OpenSession(context.Background(), testSessionRecord(key, sessionID)); err != nil {
+		t.Fatalf("OpenSession returned error: %v", err)
+	}
+
+	if _, err := store.AttachSelectedBackend(context.Background(), SessionBackendAttachment{
+		Key:               key,
+		SessionID:         sessionID,
+		BackendIdentifier: backendID,
+		MaxConnections:    10,
+	}); err != nil {
+		t.Fatalf("AttachSelectedBackend returned error: %v", err)
+	}
+}
+
+// testSessionRecord returns a complete session record fixture.
+func testSessionRecord(key AffinityKey, sessionID string) SessionRecord {
+	return SessionRecord{
+		ID:                 sessionID,
+		Key:                key,
+		Protocol:           testProtocolIMAP,
+		ListenerName:       "imaps",
+		ServiceName:        "imap",
+		ShardTag:           testShardA,
+		DirectorInstanceID: "director-test",
+		LeaseTTL:           2 * time.Second,
+		IdleGrace:          time.Second,
 	}
 }
 

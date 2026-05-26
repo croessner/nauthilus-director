@@ -42,6 +42,11 @@ const (
 	backendTLSPlaintext      = "plaintext"
 	backendTLSStartTLS       = "starttls"
 	backendTLSMinDefault     = "TLS1.2"
+	healthReasonAuth         = "auth"
+	healthReasonConnect      = "connect"
+	healthReasonProtocol     = "protocol"
+	healthReasonTLS          = "tls"
+	healthReasonUnknown      = "unknown"
 )
 
 var (
@@ -68,6 +73,11 @@ type TCPBackendConnector struct {
 	dialer BackendDialer
 }
 
+// HealthChecker performs authless light and credentialed deep backend checks.
+type HealthChecker struct {
+	connector BackendConnector
+}
+
 // NewTCPBackendConnector creates a connector with an optional test dialer.
 func NewTCPBackendConnector(dialer BackendDialer) *TCPBackendConnector {
 	if dialer == nil {
@@ -75,6 +85,41 @@ func NewTCPBackendConnector(dialer BackendDialer) *TCPBackendConnector {
 	}
 
 	return &TCPBackendConnector{dialer: dialer}
+}
+
+// NewHealthChecker creates a health checker that reuses production backend TLS rules.
+func NewHealthChecker(connector BackendConnector) *HealthChecker {
+	if connector == nil {
+		connector = NewTCPBackendConnector(nil)
+	}
+
+	return &HealthChecker{connector: connector}
+}
+
+// CheckBackend performs a bounded IMAP health check without weakening TLS verification.
+func (c *HealthChecker) CheckBackend(ctx context.Context, target backend.Backend, request backend.HealthCheckRequest) backend.HealthCheckResult {
+	connector := c.connector
+	if connector == nil {
+		connector = NewTCPBackendConnector(nil)
+	}
+
+	connection, err := connector.Connect(ctx, target, request.Timeout)
+	if err != nil {
+		return backend.HealthCheckResult{ReasonClass: backendHealthReason(err)}
+	}
+	defer func() { _ = connection.Conn().Close() }()
+
+	if !request.Deep {
+		return backend.HealthCheckResult{Healthy: true}
+	}
+
+	if err := AuthenticateHealthBackend(connection, target); err != nil {
+		return backend.HealthCheckResult{ReasonClass: backendHealthReason(err)}
+	}
+
+	_ = connection.writeCommand(connection.nextCommandTag(), "LOGOUT")
+
+	return backend.HealthCheckResult{Healthy: true}
 }
 
 // BackendConnection owns the backend stream while authentication is established.
@@ -379,6 +424,22 @@ func looksLikeUnixBackendAddress(address string) bool {
 	lower := strings.ToLower(address)
 
 	return strings.HasPrefix(lower, "unix:") || strings.HasPrefix(address, "/")
+}
+
+// backendHealthReason maps backend check errors to low-cardinality reason classes.
+func backendHealthReason(err error) string {
+	switch {
+	case errors.Is(err, ErrBackendTLS):
+		return healthReasonTLS
+	case errors.Is(err, ErrBackendConnect):
+		return healthReasonConnect
+	case errors.Is(err, ErrBackendProtocol):
+		return healthReasonProtocol
+	case errors.Is(err, ErrBackendAuth), errors.Is(err, ErrBackendAuthPolicy):
+		return healthReasonAuth
+	default:
+		return healthReasonUnknown
+	}
 }
 
 // backendTLSConfig builds a tls.Config from the selected backend policy.

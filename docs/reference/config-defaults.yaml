@@ -1,0 +1,543 @@
+auth:
+    authorities:
+        default:
+            grpc:
+                address: 127.0.0.1:50051
+                authority: nauthilus.example.org
+                caller_auth:
+                    basic:
+                        enabled: true
+                        password_file: <redacted>
+                        username: nauthilus-director
+                    bearer:
+                        enabled: false
+                        token_file: <redacted>
+                tls:
+                    ca_file: /etc/nauthilus-director/nauthilus-grpc-ca.pem
+                    enabled: true
+                    insecure_skip_verify: false
+                    server_name: nauthilus.example.org
+            http:
+                basic_auth:
+                    password_file: <redacted>
+                    username: nauthilus-director
+                content_type: application/json
+                endpoint: http://127.0.0.1:8080/api/v1/auth/json
+                tls:
+                    ca_file: /etc/nauthilus-director/nauthilus-http-ca.pem
+                    enabled: false
+                    insecure_skip_verify: false
+                    server_name: nauthilus.example.org
+            mechanisms:
+                bearer:
+                    enabled: true
+                    names:
+                        - xoauth2
+                        - oauthbearer
+                    token_max_bytes: 16384
+                    validation: nauthilus
+                password:
+                    enabled: true
+                    names:
+                        - plain
+                        - login
+            oidc:
+                audience_hint: mail
+                authority_mode: nauthilus
+                enabled: true
+                issuer_hint: https://auth.example.org
+                required_scopes:
+                    - email
+            timeout: 5s
+            transport: http
+director:
+    affinity:
+        active_user_pinning:
+            bind_to: shard_tag
+            enabled: true
+            failover:
+                allow_on_hard_down: true
+                allow_on_hard_maintenance: true
+                audit: true
+            idle_grace: 5m0s
+            key:
+                tenant: default
+                user: normalized_username
+            release: after_last_session_closed
+            required_for:
+                - imap
+                - pop3
+                - sieve
+        initial_placement: rendezvous_hash
+        local_cache:
+            enabled: true
+            max_entries: 100000
+            ttl: 15m0s
+        mode: active_user_pin
+    backend_pools:
+        imap-default:
+            backends:
+                - mailstore-a-imap
+                - mailstore-b-imap
+            protocol: imap
+            selector: rendezvous_hash
+        lmtp-default:
+            backends:
+                - mailstore-a-lmtp
+                - mailstore-b-lmtp
+            protocol: lmtp
+            selector: recipient_hash
+    backends:
+        mailstore-a-imap:
+            address: 127.0.0.1:1143
+            auth:
+                credential_replay:
+                    allowed_mechanisms:
+                        - plain
+                        - login
+                        - xoauth2
+                        - oauthbearer
+                    preserve_mechanism: true
+                    require_backend_tls: true
+                master_user:
+                    mechanism: plain
+                    password_file: <redacted>
+                    user_format: '{user}*{master_user}'
+                    username: nauthilus-director
+                mode: master_user
+                oauthbearer:
+                    require_tls: false
+                    token_file: ""
+                sasl:
+                    mechanism: ""
+                    password_file: ""
+                    require_tls: false
+                    username: ""
+            haproxy:
+                enabled: false
+            health_check:
+                deep_check: true
+                enabled: true
+                password_file: <redacted>
+                username: healthcheck@example.org
+            maintenance: disabled
+            max_connections: 1000
+            protocol: imap
+            shard_tag: mailstore-a
+            tls:
+                ca_file: /etc/nauthilus-director/mailstore-ca.pem
+                cert: ""
+                insecure_skip_verify: false
+                key: ""
+                min_tls_version: TLS1.2
+                mode: starttls
+                server_name: mailstore-a.example.org
+            weight: 100
+        mailstore-a-lmtp:
+            address: 127.0.0.1:2424
+            auth:
+                credential_replay:
+                    allowed_mechanisms: []
+                    preserve_mechanism: false
+                    require_backend_tls: false
+                master_user:
+                    mechanism: ""
+                    password_file: ""
+                    user_format: ""
+                    username: ""
+                mode: sasl
+                oauthbearer:
+                    require_tls: true
+                    token_file: <redacted>
+                sasl:
+                    mechanism: plain
+                    password_file: <redacted>
+                    require_tls: true
+                    username: nauthilus-director-lmtp
+            haproxy:
+                enabled: false
+            health_check:
+                deep_check: true
+                enabled: true
+                password_file: <redacted>
+                username: healthcheck@example.org
+            maintenance: disabled
+            max_connections: 1000
+            protocol: lmtp
+            shard_tag: mailstore-a
+            tls:
+                ca_file: /etc/nauthilus-director/mailstore-ca.pem
+                cert: /etc/nauthilus-director/lmtp-backend-client.crt
+                insecure_skip_verify: false
+                key: <redacted>
+                min_tls_version: TLS1.2
+                mode: implicit
+                server_name: mailstore-a.example.org
+            weight: 100
+        mailstore-b-imap:
+            address: 127.0.0.1:2143
+            auth:
+                credential_replay:
+                    allowed_mechanisms:
+                        - plain
+                        - login
+                        - xoauth2
+                        - oauthbearer
+                    preserve_mechanism: true
+                    require_backend_tls: true
+                master_user:
+                    mechanism: plain
+                    password_file: <redacted>
+                    user_format: '{user}*{master_user}'
+                    username: nauthilus-director
+                mode: master_user
+                oauthbearer:
+                    require_tls: false
+                    token_file: ""
+                sasl:
+                    mechanism: ""
+                    password_file: ""
+                    require_tls: false
+                    username: ""
+            haproxy:
+                enabled: false
+            health_check:
+                deep_check: true
+                enabled: true
+                password_file: <redacted>
+                username: healthcheck@example.org
+            maintenance: disabled
+            max_connections: 1000
+            protocol: imap
+            shard_tag: mailstore-b
+            tls:
+                ca_file: /etc/nauthilus-director/mailstore-ca.pem
+                cert: ""
+                insecure_skip_verify: false
+                key: ""
+                min_tls_version: TLS1.2
+                mode: starttls
+                server_name: mailstore-b.example.org
+            weight: 100
+        mailstore-b-lmtp:
+            address: 127.0.0.1:3424
+            auth:
+                credential_replay:
+                    allowed_mechanisms: []
+                    preserve_mechanism: false
+                    require_backend_tls: false
+                master_user:
+                    mechanism: ""
+                    password_file: ""
+                    user_format: ""
+                    username: ""
+                mode: sasl
+                oauthbearer:
+                    require_tls: true
+                    token_file: <redacted>
+                sasl:
+                    mechanism: plain
+                    password_file: <redacted>
+                    require_tls: true
+                    username: nauthilus-director-lmtp
+            haproxy:
+                enabled: false
+            health_check:
+                deep_check: true
+                enabled: true
+                password_file: <redacted>
+                username: healthcheck@example.org
+            maintenance: disabled
+            max_connections: 1000
+            protocol: lmtp
+            shard_tag: mailstore-b
+            tls:
+                ca_file: /etc/nauthilus-director/mailstore-ca.pem
+                cert: /etc/nauthilus-director/lmtp-backend-client.crt
+                insecure_skip_verify: false
+                key: <redacted>
+                min_tls_version: TLS1.2
+                mode: implicit
+                server_name: mailstore-b.example.org
+            weight: 100
+    health:
+        healthy_after: 2
+        interval: 5s
+        jitter: 500ms
+        timeout: 3s
+        unhealthy_after: 3
+    listeners:
+        imap:
+            address: 127.0.0.1:10143
+            authority: default
+            backend_pool: imap-default
+            imap:
+                auth_mechanisms:
+                    - plain
+                    - xoauth2
+                    - oauthbearer
+                capabilities:
+                    - IMAP4rev1
+                    - ID
+                    - SASL-IR
+                    - AUTH=PLAIN
+                    - AUTH=XOAUTH2
+                    - AUTH=OAUTHBEARER
+                require_id_before_auth: false
+            network: tcp
+            protocol: imap
+            proxy_protocol:
+                enabled: false
+                trusted_cidrs: []
+            service_name: imap
+            tls:
+                cert: /etc/nauthilus-director/imap.crt
+                client_ca: ""
+                key: <redacted>
+                min_tls_version: TLS1.2
+                mode: starttls
+                require_client_cert: false
+        imaps:
+            address: 127.0.0.1:10993
+            authority: default
+            backend_pool: imap-default
+            imap:
+                auth_mechanisms:
+                    - plain
+                    - xoauth2
+                    - oauthbearer
+                capabilities:
+                    - IMAP4rev1
+                    - ID
+                    - SASL-IR
+                    - AUTH=PLAIN
+                    - AUTH=XOAUTH2
+                    - AUTH=OAUTHBEARER
+                require_id_before_auth: false
+            network: tcp
+            protocol: imap
+            proxy_protocol:
+                enabled: false
+                trusted_cidrs: []
+            service_name: imaps
+            tls:
+                cert: /etc/nauthilus-director/imaps.crt
+                client_ca: ""
+                key: <redacted>
+                min_tls_version: TLS1.2
+                mode: implicit
+                require_client_cert: false
+        lmtp:
+            address: 127.0.0.1:10024
+            authority: default
+            backend_pool: lmtp-default
+            lmtp:
+                capabilities:
+                    - CHUNKING
+                    - SMTPUTF8
+                    - STARTTLS
+                    - AUTH PLAIN LOGIN XOAUTH2 OAUTHBEARER
+                client_auth:
+                    authority: default
+                    mechanisms:
+                        - plain
+                        - login
+                        - xoauth2
+                        - oauthbearer
+                    required: true
+                smtputf8: true
+            network: tcp
+            protocol: lmtp
+            proxy_protocol:
+                enabled: false
+                trusted_cidrs: []
+            service_name: lmtp
+            tls:
+                cert: /etc/nauthilus-director/lmtp.crt
+                client_ca: /etc/nauthilus-director/lmtp-client-ca.pem
+                key: <redacted>
+                min_tls_version: TLS1.2
+                mode: starttls
+                require_client_cert: false
+        lmtps:
+            address: 127.0.0.1:11024
+            authority: default
+            backend_pool: lmtp-default
+            lmtp:
+                capabilities:
+                    - CHUNKING
+                    - SMTPUTF8
+                    - STARTTLS
+                    - AUTH PLAIN LOGIN XOAUTH2 OAUTHBEARER
+                client_auth:
+                    authority: default
+                    mechanisms:
+                        - plain
+                        - login
+                        - xoauth2
+                        - oauthbearer
+                    required: true
+                smtputf8: true
+            network: tcp
+            protocol: lmtp
+            proxy_protocol:
+                enabled: false
+                trusted_cidrs: []
+            service_name: lmtps
+            tls:
+                cert: /etc/nauthilus-director/lmtps.crt
+                client_ca: /etc/nauthilus-director/lmtp-client-ca.pem
+                key: <redacted>
+                min_tls_version: TLS1.2
+                mode: implicit
+                require_client_cert: false
+    maintenance:
+        audit: true
+        default_mode: disabled
+        drain_timeout: 5m0s
+        hard_kill_grace: 30s
+        soft_allows_active_pins: true
+    routing:
+        default_selector: rendezvous_hash
+        default_shard: default
+        failover:
+            enabled: true
+            strategy: same_shard_then_any_healthy
+        hash_key: username
+        lmtp_hash_key: recipient
+    runtime_overrides:
+        backends:
+            allow_drain: true
+            allow_in_out: true
+            allow_weight_override: true
+            max_weight: 10000
+            min_weight: 0
+        config_writable: false
+        enabled: true
+        users:
+            allow_affinity_clear: true
+            allow_kick: true
+            allow_move: true
+            move_strategies:
+                - new_sessions_only
+                - kick_existing
+                - drain_existing
+    security:
+        fail_closed: true
+        max_preauth_line_bytes: 8192
+        max_preauth_literal_bytes: 65536
+observability:
+    log:
+        add_source: false
+        json: true
+        level: info
+        redact_secrets: true
+        username_hash_salt_file: <redacted>
+    metrics:
+        enabled: true
+        path: /metrics
+        runtime_metrics: true
+    profiles:
+        block:
+            enabled: false
+        pprof:
+            enabled: false
+    tracing:
+        enabled: true
+        endpoint: 127.0.0.1:4317
+        exporter: otlp
+        sample_ratio: 0.1
+        service_name: nauthilus-director
+runtime:
+    clients:
+        http:
+            idle_connection_timeout: 30s
+            max_connections_per_host: 20
+            max_idle_connections: 20
+            max_idle_connections_per_host: 10
+    instance_name: nauthilus-director-01
+    process:
+        shutdown_timeout: 30s
+    servers:
+        control:
+            address: 127.0.0.1:9090
+            auth:
+                bearer:
+                    enabled: true
+                    token_file: <redacted>
+                mtls:
+                    enabled: false
+                oidc:
+                    authority: default
+                    enabled: true
+                    required_scopes:
+                        - nauthilus-director.admin
+                    validation: nauthilus
+            enabled: true
+            tls:
+                cert: /etc/nauthilus-director/control.crt
+                client_ca: /etc/nauthilus-director/control-client-ca.pem
+                enabled: false
+                key: <redacted>
+                min_tls_version: TLS1.2
+                require_client_cert: false
+    timeouts:
+        auth: 10s
+        backend_connect: 5s
+        nauthilus: 5s
+        preauth: 30s
+        proxy_idle: 30m0s
+        shutdown: 30s
+storage:
+    redis:
+        auth:
+            password_file: <redacted>
+            username: nauthilus-director
+        cluster:
+            addresses:
+                - 127.0.0.1:6379
+            max_redirects: 8
+            read_only: false
+            route_by_latency: false
+            route_randomly: false
+        database_number: 0
+        dial_timeout: 5s
+        enabled: true
+        health:
+            enabled: true
+            failure_threshold: 3
+            interval: 5s
+            timeout: 2s
+        key_prefix: 'nauthilus-director:'
+        min_idle_connections: 4
+        mode: standalone
+        namespaces:
+            affinity: 'affinity:'
+            backend_runtime: 'runtime:backend:'
+            sessions: 'sessions:'
+            user_runtime: 'runtime:user:'
+        pool_size: 20
+        pool_timeout: 5s
+        protocol: 3
+        read_timeout: 2s
+        retries:
+            max_attempts: 3
+            max_backoff: 1s
+            min_backoff: 100ms
+        schema_version: 1
+        sentinel:
+            addresses: []
+            master_name: ""
+            password_file: <redacted>
+            username: ""
+        standalone:
+            address: 127.0.0.1:6379
+        tls:
+            ca_file: /etc/nauthilus-director/redis-ca.pem
+            cert: /etc/nauthilus-director/redis-client.crt
+            enabled: true
+            insecure_skip_verify: false
+            key: <redacted>
+            min_tls_version: TLS1.2
+            server_name: redis.example.org
+        write_timeout: 2s

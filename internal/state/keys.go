@@ -118,6 +118,46 @@ func (b KeyBuilder) BackendRuntimeKey(backendID string) (string, error) {
 	return b.namespaceBase() + ":runtime:backend:" + backendID, nil
 }
 
+// InstanceKey returns the Redis key for one director instance heartbeat.
+func (b KeyBuilder) InstanceKey(instanceID string) (string, error) {
+	instanceID = strings.TrimSpace(instanceID)
+	if instanceID == "" {
+		return "", newStateError(RedisErrorKindAmbiguousState, "keys", "instance id required", nil)
+	}
+
+	return b.namespaceBase() + ":runtime:instance:" + instanceID, nil
+}
+
+// HealthOwnerKey returns the Redis key for one backend health ownership lease.
+func (b KeyBuilder) HealthOwnerKey(backendID string) (string, error) {
+	backendID = strings.TrimSpace(backendID)
+	if backendID == "" {
+		return "", newStateError(RedisErrorKindAmbiguousState, "keys", "backend id required", nil)
+	}
+
+	return b.namespaceBase() + ":health:backend:" + backendID + ":owner", nil
+}
+
+// HealthStateKey returns the Redis key for one backend published health result.
+func (b KeyBuilder) HealthStateKey(backendID string) (string, error) {
+	backendID = strings.TrimSpace(backendID)
+	if backendID == "" {
+		return "", newStateError(RedisErrorKindAmbiguousState, "keys", "backend id required", nil)
+	}
+
+	return b.namespaceBase() + ":health:backend:" + backendID + ":state", nil
+}
+
+// BackendSessionIndexKey returns the repairable backend-to-session index key.
+func (b KeyBuilder) BackendSessionIndexKey(backendID string) (string, error) {
+	backendID = strings.TrimSpace(backendID)
+	if backendID == "" {
+		return "", newStateError(RedisErrorKindAmbiguousState, "keys", "backend id required", nil)
+	}
+
+	return b.namespaceBase() + ":idx:backend:" + backendID + ":sessions", nil
+}
+
 // SessionIndexKey returns the repairable session index key.
 func (b KeyBuilder) SessionIndexKey() string {
 	return b.namespaceBase() + ":idx:sessions"
@@ -126,6 +166,21 @@ func (b KeyBuilder) SessionIndexKey() string {
 // BackendIndexKey returns the repairable backend index key.
 func (b KeyBuilder) BackendIndexKey() string {
 	return b.namespaceBase() + ":idx:backends"
+}
+
+// UserIndexKey returns the repairable user-affinity index key.
+func (b KeyBuilder) UserIndexKey() string {
+	return b.namespaceBase() + ":idx:users"
+}
+
+// UserSessionIndexKey returns the repairable user-to-session index key.
+func (b KeyBuilder) UserSessionIndexKey(tenant string, normalizedAccount string) (string, error) {
+	hash, err := b.AffinityHash(tenant, normalizedAccount)
+	if err != nil {
+		return "", err
+	}
+
+	return b.namespaceBase() + ":idx:user:" + hash + ":sessions", nil
 }
 
 // namespaceBase returns the versioned Redis namespace prefix.

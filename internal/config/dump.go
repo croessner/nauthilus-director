@@ -31,10 +31,9 @@ type DumpOptions struct {
 	IncludeProtected bool
 }
 
-// DumpDefaults returns canonical defaults in the requested dump format.
-func (l *Loader) DumpDefaults(options DumpOptions) ([]byte, error) {
-	defaults := DefaultConfig()
-	settings, err := configToMap(defaults, true)
+// MapDefaults returns canonical defaults as a redaction-aware plain settings map.
+func (l *Loader) MapDefaults(options DumpOptions) (map[string]any, error) {
+	settings, err := configToMap(DefaultConfig(), true)
 	if err != nil {
 		return nil, err
 	}
@@ -42,11 +41,38 @@ func (l *Loader) DumpDefaults(options DumpOptions) ([]byte, error) {
 		settings = redactProtectedValues(settings, reflect.TypeFor[Config]())
 	}
 
+	return settings, nil
+}
+
+// DumpDefaults returns canonical defaults in the requested dump format.
+func (l *Loader) DumpDefaults(options DumpOptions) ([]byte, error) {
+	settings, err := l.MapDefaults(options)
+	if err != nil {
+		return nil, err
+	}
+
 	return marshalDump(settings, options.Format)
 }
 
-// DumpNonDefault returns effective non-default config in the requested format.
-func (s *Snapshot) DumpNonDefault(options DumpOptions) ([]byte, error) {
+// MapEffective returns the full effective config as a redaction-aware plain settings map.
+func (s *Snapshot) MapEffective(options DumpOptions) (map[string]any, error) {
+	if s == nil {
+		return nil, fmt.Errorf("config snapshot is nil")
+	}
+
+	settings, err := configToMap(s.Config, true)
+	if err != nil {
+		return nil, err
+	}
+	if !options.IncludeProtected {
+		settings = redactProtectedValues(settings, reflect.TypeFor[Config]())
+	}
+
+	return settings, nil
+}
+
+// MapNonDefault returns effective non-default config as a redaction-aware plain settings map.
+func (s *Snapshot) MapNonDefault(options DumpOptions) (map[string]any, error) {
 	if s == nil {
 		return nil, fmt.Errorf("config snapshot is nil")
 	}
@@ -63,6 +89,16 @@ func (s *Snapshot) DumpNonDefault(options DumpOptions) ([]byte, error) {
 	diff := diffMaps(defaults, effective)
 	if !options.IncludeProtected {
 		diff = redactProtectedValues(diff, reflect.TypeFor[Config]())
+	}
+
+	return diff, nil
+}
+
+// DumpNonDefault returns effective non-default config in the requested format.
+func (s *Snapshot) DumpNonDefault(options DumpOptions) ([]byte, error) {
+	diff, err := s.MapNonDefault(options)
+	if err != nil {
+		return nil, err
 	}
 
 	return marshalDump(diff, options.Format)

@@ -136,6 +136,37 @@ func TestPipeInvokesHeartbeatAndCloseHooks(t *testing.T) {
 	}
 }
 
+// TestPipeClassifiesHeartbeatControlAction verifies operator actions are not generic state failures.
+func TestPipeClassifiesHeartbeatControlAction(t *testing.T) {
+	frontendClient, frontendProxy := net.Pipe()
+	backendProxy, backendServer := net.Pipe()
+
+	defer func() { _ = frontendClient.Close() }()
+	defer func() { _ = backendServer.Close() }()
+
+	lease := &recordingLeaseLifecycle{heartbeatErr: NewControlActionError("kick")}
+	resultCh := runTestPipe(t, PipeConfig{
+		Frontend:          frontendProxy,
+		Backend:           backendProxy,
+		IdleTimeout:       time.Second,
+		HeartbeatInterval: 10 * time.Millisecond,
+		Lease:             lease,
+	})
+
+	result := waitPipeResult(t, resultCh)
+	if result.Class != ResultControlAction {
+		t.Fatalf("result class = %q, want %q", result.Class, ResultControlAction)
+	}
+
+	if !IsControlActionError(result.Err) {
+		t.Fatalf("result error = %v, want control action error", result.Err)
+	}
+
+	if lease.closes != 1 {
+		t.Fatalf("close hooks = %d, want 1", lease.closes)
+	}
+}
+
 // pipeRunResult carries a proxy run result and error through a test channel.
 type pipeRunResult struct {
 	result Result
@@ -186,15 +217,16 @@ func assertReadExact(t *testing.T, reader io.Reader, want string) {
 
 // recordingLeaseLifecycle records heartbeat and close callbacks.
 type recordingLeaseLifecycle struct {
-	heartbeats int
-	closes     int
+	heartbeats   int
+	closes       int
+	heartbeatErr error
 }
 
 // Heartbeat records one active lease refresh.
 func (l *recordingLeaseLifecycle) Heartbeat(context.Context) error {
 	l.heartbeats++
 
-	return nil
+	return l.heartbeatErr
 }
 
 // Close records one terminal lease release.

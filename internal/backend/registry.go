@@ -28,18 +28,6 @@ import (
 	"github.com/croessner/nauthilus-director/internal/config"
 )
 
-// MaintenanceMode describes runtime backend placement eligibility.
-type MaintenanceMode string
-
-const (
-	// MaintenanceModeDisabled permits normal placement.
-	MaintenanceModeDisabled MaintenanceMode = "disabled"
-	// MaintenanceModeHard rejects new sessions and may terminate active sessions.
-	MaintenanceModeHard MaintenanceMode = "hard"
-	// MaintenanceModeSoft excludes new initial placements but preserves pins.
-	MaintenanceModeSoft MaintenanceMode = "soft"
-)
-
 // Backend describes one protocol-specific backend entry.
 type Backend struct {
 	Identifier      string
@@ -52,6 +40,8 @@ type Backend struct {
 	MaintenanceMode MaintenanceMode
 	Weight          int
 	MaxConnections  int
+	HealthEnabled   bool
+	Health          HealthConfig
 }
 
 // TLSConfig describes the transport security policy for one backend connection.
@@ -87,6 +77,14 @@ type CredentialReplayConfig struct {
 	AllowedMechanisms []string
 }
 
+// HealthConfig describes the credentialed backend health-check policy.
+type HealthConfig struct {
+	Enabled   bool
+	DeepCheck bool
+	Username  string
+	Password  config.SecretString
+}
+
 // Pool describes one configured backend pool and its selector.
 type Pool struct {
 	Name     string
@@ -97,6 +95,7 @@ type Pool struct {
 
 // Registry exposes backend entries without owning selection policy.
 type Registry interface {
+	AllBackends(ctx context.Context) ([]Backend, error)
 	BackendsForShard(ctx context.Context, request RegistryRequest) ([]Backend, error)
 	Lookup(ctx context.Context, identifier string) (Backend, error)
 	Pool(ctx context.Context, name string) (Pool, error)
@@ -183,6 +182,8 @@ type registryKey struct {
 
 // NewStaticRegistry builds a fail-closed static backend registry from typed config.
 func NewStaticRegistry(director config.DirectorConfig) (*StaticRegistry, error) {
+	director = director.Normalize()
+
 	registry := &StaticRegistry{
 		pools:    make(map[string]Pool, len(director.BackendPools)),
 		backends: make(map[string]Backend, len(director.Backends)),
@@ -233,6 +234,27 @@ func NewStaticRegistry(director config.DirectorConfig) (*StaticRegistry, error) 
 	registry.sort()
 
 	return registry, nil
+}
+
+// AllBackends returns every configured backend in deterministic order.
+func (r *StaticRegistry) AllBackends(_ context.Context) ([]Backend, error) {
+	if r == nil {
+		return nil, newBackendError(ErrorKindConfig, "registry", "registry unavailable", nil)
+	}
+
+	identifiers := make([]string, 0, len(r.backends))
+	for identifier := range r.backends {
+		identifiers = append(identifiers, identifier)
+	}
+
+	sort.Strings(identifiers)
+
+	backends := make([]Backend, 0, len(identifiers))
+	for _, identifier := range identifiers {
+		backends = append(backends, r.backends[identifier])
+	}
+
+	return backends, nil
 }
 
 // BackendsForShard returns configured backends matching protocol, pool and shard.
@@ -390,6 +412,8 @@ func newBackend(poolName string, identifier string, backend config.BackendConfig
 		MaintenanceMode: mode,
 		Weight:          backend.Weight,
 		MaxConnections:  backend.MaxConnections,
+		HealthEnabled:   backend.HealthCheck.Enabled,
+		Health:          newBackendHealthConfig(backend.HealthCheck),
 	}, nil
 }
 
@@ -509,6 +533,16 @@ func newBackendAuthConfig(auth config.BackendAuthConfig) AuthConfig {
 			PreserveMechanism: auth.CredentialReplay.PreserveMechanism,
 			AllowedMechanisms: normalizeMechanisms(auth.CredentialReplay.AllowedMechanisms),
 		},
+	}
+}
+
+// newBackendHealthConfig copies health config without exposing credentials.
+func newBackendHealthConfig(health config.BackendHealthConfig) HealthConfig {
+	return HealthConfig{
+		Enabled:   health.Enabled,
+		DeepCheck: health.DeepCheck,
+		Username:  strings.TrimSpace(health.Username),
+		Password:  health.PasswordFile,
 	}
 }
 

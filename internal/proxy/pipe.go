@@ -307,7 +307,12 @@ func startHeartbeat(ctx context.Context, events chan<- pipeEvent, config PipeCon
 				return
 			case <-ticker.C:
 				if err := config.Lease.Heartbeat(ctx); err != nil {
-					events <- pipeEvent{class: ResultStateFailed, err: err}
+					class := ResultStateFailed
+					if IsControlActionError(err) {
+						class = ResultControlAction
+					}
+
+					events <- pipeEvent{class: class, err: err}
 
 					return
 				}

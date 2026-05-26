@@ -362,6 +362,7 @@ director:
 
   routing:
     default_selector: rendezvous_hash
+    default_shard: default
     hash_key: username
     lmtp_hash_key: recipient
     failover:

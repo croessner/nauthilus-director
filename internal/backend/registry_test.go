@@ -18,6 +18,8 @@ package backend
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/croessner/nauthilus-director/internal/config"
@@ -96,6 +98,25 @@ func TestStaticRegistryFailsClosedOnPoolProtocolMismatch(t *testing.T) {
 	_, err := NewStaticRegistry(cfg.Director)
 	if !IsErrorKind(err, ErrorKindConfig) {
 		t.Fatalf("NewStaticRegistry error = %v, want config", err)
+	}
+}
+
+// TestBackendHealthSecretRedaction verifies health credentials stay redacted in diagnostics.
+func TestBackendHealthSecretRedaction(t *testing.T) {
+	registry := mustStaticRegistry(t, config.DefaultConfig())
+
+	entry, err := registry.Lookup(context.Background(), testBackendID)
+	if err != nil {
+		t.Fatalf("Lookup returned error: %v", err)
+	}
+
+	formatted := fmt.Sprintf("%#v %s", entry.Health.Password, entry.Health.Password)
+	if strings.Contains(formatted, entry.Health.Password.Value()) {
+		t.Fatalf("formatted health password leaked: %s", formatted)
+	}
+
+	if !strings.Contains(formatted, "<redacted>") {
+		t.Fatalf("formatted health password = %s, want redaction marker", formatted)
 	}
 }
 

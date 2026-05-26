@@ -17,6 +17,9 @@ go_cmd="${GO:-go}"
 docker_cmd="${DOCKER:-docker}"
 dovecot_image="${DOVECOT_IMAGE:-dovecot/dovecot:2.4.3-dev}"
 interop_password="${NAUTHILUS_DIRECTOR_INTEROP_PASSWORD:-e2e-secret-password}"
+tmpdir="$(mktemp -d)"
+
+trap 'rm -rf "$tmpdir"' EXIT HUP INT TERM
 
 close_imap_probe() {
 	{ exec 3>&-; } 2>/dev/null || true
@@ -107,6 +110,7 @@ container_id="$(
 
 cleanup() {
 	"$docker_cmd" rm -f "$container_id" >/dev/null 2>&1 || true
+	rm -rf "$tmpdir"
 }
 trap cleanup EXIT HUP INT TERM
 
@@ -132,7 +136,10 @@ fi
 
 printf 'nauthilus-director e2e-interop: Dovecot IMAP mapped at %s\n' "$mapped"
 
+"$go_cmd" build -mod=vendor -trimpath -o "$tmpdir/nauthilus-director" ./cmd/nauthilus-director
+
 NAUTHILUS_DIRECTOR_INTEROP_BACKEND_ADDR="$mapped" \
+	NAUTHILUS_DIRECTOR_E2E_SERVER_BINARY="$tmpdir/nauthilus-director" \
 	"$go_cmd" test -mod=vendor -tags=interop -count=1 -run TestDovecotCredentialReplayInterop ./test/e2e
 
-printf 'ok e2e-interop: real Dovecot login and post-auth proxy handoff passed\n'
+printf 'ok e2e-interop: real server binary, Dovecot login and post-auth proxy handoff passed\n'

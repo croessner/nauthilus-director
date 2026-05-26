@@ -258,6 +258,7 @@ func defaultDirector() DirectorConfig {
 		},
 		Routing: RoutingConfig{
 			DefaultSelector: "rendezvous_hash",
+			DefaultShard:    "default",
 			HashKey:         "username",
 			LMTPHashKey:     "recipient",
 			Failover: FailoverConfig{

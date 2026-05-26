@@ -20,6 +20,12 @@ import "testing"
 
 const testOperationAuthenticate = "authenticate"
 
+const (
+	testReasonClassOther                  = "other"
+	testReasonClassRuntimeHardMaintenance = "runtime_hard_maintenance"
+	testReasonClassRuntimeOut             = "runtime_out"
+)
+
 // TestMetricLabelAllowlistAcceptsDocumentedLabels verifies approved labels.
 func TestMetricLabelAllowlistAcceptsDocumentedLabels(t *testing.T) {
 	labels := map[string]string{
@@ -176,5 +182,63 @@ func TestEventNormalizationRejectsForbiddenMetricLabels(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("NewEvent accepted raw_error as a metric label")
+	}
+}
+
+// TestRuntimeEventVocabularyCoversControlSurface verifies runtime hooks are named explicitly.
+func TestRuntimeEventVocabularyCoversControlSurface(t *testing.T) {
+	required := map[string]bool{
+		EventBackendHealthTransition:     false,
+		EventBackendEffectiveState:       false,
+		EventBackendRuntimeOperation:     false,
+		EventBackendMaintenanceOperation: false,
+		EventBackendDrain:                false,
+		EventSelectorExclusion:           false,
+		EventSessionAttach:               false,
+		EventSessionClose:                false,
+		EventSessionReap:                 false,
+		EventSessionKill:                 false,
+		EventUserMove:                    false,
+		EventUserKick:                    false,
+		EventAffinityClear:               false,
+		EventRouteLookup:                 false,
+		EventReload:                      false,
+	}
+
+	for _, name := range RuntimeEventNames() {
+		if required[name] {
+			t.Fatalf("runtime event %q is listed more than once", name)
+		}
+
+		if _, ok := required[name]; ok {
+			required[name] = true
+		}
+	}
+
+	if len(RuntimeEventNames()) != len(required) {
+		t.Fatalf("RuntimeEventNames returned %d events, want %d", len(RuntimeEventNames()), len(required))
+	}
+
+	for name, seen := range required {
+		if !seen {
+			t.Fatalf("runtime event %q is missing from RuntimeEventNames", name)
+		}
+	}
+}
+
+// TestReasonClassNormalizationKeepsMetricValuesBounded verifies raw errors become generic classes.
+func TestReasonClassNormalizationKeepsMetricValuesBounded(t *testing.T) {
+	tests := map[string]string{
+		testReasonClassRuntimeOut:                  testReasonClassRuntimeOut,
+		"Runtime Hard Maintenance":                 testReasonClassRuntimeHardMaintenance,
+		"dial tcp 127.0.0.1:143: secret token":     testReasonClassOther,
+		"session_id":                               testReasonClassOther,
+		"custom per-user backend error alice@test": testReasonClassOther,
+	}
+
+	for input, want := range tests {
+		if got := NormalizeReasonClass(input); got != want {
+			t.Fatalf("NormalizeReasonClass(%q) = %q, want %q", input, got, want)
+		}
 	}
 }

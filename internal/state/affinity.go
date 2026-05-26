@@ -21,6 +21,20 @@ import (
 	"time"
 )
 
+// ControlAction describes a heartbeat-observed runtime control action.
+type ControlAction string
+
+const (
+	// ControlActionNone means the session may continue proxying.
+	ControlActionNone ControlAction = "none"
+	// ControlActionKick asks the proxy to close after an operator kick.
+	ControlActionKick ControlAction = "kick"
+	// ControlActionDrain asks the proxy to close because backend drain or maintenance affected it.
+	ControlActionDrain ControlAction = "drain"
+	// ControlActionMoveGenerationChanged asks the proxy to close after a move-generation change.
+	ControlActionMoveGenerationChanged ControlAction = "move_generation_changed"
+)
+
 // AffinityKey identifies a user affinity record without requiring raw usernames in keys.
 type AffinityKey struct {
 	Tenant     string
@@ -38,16 +52,136 @@ type AffinityRecord struct {
 	ServerTime         time.Time
 	Status             string
 	Present            bool
+	ControlAction      ControlAction
+	ControlGeneration  string
+	BackendIdentifier  string
 }
 
 // SessionRecord describes one lease-backed frontend session.
 type SessionRecord struct {
-	ID        string
-	Key       AffinityKey
-	Protocol  string
-	ShardTag  string
-	LeaseTTL  time.Duration
-	IdleGrace time.Duration
+	ID                 string
+	Key                AffinityKey
+	Protocol           string
+	ListenerName       string
+	ServiceName        string
+	ShardTag           string
+	DirectorInstanceID string
+	LeaseTTL           time.Duration
+	IdleGrace          time.Duration
+}
+
+// SessionBackendAttachment describes selected-backend registration after placement.
+type SessionBackendAttachment struct {
+	Key               AffinityKey
+	SessionID         string
+	BackendIdentifier string
+	MaxConnections    int
+}
+
+// SessionBackendRecord describes the attached backend count and session generation.
+type SessionBackendRecord struct {
+	Status             string
+	BackendIdentifier  string
+	BackendActiveCount int
+	ServerTime         time.Time
+	LeaseExpiresAt     time.Time
+	ControlGeneration  string
+}
+
+// UserMoveRequest describes an atomic user move state mutation.
+type UserMoveRequest struct {
+	Key         AffinityKey
+	TargetShard string
+	Strategy    string
+	Reason      string
+	Actor       string
+}
+
+// UserKickRequest describes an atomic user kick state mutation.
+type UserKickRequest struct {
+	Key    AffinityKey
+	Reason string
+	Actor  string
+}
+
+// UserClearRequest describes an atomic inactive-affinity clear mutation.
+type UserClearRequest struct {
+	Key              AffinityKey
+	AllowActiveClear bool
+	Reason           string
+	Actor            string
+}
+
+// UserRuntimeRecord describes Redis-backed user runtime state after a mutation.
+type UserRuntimeRecord struct {
+	Status             string
+	Key                AffinityKey
+	ShardTag           string
+	TargetShard        string
+	Strategy           string
+	ActiveSessionCount int
+	Generation         string
+	ControlAction      ControlAction
+	ServerTime         time.Time
+}
+
+// SessionKillRequest describes an atomic session-specific control mutation.
+type SessionKillRequest struct {
+	SessionID string
+	Reason    string
+	Actor     string
+}
+
+// SessionKillRecord describes the session-specific control action outcome.
+type SessionKillRecord struct {
+	Status            string
+	SessionID         string
+	ControlAction     ControlAction
+	ControlGeneration string
+	ServerTime        time.Time
+}
+
+// ReapRequest describes a bounded expired-session repair pass.
+type ReapRequest struct {
+	Limit int
+}
+
+// ReapRecord describes expired session repair work completed by Redis.
+type ReapRecord struct {
+	Status           string
+	ScannedSessions  int
+	ExpiredSessions  int
+	RepairedBackends int
+	ServerTime       time.Time
+}
+
+// BackendRuntimeMutation describes an atomic backend runtime override change.
+type BackendRuntimeMutation struct {
+	BackendIdentifier string
+	InService         *bool
+	Weight            *int
+	MaintenanceMode   string
+	DrainMode         string
+	DrainEnabled      bool
+	Reason            string
+	Actor             string
+}
+
+// BackendRuntimeClearRequest describes an atomic backend runtime override clear.
+type BackendRuntimeClearRequest struct {
+	BackendIdentifier string
+	Reason            string
+	Actor             string
+}
+
+// BackendRuntimeRecord describes Redis-backed backend runtime state after mutation.
+type BackendRuntimeRecord struct {
+	Status             string
+	BackendIdentifier  string
+	Generation         string
+	ActiveSessionCount int
+	MarkedSessionCount int
+	ServerTime         time.Time
 }
 
 // BackendRuntimeState contains mutable operator state for a backend entry.
@@ -67,6 +201,7 @@ type AffinityStore interface {
 // SessionStore owns lease-backed session coordination.
 type SessionStore interface {
 	OpenSession(ctx context.Context, record SessionRecord) (AffinityRecord, error)
+	AttachSelectedBackend(ctx context.Context, attachment SessionBackendAttachment) (SessionBackendRecord, error)
 	HeartbeatSession(ctx context.Context, key AffinityKey, sessionID string, ttl time.Duration) (AffinityRecord, error)
 	CloseSession(ctx context.Context, key AffinityKey, sessionID string) (AffinityRecord, error)
 }

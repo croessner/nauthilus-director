@@ -30,6 +30,7 @@ func (l *Loader) Validate(config Config) error {
 	if l == nil {
 		l = NewLoader()
 	}
+	config = config.Normalize()
 
 	if err := l.validate.Struct(config); err != nil {
 		return fmt.Errorf("validate typed config: %w", err)

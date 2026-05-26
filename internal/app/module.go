@@ -18,13 +18,36 @@
 package app
 
 import (
-	"github.com/croessner/nauthilus-director/internal/listener"
 	"go.uber.org/fx"
 )
 
 // Module returns the root application composition module.
 func Module() fx.Option {
 	return fx.Options(
-		listener.Module(),
+		fx.Provide(
+			provideLoader,
+			provideSnapshot,
+			provideConfig,
+			provideRecorder,
+			provideRedisClient,
+			provideRedisStore,
+			provideBackendRegistry,
+			provideRuntimeSelector,
+			provideRoutingResolver,
+			provideLocalSessionRegistry,
+			provideListenerManager,
+			provideBackendReadService,
+			provideRouteLookupService,
+			provideControlHandle,
+			provideHealthRunnerHandle,
+			provideReaperHandle,
+		),
+		fx.Invoke(
+			registerRedisLifecycle,
+			registerControlLifecycle,
+			registerListenerLifecycle,
+			registerHealthRunnerLifecycle,
+			registerReaperLifecycle,
+		),
 	)
 }

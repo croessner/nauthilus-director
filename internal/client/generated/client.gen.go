@@ -34,16 +34,16 @@ func (e AcceptedResponseStatus) Valid() bool {
 
 // Defines values for ConfigDocumentFormat.
 const (
-	JSON ConfigDocumentFormat = "json"
-	Yaml ConfigDocumentFormat = "yaml"
+	ConfigDocumentFormatJSON ConfigDocumentFormat = "json"
+	ConfigDocumentFormatYaml ConfigDocumentFormat = "yaml"
 )
 
 // Valid indicates whether the value is a known member of the ConfigDocumentFormat enum.
 func (e ConfigDocumentFormat) Valid() bool {
 	switch e {
-	case JSON:
+	case ConfigDocumentFormatJSON:
 		return true
-	case Yaml:
+	case ConfigDocumentFormatYaml:
 		return true
 	default:
 		return false
@@ -91,16 +91,91 @@ func (e MaintenanceMode) Valid() bool {
 
 // Defines values for UserMoveRequestStrategy.
 const (
-	KickExisting     UserMoveRequestStrategy = "kick_existing"
-	PreserveExisting UserMoveRequestStrategy = "preserve_existing"
+	DrainExisting   UserMoveRequestStrategy = "drain_existing"
+	KickExisting    UserMoveRequestStrategy = "kick_existing"
+	NewSessionsOnly UserMoveRequestStrategy = "new_sessions_only"
 )
 
 // Valid indicates whether the value is a known member of the UserMoveRequestStrategy enum.
 func (e UserMoveRequestStrategy) Valid() bool {
 	switch e {
+	case DrainExisting:
+		return true
 	case KickExisting:
 		return true
-	case PreserveExisting:
+	case NewSessionsOnly:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ConfigFormat.
+const (
+	ConfigFormatJSON ConfigFormat = "json"
+	ConfigFormatYaml ConfigFormat = "yaml"
+)
+
+// Valid indicates whether the value is a known member of the ConfigFormat enum.
+func (e ConfigFormat) Valid() bool {
+	switch e {
+	case ConfigFormatJSON:
+		return true
+	case ConfigFormatYaml:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for GetDefaultConfigParamsFormat.
+const (
+	GetDefaultConfigParamsFormatJSON GetDefaultConfigParamsFormat = "json"
+	GetDefaultConfigParamsFormatYaml GetDefaultConfigParamsFormat = "yaml"
+)
+
+// Valid indicates whether the value is a known member of the GetDefaultConfigParamsFormat enum.
+func (e GetDefaultConfigParamsFormat) Valid() bool {
+	switch e {
+	case GetDefaultConfigParamsFormatJSON:
+		return true
+	case GetDefaultConfigParamsFormatYaml:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for GetEffectiveConfigParamsFormat.
+const (
+	GetEffectiveConfigParamsFormatJSON GetEffectiveConfigParamsFormat = "json"
+	GetEffectiveConfigParamsFormatYaml GetEffectiveConfigParamsFormat = "yaml"
+)
+
+// Valid indicates whether the value is a known member of the GetEffectiveConfigParamsFormat enum.
+func (e GetEffectiveConfigParamsFormat) Valid() bool {
+	switch e {
+	case GetEffectiveConfigParamsFormatJSON:
+		return true
+	case GetEffectiveConfigParamsFormatYaml:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for GetNonDefaultConfigParamsFormat.
+const (
+	JSON GetNonDefaultConfigParamsFormat = "json"
+	Yaml GetNonDefaultConfigParamsFormat = "yaml"
+)
+
+// Valid indicates whether the value is a known member of the GetNonDefaultConfigParamsFormat enum.
+func (e GetNonDefaultConfigParamsFormat) Valid() bool {
+	switch e {
+	case JSON:
+		return true
+	case Yaml:
 		return true
 	default:
 		return false
@@ -181,31 +256,93 @@ type MaintenanceRequest struct {
 	Reason       string          `json:"reason"`
 }
 
+// RouteLookupAffinity defines model for RouteLookupAffinity.
+type RouteLookupAffinity struct {
+	Active         bool    `json:"active"`
+	ActiveSessions int     `json:"active_sessions"`
+	BackendID      *string `json:"backend_id,omitempty"`
+	Generation     *string `json:"generation,omitempty"`
+	Present        bool    `json:"present"`
+	Requested      bool    `json:"requested"`
+	ShardTag       *string `json:"shard_tag,omitempty"`
+}
+
+// RouteLookupBackendExclusion defines model for RouteLookupBackendExclusion.
+type RouteLookupBackendExclusion struct {
+	Detail string `json:"detail"`
+	Reason string `json:"reason"`
+	Source string `json:"source"`
+}
+
+// RouteLookupBackendSummary defines model for RouteLookupBackendSummary.
+type RouteLookupBackendSummary struct {
+	AllowsActivePins  bool                          `json:"allows_active_pins"`
+	AllowsNewSessions bool                          `json:"allows_new_sessions"`
+	BackendPool       string                        `json:"backend_pool"`
+	Eligible          bool                          `json:"eligible"`
+	Exclusions        []RouteLookupBackendExclusion `json:"exclusions"`
+	FailClosed        bool                          `json:"fail_closed"`
+	FailClosedReason  *string                       `json:"fail_closed_reason,omitempty"`
+	Generation        *string                       `json:"generation,omitempty"`
+	Identifier        string                        `json:"identifier"`
+	Protocol          string                        `json:"protocol"`
+	ShardTag          string                        `json:"shard_tag"`
+}
+
+// RouteLookupEffects defines model for RouteLookupEffects.
+type RouteLookupEffects struct {
+	Health          bool `json:"health"`
+	Maintenance     bool `json:"maintenance"`
+	MaxConnections  bool `json:"max_connections"`
+	RuntimeOverride bool `json:"runtime_override"`
+}
+
 // RouteLookupRequest defines model for RouteLookupRequest.
 type RouteLookupRequest struct {
-	Attributes  *map[string][]string `json:"attributes,omitempty"`
-	BackendPool *string              `json:"backend_pool,omitempty"`
-	ClientIP    *string              `json:"client_ip,omitempty"`
-	Listener    *string              `json:"listener,omitempty"`
-	Protocol    string               `json:"protocol"`
-	ServiceName *string              `json:"service_name,omitempty"`
-	Tenant      *string              `json:"tenant,omitempty"`
-	UserKey     string               `json:"user_key"`
+	Attributes      *map[string][]string `json:"attributes,omitempty"`
+	BackendPool     *string              `json:"backend_pool,omitempty"`
+	ClientIP        *string              `json:"client_ip,omitempty"`
+	IncludeAffinity *bool                `json:"include_affinity,omitempty"`
+	Listener        *string              `json:"listener,omitempty"`
+	Protocol        string               `json:"protocol"`
+	ServiceName     *string              `json:"service_name,omitempty"`
+	Tenant          *string              `json:"tenant,omitempty"`
+	UserKey         string               `json:"user_key"`
 }
 
 // RouteLookupResponse defines model for RouteLookupResponse.
 type RouteLookupResponse struct {
-	Healthy           bool    `json:"healthy"`
-	Maintenance       bool    `json:"maintenance"`
-	Reason            string  `json:"reason"`
-	RoutingGeneration *string `json:"routing_generation,omitempty"`
-	SelectedBackend   string  `json:"selected_backend"`
-	ShardTag          string  `json:"shard_tag"`
+	AffectedBy        RouteLookupEffects          `json:"affected_by"`
+	Affinity          *RouteLookupAffinity        `json:"affinity,omitempty"`
+	Backends          []RouteLookupBackendSummary `json:"backends"`
+	FailClosed        bool                        `json:"fail_closed"`
+	Healthy           bool                        `json:"healthy"`
+	Maintenance       bool                        `json:"maintenance"`
+	Reason            string                      `json:"reason"`
+	Routing           RouteLookupRouting          `json:"routing"`
+	RoutingGeneration *string                     `json:"routing_generation,omitempty"`
+	SelectedBackend   string                      `json:"selected_backend"`
+	ShardTag          string                      `json:"shard_tag"`
+}
+
+// RouteLookupRouting defines model for RouteLookupRouting.
+type RouteLookupRouting struct {
+	Generation       *string `json:"generation,omitempty"`
+	RequestedShard   *string `json:"requested_shard,omitempty"`
+	ShardTag         string  `json:"shard_tag"`
+	Source           string  `json:"source"`
+	UsedDefaultShard bool    `json:"used_default_shard"`
 }
 
 // RuntimeReasonRequest defines model for RuntimeReasonRequest.
 type RuntimeReasonRequest struct {
-	Reason *string `json:"reason,omitempty"`
+	Reason string `json:"reason"`
+}
+
+// RuntimeWeightRequest defines model for RuntimeWeightRequest.
+type RuntimeWeightRequest struct {
+	Reason string `json:"reason"`
+	Weight int    `json:"weight"`
 }
 
 // SessionDetail defines model for SessionDetail.
@@ -272,8 +409,14 @@ type VersionResponse struct {
 	Version    string `json:"version"`
 }
 
+// ConfigFormat defines model for ConfigFormat.
+type ConfigFormat string
+
 // Identifier defines model for Identifier.
 type Identifier = string
+
+// IncludeProtected defines model for IncludeProtected.
+type IncludeProtected = bool
 
 // SessionID defines model for SessionID.
 type SessionID = string
@@ -287,16 +430,52 @@ type BadRequest = ErrorResponse
 // Error defines model for Error.
 type Error = ErrorResponse
 
-// NotImplemented defines model for NotImplemented.
-type NotImplemented = ErrorResponse
+// GetDefaultConfigParams defines parameters for GetDefaultConfig.
+type GetDefaultConfigParams struct {
+	Format *GetDefaultConfigParamsFormat `form:"format,omitempty" json:"format,omitempty"`
+
+	// IncludeProtected Requests protected config values. Requires explicit protected-config authorization and an audit event; ordinary control authentication is not sufficient.
+	IncludeProtected *IncludeProtected `form:"include_protected,omitempty" json:"include_protected,omitempty"`
+}
+
+// GetDefaultConfigParamsFormat defines parameters for GetDefaultConfig.
+type GetDefaultConfigParamsFormat string
+
+// GetEffectiveConfigParams defines parameters for GetEffectiveConfig.
+type GetEffectiveConfigParams struct {
+	Format *GetEffectiveConfigParamsFormat `form:"format,omitempty" json:"format,omitempty"`
+
+	// IncludeProtected Requests protected config values. Requires explicit protected-config authorization and an audit event; ordinary control authentication is not sufficient.
+	IncludeProtected *IncludeProtected `form:"include_protected,omitempty" json:"include_protected,omitempty"`
+}
+
+// GetEffectiveConfigParamsFormat defines parameters for GetEffectiveConfig.
+type GetEffectiveConfigParamsFormat string
+
+// GetNonDefaultConfigParams defines parameters for GetNonDefaultConfig.
+type GetNonDefaultConfigParams struct {
+	Format *GetNonDefaultConfigParamsFormat `form:"format,omitempty" json:"format,omitempty"`
+
+	// IncludeProtected Requests protected config values. Requires explicit protected-config authorization and an audit event; ordinary control authentication is not sufficient.
+	IncludeProtected *IncludeProtected `form:"include_protected,omitempty" json:"include_protected,omitempty"`
+}
+
+// GetNonDefaultConfigParamsFormat defines parameters for GetNonDefaultConfig.
+type GetNonDefaultConfigParamsFormat string
 
 // ListSessionsParams defines parameters for ListSessions.
 type ListSessionsParams struct {
 	Protocol *string `form:"protocol,omitempty" json:"protocol,omitempty"`
 }
 
+// DisableBackendMaintenanceJSONRequestBody defines body for DisableBackendMaintenance for application/json ContentType.
+type DisableBackendMaintenanceJSONRequestBody = RuntimeReasonRequest
+
 // EnableBackendMaintenanceJSONRequestBody defines body for EnableBackendMaintenance for application/json ContentType.
 type EnableBackendMaintenanceJSONRequestBody = MaintenanceRequest
+
+// ClearBackendRuntimeJSONRequestBody defines body for ClearBackendRuntime for application/json ContentType.
+type ClearBackendRuntimeJSONRequestBody = RuntimeReasonRequest
 
 // DrainBackendJSONRequestBody defines body for DrainBackend for application/json ContentType.
 type DrainBackendJSONRequestBody = DrainRequest
@@ -307,8 +486,17 @@ type MarkBackendInJSONRequestBody = RuntimeReasonRequest
 // MarkBackendOutJSONRequestBody defines body for MarkBackendOut for application/json ContentType.
 type MarkBackendOutJSONRequestBody = RuntimeReasonRequest
 
+// SetBackendWeightJSONRequestBody defines body for SetBackendWeight for application/json ContentType.
+type SetBackendWeightJSONRequestBody = RuntimeWeightRequest
+
 // LookupRouteJSONRequestBody defines body for LookupRoute for application/json ContentType.
 type LookupRouteJSONRequestBody = RouteLookupRequest
+
+// DeleteSessionJSONRequestBody defines body for DeleteSession for application/json ContentType.
+type DeleteSessionJSONRequestBody = RuntimeReasonRequest
+
+// ClearUserAffinityJSONRequestBody defines body for ClearUserAffinity for application/json ContentType.
+type ClearUserAffinityJSONRequestBody = RuntimeReasonRequest
 
 // SetUserAffinityJSONRequestBody defines body for SetUserAffinity for application/json ContentType.
 type SetUserAffinityJSONRequestBody = AffinityUpdateRequest
@@ -398,16 +586,20 @@ type ClientInterface interface {
 	// GetBackend request
 	GetBackend(ctx context.Context, identifier Identifier, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	// DisableBackendMaintenance request
-	DisableBackendMaintenance(ctx context.Context, identifier Identifier, reqEditors ...RequestEditorFn) (*http.Response, error)
+	// DisableBackendMaintenanceWithBody request with any body
+	DisableBackendMaintenanceWithBody(ctx context.Context, identifier Identifier, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	DisableBackendMaintenance(ctx context.Context, identifier Identifier, body DisableBackendMaintenanceJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// EnableBackendMaintenanceWithBody request with any body
 	EnableBackendMaintenanceWithBody(ctx context.Context, identifier Identifier, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	EnableBackendMaintenance(ctx context.Context, identifier Identifier, body EnableBackendMaintenanceJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	// ClearBackendRuntime request
-	ClearBackendRuntime(ctx context.Context, identifier Identifier, reqEditors ...RequestEditorFn) (*http.Response, error)
+	// ClearBackendRuntimeWithBody request with any body
+	ClearBackendRuntimeWithBody(ctx context.Context, identifier Identifier, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	ClearBackendRuntime(ctx context.Context, identifier Identifier, body ClearBackendRuntimeJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// DrainBackendWithBody request with any body
 	DrainBackendWithBody(ctx context.Context, identifier Identifier, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -424,14 +616,19 @@ type ClientInterface interface {
 
 	MarkBackendOut(ctx context.Context, identifier Identifier, body MarkBackendOutJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// SetBackendWeightWithBody request with any body
+	SetBackendWeightWithBody(ctx context.Context, identifier Identifier, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	SetBackendWeight(ctx context.Context, identifier Identifier, body SetBackendWeightJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// GetDefaultConfig request
-	GetDefaultConfig(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+	GetDefaultConfig(ctx context.Context, params *GetDefaultConfigParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetEffectiveConfig request
-	GetEffectiveConfig(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+	GetEffectiveConfig(ctx context.Context, params *GetEffectiveConfigParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetNonDefaultConfig request
-	GetNonDefaultConfig(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+	GetNonDefaultConfig(ctx context.Context, params *GetNonDefaultConfigParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// Reload request
 	Reload(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -444,8 +641,10 @@ type ClientInterface interface {
 	// ListSessions request
 	ListSessions(ctx context.Context, params *ListSessionsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	// DeleteSession request
-	DeleteSession(ctx context.Context, sessionID SessionID, reqEditors ...RequestEditorFn) (*http.Response, error)
+	// DeleteSessionWithBody request with any body
+	DeleteSessionWithBody(ctx context.Context, sessionID SessionID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	DeleteSession(ctx context.Context, sessionID SessionID, body DeleteSessionJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetSession request
 	GetSession(ctx context.Context, sessionID SessionID, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -456,8 +655,10 @@ type ClientInterface interface {
 	// GetUser request
 	GetUser(ctx context.Context, userKey UserKey, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	// ClearUserAffinity request
-	ClearUserAffinity(ctx context.Context, userKey UserKey, reqEditors ...RequestEditorFn) (*http.Response, error)
+	// ClearUserAffinityWithBody request with any body
+	ClearUserAffinityWithBody(ctx context.Context, userKey UserKey, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	ClearUserAffinity(ctx context.Context, userKey UserKey, body ClearUserAffinityJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetUserAffinity request
 	GetUserAffinity(ctx context.Context, userKey UserKey, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -517,8 +718,20 @@ func (c *Client) GetBackend(ctx context.Context, identifier Identifier, reqEdito
 	return c.Client.Do(req)
 }
 
-func (c *Client) DisableBackendMaintenance(ctx context.Context, identifier Identifier, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewDisableBackendMaintenanceRequest(c.Server, identifier)
+func (c *Client) DisableBackendMaintenanceWithBody(ctx context.Context, identifier Identifier, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDisableBackendMaintenanceRequestWithBody(c.Server, identifier, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) DisableBackendMaintenance(ctx context.Context, identifier Identifier, body DisableBackendMaintenanceJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDisableBackendMaintenanceRequest(c.Server, identifier, body)
 	if err != nil {
 		return nil, err
 	}
@@ -553,8 +766,20 @@ func (c *Client) EnableBackendMaintenance(ctx context.Context, identifier Identi
 	return c.Client.Do(req)
 }
 
-func (c *Client) ClearBackendRuntime(ctx context.Context, identifier Identifier, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewClearBackendRuntimeRequest(c.Server, identifier)
+func (c *Client) ClearBackendRuntimeWithBody(ctx context.Context, identifier Identifier, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewClearBackendRuntimeRequestWithBody(c.Server, identifier, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ClearBackendRuntime(ctx context.Context, identifier Identifier, body ClearBackendRuntimeJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewClearBackendRuntimeRequest(c.Server, identifier, body)
 	if err != nil {
 		return nil, err
 	}
@@ -637,8 +862,8 @@ func (c *Client) MarkBackendOut(ctx context.Context, identifier Identifier, body
 	return c.Client.Do(req)
 }
 
-func (c *Client) GetDefaultConfig(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewGetDefaultConfigRequest(c.Server)
+func (c *Client) SetBackendWeightWithBody(ctx context.Context, identifier Identifier, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewSetBackendWeightRequestWithBody(c.Server, identifier, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -649,8 +874,8 @@ func (c *Client) GetDefaultConfig(ctx context.Context, reqEditors ...RequestEdit
 	return c.Client.Do(req)
 }
 
-func (c *Client) GetEffectiveConfig(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewGetEffectiveConfigRequest(c.Server)
+func (c *Client) SetBackendWeight(ctx context.Context, identifier Identifier, body SetBackendWeightJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewSetBackendWeightRequest(c.Server, identifier, body)
 	if err != nil {
 		return nil, err
 	}
@@ -661,8 +886,32 @@ func (c *Client) GetEffectiveConfig(ctx context.Context, reqEditors ...RequestEd
 	return c.Client.Do(req)
 }
 
-func (c *Client) GetNonDefaultConfig(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewGetNonDefaultConfigRequest(c.Server)
+func (c *Client) GetDefaultConfig(ctx context.Context, params *GetDefaultConfigParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetDefaultConfigRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) GetEffectiveConfig(ctx context.Context, params *GetEffectiveConfigParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetEffectiveConfigRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) GetNonDefaultConfig(ctx context.Context, params *GetNonDefaultConfigParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetNonDefaultConfigRequest(c.Server, params)
 	if err != nil {
 		return nil, err
 	}
@@ -721,8 +970,20 @@ func (c *Client) ListSessions(ctx context.Context, params *ListSessionsParams, r
 	return c.Client.Do(req)
 }
 
-func (c *Client) DeleteSession(ctx context.Context, sessionID SessionID, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewDeleteSessionRequest(c.Server, sessionID)
+func (c *Client) DeleteSessionWithBody(ctx context.Context, sessionID SessionID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDeleteSessionRequestWithBody(c.Server, sessionID, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) DeleteSession(ctx context.Context, sessionID SessionID, body DeleteSessionJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDeleteSessionRequest(c.Server, sessionID, body)
 	if err != nil {
 		return nil, err
 	}
@@ -769,8 +1030,20 @@ func (c *Client) GetUser(ctx context.Context, userKey UserKey, reqEditors ...Req
 	return c.Client.Do(req)
 }
 
-func (c *Client) ClearUserAffinity(ctx context.Context, userKey UserKey, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewClearUserAffinityRequest(c.Server, userKey)
+func (c *Client) ClearUserAffinityWithBody(ctx context.Context, userKey UserKey, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewClearUserAffinityRequestWithBody(c.Server, userKey, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ClearUserAffinity(ctx context.Context, userKey UserKey, body ClearUserAffinityJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewClearUserAffinityRequest(c.Server, userKey, body)
 	if err != nil {
 		return nil, err
 	}
@@ -986,8 +1259,19 @@ func NewGetBackendRequest(server string, identifier Identifier) (*http.Request, 
 	return req, nil
 }
 
-// NewDisableBackendMaintenanceRequest generates requests for DisableBackendMaintenance
-func NewDisableBackendMaintenanceRequest(server string, identifier Identifier) (*http.Request, error) {
+// NewDisableBackendMaintenanceRequest calls the generic DisableBackendMaintenance builder with application/json body
+func NewDisableBackendMaintenanceRequest(server string, identifier Identifier, body DisableBackendMaintenanceJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewDisableBackendMaintenanceRequestWithBody(server, identifier, "application/json", bodyReader)
+}
+
+// NewDisableBackendMaintenanceRequestWithBody generates requests for DisableBackendMaintenance with any type of body
+func NewDisableBackendMaintenanceRequestWithBody(server string, identifier Identifier, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -1012,10 +1296,12 @@ func NewDisableBackendMaintenanceRequest(server string, identifier Identifier) (
 		return nil, err
 	}
 
-	req, err := http.NewRequest(http.MethodDelete, queryURL.String(), nil)
+	req, err := http.NewRequest(http.MethodDelete, queryURL.String(), body)
 	if err != nil {
 		return nil, err
 	}
+
+	req.Header.Add("Content-Type", contentType)
 
 	return req, nil
 }
@@ -1067,8 +1353,19 @@ func NewEnableBackendMaintenanceRequestWithBody(server string, identifier Identi
 	return req, nil
 }
 
-// NewClearBackendRuntimeRequest generates requests for ClearBackendRuntime
-func NewClearBackendRuntimeRequest(server string, identifier Identifier) (*http.Request, error) {
+// NewClearBackendRuntimeRequest calls the generic ClearBackendRuntime builder with application/json body
+func NewClearBackendRuntimeRequest(server string, identifier Identifier, body ClearBackendRuntimeJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewClearBackendRuntimeRequestWithBody(server, identifier, "application/json", bodyReader)
+}
+
+// NewClearBackendRuntimeRequestWithBody generates requests for ClearBackendRuntime with any type of body
+func NewClearBackendRuntimeRequestWithBody(server string, identifier Identifier, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -1093,10 +1390,12 @@ func NewClearBackendRuntimeRequest(server string, identifier Identifier) (*http.
 		return nil, err
 	}
 
-	req, err := http.NewRequest(http.MethodDelete, queryURL.String(), nil)
+	req, err := http.NewRequest(http.MethodDelete, queryURL.String(), body)
 	if err != nil {
 		return nil, err
 	}
+
+	req.Header.Add("Content-Type", contentType)
 
 	return req, nil
 }
@@ -1242,8 +1541,55 @@ func NewMarkBackendOutRequestWithBody(server string, identifier Identifier, cont
 	return req, nil
 }
 
+// NewSetBackendWeightRequest calls the generic SetBackendWeight builder with application/json body
+func NewSetBackendWeightRequest(server string, identifier Identifier, body SetBackendWeightJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewSetBackendWeightRequestWithBody(server, identifier, "application/json", bodyReader)
+}
+
+// NewSetBackendWeightRequestWithBody generates requests for SetBackendWeight with any type of body
+func NewSetBackendWeightRequestWithBody(server string, identifier Identifier, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "identifier", identifier, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/backends/%s/runtime/weight", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
 // NewGetDefaultConfigRequest generates requests for GetDefaultConfig
-func NewGetDefaultConfigRequest(server string) (*http.Request, error) {
+func NewGetDefaultConfigRequest(server string, params *GetDefaultConfigParams) (*http.Request, error) {
 	var err error
 
 	serverURL, err := url.Parse(server)
@@ -1261,6 +1607,45 @@ func NewGetDefaultConfigRequest(server string) (*http.Request, error) {
 		return nil, err
 	}
 
+	if params != nil {
+		// queryValues collects non-styled parameters (passthrough, JSON)
+		// that are safe to round-trip through url.Values.Encode().
+		queryValues := queryURL.Query()
+		// rawQueryFragments collects pre-encoded query fragments from
+		// styled parameters, preserving literal commas as delimiters
+		// per the OpenAPI spec (e.g. "color=blue,black,brown").
+		var rawQueryFragments []string
+
+		if params.Format != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "format", *params.Format, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.IncludeProtected != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "include_protected", *params.IncludeProtected, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "boolean", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if encoded := queryValues.Encode(); encoded != "" {
+			rawQueryFragments = append(rawQueryFragments, encoded)
+		}
+		queryURL.RawQuery = strings.Join(rawQueryFragments, "&")
+	}
+
 	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
 	if err != nil {
 		return nil, err
@@ -1270,7 +1655,7 @@ func NewGetDefaultConfigRequest(server string) (*http.Request, error) {
 }
 
 // NewGetEffectiveConfigRequest generates requests for GetEffectiveConfig
-func NewGetEffectiveConfigRequest(server string) (*http.Request, error) {
+func NewGetEffectiveConfigRequest(server string, params *GetEffectiveConfigParams) (*http.Request, error) {
 	var err error
 
 	serverURL, err := url.Parse(server)
@@ -1288,6 +1673,45 @@ func NewGetEffectiveConfigRequest(server string) (*http.Request, error) {
 		return nil, err
 	}
 
+	if params != nil {
+		// queryValues collects non-styled parameters (passthrough, JSON)
+		// that are safe to round-trip through url.Values.Encode().
+		queryValues := queryURL.Query()
+		// rawQueryFragments collects pre-encoded query fragments from
+		// styled parameters, preserving literal commas as delimiters
+		// per the OpenAPI spec (e.g. "color=blue,black,brown").
+		var rawQueryFragments []string
+
+		if params.Format != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "format", *params.Format, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.IncludeProtected != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "include_protected", *params.IncludeProtected, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "boolean", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if encoded := queryValues.Encode(); encoded != "" {
+			rawQueryFragments = append(rawQueryFragments, encoded)
+		}
+		queryURL.RawQuery = strings.Join(rawQueryFragments, "&")
+	}
+
 	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
 	if err != nil {
 		return nil, err
@@ -1297,7 +1721,7 @@ func NewGetEffectiveConfigRequest(server string) (*http.Request, error) {
 }
 
 // NewGetNonDefaultConfigRequest generates requests for GetNonDefaultConfig
-func NewGetNonDefaultConfigRequest(server string) (*http.Request, error) {
+func NewGetNonDefaultConfigRequest(server string, params *GetNonDefaultConfigParams) (*http.Request, error) {
 	var err error
 
 	serverURL, err := url.Parse(server)
@@ -1313,6 +1737,45 @@ func NewGetNonDefaultConfigRequest(server string) (*http.Request, error) {
 	queryURL, err := serverURL.Parse(operationPath)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+		// queryValues collects non-styled parameters (passthrough, JSON)
+		// that are safe to round-trip through url.Values.Encode().
+		queryValues := queryURL.Query()
+		// rawQueryFragments collects pre-encoded query fragments from
+		// styled parameters, preserving literal commas as delimiters
+		// per the OpenAPI spec (e.g. "color=blue,black,brown").
+		var rawQueryFragments []string
+
+		if params.Format != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "format", *params.Format, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.IncludeProtected != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "include_protected", *params.IncludeProtected, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "boolean", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if encoded := queryValues.Encode(); encoded != "" {
+			rawQueryFragments = append(rawQueryFragments, encoded)
+		}
+		queryURL.RawQuery = strings.Join(rawQueryFragments, "&")
 	}
 
 	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
@@ -1444,8 +1907,19 @@ func NewListSessionsRequest(server string, params *ListSessionsParams) (*http.Re
 	return req, nil
 }
 
-// NewDeleteSessionRequest generates requests for DeleteSession
-func NewDeleteSessionRequest(server string, sessionID SessionID) (*http.Request, error) {
+// NewDeleteSessionRequest calls the generic DeleteSession builder with application/json body
+func NewDeleteSessionRequest(server string, sessionID SessionID, body DeleteSessionJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewDeleteSessionRequestWithBody(server, sessionID, "application/json", bodyReader)
+}
+
+// NewDeleteSessionRequestWithBody generates requests for DeleteSession with any type of body
+func NewDeleteSessionRequestWithBody(server string, sessionID SessionID, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -1470,10 +1944,12 @@ func NewDeleteSessionRequest(server string, sessionID SessionID) (*http.Request,
 		return nil, err
 	}
 
-	req, err := http.NewRequest(http.MethodDelete, queryURL.String(), nil)
+	req, err := http.NewRequest(http.MethodDelete, queryURL.String(), body)
 	if err != nil {
 		return nil, err
 	}
+
+	req.Header.Add("Content-Type", contentType)
 
 	return req, nil
 }
@@ -1573,8 +2049,19 @@ func NewGetUserRequest(server string, userKey UserKey) (*http.Request, error) {
 	return req, nil
 }
 
-// NewClearUserAffinityRequest generates requests for ClearUserAffinity
-func NewClearUserAffinityRequest(server string, userKey UserKey) (*http.Request, error) {
+// NewClearUserAffinityRequest calls the generic ClearUserAffinity builder with application/json body
+func NewClearUserAffinityRequest(server string, userKey UserKey, body ClearUserAffinityJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewClearUserAffinityRequestWithBody(server, userKey, "application/json", bodyReader)
+}
+
+// NewClearUserAffinityRequestWithBody generates requests for ClearUserAffinity with any type of body
+func NewClearUserAffinityRequestWithBody(server string, userKey UserKey, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -1599,10 +2086,12 @@ func NewClearUserAffinityRequest(server string, userKey UserKey) (*http.Request,
 		return nil, err
 	}
 
-	req, err := http.NewRequest(http.MethodDelete, queryURL.String(), nil)
+	req, err := http.NewRequest(http.MethodDelete, queryURL.String(), body)
 	if err != nil {
 		return nil, err
 	}
+
+	req.Header.Add("Content-Type", contentType)
 
 	return req, nil
 }
@@ -1973,16 +2462,20 @@ type ClientWithResponsesInterface interface {
 	// GetBackendWithResponse request
 	GetBackendWithResponse(ctx context.Context, identifier Identifier, reqEditors ...RequestEditorFn) (*GetBackendResponse, error)
 
-	// DisableBackendMaintenanceWithResponse request
-	DisableBackendMaintenanceWithResponse(ctx context.Context, identifier Identifier, reqEditors ...RequestEditorFn) (*DisableBackendMaintenanceResponse, error)
+	// DisableBackendMaintenanceWithBodyWithResponse request with any body
+	DisableBackendMaintenanceWithBodyWithResponse(ctx context.Context, identifier Identifier, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*DisableBackendMaintenanceResponse, error)
+
+	DisableBackendMaintenanceWithResponse(ctx context.Context, identifier Identifier, body DisableBackendMaintenanceJSONRequestBody, reqEditors ...RequestEditorFn) (*DisableBackendMaintenanceResponse, error)
 
 	// EnableBackendMaintenanceWithBodyWithResponse request with any body
 	EnableBackendMaintenanceWithBodyWithResponse(ctx context.Context, identifier Identifier, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*EnableBackendMaintenanceResponse, error)
 
 	EnableBackendMaintenanceWithResponse(ctx context.Context, identifier Identifier, body EnableBackendMaintenanceJSONRequestBody, reqEditors ...RequestEditorFn) (*EnableBackendMaintenanceResponse, error)
 
-	// ClearBackendRuntimeWithResponse request
-	ClearBackendRuntimeWithResponse(ctx context.Context, identifier Identifier, reqEditors ...RequestEditorFn) (*ClearBackendRuntimeResponse, error)
+	// ClearBackendRuntimeWithBodyWithResponse request with any body
+	ClearBackendRuntimeWithBodyWithResponse(ctx context.Context, identifier Identifier, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ClearBackendRuntimeResponse, error)
+
+	ClearBackendRuntimeWithResponse(ctx context.Context, identifier Identifier, body ClearBackendRuntimeJSONRequestBody, reqEditors ...RequestEditorFn) (*ClearBackendRuntimeResponse, error)
 
 	// DrainBackendWithBodyWithResponse request with any body
 	DrainBackendWithBodyWithResponse(ctx context.Context, identifier Identifier, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*DrainBackendResponse, error)
@@ -1999,14 +2492,19 @@ type ClientWithResponsesInterface interface {
 
 	MarkBackendOutWithResponse(ctx context.Context, identifier Identifier, body MarkBackendOutJSONRequestBody, reqEditors ...RequestEditorFn) (*MarkBackendOutResponse, error)
 
+	// SetBackendWeightWithBodyWithResponse request with any body
+	SetBackendWeightWithBodyWithResponse(ctx context.Context, identifier Identifier, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SetBackendWeightResponse, error)
+
+	SetBackendWeightWithResponse(ctx context.Context, identifier Identifier, body SetBackendWeightJSONRequestBody, reqEditors ...RequestEditorFn) (*SetBackendWeightResponse, error)
+
 	// GetDefaultConfigWithResponse request
-	GetDefaultConfigWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*GetDefaultConfigResponse, error)
+	GetDefaultConfigWithResponse(ctx context.Context, params *GetDefaultConfigParams, reqEditors ...RequestEditorFn) (*GetDefaultConfigResponse, error)
 
 	// GetEffectiveConfigWithResponse request
-	GetEffectiveConfigWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*GetEffectiveConfigResponse, error)
+	GetEffectiveConfigWithResponse(ctx context.Context, params *GetEffectiveConfigParams, reqEditors ...RequestEditorFn) (*GetEffectiveConfigResponse, error)
 
 	// GetNonDefaultConfigWithResponse request
-	GetNonDefaultConfigWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*GetNonDefaultConfigResponse, error)
+	GetNonDefaultConfigWithResponse(ctx context.Context, params *GetNonDefaultConfigParams, reqEditors ...RequestEditorFn) (*GetNonDefaultConfigResponse, error)
 
 	// ReloadWithResponse request
 	ReloadWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*ReloadResponse, error)
@@ -2019,8 +2517,10 @@ type ClientWithResponsesInterface interface {
 	// ListSessionsWithResponse request
 	ListSessionsWithResponse(ctx context.Context, params *ListSessionsParams, reqEditors ...RequestEditorFn) (*ListSessionsResponse, error)
 
-	// DeleteSessionWithResponse request
-	DeleteSessionWithResponse(ctx context.Context, sessionID SessionID, reqEditors ...RequestEditorFn) (*DeleteSessionResponse, error)
+	// DeleteSessionWithBodyWithResponse request with any body
+	DeleteSessionWithBodyWithResponse(ctx context.Context, sessionID SessionID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*DeleteSessionResponse, error)
+
+	DeleteSessionWithResponse(ctx context.Context, sessionID SessionID, body DeleteSessionJSONRequestBody, reqEditors ...RequestEditorFn) (*DeleteSessionResponse, error)
 
 	// GetSessionWithResponse request
 	GetSessionWithResponse(ctx context.Context, sessionID SessionID, reqEditors ...RequestEditorFn) (*GetSessionResponse, error)
@@ -2031,8 +2531,10 @@ type ClientWithResponsesInterface interface {
 	// GetUserWithResponse request
 	GetUserWithResponse(ctx context.Context, userKey UserKey, reqEditors ...RequestEditorFn) (*GetUserResponse, error)
 
-	// ClearUserAffinityWithResponse request
-	ClearUserAffinityWithResponse(ctx context.Context, userKey UserKey, reqEditors ...RequestEditorFn) (*ClearUserAffinityResponse, error)
+	// ClearUserAffinityWithBodyWithResponse request with any body
+	ClearUserAffinityWithBodyWithResponse(ctx context.Context, userKey UserKey, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ClearUserAffinityResponse, error)
+
+	ClearUserAffinityWithResponse(ctx context.Context, userKey UserKey, body ClearUserAffinityJSONRequestBody, reqEditors ...RequestEditorFn) (*ClearUserAffinityResponse, error)
 
 	// GetUserAffinityWithResponse request
 	GetUserAffinityWithResponse(ctx context.Context, userKey UserKey, reqEditors ...RequestEditorFn) (*GetUserAffinityResponse, error)
@@ -2072,7 +2574,6 @@ type ListBackendsResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
 	JSON200      *BackendListResponse
-	JSON501      *NotImplemented
 	JSONDefault  *Error
 }
 
@@ -2104,7 +2605,6 @@ type GetBackendResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
 	JSON200      *BackendDetail
-	JSON501      *NotImplemented
 	JSONDefault  *Error
 }
 
@@ -2136,7 +2636,6 @@ type DisableBackendMaintenanceResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
 	JSON202      *AcceptedResponse
-	JSON501      *NotImplemented
 	JSONDefault  *Error
 }
 
@@ -2168,7 +2667,6 @@ type EnableBackendMaintenanceResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
 	JSON202      *AcceptedResponse
-	JSON501      *NotImplemented
 	JSONDefault  *Error
 }
 
@@ -2200,7 +2698,6 @@ type ClearBackendRuntimeResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
 	JSON202      *AcceptedResponse
-	JSON501      *NotImplemented
 	JSONDefault  *Error
 }
 
@@ -2232,7 +2729,6 @@ type DrainBackendResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
 	JSON202      *AcceptedResponse
-	JSON501      *NotImplemented
 	JSONDefault  *Error
 }
 
@@ -2264,7 +2760,6 @@ type MarkBackendInResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
 	JSON202      *AcceptedResponse
-	JSON501      *NotImplemented
 	JSONDefault  *Error
 }
 
@@ -2296,7 +2791,6 @@ type MarkBackendOutResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
 	JSON202      *AcceptedResponse
-	JSON501      *NotImplemented
 	JSONDefault  *Error
 }
 
@@ -2324,11 +2818,41 @@ func (r MarkBackendOutResponse) ContentType() string {
 	return ""
 }
 
+type SetBackendWeightResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON202      *AcceptedResponse
+	JSONDefault  *Error
+}
+
+// Status returns HTTPResponse.Status
+func (r SetBackendWeightResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r SetBackendWeightResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r SetBackendWeightResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
 type GetDefaultConfigResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
 	JSON200      *ConfigDocument
-	JSON501      *NotImplemented
 	JSONDefault  *Error
 }
 
@@ -2360,7 +2884,6 @@ type GetEffectiveConfigResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
 	JSON200      *ConfigDocument
-	JSON501      *NotImplemented
 	JSONDefault  *Error
 }
 
@@ -2392,7 +2915,6 @@ type GetNonDefaultConfigResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
 	JSON200      *ConfigDocument
-	JSON501      *NotImplemented
 	JSONDefault  *Error
 }
 
@@ -2424,7 +2946,6 @@ type ReloadResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
 	JSON202      *AcceptedResponse
-	JSON501      *NotImplemented
 	JSONDefault  *Error
 }
 
@@ -2457,7 +2978,6 @@ type LookupRouteResponse struct {
 	HTTPResponse *http.Response
 	JSON200      *RouteLookupResponse
 	JSON400      *BadRequest
-	JSON501      *NotImplemented
 	JSONDefault  *Error
 }
 
@@ -2489,7 +3009,6 @@ type ListSessionsResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
 	JSON200      *SessionListResponse
-	JSON501      *NotImplemented
 	JSONDefault  *Error
 }
 
@@ -2521,7 +3040,6 @@ type DeleteSessionResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
 	JSON202      *AcceptedResponse
-	JSON501      *NotImplemented
 	JSONDefault  *Error
 }
 
@@ -2553,7 +3071,6 @@ type GetSessionResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
 	JSON200      *SessionDetail
-	JSON501      *NotImplemented
 	JSONDefault  *Error
 }
 
@@ -2585,7 +3102,6 @@ type ListUsersResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
 	JSON200      *UserListResponse
-	JSON501      *NotImplemented
 	JSONDefault  *Error
 }
 
@@ -2617,7 +3133,6 @@ type GetUserResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
 	JSON200      *UserDetail
-	JSON501      *NotImplemented
 	JSONDefault  *Error
 }
 
@@ -2649,7 +3164,6 @@ type ClearUserAffinityResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
 	JSON202      *AcceptedResponse
-	JSON501      *NotImplemented
 	JSONDefault  *Error
 }
 
@@ -2681,7 +3195,6 @@ type GetUserAffinityResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
 	JSON200      *UserAffinity
-	JSON501      *NotImplemented
 	JSONDefault  *Error
 }
 
@@ -2713,7 +3226,6 @@ type SetUserAffinityResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
 	JSON202      *AcceptedResponse
-	JSON501      *NotImplemented
 	JSONDefault  *Error
 }
 
@@ -2745,7 +3257,6 @@ type KickUserResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
 	JSON202      *AcceptedResponse
-	JSON501      *NotImplemented
 	JSONDefault  *Error
 }
 
@@ -2777,7 +3288,6 @@ type MoveUserResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
 	JSON202      *AcceptedResponse
-	JSON501      *NotImplemented
 	JSONDefault  *Error
 }
 
@@ -2809,7 +3319,6 @@ type GetUserSessionsResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
 	JSON200      *SessionListResponse
-	JSON501      *NotImplemented
 	JSONDefault  *Error
 }
 
@@ -2902,7 +3411,6 @@ func (r GetHealthzResponse) ContentType() string {
 type GetMetricsResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
-	JSON501      *NotImplemented
 	JSONDefault  *Error
 }
 
@@ -2980,9 +3488,17 @@ func (c *ClientWithResponses) GetBackendWithResponse(ctx context.Context, identi
 	return ParseGetBackendResponse(rsp)
 }
 
-// DisableBackendMaintenanceWithResponse request returning *DisableBackendMaintenanceResponse
-func (c *ClientWithResponses) DisableBackendMaintenanceWithResponse(ctx context.Context, identifier Identifier, reqEditors ...RequestEditorFn) (*DisableBackendMaintenanceResponse, error) {
-	rsp, err := c.DisableBackendMaintenance(ctx, identifier, reqEditors...)
+// DisableBackendMaintenanceWithBodyWithResponse request with arbitrary body returning *DisableBackendMaintenanceResponse
+func (c *ClientWithResponses) DisableBackendMaintenanceWithBodyWithResponse(ctx context.Context, identifier Identifier, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*DisableBackendMaintenanceResponse, error) {
+	rsp, err := c.DisableBackendMaintenanceWithBody(ctx, identifier, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseDisableBackendMaintenanceResponse(rsp)
+}
+
+func (c *ClientWithResponses) DisableBackendMaintenanceWithResponse(ctx context.Context, identifier Identifier, body DisableBackendMaintenanceJSONRequestBody, reqEditors ...RequestEditorFn) (*DisableBackendMaintenanceResponse, error) {
+	rsp, err := c.DisableBackendMaintenance(ctx, identifier, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -3006,9 +3522,17 @@ func (c *ClientWithResponses) EnableBackendMaintenanceWithResponse(ctx context.C
 	return ParseEnableBackendMaintenanceResponse(rsp)
 }
 
-// ClearBackendRuntimeWithResponse request returning *ClearBackendRuntimeResponse
-func (c *ClientWithResponses) ClearBackendRuntimeWithResponse(ctx context.Context, identifier Identifier, reqEditors ...RequestEditorFn) (*ClearBackendRuntimeResponse, error) {
-	rsp, err := c.ClearBackendRuntime(ctx, identifier, reqEditors...)
+// ClearBackendRuntimeWithBodyWithResponse request with arbitrary body returning *ClearBackendRuntimeResponse
+func (c *ClientWithResponses) ClearBackendRuntimeWithBodyWithResponse(ctx context.Context, identifier Identifier, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ClearBackendRuntimeResponse, error) {
+	rsp, err := c.ClearBackendRuntimeWithBody(ctx, identifier, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseClearBackendRuntimeResponse(rsp)
+}
+
+func (c *ClientWithResponses) ClearBackendRuntimeWithResponse(ctx context.Context, identifier Identifier, body ClearBackendRuntimeJSONRequestBody, reqEditors ...RequestEditorFn) (*ClearBackendRuntimeResponse, error) {
+	rsp, err := c.ClearBackendRuntime(ctx, identifier, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -3066,9 +3590,26 @@ func (c *ClientWithResponses) MarkBackendOutWithResponse(ctx context.Context, id
 	return ParseMarkBackendOutResponse(rsp)
 }
 
+// SetBackendWeightWithBodyWithResponse request with arbitrary body returning *SetBackendWeightResponse
+func (c *ClientWithResponses) SetBackendWeightWithBodyWithResponse(ctx context.Context, identifier Identifier, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SetBackendWeightResponse, error) {
+	rsp, err := c.SetBackendWeightWithBody(ctx, identifier, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseSetBackendWeightResponse(rsp)
+}
+
+func (c *ClientWithResponses) SetBackendWeightWithResponse(ctx context.Context, identifier Identifier, body SetBackendWeightJSONRequestBody, reqEditors ...RequestEditorFn) (*SetBackendWeightResponse, error) {
+	rsp, err := c.SetBackendWeight(ctx, identifier, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseSetBackendWeightResponse(rsp)
+}
+
 // GetDefaultConfigWithResponse request returning *GetDefaultConfigResponse
-func (c *ClientWithResponses) GetDefaultConfigWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*GetDefaultConfigResponse, error) {
-	rsp, err := c.GetDefaultConfig(ctx, reqEditors...)
+func (c *ClientWithResponses) GetDefaultConfigWithResponse(ctx context.Context, params *GetDefaultConfigParams, reqEditors ...RequestEditorFn) (*GetDefaultConfigResponse, error) {
+	rsp, err := c.GetDefaultConfig(ctx, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -3076,8 +3617,8 @@ func (c *ClientWithResponses) GetDefaultConfigWithResponse(ctx context.Context, 
 }
 
 // GetEffectiveConfigWithResponse request returning *GetEffectiveConfigResponse
-func (c *ClientWithResponses) GetEffectiveConfigWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*GetEffectiveConfigResponse, error) {
-	rsp, err := c.GetEffectiveConfig(ctx, reqEditors...)
+func (c *ClientWithResponses) GetEffectiveConfigWithResponse(ctx context.Context, params *GetEffectiveConfigParams, reqEditors ...RequestEditorFn) (*GetEffectiveConfigResponse, error) {
+	rsp, err := c.GetEffectiveConfig(ctx, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -3085,8 +3626,8 @@ func (c *ClientWithResponses) GetEffectiveConfigWithResponse(ctx context.Context
 }
 
 // GetNonDefaultConfigWithResponse request returning *GetNonDefaultConfigResponse
-func (c *ClientWithResponses) GetNonDefaultConfigWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*GetNonDefaultConfigResponse, error) {
-	rsp, err := c.GetNonDefaultConfig(ctx, reqEditors...)
+func (c *ClientWithResponses) GetNonDefaultConfigWithResponse(ctx context.Context, params *GetNonDefaultConfigParams, reqEditors ...RequestEditorFn) (*GetNonDefaultConfigResponse, error) {
+	rsp, err := c.GetNonDefaultConfig(ctx, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -3128,9 +3669,17 @@ func (c *ClientWithResponses) ListSessionsWithResponse(ctx context.Context, para
 	return ParseListSessionsResponse(rsp)
 }
 
-// DeleteSessionWithResponse request returning *DeleteSessionResponse
-func (c *ClientWithResponses) DeleteSessionWithResponse(ctx context.Context, sessionID SessionID, reqEditors ...RequestEditorFn) (*DeleteSessionResponse, error) {
-	rsp, err := c.DeleteSession(ctx, sessionID, reqEditors...)
+// DeleteSessionWithBodyWithResponse request with arbitrary body returning *DeleteSessionResponse
+func (c *ClientWithResponses) DeleteSessionWithBodyWithResponse(ctx context.Context, sessionID SessionID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*DeleteSessionResponse, error) {
+	rsp, err := c.DeleteSessionWithBody(ctx, sessionID, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseDeleteSessionResponse(rsp)
+}
+
+func (c *ClientWithResponses) DeleteSessionWithResponse(ctx context.Context, sessionID SessionID, body DeleteSessionJSONRequestBody, reqEditors ...RequestEditorFn) (*DeleteSessionResponse, error) {
+	rsp, err := c.DeleteSession(ctx, sessionID, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -3164,9 +3713,17 @@ func (c *ClientWithResponses) GetUserWithResponse(ctx context.Context, userKey U
 	return ParseGetUserResponse(rsp)
 }
 
-// ClearUserAffinityWithResponse request returning *ClearUserAffinityResponse
-func (c *ClientWithResponses) ClearUserAffinityWithResponse(ctx context.Context, userKey UserKey, reqEditors ...RequestEditorFn) (*ClearUserAffinityResponse, error) {
-	rsp, err := c.ClearUserAffinity(ctx, userKey, reqEditors...)
+// ClearUserAffinityWithBodyWithResponse request with arbitrary body returning *ClearUserAffinityResponse
+func (c *ClientWithResponses) ClearUserAffinityWithBodyWithResponse(ctx context.Context, userKey UserKey, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ClearUserAffinityResponse, error) {
+	rsp, err := c.ClearUserAffinityWithBody(ctx, userKey, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseClearUserAffinityResponse(rsp)
+}
+
+func (c *ClientWithResponses) ClearUserAffinityWithResponse(ctx context.Context, userKey UserKey, body ClearUserAffinityJSONRequestBody, reqEditors ...RequestEditorFn) (*ClearUserAffinityResponse, error) {
+	rsp, err := c.ClearUserAffinity(ctx, userKey, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -3299,13 +3856,6 @@ func ParseListBackendsResponse(rsp *http.Response) (*ListBackendsResponse, error
 		}
 		response.JSON200 = &dest
 
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 501:
-		var dest NotImplemented
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON501 = &dest
-
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
 		var dest Error
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
@@ -3338,13 +3888,6 @@ func ParseGetBackendResponse(rsp *http.Response) (*GetBackendResponse, error) {
 			return nil, err
 		}
 		response.JSON200 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 501:
-		var dest NotImplemented
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON501 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
 		var dest Error
@@ -3379,13 +3922,6 @@ func ParseDisableBackendMaintenanceResponse(rsp *http.Response) (*DisableBackend
 		}
 		response.JSON202 = &dest
 
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 501:
-		var dest NotImplemented
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON501 = &dest
-
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
 		var dest Error
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
@@ -3418,13 +3954,6 @@ func ParseEnableBackendMaintenanceResponse(rsp *http.Response) (*EnableBackendMa
 			return nil, err
 		}
 		response.JSON202 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 501:
-		var dest NotImplemented
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON501 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
 		var dest Error
@@ -3459,13 +3988,6 @@ func ParseClearBackendRuntimeResponse(rsp *http.Response) (*ClearBackendRuntimeR
 		}
 		response.JSON202 = &dest
 
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 501:
-		var dest NotImplemented
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON501 = &dest
-
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
 		var dest Error
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
@@ -3498,13 +4020,6 @@ func ParseDrainBackendResponse(rsp *http.Response) (*DrainBackendResponse, error
 			return nil, err
 		}
 		response.JSON202 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 501:
-		var dest NotImplemented
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON501 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
 		var dest Error
@@ -3539,13 +4054,6 @@ func ParseMarkBackendInResponse(rsp *http.Response) (*MarkBackendInResponse, err
 		}
 		response.JSON202 = &dest
 
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 501:
-		var dest NotImplemented
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON501 = &dest
-
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
 		var dest Error
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
@@ -3579,12 +4087,38 @@ func ParseMarkBackendOutResponse(rsp *http.Response) (*MarkBackendOutResponse, e
 		}
 		response.JSON202 = &dest
 
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 501:
-		var dest NotImplemented
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
-		response.JSON501 = &dest
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseSetBackendWeightResponse parses an HTTP response from a SetBackendWeightWithResponse call
+func ParseSetBackendWeightResponse(rsp *http.Response) (*SetBackendWeightResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &SetBackendWeightResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 202:
+		var dest AcceptedResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON202 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
 		var dest Error
@@ -3619,13 +4153,6 @@ func ParseGetDefaultConfigResponse(rsp *http.Response) (*GetDefaultConfigRespons
 		}
 		response.JSON200 = &dest
 
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 501:
-		var dest NotImplemented
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON501 = &dest
-
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
 		var dest Error
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
@@ -3658,13 +4185,6 @@ func ParseGetEffectiveConfigResponse(rsp *http.Response) (*GetEffectiveConfigRes
 			return nil, err
 		}
 		response.JSON200 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 501:
-		var dest NotImplemented
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON501 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
 		var dest Error
@@ -3699,13 +4219,6 @@ func ParseGetNonDefaultConfigResponse(rsp *http.Response) (*GetNonDefaultConfigR
 		}
 		response.JSON200 = &dest
 
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 501:
-		var dest NotImplemented
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON501 = &dest
-
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
 		var dest Error
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
@@ -3738,13 +4251,6 @@ func ParseReloadResponse(rsp *http.Response) (*ReloadResponse, error) {
 			return nil, err
 		}
 		response.JSON202 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 501:
-		var dest NotImplemented
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON501 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
 		var dest Error
@@ -3786,13 +4292,6 @@ func ParseLookupRouteResponse(rsp *http.Response) (*LookupRouteResponse, error) 
 		}
 		response.JSON400 = &dest
 
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 501:
-		var dest NotImplemented
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON501 = &dest
-
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
 		var dest Error
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
@@ -3825,13 +4324,6 @@ func ParseListSessionsResponse(rsp *http.Response) (*ListSessionsResponse, error
 			return nil, err
 		}
 		response.JSON200 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 501:
-		var dest NotImplemented
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON501 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
 		var dest Error
@@ -3866,13 +4358,6 @@ func ParseDeleteSessionResponse(rsp *http.Response) (*DeleteSessionResponse, err
 		}
 		response.JSON202 = &dest
 
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 501:
-		var dest NotImplemented
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON501 = &dest
-
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
 		var dest Error
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
@@ -3905,13 +4390,6 @@ func ParseGetSessionResponse(rsp *http.Response) (*GetSessionResponse, error) {
 			return nil, err
 		}
 		response.JSON200 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 501:
-		var dest NotImplemented
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON501 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
 		var dest Error
@@ -3946,13 +4424,6 @@ func ParseListUsersResponse(rsp *http.Response) (*ListUsersResponse, error) {
 		}
 		response.JSON200 = &dest
 
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 501:
-		var dest NotImplemented
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON501 = &dest
-
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
 		var dest Error
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
@@ -3985,13 +4456,6 @@ func ParseGetUserResponse(rsp *http.Response) (*GetUserResponse, error) {
 			return nil, err
 		}
 		response.JSON200 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 501:
-		var dest NotImplemented
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON501 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
 		var dest Error
@@ -4026,13 +4490,6 @@ func ParseClearUserAffinityResponse(rsp *http.Response) (*ClearUserAffinityRespo
 		}
 		response.JSON202 = &dest
 
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 501:
-		var dest NotImplemented
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON501 = &dest
-
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
 		var dest Error
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
@@ -4065,13 +4522,6 @@ func ParseGetUserAffinityResponse(rsp *http.Response) (*GetUserAffinityResponse,
 			return nil, err
 		}
 		response.JSON200 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 501:
-		var dest NotImplemented
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON501 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
 		var dest Error
@@ -4106,13 +4556,6 @@ func ParseSetUserAffinityResponse(rsp *http.Response) (*SetUserAffinityResponse,
 		}
 		response.JSON202 = &dest
 
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 501:
-		var dest NotImplemented
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON501 = &dest
-
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
 		var dest Error
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
@@ -4145,13 +4588,6 @@ func ParseKickUserResponse(rsp *http.Response) (*KickUserResponse, error) {
 			return nil, err
 		}
 		response.JSON202 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 501:
-		var dest NotImplemented
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON501 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
 		var dest Error
@@ -4186,13 +4622,6 @@ func ParseMoveUserResponse(rsp *http.Response) (*MoveUserResponse, error) {
 		}
 		response.JSON202 = &dest
 
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 501:
-		var dest NotImplemented
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON501 = &dest
-
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
 		var dest Error
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
@@ -4225,13 +4654,6 @@ func ParseGetUserSessionsResponse(rsp *http.Response) (*GetUserSessionsResponse,
 			return nil, err
 		}
 		response.JSON200 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 501:
-		var dest NotImplemented
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON501 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
 		var dest Error
@@ -4325,13 +4747,6 @@ func ParseGetMetricsResponse(rsp *http.Response) (*GetMetricsResponse, error) {
 	}
 
 	switch {
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 501:
-		var dest NotImplemented
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON501 = &dest
-
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
 		var dest Error
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {

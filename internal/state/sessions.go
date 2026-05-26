@@ -24,10 +24,11 @@ import (
 )
 
 const (
-	scriptOpen      = "open"
-	scriptHeartbeat = "heartbeat"
+	scriptAttach    = "attach"
 	scriptClose     = "close"
+	scriptHeartbeat = "heartbeat"
 	scriptLookup    = "lookup"
+	scriptOpen      = "open"
 )
 
 // RedisSessionStore coordinates active affinity and session leases through Redis scripts.
@@ -70,19 +71,92 @@ func (s *RedisSessionStore) OpenSession(ctx context.Context, record SessionRecor
 		return AffinityRecord{}, err
 	}
 
-	value, err := s.runScript(ctx, scriptOpen, []string{keys.State, keys.Sessions, sessionKey},
+	affinityHash, err := s.keys.AffinityHash(record.Key.Tenant, record.Key.AccountKey)
+	if err != nil {
+		return AffinityRecord{}, err
+	}
+
+	userSessionIndexKey, err := s.keys.UserSessionIndexKey(record.Key.Tenant, record.Key.AccountKey)
+	if err != nil {
+		return AffinityRecord{}, err
+	}
+
+	value, err := s.runScript(ctx, scriptOpen, []string{
+		keys.State,
+		keys.Sessions,
+		sessionKey,
+		keys.Override,
+		s.keys.SessionIndexKey(),
+		s.keys.UserIndexKey(),
+		userSessionIndexKey,
+	},
 		record.ID,
 		normalizedStateValue(record.Protocol),
 		normalizedStateValue(record.ShardTag),
 		durationMilliseconds(record.LeaseTTL),
 		nonNegativeDurationMilliseconds(record.IdleGrace),
 		s.keys.schemaVersion,
+		affinityHash,
+		normalizedStateValue(record.Key.Tenant),
+		normalizedStateValue(record.ListenerName),
+		normalizedStateValue(record.ServiceName),
+		normalizedStateValue(record.DirectorInstanceID),
 	)
 	if err != nil {
 		return AffinityRecord{}, err
 	}
 
 	return parseAffinityRecord(record.Key, value)
+}
+
+// AttachSelectedBackend atomically registers the selected backend after placement.
+func (s *RedisSessionStore) AttachSelectedBackend(
+	ctx context.Context,
+	attachment SessionBackendAttachment,
+) (SessionBackendRecord, error) {
+	if err := validateSessionBackendAttachment(attachment); err != nil {
+		return SessionBackendRecord{}, err
+	}
+
+	keys, sessionKey, err := s.sessionKeys(attachment.Key, attachment.SessionID)
+	if err != nil {
+		return SessionBackendRecord{}, err
+	}
+
+	backendRuntimeKey, err := s.keys.BackendRuntimeKey(attachment.BackendIdentifier)
+	if err != nil {
+		return SessionBackendRecord{}, err
+	}
+
+	backendSessionIndexKey, err := s.keys.BackendSessionIndexKey(attachment.BackendIdentifier)
+	if err != nil {
+		return SessionBackendRecord{}, err
+	}
+
+	userSessionIndexKey, err := s.keys.UserSessionIndexKey(attachment.Key.Tenant, attachment.Key.AccountKey)
+	if err != nil {
+		return SessionBackendRecord{}, err
+	}
+
+	value, err := s.runScript(ctx, scriptAttach, []string{
+		keys.State,
+		keys.Sessions,
+		sessionKey,
+		backendRuntimeKey,
+		s.keys.SessionIndexKey(),
+		s.keys.BackendIndexKey(),
+		backendSessionIndexKey,
+		userSessionIndexKey,
+	},
+		attachment.SessionID,
+		attachment.BackendIdentifier,
+		attachment.MaxConnections,
+	)
+	if err != nil {
+		return SessionBackendRecord{}, err
+	}
+
+	return parseSessionBackendRecord(value)
 }
 
 // HeartbeatSession extends one existing session lease using Redis server time.
@@ -129,7 +203,18 @@ func (s *RedisSessionStore) CloseSession(ctx context.Context, key AffinityKey, s
 		return AffinityRecord{}, err
 	}
 
-	value, err := s.runScript(ctx, scriptClose, []string{keys.State, keys.Sessions, sessionKey}, sessionID)
+	userSessionIndexKey, err := s.keys.UserSessionIndexKey(key.Tenant, key.AccountKey)
+	if err != nil {
+		return AffinityRecord{}, err
+	}
+
+	value, err := s.runScript(ctx, scriptClose, []string{
+		keys.State,
+		keys.Sessions,
+		sessionKey,
+		s.keys.SessionIndexKey(),
+		userSessionIndexKey,
+	}, sessionID)
 	if err != nil {
 		return AffinityRecord{}, err
 	}
@@ -219,6 +304,23 @@ func validateSessionRecord(record SessionRecord) error {
 	return nil
 }
 
+// validateSessionBackendAttachment checks fields needed for backend count registration.
+func validateSessionBackendAttachment(attachment SessionBackendAttachment) error {
+	if strings.TrimSpace(attachment.SessionID) == "" {
+		return newStateError(RedisErrorKindAmbiguousState, scriptAttach, "session id required", nil)
+	}
+
+	if strings.TrimSpace(attachment.BackendIdentifier) == "" {
+		return newStateError(RedisErrorKindAmbiguousState, scriptAttach, "backend id required", nil)
+	}
+
+	if attachment.MaxConnections <= 0 {
+		return newStateError(RedisErrorKindAmbiguousState, scriptAttach, "max connections required", nil)
+	}
+
+	return nil
+}
+
 // parseAffinityRecord converts the flat Lua response into a typed affinity snapshot.
 func parseAffinityRecord(key AffinityKey, value any) (AffinityRecord, error) {
 	fields, err := parseScriptFields(value)
@@ -262,7 +364,89 @@ func parseAffinityRecord(key AffinityKey, value any) (AffinityRecord, error) {
 		return AffinityRecord{}, err
 	}
 
+	record.ControlAction, err = parseOptionalControlAction(fields["control_action"])
+	if err != nil {
+		return AffinityRecord{}, err
+	}
+
+	record.ControlGeneration = fields["control_generation"]
+	record.BackendIdentifier = fields["backend_id"]
+
 	return record, nil
+}
+
+// parseSessionBackendRecord converts the selected-backend attach payload.
+func parseSessionBackendRecord(value any) (SessionBackendRecord, error) {
+	parsed, err := parseBackendScriptFields(value)
+	if err != nil {
+		return SessionBackendRecord{}, err
+	}
+
+	record := SessionBackendRecord{
+		Status:            parsed.Status,
+		BackendIdentifier: parsed.BackendIdentifier,
+		ServerTime:        parsed.ServerTime,
+		ControlGeneration: parsed.Fields["control_generation"],
+	}
+
+	record.BackendActiveCount, err = parseIntField(parsed.Fields, "backend_active_session_count")
+	if err != nil {
+		return SessionBackendRecord{}, err
+	}
+
+	record.LeaseExpiresAt, err = parseTimeField(parsed.Fields, "lease_expires_at_ms")
+	if err != nil {
+		return SessionBackendRecord{}, err
+	}
+
+	return record, nil
+}
+
+type parsedBackendScriptFields struct {
+	Fields            map[string]string
+	Status            string
+	BackendIdentifier string
+	ServerTime        time.Time
+}
+
+// parseBackendScriptFields reads common backend script fields and server time.
+func parseBackendScriptFields(value any) (parsedBackendScriptFields, error) {
+	fields, err := parseScriptFields(value)
+	if err != nil {
+		return parsedBackendScriptFields{}, err
+	}
+
+	status, backendIdentifier, err := parseScriptStatusAndBackend(fields)
+	if err != nil {
+		return parsedBackendScriptFields{}, err
+	}
+
+	serverTime, err := parseTimeField(fields, "server_time_ms")
+	if err != nil {
+		return parsedBackendScriptFields{}, err
+	}
+
+	return parsedBackendScriptFields{
+		Fields:            fields,
+		Status:            status,
+		BackendIdentifier: backendIdentifier,
+		ServerTime:        serverTime,
+	}, nil
+}
+
+// parseScriptStatusAndBackend reads common backend script identity fields.
+func parseScriptStatusAndBackend(fields map[string]string) (string, string, error) {
+	status := fields["status"]
+	if status == "" {
+		return "", "", newStateError(RedisErrorKindAmbiguousState, "script_result", "status required", nil)
+	}
+
+	backendIdentifier := fields["backend_id"]
+	if backendIdentifier == "" {
+		return "", "", newStateError(RedisErrorKindAmbiguousState, "script_result", "backend id required", nil)
+	}
+
+	return status, backendIdentifier, nil
 }
 
 // parseScriptFields reads alternating key/value entries returned by Lua scripts.
@@ -340,6 +524,21 @@ func parseTimeField(fields map[string]string, name string) (time.Time, error) {
 	}
 
 	return time.UnixMilli(parsed).UTC(), nil
+}
+
+// parseOptionalControlAction normalizes and validates script control actions.
+func parseOptionalControlAction(value string) (ControlAction, error) {
+	action := ControlAction(strings.TrimSpace(value))
+	if action == "" {
+		return ControlActionNone, nil
+	}
+
+	switch action {
+	case ControlActionNone, ControlActionKick, ControlActionDrain, ControlActionMoveGenerationChanged:
+		return action, nil
+	default:
+		return "", newStateError(RedisErrorKindAmbiguousState, "script_result", "unsupported control action", nil)
+	}
 }
 
 // durationMilliseconds returns a positive millisecond duration for Redis lease scripts.
