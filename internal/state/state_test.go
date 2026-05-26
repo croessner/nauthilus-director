@@ -25,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/croessner/nauthilus-director/internal/backend"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -119,6 +120,33 @@ func TestBackendAndIndexKeysFollowRuntimeShape(t *testing.T) {
 		t.Fatalf("backend index key = %q", got)
 	}
 
+	instanceKey, err := builder.InstanceKey("director-a")
+	if err != nil {
+		t.Fatalf("InstanceKey returned error: %v", err)
+	}
+
+	if instanceKey != "nd:v1:runtime:instance:director-a" {
+		t.Fatalf("instance key = %q", instanceKey)
+	}
+
+	ownerKey, err := builder.HealthOwnerKey(testBackendIMAP)
+	if err != nil {
+		t.Fatalf("HealthOwnerKey returned error: %v", err)
+	}
+
+	if ownerKey != "nd:v1:health:backend:"+testBackendIMAP+":owner" {
+		t.Fatalf("health owner key = %q", ownerKey)
+	}
+
+	healthKey, err := builder.HealthStateKey(testBackendIMAP)
+	if err != nil {
+		t.Fatalf("HealthStateKey returned error: %v", err)
+	}
+
+	if healthKey != "nd:v1:health:backend:"+testBackendIMAP+":state" {
+		t.Fatalf("health state key = %q", healthKey)
+	}
+
 	backendSessions, err := builder.BackendSessionIndexKey(testBackendIMAP)
 	if err != nil {
 		t.Fatalf("BackendSessionIndexKey returned error: %v", err)
@@ -179,6 +207,9 @@ func TestScriptLoaderTracksSHAAndMissingScripts(t *testing.T) {
 		scriptClear,
 		scriptClose,
 		scriptHeartbeat,
+		scriptHealthOwnerAcquire,
+		scriptHealthOwnerRenew,
+		scriptHealthStatePublish,
 		scriptKick,
 		scriptLookup,
 		scriptMove,
@@ -533,6 +564,118 @@ func TestRedisBackendRuntimeScripts(t *testing.T) {
 	}
 }
 
+// TestRedisHealthOwnershipAndFencing verifies owner lease renewal and stale write rejection.
+func TestRedisHealthOwnershipAndFencing(t *testing.T) {
+	store, client, builder := redisIntegrationStore(t)
+	backendID := testBackendIMAP
+	instanceA := "director-health-a"
+	instanceB := "director-health-b"
+
+	cleanupHealth(t, client, builder, backendID, instanceA, instanceB)
+	publishTestInstanceHeartbeat(t, store, instanceA)
+
+	ownerA := acquireTestHealthOwner(t, store, instanceA, backendID, 75*time.Millisecond)
+	if !ownerA.Owned || ownerA.FencingToken <= 0 {
+		t.Fatalf("owner A = %#v, want owned with token", ownerA)
+	}
+
+	renewed := renewTestHealthOwner(t, store, instanceA, backendID, ownerA.FencingToken, 75*time.Millisecond)
+	if renewed.FencingToken != ownerA.FencingToken {
+		t.Fatalf("renew token = %d, want %d", renewed.FencingToken, ownerA.FencingToken)
+	}
+
+	publishTestInstanceHeartbeat(t, store, instanceB)
+	time.Sleep(120 * time.Millisecond)
+
+	ownerB := acquireTestHealthOwner(t, store, instanceB, backendID, time.Second)
+	if !ownerB.Owned || ownerB.FencingToken <= ownerA.FencingToken {
+		t.Fatalf("owner B = %#v, want newer fencing token after takeover", ownerB)
+	}
+
+	assertStaleHealthPublishRejected(t, store, instanceA, backendID, ownerA.FencingToken)
+
+	published := publishTestHealthState(t, store, instanceB, backendID, ownerB.FencingToken)
+	if published.Status != backend.HealthStatusHealthy || published.Generation == "" {
+		t.Fatalf("published health = %#v", published)
+	}
+}
+
+// publishTestInstanceHeartbeat records an integration-test instance heartbeat.
+func publishTestInstanceHeartbeat(t *testing.T, store *RedisSessionStore, instanceID string) {
+	t.Helper()
+
+	if err := store.PublishInstanceHeartbeat(context.Background(), instanceID, time.Second); err != nil {
+		t.Fatalf("PublishInstanceHeartbeat %s returned error: %v", instanceID, err)
+	}
+}
+
+// acquireTestHealthOwner acquires a health-owner lease for integration tests.
+func acquireTestHealthOwner(t *testing.T, store *RedisSessionStore, instanceID string, backendID string, ttl time.Duration) HealthOwnershipRecord {
+	t.Helper()
+
+	owner, err := store.AcquireHealthOwner(context.Background(), HealthOwnershipRequest{
+		InstanceID:        instanceID,
+		BackendIdentifier: backendID,
+		LeaseTTL:          ttl,
+	})
+	if err != nil {
+		t.Fatalf("AcquireHealthOwner %s returned error: %v", instanceID, err)
+	}
+
+	return owner
+}
+
+// renewTestHealthOwner renews a health-owner lease for integration tests.
+func renewTestHealthOwner(t *testing.T, store *RedisSessionStore, instanceID string, backendID string, token int64, ttl time.Duration) HealthOwnershipRecord {
+	t.Helper()
+
+	owner, err := store.RenewHealthOwner(context.Background(), HealthOwnershipRequest{
+		InstanceID:        instanceID,
+		BackendIdentifier: backendID,
+		LeaseTTL:          ttl,
+		FencingToken:      token,
+	})
+	if err != nil {
+		t.Fatalf("RenewHealthOwner %s returned error: %v", instanceID, err)
+	}
+
+	return owner
+}
+
+// assertStaleHealthPublishRejected verifies fenced stale health writes fail closed.
+func assertStaleHealthPublishRejected(t *testing.T, store *RedisSessionStore, instanceID string, backendID string, token int64) {
+	t.Helper()
+
+	_, err := store.PublishHealthState(context.Background(), HealthPublishRequest{
+		InstanceID:        instanceID,
+		BackendIdentifier: backendID,
+		FencingToken:      token,
+		State:             backend.HealthState{Enabled: true, Status: backend.HealthStatusHealthy},
+		TTL:               time.Second,
+	})
+	if !IsRedisErrorKind(err, RedisErrorKindAmbiguousState) {
+		t.Fatalf("stale PublishHealthState error = %v, want ambiguous_state", err)
+	}
+}
+
+// publishTestHealthState publishes a healthy integration-test health record.
+func publishTestHealthState(t *testing.T, store *RedisSessionStore, instanceID string, backendID string, token int64) backend.HealthState {
+	t.Helper()
+
+	published, err := store.PublishHealthState(context.Background(), HealthPublishRequest{
+		InstanceID:        instanceID,
+		BackendIdentifier: backendID,
+		FencingToken:      token,
+		State:             backend.HealthState{Enabled: true, Status: backend.HealthStatusHealthy},
+		TTL:               time.Second,
+	})
+	if err != nil {
+		t.Fatalf("PublishHealthState %s returned error: %v", instanceID, err)
+	}
+
+	return published
+}
+
 // TestRedisCloseReleasesAffinityWithoutGrace verifies configured immediate release behavior.
 func TestRedisCloseReleasesAffinityWithoutGrace(t *testing.T) {
 	store, client, builder := redisIntegrationStore(t)
@@ -715,6 +858,36 @@ func cleanupBackend(t *testing.T, client *redis.Client, builder KeyBuilder, back
 
 	if err := client.SRem(context.Background(), builder.BackendIndexKey(), backendID).Err(); err != nil {
 		t.Fatalf("cleanup backend index: %v", err)
+	}
+}
+
+// cleanupHealth deletes one backend health state and instance heartbeat keys.
+func cleanupHealth(t *testing.T, client *redis.Client, builder KeyBuilder, backendID string, instanceIDs ...string) {
+	t.Helper()
+
+	ownerKey, err := builder.HealthOwnerKey(backendID)
+	if err != nil {
+		t.Fatalf("HealthOwnerKey returned error: %v", err)
+	}
+
+	stateKey, err := builder.HealthStateKey(backendID)
+	if err != nil {
+		t.Fatalf("HealthStateKey returned error: %v", err)
+	}
+
+	keys := []string{ownerKey, stateKey}
+
+	for _, instanceID := range instanceIDs {
+		instanceKey, err := builder.InstanceKey(instanceID)
+		if err != nil {
+			t.Fatalf("InstanceKey returned error: %v", err)
+		}
+
+		keys = append(keys, instanceKey)
+	}
+
+	if err := client.Del(context.Background(), keys...).Err(); err != nil {
+		t.Fatalf("cleanup health keys: %v", err)
 	}
 }
 

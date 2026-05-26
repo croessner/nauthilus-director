@@ -41,6 +41,10 @@ const (
 	EventBackendConnect = "backend.connect"
 	// EventBackendAuth records selected backend authentication.
 	EventBackendAuth = "backend.auth"
+	// EventBackendHealth records backend health transition and ownership results.
+	EventBackendHealth = "backend.health"
+	// EventBackendMaintenance records backend maintenance and drain transitions.
+	EventBackendMaintenance = "backend.maintenance"
 	// EventProxyPipe records transparent proxy lifecycle completion.
 	EventProxyPipe = "proxy.pipe"
 )

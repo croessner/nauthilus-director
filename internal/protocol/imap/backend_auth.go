@@ -70,6 +70,40 @@ func AuthenticateBackend(connection *BackendConnection, target backend.Backend, 
 	return nil
 }
 
+// AuthenticateHealthBackend logs in with the configured health-check identity.
+func AuthenticateHealthBackend(connection *BackendConnection, target backend.Backend) error {
+	if connection == nil {
+		return fmt.Errorf("%w: backend connection unavailable", ErrBackendAuth)
+	}
+
+	credentials, err := healthCheckCredentials(target)
+	if err != nil {
+		return err
+	}
+	defer credentials.Clear()
+
+	command, err := healthCheckAuthCommand(connection.capabilities, credentials)
+	if err != nil {
+		return err
+	}
+
+	tag := connection.nextCommandTag()
+	if err := connection.writeCommand(tag, command); err != nil {
+		return err
+	}
+
+	ok, err := connection.readTaggedCompletion(tag)
+	if err != nil {
+		return err
+	}
+
+	if !ok {
+		return fmt.Errorf("%w: backend rejected health authentication", ErrBackendAuth)
+	}
+
+	return nil
+}
+
 // backendAuthCommand builds the secret-bearing backend command for immediate use only.
 func backendAuthCommand(target backend.Backend, connection *BackendConnection, credentials *frontendCredentials) (string, error) {
 	switch strings.ToLower(strings.TrimSpace(target.Auth.Mode)) {
@@ -112,6 +146,38 @@ func masterUserAuthCommand(
 	default:
 		return plainAuthCommand("", username, config.Password.Value()), nil
 	}
+}
+
+// healthCheckCredentials creates short-lived credentials for deep health only.
+func healthCheckCredentials(target backend.Backend) (*frontendCredentials, error) {
+	if strings.TrimSpace(target.Health.Username) == "" || target.Health.Password.IsZero() {
+		return nil, fmt.Errorf("%w: incomplete health check credentials", ErrBackendAuthPolicy)
+	}
+
+	mechanism, err := newMechanismIdentity(mechanismPlain)
+	if err != nil {
+		return nil, err
+	}
+
+	return &frontendCredentials{
+		mechanism: mechanism,
+		kind:      credentialKindPassword,
+		username:  target.Health.Username,
+		secret:    newCredentialSecret(target.Health.Password.Value()),
+	}, nil
+}
+
+// healthCheckAuthCommand prefers AUTH PLAIN and falls back to LOGIN for health checks.
+func healthCheckAuthCommand(capabilities backendCapabilities, credentials *frontendCredentials) (string, error) {
+	if capabilities.SupportsMechanism(mechanismPlain) {
+		return plainAuthCommand("", credentials.Username(), credentials.Secret().Value()), nil
+	}
+
+	if capabilities.SupportsMechanism(mechanismLogin) {
+		return loginCommand(credentials.Username(), credentials.Secret().Value()), nil
+	}
+
+	return "", fmt.Errorf("%w: health mechanism unavailable", ErrBackendAuthPolicy)
 }
 
 // credentialReplayCommand selects and builds the configured replay mechanism.

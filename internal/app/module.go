@@ -18,6 +18,7 @@
 package app
 
 import (
+	"github.com/croessner/nauthilus-director/internal/backend"
 	"github.com/croessner/nauthilus-director/internal/listener"
 	"go.uber.org/fx"
 )
@@ -26,5 +27,25 @@ import (
 func Module() fx.Option {
 	return fx.Options(
 		listener.Module(),
+		fx.Invoke(registerHealthRunnerLifecycle),
 	)
+}
+
+type healthRunnerLifecycleParams struct {
+	fx.In
+
+	Lifecycle fx.Lifecycle
+	Runner    *backend.HealthRunner `optional:"true"`
+}
+
+// registerHealthRunnerLifecycle starts the backend health loop when one is assembled.
+func registerHealthRunnerLifecycle(params healthRunnerLifecycleParams) {
+	if params.Runner == nil {
+		return
+	}
+
+	params.Lifecycle.Append(fx.Hook{
+		OnStart: params.Runner.Start,
+		OnStop:  params.Runner.Stop,
+	})
 }

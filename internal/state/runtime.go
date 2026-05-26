@@ -400,8 +400,8 @@ func optionalInt(value *int) string {
 // boolString serializes a boolean using script vocabulary.
 func boolString(value bool) string {
 	if value {
-		return "true"
+		return stateBoolTrue
 	}
 
-	return "false"
+	return stateBoolFalse
 }

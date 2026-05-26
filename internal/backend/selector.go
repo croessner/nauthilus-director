@@ -22,6 +22,7 @@ import (
 	"encoding/binary"
 	"math"
 	"strings"
+	"time"
 )
 
 const (
@@ -32,12 +33,13 @@ const (
 
 // SelectionRequest joins logical routing facts with protocol backend context.
 type SelectionRequest struct {
-	AccountKey     string
-	Tenant         string
-	ShardTag       string
-	Protocol       string
-	BackendPool    string
-	ActiveAffinity bool
+	AccountKey              string
+	Tenant                  string
+	ShardTag                string
+	Protocol                string
+	BackendPool             string
+	ActiveAffinity          bool
+	PinnedBackendIdentifier string
 }
 
 // SelectionResult contains the concrete backend chosen after policy checks.
@@ -56,9 +58,13 @@ type Selector interface {
 
 // SelectionPolicy configures static maintenance handling for backend selection.
 type SelectionPolicy struct {
-	SoftAllowsActivePins bool
-	DefaultShard         string
-	EffectiveBackend     EffectiveBackendPolicy
+	SoftAllowsActivePins       bool
+	DefaultShard               string
+	EffectiveBackend           EffectiveBackendPolicy
+	AllowHardDownFailover      bool
+	AllowHardMaintenanceMove   bool
+	HealthStartupGrace         time.Duration
+	HealthEnforcementStartedAt time.Time
 }
 
 // StaticSelector chooses static config-backed IMAP backends.
@@ -156,20 +162,30 @@ func (p SelectionPolicy) Normalize() SelectionPolicy {
 
 	p.EffectiveBackend = p.EffectiveBackend.Normalize()
 	p.EffectiveBackend.SoftAllowsActivePins = p.SoftAllowsActivePins
+	if p.HealthStartupGrace < 0 {
+		p.HealthStartupGrace = 0
+	}
 
 	return p
 }
 
 // normalizeSelectionRequest trims, canonicalizes and defaults selector input.
 func (s *StaticSelector) normalizeSelectionRequest(request SelectionRequest) SelectionRequest {
+	return normalizeSelectionRequestWithDefault(request, s.policy.DefaultShard)
+}
+
+// normalizeSelectionRequestWithDefault trims, canonicalizes and defaults selector input.
+func normalizeSelectionRequestWithDefault(request SelectionRequest, defaultShard string) SelectionRequest {
 	request.AccountKey = strings.TrimSpace(request.AccountKey)
 	request.Tenant = strings.TrimSpace(request.Tenant)
 	request.ShardTag = strings.TrimSpace(request.ShardTag)
 	if request.ShardTag == "" {
-		request.ShardTag = s.policy.DefaultShard
+		request.ShardTag = defaultShard
 	}
+
 	request.Protocol = normalizeProtocol(request.Protocol)
 	request.BackendPool = strings.TrimSpace(request.BackendPool)
+	request.PinnedBackendIdentifier = strings.TrimSpace(request.PinnedBackendIdentifier)
 
 	return request
 }

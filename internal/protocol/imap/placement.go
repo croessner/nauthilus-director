@@ -158,12 +158,8 @@ func (s *Session) placeAuthenticatedSession(
 		return err
 	}
 
-	if _, err := s.sessionStore.AttachSelectedBackend(ctx, state.SessionBackendAttachment{
-		Key:               sessionRecord.Key,
-		SessionID:         s.context.ID,
-		BackendIdentifier: backendResult.Backend.Identifier,
-		MaxConnections:    backendResult.Backend.MaxConnections,
-	}); err != nil {
+	backendResult, err = s.attachSelectedBackend(ctx, sessionRecord.Key, s.selectionRequest(routingResult, selectedShardTag, affinity), backendResult)
+	if err != nil {
 		s.recordBackendSelect(ctx, observationResultFailure, reasonClass(err), selectedShardTag)
 		_, _ = s.sessionStore.CloseSession(context.Background(), sessionRecord.Key, s.context.ID)
 
@@ -182,6 +178,46 @@ func (s *Session) placeAuthenticatedSession(
 	s.placed = true
 
 	return nil
+}
+
+// attachSelectedBackend registers backend counts and retries same-shard placement on attach races.
+func (s *Session) attachSelectedBackend(
+	ctx context.Context,
+	key state.AffinityKey,
+	request backend.SelectionRequest,
+	initial backend.SelectionResult,
+) (backend.SelectionResult, error) {
+	if _, err := s.sessionStore.AttachSelectedBackend(ctx, state.SessionBackendAttachment{
+		Key:               key,
+		SessionID:         s.context.ID,
+		BackendIdentifier: initial.Backend.Identifier,
+		MaxConnections:    initial.Backend.MaxConnections,
+	}); err != nil {
+		retrySelector, ok := s.backendSelector.(interface {
+			RetryAfterAttachFailure(context.Context, backend.SelectionRequest, string) (backend.SelectionResult, error)
+		})
+		if !ok {
+			return backend.SelectionResult{}, err
+		}
+
+		retry, retryErr := retrySelector.RetryAfterAttachFailure(ctx, request, initial.Backend.Identifier)
+		if retryErr != nil {
+			return backend.SelectionResult{}, retryErr
+		}
+
+		if _, attachErr := s.sessionStore.AttachSelectedBackend(ctx, state.SessionBackendAttachment{
+			Key:               key,
+			SessionID:         s.context.ID,
+			BackendIdentifier: retry.Backend.Identifier,
+			MaxConnections:    retry.Backend.MaxConnections,
+		}); attachErr != nil {
+			return backend.SelectionResult{}, attachErr
+		}
+
+		return retry, nil
+	}
+
+	return initial, nil
 }
 
 // withEffectiveDefaultShard fills an omitted route shard from the immutable config snapshot.
@@ -255,12 +291,13 @@ func (s *Session) sessionRecord(result routing.RoutingResult) state.SessionRecor
 // selectionRequest builds the backend selector input from the final active shard.
 func (s *Session) selectionRequest(result routing.RoutingResult, shardTag string, affinity state.AffinityRecord) backend.SelectionRequest {
 	return backend.SelectionRequest{
-		AccountKey:     normalizedAccount(result.AccountKey),
-		Tenant:         normalizedRoutingFact(result.Tenant),
-		ShardTag:       normalizedRoutingFact(shardTag),
-		Protocol:       protocolIMAP,
-		BackendPool:    s.context.BackendPool,
-		ActiveAffinity: affinityActiveForSelection(result, affinity),
+		AccountKey:              normalizedAccount(result.AccountKey),
+		Tenant:                  normalizedRoutingFact(result.Tenant),
+		ShardTag:                normalizedRoutingFact(shardTag),
+		Protocol:                protocolIMAP,
+		BackendPool:             s.context.BackendPool,
+		ActiveAffinity:          affinityActiveForSelection(result, affinity),
+		PinnedBackendIdentifier: normalizedRoutingFact(affinity.BackendIdentifier),
 	}
 }
 

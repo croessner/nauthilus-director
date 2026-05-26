@@ -17,6 +17,7 @@
 package backend
 
 import (
+	"context"
 	"strings"
 	"time"
 
@@ -95,6 +96,18 @@ type EffectiveBackendInput struct {
 	Now             time.Time
 }
 
+// RuntimeSnapshot is the Redis-backed mutable state read for one backend.
+type RuntimeSnapshot struct {
+	RuntimeOverride RuntimeOverride
+	Health          HealthState
+	ActiveSessions  int
+}
+
+// RuntimeSnapshotReader reads mutable backend state without owning selector policy.
+type RuntimeSnapshotReader interface {
+	BackendSnapshot(ctx context.Context, backendIdentifier string) (RuntimeSnapshot, error)
+}
+
 // EffectiveBackendState is the shared selector, route lookup and control view.
 type EffectiveBackendState struct {
 	Backend              Backend
@@ -137,11 +150,13 @@ func NewEffectiveBackendPolicy(director config.DirectorConfig) EffectiveBackendP
 	return EffectiveBackendPolicy{
 		RuntimeOverrides:     NewRuntimeOverridePolicy(director.RuntimeOverrides),
 		SoftAllowsActivePins: director.Maintenance.SoftAllowsActivePins,
+		EnforceHealth:        true,
 	}
 }
 
 // BoolOverride returns a pointer used to mark an optional boolean override present.
 //
+//go:fix inline
 //go:fix inline
 func BoolOverride(value bool) *bool {
 	return new(value)
@@ -149,6 +164,7 @@ func BoolOverride(value bool) *bool {
 
 // IntOverride returns a pointer used to mark an optional integer override present.
 //
+//go:fix inline
 //go:fix inline
 func IntOverride(value int) *int {
 	return new(value)
@@ -462,6 +478,7 @@ func (s *EffectiveBackendState) applyHealth(input EffectiveBackendInput) error {
 	s.Health = health
 	if !health.AllowsNewPlacement(input.Policy.EnforceHealth) {
 		s.excludeNew(EffectiveExclusionHealth, "health", string(health.Status))
+		s.excludeActive(EffectiveExclusionHealth, "health", string(health.Status))
 	}
 
 	return nil
