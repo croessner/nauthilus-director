@@ -18,56 +18,36 @@
 package app
 
 import (
-	"github.com/croessner/nauthilus-director/internal/backend"
-	"github.com/croessner/nauthilus-director/internal/listener"
-	"github.com/croessner/nauthilus-director/internal/runtime"
 	"go.uber.org/fx"
 )
 
 // Module returns the root application composition module.
 func Module() fx.Option {
 	return fx.Options(
-		fx.Provide(runtime.NewLocalSessionRegistry),
-		listener.Module(),
-		fx.Invoke(registerReaperLifecycle),
-		fx.Invoke(registerHealthRunnerLifecycle),
+		fx.Provide(
+			provideLoader,
+			provideSnapshot,
+			provideConfig,
+			provideRecorder,
+			provideRedisClient,
+			provideRedisStore,
+			provideBackendRegistry,
+			provideRuntimeSelector,
+			provideRoutingResolver,
+			provideLocalSessionRegistry,
+			provideListenerManager,
+			provideBackendReadService,
+			provideRouteLookupService,
+			provideControlHandle,
+			provideHealthRunnerHandle,
+			provideReaperHandle,
+		),
+		fx.Invoke(
+			registerRedisLifecycle,
+			registerControlLifecycle,
+			registerListenerLifecycle,
+			registerHealthRunnerLifecycle,
+			registerReaperLifecycle,
+		),
 	)
-}
-
-type reaperLifecycleParams struct {
-	fx.In
-
-	Lifecycle fx.Lifecycle
-	Reaper    *runtime.Reaper `optional:"true"`
-}
-
-// registerReaperLifecycle starts the expired-session repair loop when one is assembled.
-func registerReaperLifecycle(params reaperLifecycleParams) {
-	if params.Reaper == nil {
-		return
-	}
-
-	params.Lifecycle.Append(fx.Hook{
-		OnStart: params.Reaper.Start,
-		OnStop:  params.Reaper.Stop,
-	})
-}
-
-type healthRunnerLifecycleParams struct {
-	fx.In
-
-	Lifecycle fx.Lifecycle
-	Runner    *backend.HealthRunner `optional:"true"`
-}
-
-// registerHealthRunnerLifecycle starts the backend health loop when one is assembled.
-func registerHealthRunnerLifecycle(params healthRunnerLifecycleParams) {
-	if params.Runner == nil {
-		return
-	}
-
-	params.Lifecycle.Append(fx.Hook{
-		OnStart: params.Runner.Start,
-		OnStop:  params.Runner.Stop,
-	})
 }
