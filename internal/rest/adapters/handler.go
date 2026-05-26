@@ -20,12 +20,14 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/croessner/nauthilus-director/internal/backend"
 	"github.com/croessner/nauthilus-director/internal/config"
 	"github.com/croessner/nauthilus-director/internal/rest/generated"
+	"github.com/croessner/nauthilus-director/internal/routing"
 	"github.com/croessner/nauthilus-director/internal/runtime"
 	"github.com/croessner/nauthilus-director/internal/state"
 )
@@ -46,6 +48,7 @@ const (
 	operationConfigEffect  = "GetEffectiveConfig"
 	operationConfigDiff    = "GetNonDefaultConfig"
 	problemCodeUnavailable = "runtime_unavailable"
+	protocolIMAP           = "imap"
 )
 
 // BackendReader exposes runtime-effective backend views to REST adapters.
@@ -908,12 +911,21 @@ func withDefaultRouteLookup(
 
 	reader, _ := options.BackendReader.(*runtime.BackendReadService)
 
+	resolver, err := routeLookupResolver(cfg, registry)
+	if err != nil {
+		options.ConfigLoadError = errors.Join(options.ConfigLoadError, err)
+
+		return options
+	}
+
 	service, err := runtime.NewRouteLookupService(runtime.RouteLookupServiceOptions{
-		Selector:      selector,
-		BackendRead:   reader,
-		DefaultPool:   defaultBackendPool(cfg),
-		DefaultShard:  cfg.Director.Routing.EffectiveDefaultShard(),
-		DefaultTenant: defaultTenant,
+		Resolver:         resolver,
+		Selector:         selector,
+		BackendRead:      reader,
+		ListenerContexts: routeLookupListenerContexts(cfg),
+		DefaultPool:      defaultBackendPool(cfg),
+		DefaultShard:     cfg.Director.Routing.EffectiveDefaultShard(),
+		DefaultTenant:    defaultTenant,
 	})
 	if err != nil {
 		options.ConfigLoadError = errors.Join(options.ConfigLoadError, err)
@@ -940,10 +952,80 @@ func selectionPolicy(cfg config.Config) backend.SelectionPolicy {
 	}
 }
 
+// routeLookupResolver builds the shared routing chain used by diagnostics.
+func routeLookupResolver(cfg config.Config, registry backend.Registry) (routing.RoutingResolver, error) {
+	authResolver, err := routing.NewAuthAttributeResolver(routing.AuthAttributeResolverConfig{
+		AccountKeyAttribute: "account",
+		TenantAttribute:     "tenant",
+		ShardTagAttribute:   "mailShard",
+		Sticky:              true,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	hashResolver, err := routing.NewHashResolver(routing.HashResolverConfig{
+		ShardTags: routeLookupShardTags(cfg, registry),
+		Sticky:    true,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return routing.NewChainResolver(authResolver, hashResolver)
+}
+
+// routeLookupShardTags returns deterministic shard tags from the effective backend view.
+func routeLookupShardTags(cfg config.Config, registry backend.Registry) []string {
+	shards := make(map[string]struct{})
+
+	if registry != nil {
+		if backends, err := registry.AllBackends(context.Background()); err == nil {
+			for _, entry := range backends {
+				if entry.Protocol != protocolIMAP {
+					continue
+				}
+
+				if shard := strings.TrimSpace(entry.ShardTag); shard != "" {
+					shards[shard] = struct{}{}
+				}
+			}
+		}
+	}
+
+	if len(shards) == 0 {
+		shards[cfg.Director.Routing.EffectiveDefaultShard()] = struct{}{}
+	}
+
+	result := make([]string, 0, len(shards))
+	for shard := range shards {
+		result = append(result, shard)
+	}
+
+	sort.Strings(result)
+
+	return result
+}
+
+// routeLookupListenerContexts adapts immutable listener config into lookup defaults.
+func routeLookupListenerContexts(cfg config.Config) []runtime.RouteLookupListenerContext {
+	contexts := make([]runtime.RouteLookupListenerContext, 0, len(cfg.Director.Listeners))
+	for name, listener := range cfg.Director.Listeners {
+		contexts = append(contexts, runtime.RouteLookupListenerContext{
+			Name:        name,
+			Protocol:    listener.Protocol,
+			ServiceName: listener.ServiceName,
+			BackendPool: listener.BackendPool,
+		})
+	}
+
+	return contexts
+}
+
 // defaultBackendPool returns the first IMAP listener backend pool.
 func defaultBackendPool(cfg config.Config) string {
 	for _, listener := range cfg.Director.Listeners {
-		if strings.EqualFold(listener.Protocol, "imap") && strings.TrimSpace(listener.BackendPool) != "" {
+		if strings.EqualFold(listener.Protocol, protocolIMAP) && strings.TrimSpace(listener.BackendPool) != "" {
 			return listener.BackendPool
 		}
 	}
@@ -998,13 +1080,15 @@ func backendDetail(state backend.EffectiveBackendState) generated.BackendDetail 
 // routeLookupRequest adapts generated route lookup DTOs into domain input.
 func routeLookupRequest(body generated.LookupRouteJSONRequestBody) runtime.RouteLookupRequest {
 	return runtime.RouteLookupRequest{
-		Protocol:     body.Protocol,
-		ListenerName: pointerString(body.Listener),
-		ServiceName:  pointerString(body.ServiceName),
-		BackendPool:  pointerString(body.BackendPool),
-		Tenant:       pointerString(body.Tenant),
-		AccountKey:   body.UserKey,
-		Attributes:   pointerMap(body.Attributes),
+		Protocol:        body.Protocol,
+		ListenerName:    pointerString(body.Listener),
+		ServiceName:     pointerString(body.ServiceName),
+		BackendPool:     pointerString(body.BackendPool),
+		ClientIP:        pointerString(body.ClientIP),
+		Tenant:          pointerString(body.Tenant),
+		AccountKey:      body.UserKey,
+		IncludeAffinity: pointerBool(body.IncludeAffinity),
+		Attributes:      pointerMap(body.Attributes),
 	}
 }
 
@@ -1022,21 +1106,85 @@ func routeLookupResponse(result runtime.RouteLookupResponse) generated.RouteLook
 		healthy = !candidate.FailClosed
 	}
 
-	generation := result.Routing.RoutingGeneration
-
-	var generationPtr *string
-	if strings.TrimSpace(generation) != "" {
-		generationPtr = &generation
-	}
+	generationPtr := stringPtrIfNotEmpty(result.Routing.RoutingGeneration)
 
 	return generated.RouteLookupResponse{
-		Healthy:           healthy,
-		Maintenance:       maintenance,
-		Reason:            result.ReasonClass,
+		AffectedBy: generated.RouteLookupEffects{
+			Health:          result.Effects.Health,
+			Maintenance:     result.Effects.Maintenance,
+			MaxConnections:  result.Effects.MaxConnections,
+			RuntimeOverride: result.Effects.RuntimeOverride,
+		},
+		Affinity:    routeLookupAffinity(result.Affinity),
+		Backends:    routeLookupBackends(result.Backends),
+		FailClosed:  result.FailClosed,
+		Healthy:     healthy,
+		Maintenance: maintenance,
+		Reason:      result.ReasonClass,
+		Routing: generated.RouteLookupRouting{
+			Generation:       generationPtr,
+			RequestedShard:   stringPtrIfNotEmpty(result.Routing.RequestedShard),
+			ShardTag:         result.Routing.EffectiveShard,
+			Source:           result.Routing.RoutingSource,
+			UsedDefaultShard: result.Routing.UsedDefaultShard,
+		},
 		RoutingGeneration: generationPtr,
 		SelectedBackend:   result.SelectedBackend,
 		ShardTag:          result.Routing.EffectiveShard,
 	}
+}
+
+// routeLookupAffinity adapts requested affinity context when it was read.
+func routeLookupAffinity(affinity runtime.RouteLookupAffinityState) *generated.RouteLookupAffinity {
+	if !affinity.Requested {
+		return nil
+	}
+
+	return &generated.RouteLookupAffinity{
+		Active:         affinity.Active,
+		ActiveSessions: affinity.ActiveSessions,
+		BackendID:      stringPtrIfNotEmpty(affinity.BackendID),
+		Generation:     stringPtrIfNotEmpty(affinity.Generation),
+		Present:        affinity.Present,
+		Requested:      affinity.Requested,
+		ShardTag:       stringPtrIfNotEmpty(affinity.ShardTag),
+	}
+}
+
+// routeLookupBackends adapts effective candidate summaries into generated DTOs.
+func routeLookupBackends(backends []runtime.RouteLookupBackendState) []generated.RouteLookupBackendSummary {
+	summaries := make([]generated.RouteLookupBackendSummary, 0, len(backends))
+	for _, entry := range backends {
+		summaries = append(summaries, generated.RouteLookupBackendSummary{
+			AllowsActivePins:  entry.AllowsActivePins,
+			AllowsNewSessions: entry.AllowsNewSessions,
+			BackendPool:       entry.BackendPool,
+			Eligible:          entry.Eligible,
+			Exclusions:        routeLookupExclusions(entry.Exclusions),
+			FailClosed:        entry.FailClosed,
+			FailClosedReason:  stringPtrIfNotEmpty(string(entry.FailClosedReason)),
+			Generation:        stringPtrIfNotEmpty(entry.Generation),
+			Identifier:        entry.Identifier,
+			Protocol:          entry.Protocol,
+			ShardTag:          entry.EffectiveShard,
+		})
+	}
+
+	return summaries
+}
+
+// routeLookupExclusions adapts classified selector exclusions.
+func routeLookupExclusions(exclusions []backend.EffectiveExclusion) []generated.RouteLookupBackendExclusion {
+	result := make([]generated.RouteLookupBackendExclusion, 0, len(exclusions))
+	for _, exclusion := range exclusions {
+		result = append(result, generated.RouteLookupBackendExclusion{
+			Detail: exclusion.Detail,
+			Reason: string(exclusion.Reason),
+			Source: exclusion.Source,
+		})
+	}
+
+	return result
 }
 
 // sessionDetails adapts runtime sessions into generated DTOs.
@@ -1246,6 +1394,21 @@ func pointerString(value *string) string {
 	}
 
 	return *value
+}
+
+// pointerBool unwraps optional generated boolean fields.
+func pointerBool(value *bool) bool {
+	return value != nil && *value
+}
+
+// stringPtrIfNotEmpty returns an optional generated string when value is present.
+func stringPtrIfNotEmpty(value string) *string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+
+	return &value
 }
 
 // pointerMap unwraps optional generated attribute maps.

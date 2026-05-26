@@ -53,28 +53,69 @@ func (s *RuntimeSelector) WithClock(clock func() time.Time) *RuntimeSelector {
 	return s
 }
 
-// Select maps logical routing facts to a runtime-aware concrete backend.
-func (s *RuntimeSelector) Select(ctx context.Context, request SelectionRequest) (SelectionResult, error) {
+// Explain maps logical routing facts to candidates and a runtime-aware backend.
+func (s *RuntimeSelector) Explain(ctx context.Context, request SelectionRequest) (SelectionExplanation, error) {
 	if s == nil || s.registry == nil {
-		return SelectionResult{}, newBackendError(ErrorKindConfig, "runtime_selector", "selector unavailable", nil)
+		return SelectionExplanation{}, newBackendError(ErrorKindConfig, "runtime_selector", "selector unavailable", nil)
 	}
 
 	request = s.normalizeSelectionRequest(request)
+
+	effective, candidateCount, err := s.explanationCandidates(ctx, request)
+	if err != nil {
+		return SelectionExplanation{Request: request, EffectiveBackends: effective}, err
+	}
+
+	explanation := SelectionExplanation{
+		Request:           request,
+		EffectiveBackends: effective,
+	}
+
+	if request.ActiveAffinity && request.PinnedBackendIdentifier != "" {
+		result, err := s.selectPinnedOrFailover(request, effective)
+		explanation.Result = result
+
+		return explanation, err
+	}
+
+	eligible := eligibleEffectiveBackends(effective, request.ActiveAffinity)
+	if len(eligible) == 0 {
+		return explanation, newBackendError(ErrorKindNoBackend, "runtime_selector", "no eligible "+formatBackendCount(candidateCount), nil)
+	}
+
+	selected := selectRendezvousBackend(request, eligible)
+
+	explanation.Result = SelectionResult{
+		Backend:          selected.Backend,
+		EffectiveBackend: selected,
+		Reason:           selectionReason(request.ActiveAffinity),
+		Generation:       selected.Generation,
+		ActiveAffinity:   request.ActiveAffinity,
+	}
+
+	return explanation, nil
+}
+
+// explanationCandidates validates selector context and builds effective candidates.
+func (s *RuntimeSelector) explanationCandidates(
+	ctx context.Context,
+	request SelectionRequest,
+) ([]EffectiveBackendState, int, error) {
 	if err := validateSelectionRequest(request); err != nil {
-		return SelectionResult{}, err
+		return nil, 0, err
 	}
 
 	pool, err := s.registry.Pool(ctx, request.BackendPool)
 	if err != nil {
-		return SelectionResult{}, err
+		return nil, 0, err
 	}
 
 	if pool.Protocol != request.Protocol {
-		return SelectionResult{}, newBackendError(ErrorKindAmbiguous, "runtime_selector", "listener pool protocol mismatch", nil)
+		return nil, 0, newBackendError(ErrorKindAmbiguous, "runtime_selector", "listener pool protocol mismatch", nil)
 	}
 
 	if strings.TrimSpace(pool.Selector) != selectorRendezvousHash {
-		return SelectionResult{}, newBackendError(ErrorKindConfig, "runtime_selector", "unsupported selector", nil)
+		return nil, 0, newBackendError(ErrorKindConfig, "runtime_selector", "unsupported selector", nil)
 	}
 
 	candidates, err := s.registry.BackendsForShard(ctx, RegistryRequest{
@@ -83,32 +124,25 @@ func (s *RuntimeSelector) Select(ctx context.Context, request SelectionRequest) 
 		ShardTag:    request.ShardTag,
 	})
 	if err != nil {
-		return SelectionResult{}, err
+		return nil, 0, err
 	}
 
 	effective, err := s.effectiveBackends(ctx, candidates)
 	if err != nil {
+		return effective, len(candidates), err
+	}
+
+	return effective, len(candidates), nil
+}
+
+// Select maps logical routing facts to a runtime-aware concrete backend.
+func (s *RuntimeSelector) Select(ctx context.Context, request SelectionRequest) (SelectionResult, error) {
+	explanation, err := s.Explain(ctx, request)
+	if err != nil {
 		return SelectionResult{}, err
 	}
 
-	if request.ActiveAffinity && request.PinnedBackendIdentifier != "" {
-		return s.selectPinnedOrFailover(request, effective)
-	}
-
-	eligible := eligibleEffectiveBackends(effective, request.ActiveAffinity)
-	if len(eligible) == 0 {
-		return SelectionResult{}, newBackendError(ErrorKindNoBackend, "runtime_selector", "no eligible "+formatBackendCount(len(candidates)), nil)
-	}
-
-	selected := selectRendezvousBackend(request, eligible)
-
-	return SelectionResult{
-		Backend:          selected.Backend,
-		EffectiveBackend: selected,
-		Reason:           selectionReason(request.ActiveAffinity),
-		Generation:       selected.Generation,
-		ActiveAffinity:   request.ActiveAffinity,
-	}, nil
+	return explanation.Result, nil
 }
 
 // RetryAfterAttachFailure selects another eligible backend in the same effective shard.

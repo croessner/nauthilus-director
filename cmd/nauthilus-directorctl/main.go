@@ -1181,8 +1181,13 @@ func (app application) runRouteLookup(args []string) int {
 	line, err := parseCommandLine(args, []commandFlag{
 		valueFlag("protocol"),
 		valueFlag("user"),
+		valueFlag("tenant"),
 		valueFlag("listener"),
+		valueFlag("service-name"),
+		valueFlag("backend-pool"),
+		valueFlag("client-ip"),
 		valueFlag("attribute"),
+		boolFlag("include-affinity"),
 	})
 	if err != nil {
 		return app.usageError("%v", err)
@@ -1210,8 +1215,24 @@ func (app application) runRouteLookup(args []string) int {
 		Protocol:   protocol,
 		UserKey:    userKey,
 	}
+	if tenant := line.value("tenant"); tenant != "" {
+		body.Tenant = &tenant
+	}
 	if listener := line.value("listener"); listener != "" {
 		body.Listener = &listener
+	}
+	if serviceName := line.value("service-name"); serviceName != "" {
+		body.ServiceName = &serviceName
+	}
+	if backendPool := line.value("backend-pool"); backendPool != "" {
+		body.BackendPool = &backendPool
+	}
+	if clientIP := line.value("client-ip"); clientIP != "" {
+		body.ClientIP = &clientIP
+	}
+	if line.bool("include-affinity") {
+		includeAffinity := true
+		body.IncludeAffinity = &includeAffinity
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), app.options.Timeout)
@@ -1744,14 +1765,35 @@ func writeRouteLine(writer io.Writer, route generated.RouteLookupResponse) {
 	}
 	_, _ = fmt.Fprintf(
 		writer,
-		"selected_backend=%s shard_tag=%s healthy=%t maintenance=%t reason=%s routing_generation=%s\n",
+		"selected_backend=%s shard_tag=%s routing_source=%s healthy=%t maintenance=%t fail_closed=%t affected_health=%t affected_maintenance=%t affected_runtime=%t affected_max_connections=%t reason=%s routing_generation=%s",
 		fieldValue(route.SelectedBackend),
 		fieldValue(route.ShardTag),
+		fieldValue(route.Routing.Source),
 		route.Healthy,
 		route.Maintenance,
+		route.FailClosed,
+		route.AffectedBy.Health,
+		route.AffectedBy.Maintenance,
+		route.AffectedBy.RuntimeOverride,
+		route.AffectedBy.MaxConnections,
 		fieldValue(route.Reason),
 		fieldValue(generation),
 	)
+	if route.Affinity != nil {
+		shardTag := ""
+		if route.Affinity.ShardTag != nil {
+			shardTag = *route.Affinity.ShardTag
+		}
+		_, _ = fmt.Fprintf(
+			writer,
+			" affinity_present=%t affinity_active=%t affinity_shard=%s affinity_sessions=%d",
+			route.Affinity.Present,
+			route.Affinity.Active,
+			fieldValue(shardTag),
+			route.Affinity.ActiveSessions,
+		)
+	}
+	_, _ = fmt.Fprintln(writer)
 }
 
 // fieldValue quotes text values only when needed for scriptable key-value output.

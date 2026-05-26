@@ -62,6 +62,22 @@ func TestDomainPackagesDoNotImportGeneratedDTOs(t *testing.T) {
 	}
 }
 
+// TestRuntimePackageDoesNotImportNauthilus keeps diagnostics from authenticating.
+func TestRuntimePackageDoesNotImportNauthilus(t *testing.T) {
+	for _, line := range packageImportLines(t) {
+		fields := strings.Fields(line)
+		if len(fields) == 0 || !strings.HasSuffix(fields[0], "/internal/runtime") {
+			continue
+		}
+
+		for _, imported := range fields[1:] {
+			if strings.Contains(imported, "/internal/nauthilus") {
+				t.Fatalf("runtime package imports Nauthilus auth boundary %q", imported)
+			}
+		}
+	}
+}
+
 // packageImportLines returns import summaries for every package in the module.
 func packageImportLines(t *testing.T) []string {
 	t.Helper()

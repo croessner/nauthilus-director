@@ -787,6 +787,8 @@ components:
           type: string
         client_ip:
           type: string
+        include_affinity:
+          type: boolean
         attributes:
           type: object
           additionalProperties:
@@ -802,6 +804,10 @@ components:
         - healthy
         - maintenance
         - shard_tag
+        - routing
+        - backends
+        - affected_by
+        - fail_closed
       properties:
         selected_backend:
           type: string
@@ -815,6 +821,129 @@ components:
           type: string
         routing_generation:
           type: string
+        routing:
+          $ref: "#/components/schemas/RouteLookupRouting"
+        affinity:
+          $ref: "#/components/schemas/RouteLookupAffinity"
+        backends:
+          type: array
+          items:
+            $ref: "#/components/schemas/RouteLookupBackendSummary"
+        affected_by:
+          $ref: "#/components/schemas/RouteLookupEffects"
+        fail_closed:
+          type: boolean
+    RouteLookupRouting:
+      type: object
+      additionalProperties: false
+      required:
+        - source
+        - shard_tag
+        - used_default_shard
+      properties:
+        source:
+          type: string
+        shard_tag:
+          type: string
+        requested_shard:
+          type: string
+        generation:
+          type: string
+        used_default_shard:
+          type: boolean
+    RouteLookupAffinity:
+      type: object
+      additionalProperties: false
+      required:
+        - requested
+        - present
+        - active
+        - active_sessions
+      properties:
+        requested:
+          type: boolean
+        present:
+          type: boolean
+        active:
+          type: boolean
+        shard_tag:
+          type: string
+        backend_id:
+          type: string
+        generation:
+          type: string
+        active_sessions:
+          type: integer
+          minimum: 0
+    RouteLookupBackendSummary:
+      type: object
+      additionalProperties: false
+      required:
+        - identifier
+        - protocol
+        - backend_pool
+        - shard_tag
+        - eligible
+        - allows_new_sessions
+        - allows_active_pins
+        - fail_closed
+        - exclusions
+      properties:
+        identifier:
+          type: string
+        protocol:
+          type: string
+        backend_pool:
+          type: string
+        shard_tag:
+          type: string
+        generation:
+          type: string
+        eligible:
+          type: boolean
+        allows_new_sessions:
+          type: boolean
+        allows_active_pins:
+          type: boolean
+        fail_closed:
+          type: boolean
+        fail_closed_reason:
+          type: string
+        exclusions:
+          type: array
+          items:
+            $ref: "#/components/schemas/RouteLookupBackendExclusion"
+    RouteLookupBackendExclusion:
+      type: object
+      additionalProperties: false
+      required:
+        - reason
+        - source
+        - detail
+      properties:
+        reason:
+          type: string
+        source:
+          type: string
+        detail:
+          type: string
+    RouteLookupEffects:
+      type: object
+      additionalProperties: false
+      required:
+        - health
+        - maintenance
+        - runtime_override
+        - max_connections
+      properties:
+        health:
+          type: boolean
+        maintenance:
+          type: boolean
+        runtime_override:
+          type: boolean
+        max_connections:
+          type: boolean
     RuntimeReasonRequest:
       type: object
       additionalProperties: false

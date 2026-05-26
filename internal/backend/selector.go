@@ -51,9 +51,22 @@ type SelectionResult struct {
 	ActiveAffinity   bool
 }
 
+// SelectionExplanation describes selector input, candidates and the selected result.
+type SelectionExplanation struct {
+	Request           SelectionRequest
+	EffectiveBackends []EffectiveBackendState
+	Result            SelectionResult
+}
+
 // Selector selects concrete backends after routing facts are known.
 type Selector interface {
 	Select(ctx context.Context, request SelectionRequest) (SelectionResult, error)
+}
+
+// ExplainingSelector selects backends and returns the effective candidate view.
+type ExplainingSelector interface {
+	Selector
+	Explain(ctx context.Context, request SelectionRequest) (SelectionExplanation, error)
 }
 
 // SelectionPolicy configures static maintenance handling for backend selection.

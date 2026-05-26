@@ -202,7 +202,11 @@ func TestRouteLookupAttributes(t *testing.T) {
 		"route", "lookup",
 		"--protocol", "imap",
 		"--user", "user-a",
+		"--tenant", "blue",
 		"--listener", "imap",
+		"--service-name", "imap",
+		"--backend-pool", "imap-default",
+		"--include-affinity",
 		"--attribute", "tier=gold",
 		"--attribute", "tier=silver",
 	}, fake)
@@ -213,6 +217,15 @@ func TestRouteLookupAttributes(t *testing.T) {
 	request := fake.routeRequest
 	if request.Protocol != "imap" || request.UserKey != "user-a" || request.Listener == nil || *request.Listener != "imap" {
 		t.Fatalf("route request = %#v, want protocol/user/listener", request)
+	}
+	if request.Tenant == nil || *request.Tenant != "blue" || request.ServiceName == nil || *request.ServiceName != "imap" {
+		t.Fatalf("route request = %#v, want tenant/service", request)
+	}
+	if request.BackendPool == nil || *request.BackendPool != "imap-default" {
+		t.Fatalf("route request = %#v, want backend pool", request)
+	}
+	if request.IncludeAffinity == nil || !*request.IncludeAffinity {
+		t.Fatalf("route request = %#v, want include affinity", request)
 	}
 	if request.Attributes == nil {
 		t.Fatal("route request attributes were nil")
