@@ -67,7 +67,7 @@ func (l *managedListener) recordListenerEvent(ctx context.Context, name string, 
 		labels[listenerFieldReasonClass] = reason
 	}
 
-	event, err := observability.NewEvent(name, observability.TraceBoundarySession, fields, labels)
+	event, err := observability.NewEvent(name, "", fields, labels)
 	if err != nil {
 		return
 	}

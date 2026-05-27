@@ -20,12 +20,12 @@ import (
 	"context"
 	"fmt"
 	"net/url"
-	"sort"
 	"strings"
 	"time"
 
 	"github.com/croessner/nauthilus-director/internal/config"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -38,7 +38,9 @@ const (
 	defaultTraceBatchTimeout  = time.Second
 	tracerInstrumentationName = "github.com/croessner/nauthilus-director/internal/observability"
 	otelAttributeEventName    = "event.name"
+	otelAttributeProcessComp  = "process.component"
 	otelAttributeServiceName  = "service.name"
+	otelAttributeServiceVer   = "service.version"
 )
 
 // TraceExporterFactory constructs the configured OpenTelemetry span exporter.
@@ -68,12 +70,41 @@ type traceRuntime struct {
 	reportFailure func(context.Context, string, error)
 }
 
+type traceRuntimeOptions struct {
+	component string
+	version   string
+}
+
+// TraceSpan is the domain-safe handle for an active OpenTelemetry span.
+type TraceSpan interface {
+	SetAttributes(fields map[string]string)
+	End(result string, reasonClass string)
+}
+
+type traceSpanStarter interface {
+	StartTraceSpan(ctx context.Context, boundary TraceBoundary, fields map[string]string) (context.Context, TraceSpan)
+}
+
+// StartSpan starts a prepared span through the supplied recorder when possible.
+func StartSpan(ctx context.Context, recorder Recorder, boundary TraceBoundary, fields map[string]string) (context.Context, TraceSpan) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	if starter, ok := NormalizeRecorder(recorder).(traceSpanStarter); ok {
+		return starter.StartTraceSpan(ctx, boundary, fields)
+	}
+
+	return ctx, noopTraceSpan{}
+}
+
 // newTraceRuntime builds either a no-op provider or the configured OTLP provider.
 func newTraceRuntime(
 	ctx context.Context,
 	cfg config.TracingConfig,
 	factory TraceExporterFactory,
 	reportFailure func(context.Context, string, error),
+	options traceRuntimeOptions,
 ) (*traceRuntime, error) {
 	if !cfg.Enabled {
 		provider := noop.NewTracerProvider()
@@ -95,7 +126,7 @@ func newTraceRuntime(
 		reportFailure: reportFailure,
 	}
 
-	provider, err := newSDKTracerProvider(ctx, cfg, reportingExporter)
+	provider, err := newSDKTracerProvider(ctx, cfg, reportingExporter, options)
 	if err != nil {
 		_ = exporter.Shutdown(ctx)
 
@@ -132,11 +163,37 @@ func (t *traceRuntime) Record(ctx context.Context, event Event) error {
 		return nil
 	}
 
-	_, span := t.tracer.Start(ctx, event.SpanName)
-	span.SetAttributes(traceAttributes(event)...)
+	attrs := TraceAttributesForEvent(event)
+
+	active := oteltrace.SpanFromContext(ctx)
+	if active.SpanContext().IsValid() {
+		active.AddEvent(event.Name, oteltrace.WithAttributes(attrs...))
+		applySpanOutcome(active, eventResult(event), eventReasonClass(event))
+
+		return nil
+	}
+
+	_, span := t.tracer.Start(ctx, event.SpanName, oteltrace.WithAttributes(attrs...))
+	applySpanOutcome(span, eventResult(event), eventReasonClass(event))
 	span.End()
 
 	return nil
+}
+
+// StartTraceSpan starts an active span for one prepared boundary.
+func (t *traceRuntime) StartTraceSpan(ctx context.Context, boundary TraceBoundary, fields map[string]string) (context.Context, TraceSpan) {
+	if t == nil || !t.enabled {
+		return ctx, noopTraceSpan{}
+	}
+
+	name, ok := SpanName(boundary)
+	if !ok {
+		return ctx, noopTraceSpan{}
+	}
+
+	child, span := t.tracer.Start(ctx, name, oteltrace.WithAttributes(NewTraceAttributes(fields)...))
+
+	return child, runtimeTraceSpan{span: span}
 }
 
 // Shutdown flushes the tracer provider and then stops exporter background work.
@@ -161,8 +218,22 @@ func (t *traceRuntime) Shutdown(ctx context.Context) {
 }
 
 // newSDKTracerProvider creates an SDK provider with bounded batch/export timing.
-func newSDKTracerProvider(ctx context.Context, cfg config.TracingConfig, exporter sdktrace.SpanExporter) (*sdktrace.TracerProvider, error) {
-	resources, err := resource.New(ctx, resource.WithAttributes(attribute.String(otelAttributeServiceName, cfg.ServiceName)))
+func newSDKTracerProvider(
+	ctx context.Context,
+	cfg config.TracingConfig,
+	exporter sdktrace.SpanExporter,
+	options traceRuntimeOptions,
+) (*sdktrace.TracerProvider, error) {
+	attrs := []attribute.KeyValue{attribute.String(otelAttributeServiceName, cfg.ServiceName)}
+	if component := strings.TrimSpace(options.component); component != "" {
+		attrs = append(attrs, attribute.String(otelAttributeProcessComp, component))
+	}
+
+	if version := strings.TrimSpace(options.version); version != "" {
+		attrs = append(attrs, attribute.String(otelAttributeServiceVer, version))
+	}
+
+	resources, err := resource.New(ctx, resource.WithAttributes(attrs...))
 	if err != nil {
 		return nil, fmt.Errorf("create trace resource: %w", err)
 	}
@@ -176,35 +247,6 @@ func newSDKTracerProvider(ctx context.Context, cfg config.TracingConfig, exporte
 			sdktrace.WithExportTimeout(defaultTraceExportTimeout),
 		),
 	), nil
-}
-
-// traceAttributes converts normalized event metadata into safe span attributes.
-func traceAttributes(event Event) []attribute.KeyValue {
-	attrs := []attribute.KeyValue{
-		attribute.String(otelAttributeEventName, event.Name),
-	}
-
-	for _, name := range sortedMetricAttributeNames(event.MetricLabels) {
-		attrs = append(attrs, attribute.String(name, event.MetricLabels[name]))
-	}
-
-	for _, name := range sortedLogFieldNames(event.LogFields) {
-		attrs = append(attrs, attribute.String(name, event.LogFields[name]))
-	}
-
-	return attrs
-}
-
-// sortedMetricAttributeNames returns deterministic metric-label attributes.
-func sortedMetricAttributeNames(labels MetricLabels) []string {
-	names := make([]string, 0, len(labels))
-	for name := range labels {
-		names = append(names, name)
-	}
-
-	sort.Strings(names)
-
-	return names
 }
 
 // otlpHTTPTraceExporterFactory constructs the OTLP HTTP trace exporter.
@@ -258,4 +300,100 @@ func (e reportingSpanExporter) Shutdown(ctx context.Context) error {
 	}
 
 	return err
+}
+
+type runtimeTraceSpan struct {
+	span oteltrace.Span
+}
+
+// SetAttributes adds policy-checked diagnostic attributes to the active span.
+func (s runtimeTraceSpan) SetAttributes(fields map[string]string) {
+	if s.span == nil {
+		return
+	}
+
+	s.span.SetAttributes(NewTraceAttributes(fields)...)
+}
+
+// End records bounded outcome fields and closes the active span.
+func (s runtimeTraceSpan) End(result string, reasonClass string) {
+	if s.span == nil {
+		return
+	}
+
+	applySpanOutcome(s.span, result, reasonClass)
+	s.span.End()
+}
+
+type noopTraceSpan struct{}
+
+// SetAttributes ignores attributes for disabled or unavailable tracing.
+func (noopTraceSpan) SetAttributes(map[string]string) {}
+
+// End closes a disabled or unavailable span handle.
+func (noopTraceSpan) End(string, string) {}
+
+// applySpanOutcome records span status without raw error text.
+func applySpanOutcome(span oteltrace.Span, result string, reasonClass string) {
+	if span == nil {
+		return
+	}
+
+	result = strings.TrimSpace(result)
+	if result == "" {
+		result = reasonClassOK
+	}
+
+	result = normalizeTraceResult(result)
+
+	if strings.TrimSpace(reasonClass) == "" && result == reasonClassOK {
+		reasonClass = reasonClassOK
+	}
+
+	reasonClass = NormalizeReasonClass(reasonClass)
+	span.SetAttributes(
+		attribute.String(metricLabelResult, result),
+		attribute.String(metricLabelReasonClass, reasonClass),
+	)
+
+	if traceResultIsError(result) {
+		span.SetStatus(codes.Error, reasonClass)
+
+		return
+	}
+
+	span.SetStatus(codes.Ok, "")
+}
+
+// traceResultIsError maps bounded result values to OpenTelemetry status.
+func traceResultIsError(result string) bool {
+	normalized, ok := normalizedReasonToken(strings.ToLower(strings.TrimSpace(result)))
+	if !ok {
+		return false
+	}
+
+	switch normalized {
+	case "failure", "fail_closed", "temporary_failure":
+		return true
+	default:
+		return false
+	}
+}
+
+// eventResult extracts the bounded result from event metadata.
+func eventResult(event Event) string {
+	if value := strings.TrimSpace(event.MetricLabels[metricLabelResult]); value != "" {
+		return value
+	}
+
+	return strings.TrimSpace(event.LogFields[metricLabelResult])
+}
+
+// eventReasonClass extracts the bounded reason class from event metadata.
+func eventReasonClass(event Event) string {
+	if value := strings.TrimSpace(event.MetricLabels[metricLabelReasonClass]); value != "" {
+		return value
+	}
+
+	return strings.TrimSpace(event.LogFields[metricLabelReasonClass])
 }

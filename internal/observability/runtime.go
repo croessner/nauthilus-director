@@ -55,6 +55,8 @@ type runtimeOptions struct {
 	logWriter            io.Writer
 	traceExporterFactory TraceExporterFactory
 	additionalRecorder   Recorder
+	processComponent     string
+	processVersion       string
 }
 
 // NewRuntime creates a cohesive observability runtime from typed config.
@@ -80,7 +82,10 @@ func NewRuntime(cfg config.ObservabilityConfig, opts ...RuntimeOption) (*Runtime
 
 	reporter := newTelemetryFailureReporter(logger, metrics)
 
-	tracing, err := newTraceRuntime(context.Background(), cfg.Tracing, options.traceExporterFactory, reporter.Report)
+	tracing, err := newTraceRuntime(context.Background(), cfg.Tracing, options.traceExporterFactory, reporter.Report, traceRuntimeOptions{
+		component: options.processComponent,
+		version:   options.processVersion,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -187,11 +192,20 @@ func WithAdditionalRecorder(recorder Recorder) RuntimeOption {
 	}
 }
 
+// WithProcessInfo adds process component metadata to trace resources.
+func WithProcessInfo(component string, version string) RuntimeOption {
+	return func(options *runtimeOptions) {
+		options.processComponent = component
+		options.processVersion = version
+	}
+}
+
 // defaultRuntimeOptions returns production sink defaults.
 func defaultRuntimeOptions() runtimeOptions {
 	return runtimeOptions{
 		logWriter:            os.Stderr,
 		traceExporterFactory: otlpHTTPTraceExporterFactory{},
+		processComponent:     "nauthilus-director",
 	}
 }
 

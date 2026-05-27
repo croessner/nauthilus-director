@@ -47,7 +47,9 @@ func NewServer(options Options) *Server {
 	}
 
 	handler := adapters.NewHandler(handlerOptions)
-	strict := generated.NewStrictHandlerWithOptions(handler, nil, generated.StrictHTTPServerOptions{
+	strict := generated.NewStrictHandlerWithOptions(handler, []generated.StrictMiddlewareFunc{
+		traceRESTRequests(handlerOptions.Observability),
+	}, generated.StrictHTTPServerOptions{
 		RequestErrorHandlerFunc: func(w http.ResponseWriter, _ *http.Request, _ error) {
 			writeProblem(w, http.StatusBadRequest, "bad_request", "request body, path parameter or query parameter is invalid", "")
 		},

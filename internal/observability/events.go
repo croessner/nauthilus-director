@@ -73,6 +73,8 @@ const (
 	EventAffinityClear = "affinity.clear"
 	// EventRouteLookup records a side-effect-free route diagnostic.
 	EventRouteLookup = "route.lookup"
+	// EventRESTRequest records one generated REST control API request.
+	EventRESTRequest = "rest.request"
 	// EventReload records safe reload attempts and outcomes.
 	EventReload = "reload"
 	// EventProxyPipe records transparent proxy lifecycle completion.

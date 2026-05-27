@@ -35,7 +35,7 @@ func SanitizeLogFields(fields map[string]string) LogFields {
 		switch {
 		case IsSecretFieldName(name):
 			safe[name] = RedactedValue
-		case IsHighCardinalityFieldName(name):
+		case IsCollapsedLogFieldName(name):
 			safe[name+logFieldPresentSuffix] = boolString(value != "")
 		default:
 			safe[name] = value

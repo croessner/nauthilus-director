@@ -179,9 +179,11 @@ func (s *Session) Placement() (Placement, bool) {
 
 // Serve writes the initial greeting and processes pre-auth commands in wire order.
 func (s *Session) Serve(ctx context.Context) (err error) {
+	ctx, sessionSpan := s.startObservationSpan(ctx, observability.TraceBoundarySession, observationOperationSession, observationResultStart, "", nil)
 	s.recordSessionStart(ctx)
 	defer func() {
 		s.recordSessionEnd(ctx, err)
+		sessionSpan.End(resultLabel(err), reasonClass(err))
 	}()
 
 	if err := s.applyPreauthDeadline(); err != nil {
@@ -301,7 +303,12 @@ func (s *Session) readPreauthLine() ([]byte, error) {
 }
 
 // processPreauthLine parses and dispatches one pre-auth command.
-func (s *Session) processPreauthLine(ctx context.Context, line []byte) (bool, error) {
+func (s *Session) processPreauthLine(ctx context.Context, line []byte) (closeSession bool, err error) {
+	ctx, preAuthSpan := s.startObservationSpan(ctx, observability.TraceBoundaryIMAPPreAuth, observationOperationPreAuth, observationResultStart, "", nil)
+	defer func() {
+		preAuthSpan.End(resultLabel(err), reasonClass(err))
+	}()
+
 	tag := tagHintForLine(line)
 
 	s.recordPreAuth(ctx, "parse", "start", "")

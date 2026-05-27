@@ -24,6 +24,7 @@ import (
 	"strings"
 
 	"github.com/croessner/nauthilus-director/internal/config"
+	oteltrace "go.opentelemetry.io/otel/trace"
 )
 
 const (
@@ -77,9 +78,24 @@ func (l *structuredLogger) Record(ctx context.Context, event Event) error {
 		attrs = append(attrs, slog.String(name, event.LogFields[name]))
 	}
 
+	attrs = appendTraceCorrelationAttrs(ctx, attrs)
 	l.logger.LogAttrs(ctx, level, event.Name, attrs...)
 
 	return nil
+}
+
+// appendTraceCorrelationAttrs adds active span identifiers to structured logs.
+func appendTraceCorrelationAttrs(ctx context.Context, attrs []slog.Attr) []slog.Attr {
+	spanContext := oteltrace.SpanContextFromContext(ctx)
+	if !spanContext.IsValid() {
+		return attrs
+	}
+
+	return append(
+		attrs,
+		slog.String(fieldTraceID, spanContext.TraceID().String()),
+		slog.String(fieldSpanID, spanContext.SpanID().String()),
+	)
 }
 
 // slogLevel maps config strings to standard library log levels.

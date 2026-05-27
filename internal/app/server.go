@@ -147,6 +147,7 @@ func runtimeOptionsFor(options Options) (runtimeOptions, error) {
 	observabilityRuntime, err := observability.NewRuntime(
 		snapshot.Config.Observability,
 		observability.WithAdditionalRecorder(options.Recorder),
+		observability.WithProcessInfo("nauthilus-director", options.Version),
 	)
 	if err != nil {
 		return runtimeOptions{}, err

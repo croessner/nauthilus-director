@@ -17,17 +17,24 @@
 package observability
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
 	"github.com/croessner/nauthilus-director/internal/config"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	oteltrace "go.opentelemetry.io/otel/trace"
 )
 
-const testObservabilitySampleRatioPath = "observability.tracing.sample_ratio"
+const (
+	testObservabilitySampleRatioPath = "observability.tracing.sample_ratio"
+	testRESTOperationGetVersion      = "GetVersion"
+)
 
 // TestRuntimeConstructionSucceedsForDefaultConfig verifies canonical defaults build sinks.
 func TestRuntimeConstructionSucceedsForDefaultConfig(t *testing.T) {
@@ -157,6 +164,101 @@ func TestDisabledTracingAvoidsExporterConstruction(t *testing.T) {
 	}
 }
 
+// TestTracingUsesParentBasedRatioSampling verifies sampled parents override a zero ratio.
+func TestTracingUsesParentBasedRatioSampling(t *testing.T) {
+	cfg := config.DefaultConfig().Observability
+	cfg.Metrics.Enabled = false
+	cfg.Tracing.SampleRatio = 0
+
+	unsampledExporter := &recordingSpanExporter{}
+
+	unsampledRuntime, err := NewRuntime(cfg, WithLogWriter(io.Discard), WithTraceExporterFactory(&recordingTraceExporterFactory{exporter: unsampledExporter}))
+	if err != nil {
+		t.Fatalf("NewRuntime returned error: %v", err)
+	}
+
+	ctx, span := StartSpan(context.Background(), unsampledRuntime.Recorder(), TraceBoundarySession, nil)
+	unsampledRuntime.Recorder().Record(ctx, Event{Name: EventSessionStart, SpanName: traceSpanSession})
+	span.End(reasonClassOK, reasonClassOK)
+
+	if err := unsampledRuntime.Shutdown(context.Background()); err != nil {
+		t.Fatalf("shutdown unsampled runtime: %v", err)
+	}
+
+	if unsampledExporter.spanCount() != 0 {
+		t.Fatalf("unsampled root spans = %d, want 0", unsampledExporter.spanCount())
+	}
+
+	sampledExporter := &recordingSpanExporter{}
+
+	sampledRuntime, err := NewRuntime(cfg, WithLogWriter(io.Discard), WithTraceExporterFactory(&recordingTraceExporterFactory{exporter: sampledExporter}))
+	if err != nil {
+		t.Fatalf("sampled NewRuntime returned error: %v", err)
+	}
+
+	parentCtx := oteltrace.ContextWithRemoteSpanContext(context.Background(), oteltrace.NewSpanContext(oteltrace.SpanContextConfig{
+		TraceID:    oteltrace.TraceID{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16},
+		SpanID:     oteltrace.SpanID{1, 2, 3, 4, 5, 6, 7, 8},
+		TraceFlags: oteltrace.FlagsSampled,
+		Remote:     true,
+	}))
+	ctx, span = StartSpan(parentCtx, sampledRuntime.Recorder(), TraceBoundarySession, nil)
+	sampledRuntime.Recorder().Record(ctx, Event{Name: EventSessionStart, SpanName: traceSpanSession})
+	span.End(reasonClassOK, reasonClassOK)
+
+	if err := sampledRuntime.Shutdown(context.Background()); err != nil {
+		t.Fatalf("shutdown sampled runtime: %v", err)
+	}
+
+	if sampledExporter.spanCount() == 0 {
+		t.Fatal("sampled parent did not produce an exported child span")
+	}
+}
+
+// TestStructuredLogsIncludeTraceCorrelation verifies active span IDs reach logs.
+func TestStructuredLogsIncludeTraceCorrelation(t *testing.T) {
+	var output bytes.Buffer
+
+	cfg := config.DefaultConfig().Observability
+	cfg.Metrics.Enabled = false
+	cfg.Tracing.SampleRatio = 1
+
+	runtime, err := NewRuntime(cfg, WithLogWriter(&output), WithTraceExporterFactory(&recordingTraceExporterFactory{}))
+	if err != nil {
+		t.Fatalf("NewRuntime returned error: %v", err)
+	}
+
+	ctx, span := StartSpan(context.Background(), runtime.Recorder(), TraceBoundaryRESTRequest, map[string]string{
+		metricLabelOperation: testRESTOperationGetVersion,
+	})
+	runtime.Recorder().Record(ctx, Event{
+		Name:     EventRESTRequest,
+		SpanName: traceSpanRESTRequest,
+		LogFields: LogFields{
+			metricLabelOperation: testRESTOperationGetVersion,
+			metricLabelResult:    reasonClassOK,
+		},
+	})
+	span.End(reasonClassOK, reasonClassOK)
+
+	if err := runtime.Shutdown(context.Background()); err != nil {
+		t.Fatalf("shutdown runtime: %v", err)
+	}
+
+	var record map[string]any
+	if err := json.Unmarshal(output.Bytes(), &record); err != nil {
+		t.Fatalf("decode structured log: %v\n%s", err, output.String())
+	}
+
+	if record[fieldTraceID] == "" {
+		t.Fatalf("trace_id missing from log record: %#v", record)
+	}
+
+	if record[fieldSpanID] == "" {
+		t.Fatalf("span_id missing from log record: %#v", record)
+	}
+}
+
 // TestShutdownFlushIsIdempotent verifies repeated shutdown does not repeat exporter close.
 func TestShutdownFlushIsIdempotent(t *testing.T) {
 	cfg := config.DefaultConfig().Observability
@@ -242,11 +344,28 @@ func (f *recordingTraceExporterFactory) NewTraceExporter(context.Context, config
 type recordingSpanExporter struct {
 	exports   atomic.Int64
 	shutdowns atomic.Int64
+
+	mu    sync.Mutex
+	spans []recordedSpan
 }
 
 // ExportSpans records exported span count without remote collector access.
 func (e *recordingSpanExporter) ExportSpans(_ context.Context, spans []sdktrace.ReadOnlySpan) error {
 	e.exports.Add(int64(len(spans)))
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	for _, span := range spans {
+		attrs := make(map[string]string, len(span.Attributes()))
+		for _, attr := range span.Attributes() {
+			attrs[string(attr.Key)] = attr.Value.AsString()
+		}
+
+		e.spans = append(e.spans, recordedSpan{
+			name:       span.Name(),
+			attributes: attrs,
+		})
+	}
 
 	return nil
 }
@@ -256,4 +375,17 @@ func (e *recordingSpanExporter) Shutdown(context.Context) error {
 	e.shutdowns.Add(1)
 
 	return nil
+}
+
+// spanCount returns the number of copied exported spans.
+func (e *recordingSpanExporter) spanCount() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	return len(e.spans)
+}
+
+type recordedSpan struct {
+	name       string
+	attributes map[string]string
 }

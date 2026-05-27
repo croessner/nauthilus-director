@@ -177,6 +177,21 @@ func (s *Session) recordObservation(
 	recorder.Record(ctx, event)
 }
 
+// startObservationSpan starts a prepared span with the same safe session fields.
+func (s *Session) startObservationSpan(
+	ctx context.Context,
+	boundary observability.TraceBoundary,
+	operation string,
+	result string,
+	reason string,
+	extraFields map[string]string,
+) (context.Context, observability.TraceSpan) {
+	fields := s.observationFields(operation, result, reason)
+	maps.Copy(fields, extraFields)
+
+	return observability.StartSpan(ctx, s.observability, boundary, fields)
+}
+
 // observationFields returns structured log fields before policy normalization.
 func (s *Session) observationFields(operation string, result string, reason string) map[string]string {
 	fields := map[string]string{

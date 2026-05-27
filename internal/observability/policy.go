@@ -46,6 +46,7 @@ const (
 	fieldBearer            = "bearer"
 	fieldClientIP          = "client_ip"
 	fieldCredential        = "credential"
+	fieldError             = "error"
 	fieldOAuth             = "oauth"
 	fieldPasswd            = "passwd"
 	fieldPassword          = "password"
@@ -54,13 +55,16 @@ const (
 	fieldRecipient         = "recipient"
 	fieldRemoteAddr        = "remote_addr"
 	fieldRequestID         = "request_id"
+	fieldRedisKey          = "redis_key"
 	fieldSASL              = "sasl"
 	fieldSASLBlob          = "sasl_blob"
 	fieldSecret            = "secret"
 	fieldSessionID         = "session_id"
+	fieldSpanID            = "span_id"
 	fieldToken             = "token"
 	fieldTraceID           = "trace_id"
 	fieldUserHash          = "user_hash"
+	fieldUserKey           = "user_key"
 	fieldUsername          = "username"
 
 	reasonClassOK                     = "ok"
@@ -99,12 +103,28 @@ var forbiddenMetricLabels = map[string]struct{}{
 	fieldRecipient:         {},
 	fieldRemoteAddr:        {},
 	fieldRequestID:         {},
+	fieldRedisKey:          {},
 	fieldSASLBlob:          {},
 	fieldSessionID:         {},
 	fieldToken:             {},
 	fieldTraceID:           {},
 	fieldUserHash:          {},
 	fieldUsername:          {},
+}
+
+var collapsedLogFields = map[string]struct{}{
+	fieldClientIP:   {},
+	fieldError:      {},
+	fieldRawError:   {},
+	fieldRecipient:  {},
+	fieldRemoteAddr: {},
+	fieldRequestID:  {},
+	fieldRedisKey:   {},
+	fieldSASLBlob:   {},
+	fieldSessionID:  {},
+	fieldUserHash:   {},
+	fieldUserKey:    {},
+	fieldUsername:   {},
 }
 
 var secretFieldFragments = []string{
@@ -221,6 +241,14 @@ func IsHighCardinalityFieldName(name string) bool {
 	_, forbidden := forbiddenMetricLabels[normalized]
 
 	return forbidden
+}
+
+// IsCollapsedLogFieldName reports whether logs may record only field presence.
+func IsCollapsedLogFieldName(name string) bool {
+	normalized := normalizeFieldName(name)
+	_, collapsed := collapsedLogFields[normalized]
+
+	return collapsed
 }
 
 // IsSafeRoutingAttribute reports whether an auth attribute can be echoed safely.

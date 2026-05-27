@@ -92,6 +92,19 @@ func (r *sharedRecorder) Record(ctx context.Context, event Event) {
 	}
 }
 
+// StartTraceSpan starts a prepared child span through the runtime tracing sink.
+func (r *sharedRecorder) StartTraceSpan(ctx context.Context, boundary TraceBoundary, fields map[string]string) (context.Context, TraceSpan) {
+	if r == nil || r.tracing == nil {
+		if ctx == nil {
+			ctx = context.Background()
+		}
+
+		return ctx, noopTraceSpan{}
+	}
+
+	return r.tracing.StartTraceSpan(ctx, boundary, fields)
+}
+
 // recordMetrics sends an event to the metrics sink when enabled.
 func (r *sharedRecorder) recordMetrics(ctx context.Context, event Event) error {
 	if r.metrics == nil {
