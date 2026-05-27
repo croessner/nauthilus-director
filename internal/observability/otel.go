@@ -373,7 +373,7 @@ func traceResultIsError(result string) bool {
 	}
 
 	switch normalized {
-	case "failure", "fail_closed", "temporary_failure":
+	case "failure", "fail_closed", reasonClassTemporaryFailure:
 		return true
 	default:
 		return false

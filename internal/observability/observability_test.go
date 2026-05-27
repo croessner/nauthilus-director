@@ -277,6 +277,7 @@ func TestRuntimeEventVocabularyCoversControlSurface(t *testing.T) {
 		EventAffinityClear:               false,
 		EventRouteLookup:                 false,
 		EventReload:                      false,
+		EventRedisOperation:              false,
 	}
 
 	for _, name := range RuntimeEventNames() {

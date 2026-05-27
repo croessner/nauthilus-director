@@ -209,5 +209,9 @@ func normalizeRecordedEvent(event Event) Event {
 		event.MetricLabels = MetricLabels{}
 	}
 
+	if event.Measurements == nil {
+		event.Measurements = MetricMeasurements{}
+	}
+
 	return event
 }

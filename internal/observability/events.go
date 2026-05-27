@@ -77,6 +77,8 @@ const (
 	EventRESTRequest = "rest.request"
 	// EventReload records safe reload attempts and outcomes.
 	EventReload = "reload"
+	// EventRedisOperation records one Redis state operation class.
+	EventRedisOperation = "redis.operation"
 	// EventProxyPipe records transparent proxy lifecycle completion.
 	EventProxyPipe = "proxy.pipe"
 )
@@ -87,6 +89,7 @@ type Event struct {
 	SpanName     string
 	LogFields    LogFields
 	MetricLabels MetricLabels
+	Measurements MetricMeasurements
 }
 
 // Recorder receives normalized events from runtime packages.
@@ -139,6 +142,7 @@ func RuntimeEventNames() []string {
 		EventAffinityClear,
 		EventRouteLookup,
 		EventReload,
+		EventRedisOperation,
 	}
 }
 
@@ -162,5 +166,6 @@ func NewEvent(name string, boundary TraceBoundary, fields map[string]string, lab
 		SpanName:     spanName,
 		LogFields:    SanitizeLogFields(fields),
 		MetricLabels: metricLabels,
+		Measurements: MetricMeasurements{},
 	}, nil
 }

@@ -23,6 +23,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/croessner/nauthilus-director/internal/observability"
 	"github.com/croessner/nauthilus-director/internal/rest/generated"
@@ -84,6 +85,7 @@ func traceRESTRequests(recorder observability.Recorder) generated.StrictMiddlewa
 
 	return func(next generated.StrictHandlerFunc, operationID string) generated.StrictHandlerFunc {
 		return func(ctx context.Context, w http.ResponseWriter, r *http.Request, request any) (any, error) {
+			started := time.Now()
 			route := routeTemplateForOperation(operationID)
 			fields := restObservationFields(r.Method, operationID, route, restResultOK, restStatusUnknown)
 			ctx, span := observability.StartSpan(ctx, recorder, observability.TraceBoundaryRESTRequest, fields)
@@ -104,7 +106,7 @@ func traceRESTRequests(recorder observability.Recorder) generated.StrictMiddlewa
 			}
 
 			span.SetAttributes(fields)
-			recordRESTRequest(ctx, recorder, fields)
+			recordRESTRequest(ctx, recorder, fields, time.Since(started))
 			span.End(result, reasonClass)
 
 			return response, err
@@ -113,7 +115,7 @@ func traceRESTRequests(recorder observability.Recorder) generated.StrictMiddlewa
 }
 
 // recordRESTRequest emits the generated-route REST observation.
-func recordRESTRequest(ctx context.Context, recorder observability.Recorder, fields map[string]string) {
+func recordRESTRequest(ctx context.Context, recorder observability.Recorder, fields map[string]string, duration time.Duration) {
 	event, err := observability.NewEvent(observability.EventRESTRequest, observability.TraceBoundaryRESTRequest, fields, map[string]string{
 		restFieldMethod:      fields[restFieldMethod],
 		restFieldOperation:   fields[restFieldOperation],
@@ -123,6 +125,12 @@ func recordRESTRequest(ctx context.Context, recorder observability.Recorder, fie
 	})
 	if err != nil {
 		return
+	}
+
+	if duration > 0 {
+		event.Measurements = observability.NewMetricMeasurements(map[string]float64{
+			observability.MetricMeasurementDurationSeconds: duration.Seconds(),
+		})
 	}
 
 	recorder.Record(ctx, event)

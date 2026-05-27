@@ -44,9 +44,12 @@ func (s *Session) authenticateAndPlace(ctx context.Context, tag string, credenti
 		obsFieldMechanism: mechanism,
 	})
 
+	authStarted := time.Now()
 	result, err := s.authenticateWithAuthority(authCtx, credentials)
+
+	authDuration := time.Since(authStarted)
 	if err != nil {
-		s.recordNauthilusAuth(authCtx, mechanism, observationResultFailure, reasonClass(err))
+		s.recordNauthilusAuth(authCtx, mechanism, observationResultFailure, reasonClass(err), authDuration)
 		authSpan.End(observationResultFailure, reasonClass(err))
 
 		return commandOutcome{}, s.writeTagged(tag, responseNo, authUnavailableText)
@@ -54,10 +57,10 @@ func (s *Session) authenticateAndPlace(ctx context.Context, tag string, credenti
 
 	switch result.Decision {
 	case nauthilus.DecisionAuthenticated:
-		s.recordNauthilusAuth(authCtx, mechanism, observationResultOK, "")
+		s.recordNauthilusAuth(authCtx, mechanism, observationResultOK, "", authDuration)
 		authSpan.End(observationResultOK, "")
 		if err := s.placeAuthenticatedSession(ctx, credentials, result); err != nil {
-			s.recordRoutingResolve(ctx, observationResultFailure, reasonClass(err), "")
+			s.recordRoutingResolve(ctx, observationResultFailure, reasonClass(err), "", 0)
 
 			return commandOutcome{}, s.writeTagged(tag, responseNo, authUnavailableText)
 		}
@@ -66,17 +69,17 @@ func (s *Session) authenticateAndPlace(ctx context.Context, tag string, credenti
 
 		return s.transitionAuthenticatedSession(ctx, tag, credentials)
 	case nauthilus.DecisionRejected:
-		s.recordNauthilusAuth(authCtx, mechanism, "rejected", "")
+		s.recordNauthilusAuth(authCtx, mechanism, "rejected", "", authDuration)
 		authSpan.End("rejected", "")
 
 		return commandOutcome{}, s.writeTagged(tag, responseNo, rejectedAuthResponseText(result.StatusMessage))
 	case nauthilus.DecisionTemporaryFailure:
-		s.recordNauthilusAuth(authCtx, mechanism, observationResultFailure, "temporary_failure")
+		s.recordNauthilusAuth(authCtx, mechanism, observationResultFailure, "temporary_failure", authDuration)
 		authSpan.End(observationResultFailure, "temporary_failure")
 
 		return commandOutcome{}, s.writeTagged(tag, responseNo, authUnavailableText)
 	default:
-		s.recordNauthilusAuth(authCtx, mechanism, observationResultFailure, "ambiguous")
+		s.recordNauthilusAuth(authCtx, mechanism, observationResultFailure, "ambiguous", authDuration)
 		authSpan.End(observationResultFailure, "ambiguous")
 
 		return commandOutcome{}, s.writeTagged(tag, responseNo, authUnavailableText)
@@ -135,9 +138,12 @@ func (s *Session) placeAuthenticatedSession(
 
 	routingCtx, routingSpan := s.startObservationSpan(ctx, observability.TraceBoundaryRoutingResolve, observationOperationRouting, observationResultStart, "", nil)
 
+	routingStarted := time.Now()
 	routingResult, err := s.routingResolver.Resolve(routingCtx, routingRequest)
+
+	routingDuration := time.Since(routingStarted)
 	if err != nil {
-		s.recordRoutingResolve(routingCtx, observationResultFailure, reasonClass(err), "")
+		s.recordRoutingResolve(routingCtx, observationResultFailure, reasonClass(err), "", routingDuration)
 		routingSpan.End(observationResultFailure, reasonClass(err))
 
 		return err
@@ -146,7 +152,7 @@ func (s *Session) placeAuthenticatedSession(
 	routingResult = s.withEffectiveDefaultShard(routingResult)
 
 	if !routingResult.Complete() {
-		s.recordRoutingResolve(routingCtx, observationResultFailure, "incomplete", routingResult.RoutingSource)
+		s.recordRoutingResolve(routingCtx, observationResultFailure, "incomplete", routingResult.RoutingSource, routingDuration)
 		routingSpan.SetAttributes(map[string]string{
 			obsFieldRoutingSource: routingResult.RoutingSource,
 		})
@@ -159,7 +165,7 @@ func (s *Session) placeAuthenticatedSession(
 		obsFieldRoutingSource: routingResult.RoutingSource,
 		obsFieldShardTag:      routingResult.ShardTag,
 	})
-	s.recordRoutingResolve(routingCtx, observationResultOK, "", routingResult.RoutingSource)
+	s.recordRoutingResolve(routingCtx, observationResultOK, "", routingResult.RoutingSource, routingDuration)
 	routingSpan.End(observationResultOK, "")
 
 	sessionRecord := s.sessionRecord(routingResult)
@@ -184,9 +190,12 @@ func (s *Session) placeAuthenticatedSession(
 		obsFieldShardTag: selectedShardTag,
 	})
 
+	selectStarted := time.Now()
 	backendResult, err := s.backendSelector.Select(selectCtx, selectionRequest)
+
+	selectDuration := time.Since(selectStarted)
 	if err != nil {
-		s.recordBackendSelect(selectCtx, observationResultFailure, reasonClass(err), selectedShardTag)
+		s.recordBackendSelect(selectCtx, observationResultFailure, reasonClass(err), selectedShardTag, selectDuration)
 		selectSpan.End(observationResultFailure, reasonClass(err))
 		_, _ = s.sessionStore.CloseSession(context.Background(), sessionRecord.Key, s.context.ID)
 
@@ -195,7 +204,7 @@ func (s *Session) placeAuthenticatedSession(
 
 	backendResult, err = s.attachSelectedBackend(selectCtx, sessionRecord.Key, selectionRequest, backendResult)
 	if err != nil {
-		s.recordBackendSelect(selectCtx, observationResultFailure, reasonClass(err), selectedShardTag)
+		s.recordBackendSelect(selectCtx, observationResultFailure, reasonClass(err), selectedShardTag, time.Since(selectStarted))
 		s.recordSessionAttach(selectCtx, observationResultFailure, reasonClass(err), backendResult.Backend.Identifier, selectedShardTag)
 		selectSpan.SetAttributes(map[string]string{
 			obsFieldBackendIdentifier: backendResult.Backend.Identifier,
@@ -212,7 +221,7 @@ func (s *Session) placeAuthenticatedSession(
 		obsFieldShardTag:          selectedShardTag,
 	})
 	s.recordSessionAttach(selectCtx, observationResultOK, "", backendResult.Backend.Identifier, selectedShardTag)
-	s.recordBackendSelect(selectCtx, observationResultOK, "", selectedShardTag)
+	s.recordBackendSelect(selectCtx, observationResultOK, "", selectedShardTag, time.Since(selectStarted))
 	selectSpan.End(observationResultOK, "")
 
 	s.placement = Placement{
@@ -426,16 +435,19 @@ func (s *Session) transitionAuthenticatedSession(
 		obsFieldShardTag:          s.placement.SelectedShardTag,
 	})
 
+	connectStarted := time.Now()
 	connection, err := s.backendConnector.Connect(connectCtx, s.placement.Backend.Backend, s.context.BackendConnectTimeout)
+
+	connectDuration := time.Since(connectStarted)
 	if err != nil {
-		s.recordBackendConnect(connectCtx, observationResultFailure, reasonBackendConnect)
+		s.recordBackendConnect(connectCtx, observationResultFailure, reasonBackendConnect, connectDuration)
 		connectSpan.End(observationResultFailure, reasonBackendConnect)
 		_ = s.closePlacedSession(context.Background())
 
 		return commandOutcome{}, s.writeTagged(tag, responseNo, authUnavailableText)
 	}
 
-	s.recordBackendConnect(connectCtx, observationResultOK, "")
+	s.recordBackendConnect(connectCtx, observationResultOK, "", connectDuration)
 
 	if err := AuthenticateBackend(connection, s.placement.Backend.Backend, credentials); err != nil {
 		s.recordBackendAuth(connectCtx, observationResultFailure, reasonClass(err), credentials.Mechanism().Normalized())

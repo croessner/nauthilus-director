@@ -98,6 +98,7 @@ func newManagedListener(
 		handler: options.handlerFactory(SessionOptions{
 			ListenerName:        name,
 			Config:              entry,
+			AuthorityTransport:  authority.Transport,
 			Timeouts:            runtime.Timeouts,
 			Security:            security,
 			Authenticator:       authenticator,

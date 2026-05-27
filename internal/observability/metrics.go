@@ -16,10 +16,27 @@
 
 package observability
 
-import "maps"
+import (
+	"maps"
+	"math"
+)
+
+const (
+	// MetricMeasurementActiveSessions carries aggregate active-session counts.
+	MetricMeasurementActiveSessions = "active_sessions"
+	// MetricMeasurementBackendToClientBytes carries proxy bytes from backend to client.
+	MetricMeasurementBackendToClientBytes = "backend_to_client_bytes"
+	// MetricMeasurementClientToBackendBytes carries proxy bytes from client to backend.
+	MetricMeasurementClientToBackendBytes = "client_to_backend_bytes"
+	// MetricMeasurementDurationSeconds carries elapsed operation duration.
+	MetricMeasurementDurationSeconds = "duration_seconds"
+)
 
 // MetricLabels contains Prometheus labels after allowlist validation.
 type MetricLabels map[string]string
+
+// MetricMeasurements contains non-label numeric values for Prometheus samples.
+type MetricMeasurements map[string]float64
 
 // NewMetricLabels validates and copies labels for metric registration.
 func NewMetricLabels(labels map[string]string) (MetricLabels, error) {
@@ -43,6 +60,30 @@ func (l MetricLabels) Validate() error {
 	}
 
 	return ValidateMetricLabels(names...)
+}
+
+// NewMetricMeasurements copies finite non-negative measurement values.
+func NewMetricMeasurements(values map[string]float64) MetricMeasurements {
+	copied := make(MetricMeasurements, len(values))
+	for name, value := range values {
+		if name == "" || value < 0 || math.IsNaN(value) || math.IsInf(value, 0) {
+			continue
+		}
+
+		copied[name] = value
+	}
+
+	return copied
+}
+
+// Value returns one finite measurement value.
+func (m MetricMeasurements) Value(name string) (float64, bool) {
+	value, ok := m[name]
+	if !ok || value < 0 || math.IsNaN(value) || math.IsInf(value, 0) {
+		return 0, false
+	}
+
+	return value, true
 }
 
 // cloneLabels copies labels before callers hand them to metric backends.

@@ -21,6 +21,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/croessner/nauthilus-director/internal/observability"
 )
 
 const (
@@ -33,13 +35,15 @@ const (
 
 // RedisSessionStore coordinates active affinity and session leases through Redis scripts.
 type RedisSessionStore struct {
-	client   RedisClient
-	keys     KeyBuilder
-	registry *ScriptRegistry
+	client    RedisClient
+	keys      KeyBuilder
+	registry  *ScriptRegistry
+	recorder  observability.Recorder
+	redisMode string
 }
 
 // NewRedisSessionStore creates a Redis-backed session store with embedded scripts.
-func NewRedisSessionStore(client RedisClient, keys KeyBuilder, registry *ScriptRegistry) (*RedisSessionStore, error) {
+func NewRedisSessionStore(client RedisClient, keys KeyBuilder, registry *ScriptRegistry, options ...RedisSessionStoreOption) (*RedisSessionStore, error) {
 	if client == nil {
 		return nil, newStateError(RedisErrorKindConfig, "session_store", "redis client required", nil)
 	}
@@ -57,7 +61,15 @@ func NewRedisSessionStore(client RedisClient, keys KeyBuilder, registry *ScriptR
 		registry = loaded
 	}
 
-	return &RedisSessionStore{client: client, keys: keys, registry: registry}, nil
+	applied := applyRedisStoreOptions(options)
+
+	return &RedisSessionStore{
+		client:    client,
+		keys:      keys,
+		registry:  registry,
+		recorder:  applied.recorder,
+		redisMode: applied.redisMode,
+	}, nil
 }
 
 // OpenSession creates or refreshes a lease while preserving existing active affinity.
@@ -261,21 +273,31 @@ func (s *RedisSessionStore) runScript(ctx context.Context, name string, keys []s
 	}
 
 	ctx = redisContext(ctx)
+	started := time.Now()
 
 	value, err := s.client.EvalSha(ctx, script.SHA, keys, args...).Result()
 	if err == nil {
+		s.recordRedisOperation(ctx, name, started, nil)
+
 		return value, nil
 	}
 
 	classified := ClassifyRedisError(name, err)
 	if !ShouldFallbackToEval(classified) {
+		s.recordRedisOperation(ctx, name, started, classified)
+
 		return nil, classified
 	}
 
 	value, err = s.client.Eval(ctx, script.Source, keys, args...).Result()
 	if err != nil {
-		return nil, ClassifyRedisError(name, err)
+		classified = ClassifyRedisError(name, err)
+		s.recordRedisOperation(ctx, name, started, classified)
+
+		return nil, classified
 	}
+
+	s.recordRedisOperation(ctx, name, started, nil)
 
 	return value, nil
 }

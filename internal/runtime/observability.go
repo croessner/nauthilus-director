@@ -19,6 +19,7 @@ package runtime
 import (
 	"context"
 	"maps"
+	"strconv"
 	"strings"
 
 	"github.com/croessner/nauthilus-director/internal/observability"
@@ -134,5 +135,26 @@ func recordRuntimeObservation(
 		return
 	}
 
+	if activeSessions, ok := numericObservation(fields, runtimeObservationFieldActiveSessions); ok {
+		event.Measurements = observability.NewMetricMeasurements(map[string]float64{
+			observability.MetricMeasurementActiveSessions: activeSessions,
+		})
+	}
+
 	observability.NormalizeRecorder(recorder).Record(ctx, event)
+}
+
+// numericObservation parses one non-negative observation field.
+func numericObservation(fields map[string]string, name string) (float64, bool) {
+	value := strings.TrimSpace(fields[name])
+	if value == "" {
+		return 0, false
+	}
+
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil || parsed < 0 {
+		return 0, false
+	}
+
+	return parsed, true
 }

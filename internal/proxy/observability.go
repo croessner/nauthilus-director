@@ -18,6 +18,7 @@ package proxy
 
 import (
 	"context"
+	"time"
 
 	"github.com/croessner/nauthilus-director/internal/observability"
 )
@@ -37,7 +38,7 @@ func recordProxyStart(ctx context.Context, config PipeConfig) {
 }
 
 // recordProxyEnd emits the terminal proxy result using bounded reason classes.
-func recordProxyEnd(ctx context.Context, config PipeConfig, result Result, err error) {
+func recordProxyEnd(ctx context.Context, config PipeConfig, started time.Time, result Result, err error) {
 	metricResult := proxyResultOK
 	if err != nil {
 		metricResult = "failure"
@@ -49,11 +50,11 @@ func recordProxyEnd(ctx context.Context, config PipeConfig, result Result, err e
 		reason = ResultClientClosed
 	}
 
-	recordProxyEvent(ctx, config, metricResult, reason)
+	recordProxyEvent(ctx, config, metricResult, reason, time.Since(started))
 }
 
 // recordProxyEvent normalizes low-cardinality proxy labels before recording.
-func recordProxyEvent(ctx context.Context, config PipeConfig, result string, reason string) {
+func recordProxyEvent(ctx context.Context, config PipeConfig, result string, reason string, duration ...time.Duration) {
 	recorder := observability.NormalizeRecorder(config.Observability)
 
 	event, err := observability.NewEvent(observability.EventProxyPipe, observability.TraceBoundaryProxyPipe, map[string]string{
@@ -67,6 +68,12 @@ func recordProxyEvent(ctx context.Context, config PipeConfig, result string, rea
 	})
 	if err != nil {
 		return
+	}
+
+	if len(duration) > 0 && duration[0] > 0 {
+		event.Measurements = observability.NewMetricMeasurements(map[string]float64{
+			observability.MetricMeasurementDurationSeconds: duration[0].Seconds(),
+		})
 	}
 
 	recorder.Record(ctx, event)

@@ -71,8 +71,10 @@ func (p *Pipe) Run(ctx context.Context, config PipeConfig) (result Result, err e
 	}
 
 	recordProxyStart(ctx, config)
+
+	started := time.Now()
 	defer func() {
-		recordProxyEnd(ctx, config, result, err)
+		recordProxyEnd(ctx, config, started, result, err)
 	}()
 
 	runCtx, cancel := context.WithCancel(ctx)

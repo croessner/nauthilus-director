@@ -124,6 +124,7 @@ func NewSession(config SessionConfig, conn net.Conn) (*Session, error) {
 			ID:                     sessionID,
 			ListenerName:           config.ListenerName,
 			AuthorityName:          config.AuthorityName,
+			AuthorityTransport:     config.AuthorityTransport,
 			ServiceName:            config.ServiceName,
 			Network:                config.Network,
 			BackendPool:            config.BackendPool,

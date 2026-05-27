@@ -21,6 +21,7 @@ import (
 	"errors"
 	"maps"
 	"strings"
+	"time"
 
 	"github.com/croessner/nauthilus-director/internal/observability"
 	"github.com/croessner/nauthilus-director/internal/proxy"
@@ -68,6 +69,7 @@ const (
 	obsFieldSessionID         = "session_id"
 	obsFieldShardTag          = "shard_tag"
 	obsFieldTLSMode           = "tls_mode"
+	obsFieldTransport         = "transport"
 )
 
 // recordSessionStart emits the first accepted-session observation.
@@ -88,17 +90,17 @@ func (s *Session) recordPreAuth(ctx context.Context, command string, result stri
 }
 
 // recordNauthilusAuth emits one authority authentication observation.
-func (s *Session) recordNauthilusAuth(ctx context.Context, mechanism string, result string, reason string) {
+func (s *Session) recordNauthilusAuth(ctx context.Context, mechanism string, result string, reason string, duration time.Duration) {
 	s.recordObservation(ctx, observability.EventNauthilusAuth, observability.TraceBoundaryNauthilusAuth, observationOperationAuth, result, reason, map[string]string{
 		obsFieldMechanism: strings.ToLower(strings.TrimSpace(mechanism)),
-	})
+	}, duration)
 }
 
 // recordRoutingResolve emits one director-owned routing observation.
-func (s *Session) recordRoutingResolve(ctx context.Context, result string, reason string, source string) {
+func (s *Session) recordRoutingResolve(ctx context.Context, result string, reason string, source string, duration time.Duration) {
 	s.recordObservation(ctx, observability.EventRoutingResolve, observability.TraceBoundaryRoutingResolve, observationOperationRouting, result, reason, map[string]string{
 		obsFieldRoutingSource: source,
-	})
+	}, duration)
 }
 
 // recordAffinityOpen emits the Redis-backed session-open observation.
@@ -123,15 +125,15 @@ func (s *Session) recordSessionClose(ctx context.Context, result string, reason 
 }
 
 // recordBackendSelect emits one concrete backend selection observation.
-func (s *Session) recordBackendSelect(ctx context.Context, result string, reason string, shardTag string) {
+func (s *Session) recordBackendSelect(ctx context.Context, result string, reason string, shardTag string, duration time.Duration) {
 	s.recordObservation(ctx, observability.EventBackendSelect, observability.TraceBoundaryBackendSelect, observationOperationBackendSelect, result, reason, map[string]string{
 		obsFieldShardTag: shardTag,
-	})
+	}, duration)
 }
 
 // recordBackendConnect emits one backend connection observation.
-func (s *Session) recordBackendConnect(ctx context.Context, result string, reason string) {
-	s.recordObservation(ctx, observability.EventBackendConnect, observability.TraceBoundaryBackendConnect, observationOperationBackendConnect, result, reason, nil)
+func (s *Session) recordBackendConnect(ctx context.Context, result string, reason string, duration time.Duration) {
+	s.recordObservation(ctx, observability.EventBackendConnect, observability.TraceBoundaryBackendConnect, observationOperationBackendConnect, result, reason, nil, duration)
 }
 
 // recordBackendAuth emits one backend authentication observation.
@@ -148,9 +150,18 @@ func (s *Session) recordProxyPipe(ctx context.Context, result proxy.Result, err 
 		reason = result.Class
 	}
 
-	s.recordObservation(ctx, observability.EventProxyPipe, observability.TraceBoundaryProxyPipe, observationOperationProxy, resultLabel(err), reason, map[string]string{
+	event := s.newObservation(ctx, observability.EventProxyPipe, observability.TraceBoundaryProxyPipe, observationOperationProxy, resultLabel(err), reason, map[string]string{
 		obsFieldProxyResult: result.Class,
 	})
+	if event.Name == "" {
+		return
+	}
+
+	event.Measurements = observability.NewMetricMeasurements(map[string]float64{
+		observability.MetricMeasurementBackendToClientBytes: float64(result.Accounted.BackendToClient),
+		observability.MetricMeasurementClientToBackendBytes: float64(result.Accounted.ClientToBackend),
+	})
+	observability.NormalizeRecorder(s.observability).Record(ctx, event)
 }
 
 // recordObservation builds a normalized event and drops impossible internal label mistakes.
@@ -162,8 +173,27 @@ func (s *Session) recordObservation(
 	result string,
 	reason string,
 	extraFields map[string]string,
+	duration ...time.Duration,
 ) {
-	recorder := observability.NormalizeRecorder(s.observability)
+	event := s.newObservation(ctx, name, boundary, operation, result, reason, extraFields, duration...)
+	if event.Name == "" {
+		return
+	}
+
+	observability.NormalizeRecorder(s.observability).Record(ctx, event)
+}
+
+// newObservation builds a normalized event and returns zero on policy mistakes.
+func (s *Session) newObservation(
+	_ context.Context,
+	name string,
+	boundary observability.TraceBoundary,
+	operation string,
+	result string,
+	reason string,
+	extraFields map[string]string,
+	duration ...time.Duration,
+) observability.Event {
 	fields := s.observationFields(operation, result, reason)
 	maps.Copy(fields, extraFields)
 
@@ -171,10 +201,16 @@ func (s *Session) recordObservation(
 
 	event, err := observability.NewEvent(name, boundary, fields, labels)
 	if err != nil {
-		return
+		return observability.Event{}
 	}
 
-	recorder.Record(ctx, event)
+	if len(duration) > 0 && duration[0] > 0 {
+		event.Measurements = observability.NewMetricMeasurements(map[string]float64{
+			observability.MetricMeasurementDurationSeconds: duration[0].Seconds(),
+		})
+	}
+
+	return event
 }
 
 // startObservationSpan starts a prepared span with the same safe session fields.
@@ -228,6 +264,10 @@ func (s *Session) observationLabels(operation string, result string, reason stri
 		obsFieldResult:      result,
 		obsFieldService:     s.context.ServiceName,
 		obsFieldTLSMode:     s.context.TLSMode,
+	}
+
+	if transport := strings.ToLower(strings.TrimSpace(s.context.AuthorityTransport)); transport != "" {
+		labels[obsFieldTransport] = transport
 	}
 
 	if mechanism := extraFields[obsFieldMechanism]; mechanism != "" {

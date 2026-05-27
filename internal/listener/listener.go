@@ -60,6 +60,7 @@ type NauthilusClientFactory func(authority config.AuthorityConfig) (nauthilus.Au
 type SessionOptions struct {
 	ListenerName        string
 	Config              config.ListenerConfig
+	AuthorityTransport  string
 	Timeouts            config.RuntimeTimeouts
 	Security            config.DirectorSecurityConfig
 	Authenticator       nauthilus.Authenticator

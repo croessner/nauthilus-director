@@ -200,8 +200,8 @@ func provideRedisClient(cfg config.Config) (redis.UniversalClient, error) {
 }
 
 // provideRedisStore creates the Redis-backed runtime state store.
-func provideRedisStore(client redis.UniversalClient, cfg config.Config) (*state.RedisSessionStore, error) {
-	return newRedisStore(client, cfg.Storage.Redis)
+func provideRedisStore(client redis.UniversalClient, cfg config.Config, recorder observability.Recorder) (*state.RedisSessionStore, error) {
+	return newRedisStore(client, cfg.Storage.Redis, recorder)
 }
 
 // provideBackendRegistry builds the immutable backend inventory.
@@ -459,6 +459,7 @@ func sessionHandlerFactory(
 		return imap.NewHandler(imap.SessionConfig{
 			ListenerName:           options.ListenerName,
 			AuthorityName:          options.Config.Authority,
+			AuthorityTransport:     options.AuthorityTransport,
 			ServiceName:            options.Config.ServiceName,
 			Network:                options.Config.Network,
 			BackendPool:            options.Config.BackendPool,
