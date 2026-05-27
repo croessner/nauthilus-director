@@ -19,10 +19,12 @@ package app
 import (
 	"context"
 	"errors"
+	"io"
 	"testing"
 
 	"github.com/croessner/nauthilus-director/internal/config"
 	"github.com/croessner/nauthilus-director/internal/observability"
+	"go.uber.org/fx"
 	"go.uber.org/fx/fxevent"
 )
 
@@ -103,6 +105,33 @@ func TestFxLoggerAllowsDebugEventsAtDebug(t *testing.T) {
 
 	if recorder.events[0].LogFields[fxLogFieldLevel] != fxLogLevelDebug {
 		t.Fatalf("event level = %q, want debug", recorder.events[0].LogFields[fxLogFieldLevel])
+	}
+}
+
+// TestFxRecorderProviderUsesRuntimeRecorder verifies Fx receives the shared runtime recorder.
+func TestFxRecorderProviderUsesRuntimeRecorder(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Observability.Tracing.Enabled = false
+
+	runtime, err := observability.NewRuntime(cfg.Observability, observability.WithLogWriter(io.Discard))
+	if err != nil {
+		t.Fatalf("NewRuntime returned error: %v", err)
+	}
+
+	var recorder observability.Recorder
+
+	app := fx.New(
+		fx.NopLogger,
+		fx.Supply(runtime),
+		fx.Provide(provideRecorder),
+		fx.Populate(&recorder),
+	)
+	if err := app.Err(); err != nil {
+		t.Fatalf("fx app error: %v", err)
+	}
+
+	if recorder != runtime.Recorder() {
+		t.Fatal("Fx recorder provider did not return the runtime-owned recorder")
 	}
 }
 

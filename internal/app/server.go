@@ -57,12 +57,13 @@ type composedApplication struct {
 }
 
 type runtimeOptions struct {
-	ConfigPath      string
-	Version         string
-	Loader          *config.Loader
-	Snapshot        *config.Snapshot
-	Recorder        observability.Recorder
-	ShutdownTimeout time.Duration
+	ConfigPath           string
+	Version              string
+	Loader               *config.Loader
+	Snapshot             *config.Snapshot
+	ObservabilityRuntime *observability.Runtime
+	Recorder             observability.Recorder
+	ShutdownTimeout      time.Duration
 }
 
 type controlHandle struct {
@@ -143,13 +144,22 @@ func runtimeOptionsFor(options Options) (runtimeOptions, error) {
 		shutdownTimeout = config.DefaultConfig().Runtime.Process.ShutdownTimeout.Std()
 	}
 
+	observabilityRuntime, err := observability.NewRuntime(
+		snapshot.Config.Observability,
+		observability.WithAdditionalRecorder(options.Recorder),
+	)
+	if err != nil {
+		return runtimeOptions{}, err
+	}
+
 	return runtimeOptions{
-		ConfigPath:      options.ConfigPath,
-		Version:         options.Version,
-		Loader:          loader,
-		Snapshot:        snapshot,
-		Recorder:        observability.NormalizeRecorder(options.Recorder),
-		ShutdownTimeout: shutdownTimeout,
+		ConfigPath:           options.ConfigPath,
+		Version:              options.Version,
+		Loader:               loader,
+		Snapshot:             snapshot,
+		ObservabilityRuntime: observabilityRuntime,
+		Recorder:             observabilityRuntime.Recorder(),
+		ShutdownTimeout:      shutdownTimeout,
 	}, nil
 }
 
@@ -168,9 +178,19 @@ func provideConfig(snapshot *config.Snapshot) config.Config {
 	return snapshot.Config
 }
 
-// provideRecorder exposes the normalized observability recorder to Fx providers.
-func provideRecorder(options runtimeOptions) observability.Recorder {
-	return options.Recorder
+// provideObservabilityRuntime exposes the process-local observability owner to Fx.
+func provideObservabilityRuntime(options runtimeOptions) *observability.Runtime {
+	return options.ObservabilityRuntime
+}
+
+// provideRecorder exposes the runtime-owned observability recorder to Fx providers.
+func provideRecorder(runtime *observability.Runtime) observability.Recorder {
+	return runtime.Recorder()
+}
+
+// provideMetricsProvider exposes the runtime-owned Prometheus provider to REST.
+func provideMetricsProvider(runtime *observability.Runtime) observability.MetricsProvider {
+	return runtime.MetricsProvider()
 }
 
 // provideRedisClient creates the configured Redis topology client.
@@ -253,6 +273,7 @@ func provideControlHandle(
 	options runtimeOptions,
 	loader *config.Loader,
 	recorder observability.Recorder,
+	metrics observability.MetricsProvider,
 	backendReader *runtimectl.BackendReadService,
 	store *state.RedisSessionStore,
 	localSessions *runtimectl.LocalSessionRegistry,
@@ -279,6 +300,7 @@ func provideControlHandle(
 			UserMutator:    runtimectl.NewUserService(store, localSessions, runtimectl.WithObservabilityRecorder(recorder)),
 			RouteLookup:    routeLookup,
 			Reload:         safeReloadService(cfg, loader, options.ConfigPath, recorder),
+			Metrics:        metrics,
 			Observability:  recorder,
 		},
 	})
@@ -289,6 +311,14 @@ func provideControlHandle(
 	}
 
 	return controlHandle{server: server}, nil
+}
+
+// registerObservabilityLifecycle starts observability first and flushes it last.
+func registerObservabilityLifecycle(lifecycle fx.Lifecycle, runtime *observability.Runtime) {
+	lifecycle.Append(fx.Hook{
+		OnStart: runtime.Start,
+		OnStop:  runtime.Shutdown,
+	})
 }
 
 // provideHealthRunnerHandle creates the optional backend health worker.
