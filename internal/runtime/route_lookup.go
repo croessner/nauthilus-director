@@ -19,6 +19,7 @@ package runtime
 import (
 	"context"
 	"strings"
+	"time"
 
 	"github.com/croessner/nauthilus-director/internal/backend"
 	"github.com/croessner/nauthilus-director/internal/observability"
@@ -180,9 +181,10 @@ func (s *RouteLookupService) Lookup(ctx context.Context, request RouteLookupRequ
 		return RouteLookupResponse{}, newRuntimeError(ErrorKindUnavailable, operationRouteLookup, "route lookup service unavailable")
 	}
 
+	started := time.Now()
 	request = request.Normalize()
 	if err := s.applyDefaults(&request); err != nil {
-		s.recordRouteLookup(ctx, request, runtimeObservationResultFailure, "invalid_request", RouteLookupResponse{})
+		s.recordRouteLookup(ctx, request, runtimeObservationResultFailure, "invalid_request", RouteLookupResponse{}, time.Since(started))
 
 		return RouteLookupResponse{}, err
 	}
@@ -199,7 +201,7 @@ func (s *RouteLookupService) Lookup(ctx context.Context, request RouteLookupRequ
 		ClientIP:          request.ClientIP,
 	})
 	if err != nil {
-		s.recordRouteLookup(ctx, request, runtimeObservationResultFailure, "other", RouteLookupResponse{})
+		s.recordRouteLookup(ctx, request, runtimeObservationResultFailure, "other", RouteLookupResponse{}, time.Since(started))
 
 		return RouteLookupResponse{}, err
 	}
@@ -216,12 +218,12 @@ func (s *RouteLookupService) Lookup(ctx context.Context, request RouteLookupRequ
 		if backend.IsErrorKind(err, backend.ErrorKindNoBackend) {
 			response.FailClosed = true
 			response.ReasonClass = string(backend.ErrorKindNoBackend)
-			s.recordRouteLookup(ctx, request, runtimeObservationResultOK, response.ReasonClass, response)
+			s.recordRouteLookup(ctx, request, runtimeObservationResultOK, response.ReasonClass, response, time.Since(started))
 
 			return response, nil
 		}
 
-		s.recordRouteLookup(ctx, request, runtimeObservationResultFailure, "other", response)
+		s.recordRouteLookup(ctx, request, runtimeObservationResultFailure, "other", response, time.Since(started))
 
 		return RouteLookupResponse{}, err
 	}
@@ -232,7 +234,7 @@ func (s *RouteLookupService) Lookup(ctx context.Context, request RouteLookupRequ
 	response.Routing.EffectiveShard = explanation.Result.EffectiveBackend.EffectiveShardTag
 	response.Effects = response.Effects.Merge(NewRouteLookupBackendState(explanation.Result.EffectiveBackend, selectionRequest.ActiveAffinity).Effects())
 
-	s.recordRouteLookup(ctx, request, runtimeObservationResultOK, response.ReasonClass, response)
+	s.recordRouteLookup(ctx, request, runtimeObservationResultOK, response.ReasonClass, response, time.Since(started))
 
 	return response, nil
 }
@@ -549,6 +551,7 @@ func (s *RouteLookupService) recordRouteLookup(
 	result string,
 	reasonClass string,
 	response RouteLookupResponse,
+	duration time.Duration,
 ) {
 	if s == nil {
 		return
@@ -574,7 +577,7 @@ func (s *RouteLookupService) recordRouteLookup(
 		labels[runtimeObservationFieldShardTag] = response.Routing.EffectiveShard
 	}
 
-	recordRuntimeObservation(ctx, s.recorder, observability.EventRouteLookup, observability.TraceBoundaryRESTRequest, operationRouteLookup, result, reasonClass, fields, labels)
+	recordRuntimeObservation(ctx, s.recorder, observability.EventRouteLookup, observability.TraceBoundaryRESTRequest, operationRouteLookup, result, reasonClass, fields, labels, duration)
 
 	for _, state := range response.Backends {
 		s.recordRouteBackendState(ctx, request.Protocol, state)

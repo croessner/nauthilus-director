@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/croessner/nauthilus-director/internal/config"
+	"github.com/croessner/nauthilus-director/internal/nauthilus"
 	"github.com/croessner/nauthilus-director/internal/observability"
 )
 
@@ -92,12 +93,22 @@ func newManagedListener(
 		return nil, fmt.Errorf("listener %s: %w", name, err)
 	}
 
+	authenticator = nauthilus.ObserveAuthenticator(authenticator, nauthilus.ObservationConfig{
+		AuthorityName: entry.Authority,
+		BackendPool:   entry.BackendPool,
+		ListenerName:  name,
+		Recorder:      options.observability,
+		ServiceName:   entry.ServiceName,
+		Transport:     authority.Transport,
+	})
+
 	return &managedListener{
 		name:   name,
 		config: configured,
 		handler: options.handlerFactory(SessionOptions{
 			ListenerName:        name,
 			Config:              entry,
+			AuthorityTransport:  authority.Transport,
 			Timeouts:            runtime.Timeouts,
 			Security:            security,
 			Authenticator:       authenticator,
@@ -214,8 +225,12 @@ func (l *managedListener) acceptLoop(ln net.Listener) {
 		conn, err := ln.Accept()
 		if err != nil {
 			if errors.Is(err, net.ErrClosed) {
+				l.recordAcceptLoopStop(listenerResultOK, "closed")
+
 				return
 			}
+
+			l.recordAcceptLoopStop("failure", "transport")
 
 			return
 		}
@@ -247,9 +262,12 @@ func (l *managedListener) prepareConnection(conn net.Conn) (net.Conn, error) {
 	if l.proxyProtocol != nil {
 		proxyConn, err := l.proxyProtocol.apply(conn)
 		if err != nil {
+			l.recordProxyProtocol(listenerResultRejected, proxyProtocolReasonClass(err))
+
 			return nil, err
 		}
 
+		l.recordProxyProtocol(listenerResultAccepted, "ok")
 		prepared = proxyConn
 	}
 

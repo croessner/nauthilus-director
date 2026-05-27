@@ -30,10 +30,18 @@ const operationRuntimeRead = "runtime_read"
 
 // ListRuntimeSessions returns active sessions from repairable Redis indexes.
 func (s *RedisSessionStore) ListRuntimeSessions(ctx context.Context, protocol string) ([]RuntimeSessionRecord, error) {
-	entries, err := s.client.HGetAll(redisContext(ctx), s.keys.SessionIndexKey()).Result()
+	redisCtx := redisContext(ctx)
+	started := time.Now()
+
+	entries, err := s.client.HGetAll(redisCtx, s.keys.SessionIndexKey()).Result()
 	if err != nil {
-		return nil, ClassifyRedisError(operationRuntimeRead, err)
+		classified := ClassifyRedisError(operationRuntimeRead, err)
+		s.recordRedisOperation(redisCtx, "runtime_session_list", started, classified)
+
+		return nil, classified
 	}
+
+	s.recordRedisOperation(redisCtx, "runtime_session_list", started, nil)
 
 	protocol = strings.ToLower(strings.TrimSpace(protocol))
 
@@ -63,14 +71,24 @@ func (s *RedisSessionStore) GetRuntimeSession(ctx context.Context, sessionID str
 		return RuntimeSessionRecord{}, false, newStateError(RedisErrorKindAmbiguousState, operationRuntimeRead, "session id required", nil)
 	}
 
-	sessionKey, err := s.client.HGet(redisContext(ctx), s.keys.SessionIndexKey(), sessionID).Result()
+	redisCtx := redisContext(ctx)
+	started := time.Now()
+
+	sessionKey, err := s.client.HGet(redisCtx, s.keys.SessionIndexKey(), sessionID).Result()
 	if errors.Is(err, redis.Nil) {
+		s.recordRedisOperation(redisCtx, "runtime_session_get", started, nil)
+
 		return RuntimeSessionRecord{}, false, nil
 	}
 
 	if err != nil {
-		return RuntimeSessionRecord{}, false, ClassifyRedisError(operationRuntimeRead, err)
+		classified := ClassifyRedisError(operationRuntimeRead, err)
+		s.recordRedisOperation(redisCtx, "runtime_session_get", started, classified)
+
+		return RuntimeSessionRecord{}, false, classified
 	}
+
+	s.recordRedisOperation(redisCtx, "runtime_session_get", started, nil)
 
 	return s.readRuntimeSession(ctx, sessionID, sessionKey)
 }
@@ -82,10 +100,18 @@ func (s *RedisSessionStore) ListRuntimeSessionsForUser(ctx context.Context, key 
 		return nil, err
 	}
 
-	sessionIDs, err := s.client.SMembers(redisContext(ctx), userSessionsKey).Result()
+	redisCtx := redisContext(ctx)
+	started := time.Now()
+
+	sessionIDs, err := s.client.SMembers(redisCtx, userSessionsKey).Result()
 	if err != nil {
-		return nil, ClassifyRedisError(operationRuntimeRead, err)
+		classified := ClassifyRedisError(operationRuntimeRead, err)
+		s.recordRedisOperation(redisCtx, "runtime_user_sessions_list", started, classified)
+
+		return nil, classified
 	}
+
+	s.recordRedisOperation(redisCtx, "runtime_user_sessions_list", started, nil)
 
 	records := make([]RuntimeSessionRecord, 0, len(sessionIDs))
 	for _, sessionID := range sessionIDs {
@@ -176,10 +202,18 @@ func (s *RedisSessionStore) readRuntimeSession(ctx context.Context, sessionID st
 		return RuntimeSessionRecord{}, false, nil
 	}
 
-	fields, err := s.client.HGetAll(redisContext(ctx), sessionKey).Result()
+	redisCtx := redisContext(ctx)
+	started := time.Now()
+
+	fields, err := s.client.HGetAll(redisCtx, sessionKey).Result()
 	if err != nil {
-		return RuntimeSessionRecord{}, false, ClassifyRedisError(operationRuntimeRead, err)
+		classified := ClassifyRedisError(operationRuntimeRead, err)
+		s.recordRedisOperation(redisCtx, "runtime_session_read", started, classified)
+
+		return RuntimeSessionRecord{}, false, classified
 	}
+
+	s.recordRedisOperation(redisCtx, "runtime_session_read", started, nil)
 
 	if len(fields) == 0 {
 		return RuntimeSessionRecord{}, false, nil

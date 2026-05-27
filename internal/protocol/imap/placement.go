@@ -26,6 +26,7 @@ import (
 
 	"github.com/croessner/nauthilus-director/internal/backend"
 	"github.com/croessner/nauthilus-director/internal/nauthilus"
+	"github.com/croessner/nauthilus-director/internal/observability"
 	"github.com/croessner/nauthilus-director/internal/proxy"
 	"github.com/croessner/nauthilus-director/internal/routing"
 	runtimectl "github.com/croessner/nauthilus-director/internal/runtime"
@@ -36,16 +37,13 @@ import (
 func (s *Session) authenticateAndPlace(ctx context.Context, tag string, credentials *frontendCredentials) (commandOutcome, error) {
 	result, err := s.authenticateWithAuthority(ctx, credentials)
 	if err != nil {
-		s.recordNauthilusAuth(ctx, credentials.Mechanism().Normalized(), observationResultFailure, reasonClass(err))
-
 		return commandOutcome{}, s.writeTagged(tag, responseNo, authUnavailableText)
 	}
 
 	switch result.Decision {
 	case nauthilus.DecisionAuthenticated:
-		s.recordNauthilusAuth(ctx, credentials.Mechanism().Normalized(), observationResultOK, "")
 		if err := s.placeAuthenticatedSession(ctx, credentials, result); err != nil {
-			s.recordRoutingResolve(ctx, observationResultFailure, reasonClass(err), "")
+			s.recordRoutingResolve(ctx, observationResultFailure, reasonClass(err), "", 0)
 
 			return commandOutcome{}, s.writeTagged(tag, responseNo, authUnavailableText)
 		}
@@ -54,16 +52,10 @@ func (s *Session) authenticateAndPlace(ctx context.Context, tag string, credenti
 
 		return s.transitionAuthenticatedSession(ctx, tag, credentials)
 	case nauthilus.DecisionRejected:
-		s.recordNauthilusAuth(ctx, credentials.Mechanism().Normalized(), "rejected", "")
-
 		return commandOutcome{}, s.writeTagged(tag, responseNo, rejectedAuthResponseText(result.StatusMessage))
 	case nauthilus.DecisionTemporaryFailure:
-		s.recordNauthilusAuth(ctx, credentials.Mechanism().Normalized(), observationResultFailure, "temporary_failure")
-
 		return commandOutcome{}, s.writeTagged(tag, responseNo, authUnavailableText)
 	default:
-		s.recordNauthilusAuth(ctx, credentials.Mechanism().Normalized(), observationResultFailure, "ambiguous")
-
 		return commandOutcome{}, s.writeTagged(tag, responseNo, authUnavailableText)
 	}
 }
@@ -118,9 +110,15 @@ func (s *Session) placeAuthenticatedSession(
 		return err
 	}
 
-	routingResult, err := s.routingResolver.Resolve(ctx, routingRequest)
+	routingCtx, routingSpan := s.startObservationSpan(ctx, observability.TraceBoundaryRoutingResolve, observationOperationRouting, observationResultStart, "", nil)
+
+	routingStarted := time.Now()
+	routingResult, err := s.routingResolver.Resolve(routingCtx, routingRequest)
+
+	routingDuration := time.Since(routingStarted)
 	if err != nil {
-		s.recordRoutingResolve(ctx, observationResultFailure, reasonClass(err), "")
+		s.recordRoutingResolve(routingCtx, observationResultFailure, reasonClass(err), "", routingDuration)
+		routingSpan.End(observationResultFailure, reasonClass(err))
 
 		return err
 	}
@@ -128,12 +126,21 @@ func (s *Session) placeAuthenticatedSession(
 	routingResult = s.withEffectiveDefaultShard(routingResult)
 
 	if !routingResult.Complete() {
-		s.recordRoutingResolve(ctx, observationResultFailure, "incomplete", routingResult.RoutingSource)
+		s.recordRoutingResolve(routingCtx, observationResultFailure, "incomplete", routingResult.RoutingSource, routingDuration)
+		routingSpan.SetAttributes(map[string]string{
+			obsFieldRoutingSource: routingResult.RoutingSource,
+		})
+		routingSpan.End(observationResultFailure, "incomplete")
 
 		return errors.New("imap: incomplete routing result")
 	}
 
-	s.recordRoutingResolve(ctx, observationResultOK, "", routingResult.RoutingSource)
+	routingSpan.SetAttributes(map[string]string{
+		obsFieldRoutingSource: routingResult.RoutingSource,
+		obsFieldShardTag:      routingResult.ShardTag,
+	})
+	s.recordRoutingResolve(routingCtx, observationResultOK, "", routingResult.RoutingSource, routingDuration)
+	routingSpan.End(observationResultOK, "")
 
 	sessionRecord := s.sessionRecord(routingResult)
 
@@ -152,25 +159,44 @@ func (s *Session) placeAuthenticatedSession(
 
 	s.recordAffinityOpen(ctx, observationResultOK, "", affinity.Status, selectedShardTag)
 
-	backendResult, err := s.backendSelector.Select(ctx, s.selectionRequest(routingResult, selectedShardTag, affinity))
+	selectionRequest := s.selectionRequest(routingResult, selectedShardTag, affinity)
+	selectCtx, selectSpan := s.startObservationSpan(ctx, observability.TraceBoundaryBackendSelect, observationOperationBackendSelect, observationResultStart, "", map[string]string{
+		obsFieldShardTag: selectedShardTag,
+	})
+
+	selectStarted := time.Now()
+	backendResult, err := s.backendSelector.Select(selectCtx, selectionRequest)
+
+	selectDuration := time.Since(selectStarted)
 	if err != nil {
-		s.recordBackendSelect(ctx, observationResultFailure, reasonClass(err), selectedShardTag)
+		s.recordBackendSelect(selectCtx, observationResultFailure, reasonClass(err), selectedShardTag, selectDuration)
+		selectSpan.End(observationResultFailure, reasonClass(err))
 		_, _ = s.sessionStore.CloseSession(context.Background(), sessionRecord.Key, s.context.ID)
 
 		return err
 	}
 
-	backendResult, err = s.attachSelectedBackend(ctx, sessionRecord.Key, s.selectionRequest(routingResult, selectedShardTag, affinity), backendResult)
+	backendResult, err = s.attachSelectedBackend(selectCtx, sessionRecord.Key, selectionRequest, backendResult)
 	if err != nil {
-		s.recordBackendSelect(ctx, observationResultFailure, reasonClass(err), selectedShardTag)
-		s.recordSessionAttach(ctx, observationResultFailure, reasonClass(err), backendResult.Backend.Identifier, selectedShardTag)
+		s.recordBackendSelect(selectCtx, observationResultFailure, reasonClass(err), selectedShardTag, time.Since(selectStarted))
+		s.recordSessionAttach(selectCtx, observationResultFailure, reasonClass(err), backendResult.Backend.Identifier, selectedShardTag)
+		selectSpan.SetAttributes(map[string]string{
+			obsFieldBackendIdentifier: backendResult.Backend.Identifier,
+			obsFieldShardTag:          selectedShardTag,
+		})
+		selectSpan.End(observationResultFailure, reasonClass(err))
 		_, _ = s.sessionStore.CloseSession(context.Background(), sessionRecord.Key, s.context.ID)
 
 		return err
 	}
 
-	s.recordSessionAttach(ctx, observationResultOK, "", backendResult.Backend.Identifier, selectedShardTag)
-	s.recordBackendSelect(ctx, observationResultOK, "", selectedShardTag)
+	selectSpan.SetAttributes(map[string]string{
+		obsFieldBackendIdentifier: backendResult.Backend.Identifier,
+		obsFieldShardTag:          selectedShardTag,
+	})
+	s.recordSessionAttach(selectCtx, observationResultOK, "", backendResult.Backend.Identifier, selectedShardTag)
+	s.recordBackendSelect(selectCtx, observationResultOK, "", selectedShardTag, time.Since(selectStarted))
+	selectSpan.End(observationResultOK, "")
 
 	s.placement = Placement{
 		AuthResult:       cloneAuthResult(result),
@@ -378,25 +404,36 @@ func (s *Session) transitionAuthenticatedSession(
 	tag string,
 	credentials *frontendCredentials,
 ) (commandOutcome, error) {
-	connection, err := s.backendConnector.Connect(ctx, s.placement.Backend.Backend, s.context.BackendConnectTimeout)
+	connectCtx, connectSpan := s.startObservationSpan(ctx, observability.TraceBoundaryBackendConnect, observationOperationBackendConnect, observationResultStart, "", map[string]string{
+		obsFieldBackendIdentifier: s.placement.Backend.Backend.Identifier,
+		obsFieldShardTag:          s.placement.SelectedShardTag,
+	})
+
+	connectStarted := time.Now()
+	connection, err := s.backendConnector.Connect(connectCtx, s.placement.Backend.Backend, s.context.BackendConnectTimeout)
+
+	connectDuration := time.Since(connectStarted)
 	if err != nil {
-		s.recordBackendConnect(ctx, observationResultFailure, reasonBackendConnect)
+		s.recordBackendConnect(connectCtx, observationResultFailure, reasonBackendConnect, connectDuration)
+		connectSpan.End(observationResultFailure, reasonBackendConnect)
 		_ = s.closePlacedSession(context.Background())
 
 		return commandOutcome{}, s.writeTagged(tag, responseNo, authUnavailableText)
 	}
 
-	s.recordBackendConnect(ctx, observationResultOK, "")
+	s.recordBackendConnect(connectCtx, observationResultOK, "", connectDuration)
 
 	if err := AuthenticateBackend(connection, s.placement.Backend.Backend, credentials); err != nil {
-		s.recordBackendAuth(ctx, observationResultFailure, reasonClass(err), credentials.Mechanism().Normalized())
+		s.recordBackendAuth(connectCtx, observationResultFailure, reasonClass(err), credentials.Mechanism().Normalized())
+		connectSpan.End(observationResultFailure, reasonClass(err))
 		_ = connection.Conn().Close()
 		_ = s.closePlacedSession(context.Background())
 
 		return commandOutcome{}, s.writeTagged(tag, responseNo, authUnavailableText)
 	}
 
-	s.recordBackendAuth(ctx, observationResultOK, "", credentials.Mechanism().Normalized())
+	s.recordBackendAuth(connectCtx, observationResultOK, "", credentials.Mechanism().Normalized())
+	connectSpan.End(observationResultOK, "")
 
 	credentials.Clear()
 
@@ -419,7 +456,11 @@ func (s *Session) transitionAuthenticatedSession(
 	unregister := s.registerLocalProxySession(handoff.Frontend(), connection.Conn())
 	defer unregister()
 
-	proxyResult, err := s.proxyRunner.Run(ctx, proxy.PipeConfig{
+	proxyCtx, proxySpan := s.startObservationSpan(ctx, observability.TraceBoundaryProxyPipe, observationOperationProxy, observationResultStart, "", map[string]string{
+		obsFieldBackendIdentifier: s.placement.Backend.Backend.Identifier,
+		obsFieldShardTag:          s.placement.SelectedShardTag,
+	})
+	_, err = s.proxyRunner.Run(proxyCtx, proxy.PipeConfig{
 		Frontend:          handoff.Frontend(),
 		Backend:           connection.Conn(),
 		BufferedToBackend: handoff.Buffered(),
@@ -429,7 +470,7 @@ func (s *Session) transitionAuthenticatedSession(
 		Lease:             s.proxyLease(),
 		Observability:     s.observability,
 	})
-	s.recordProxyPipe(ctx, proxyResult, err)
+	proxySpan.End(resultLabel(err), reasonClass(err))
 
 	return commandOutcome{closeSession: true, flushed: true}, err
 }

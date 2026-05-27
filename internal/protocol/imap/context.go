@@ -61,6 +61,7 @@ func (p Placement) Clone() Placement {
 type SessionConfig struct {
 	ListenerName           string
 	AuthorityName          string
+	AuthorityTransport     string
 	ServiceName            string
 	Network                string
 	BackendPool            string
@@ -96,6 +97,7 @@ type Context struct {
 	ID                     string
 	ListenerName           string
 	AuthorityName          string
+	AuthorityTransport     string
 	ServiceName            string
 	Network                string
 	BackendPool            string

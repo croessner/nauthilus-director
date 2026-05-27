@@ -25,6 +25,7 @@ import (
 	"strings"
 
 	"github.com/croessner/nauthilus-director/internal/config"
+	"github.com/croessner/nauthilus-director/internal/observability"
 	"github.com/croessner/nauthilus-director/internal/state"
 	"github.com/redis/go-redis/v9"
 )
@@ -68,7 +69,7 @@ func newRedisClient(cfg config.RedisConfig) (redis.UniversalClient, error) {
 }
 
 // newRedisStore creates the Redis-backed session and runtime store.
-func newRedisStore(client redis.UniversalClient, cfg config.RedisConfig) (*state.RedisSessionStore, error) {
+func newRedisStore(client redis.UniversalClient, cfg config.RedisConfig, recorder observability.Recorder) (*state.RedisSessionStore, error) {
 	keys, err := state.NewKeyBuilder(state.KeyBuilderOptions{
 		Prefix:        cfg.KeyPrefix,
 		SchemaVersion: cfg.SchemaVersion,
@@ -77,7 +78,13 @@ func newRedisStore(client redis.UniversalClient, cfg config.RedisConfig) (*state
 		return nil, err
 	}
 
-	return state.NewRedisSessionStore(client, keys, nil)
+	return state.NewRedisSessionStore(
+		client,
+		keys,
+		nil,
+		state.WithObservabilityRecorder(recorder),
+		state.WithRedisMode(cfg.Mode),
+	)
 }
 
 // pingRedis verifies that the central runtime state backend is reachable.

@@ -1151,6 +1151,12 @@ surface against six real Dovecot backends behind three Director processes.
 
 ### M4: Observability
 
+Status: completed. The observability runtime, OTLP tracing, Prometheus
+`/metrics` provider, structured log correlation, runtime instrumentation
+coverage and deterministic fake-service E2E proof are in place. The detailed
+completion evidence lives in
+`docs/specs/implementation/M4_OBSERVABILITY_SPEC.md`.
+
 - OTLP exporter config
 - traces for sessions/auth/routing/backend/proxy
 - Prometheus metrics

@@ -18,7 +18,11 @@ package observability
 
 import "testing"
 
-const testOperationAuthenticate = "authenticate"
+const (
+	testDiagnosticAccount     = "alice@example.org"
+	testDiagnosticBackendID   = "mailstore-a-imap"
+	testOperationAuthenticate = "authenticate"
+)
 
 const (
 	testReasonClassOther                  = "other"
@@ -109,8 +113,29 @@ func TestTraceSpanNamesPrepared(t *testing.T) {
 		t.Fatalf("auth span = %q", authName)
 	}
 
-	if len(PreparedSpanNames()) == 0 {
-		t.Fatal("prepared span name list is empty")
+	expected := []string{
+		"nauthilus_director.backend.connect",
+		"nauthilus_director.backend.select",
+		"nauthilus_director.imap.pre_auth",
+		"nauthilus_director.lmtp.transaction",
+		"nauthilus_director.nauthilus.auth",
+		"nauthilus_director.pop3.pre_auth",
+		"nauthilus_director.proxy.pipe",
+		"nauthilus_director.rest.request",
+		"nauthilus_director.routing.resolve",
+		"nauthilus_director.session",
+		"nauthilus_director.sieve.pre_auth",
+	}
+
+	names := PreparedSpanNames()
+	if len(names) != len(expected) {
+		t.Fatalf("prepared span names = %d, want %d", len(names), len(expected))
+	}
+
+	for index, want := range expected {
+		if names[index] != want {
+			t.Fatalf("prepared span name[%d] = %q, want %q", index, names[index], want)
+		}
 	}
 }
 
@@ -185,6 +210,55 @@ func TestEventNormalizationRejectsForbiddenMetricLabels(t *testing.T) {
 	}
 }
 
+// TestTraceAttributesApplyDiagnosticPolicy verifies traces have their own safe attribute policy.
+func TestTraceAttributesApplyDiagnosticPolicy(t *testing.T) {
+	fields := SanitizeTraceFields(map[string]string{
+		fieldBackendIdentifier: testDiagnosticBackendID,
+		fieldClientIP:          "192.0.2.10",
+		fieldPassword:          "secret",
+		fieldRawError:          "dial tcp 192.0.2.10:143: secret",
+		fieldRecipient:         testDiagnosticAccount,
+		fieldRedisKey:          "{alice}:session",
+		fieldUsername:          testDiagnosticAccount,
+		metricLabelOperation:   testOperationAuthenticate,
+	})
+
+	if fields[fieldPassword] != RedactedValue {
+		t.Fatalf("password trace attribute = %q, want redacted", fields[fieldPassword])
+	}
+
+	if fields[fieldBackendIdentifier] != testDiagnosticBackendID {
+		t.Fatalf("backend identifier trace attribute = %q", fields[fieldBackendIdentifier])
+	}
+
+	for _, name := range []string{fieldClientIP, fieldRawError, fieldRecipient, fieldRedisKey, fieldUsername} {
+		if _, ok := fields[name]; ok {
+			t.Fatalf("raw trace attribute %q remained", name)
+		}
+
+		if fields[name+logFieldPresentSuffix] != logBoolTrue {
+			t.Fatalf("%s presence = %q, want true", name, fields[name+logFieldPresentSuffix])
+		}
+	}
+}
+
+// TestBackendIdentifierPolicyDiffersBySink keeps logs/traces separate from metrics.
+func TestBackendIdentifierPolicyDiffersBySink(t *testing.T) {
+	if err := ValidateMetricLabels(fieldBackendIdentifier); err == nil {
+		t.Fatal("backend_identifier was accepted as a metric label")
+	}
+
+	logFields := SanitizeLogFields(map[string]string{fieldBackendIdentifier: testDiagnosticBackendID})
+	if logFields[fieldBackendIdentifier] != testDiagnosticBackendID {
+		t.Fatalf("backend identifier log field = %q", logFields[fieldBackendIdentifier])
+	}
+
+	traceFields := SanitizeTraceFields(map[string]string{fieldBackendIdentifier: testDiagnosticBackendID})
+	if traceFields[fieldBackendIdentifier] != testDiagnosticBackendID {
+		t.Fatalf("backend identifier trace field = %q", traceFields[fieldBackendIdentifier])
+	}
+}
+
 // TestRuntimeEventVocabularyCoversControlSurface verifies runtime hooks are named explicitly.
 func TestRuntimeEventVocabularyCoversControlSurface(t *testing.T) {
 	required := map[string]bool{
@@ -203,6 +277,7 @@ func TestRuntimeEventVocabularyCoversControlSurface(t *testing.T) {
 		EventAffinityClear:               false,
 		EventRouteLookup:                 false,
 		EventReload:                      false,
+		EventRedisOperation:              false,
 	}
 
 	for _, name := range RuntimeEventNames() {

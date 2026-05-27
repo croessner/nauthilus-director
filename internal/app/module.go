@@ -28,7 +28,9 @@ func Module() fx.Option {
 			provideLoader,
 			provideSnapshot,
 			provideConfig,
+			provideObservabilityRuntime,
 			provideRecorder,
+			provideMetricsProvider,
 			provideRedisClient,
 			provideRedisStore,
 			provideBackendRegistry,
@@ -43,6 +45,7 @@ func Module() fx.Option {
 			provideReaperHandle,
 		),
 		fx.Invoke(
+			registerObservabilityLifecycle,
 			registerRedisLifecycle,
 			registerControlLifecycle,
 			registerListenerLifecycle,

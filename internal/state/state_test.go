@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/croessner/nauthilus-director/internal/backend"
+	"github.com/croessner/nauthilus-director/internal/observability"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -40,6 +41,7 @@ const (
 	testOperatorClear    = "operator clear"
 	testOperatorActor    = "test-operator"
 	testProtocolIMAP     = "imap"
+	testRedisModeCluster = "cluster"
 	testRuntimeSessionID = "runtime-session"
 	testClearStatus      = "cleared"
 	testShardA           = "mailstore-a"
@@ -390,6 +392,37 @@ func TestRedisAmbiguousStateErrorsFailClosed(t *testing.T) {
 
 	if IsFailClosedRedisError(errors.New("plain")) {
 		t.Fatal("plain errors should not be treated as classified state errors")
+	}
+}
+
+// TestRedisObservationClassifiesAmbiguousStateWithoutKeys verifies state telemetry stays bounded.
+func TestRedisObservationClassifiesAmbiguousStateWithoutKeys(t *testing.T) {
+	recorder := &recordingStateObservability{}
+	store := &RedisSessionStore{recorder: recorder, redisMode: testRedisModeCluster}
+
+	store.recordRedisOperation(
+		context.Background(),
+		scriptOpen,
+		time.Now(),
+		newStateError(RedisErrorKindAmbiguousState, scriptOpen, "ambiguous key {secret}:session", nil),
+	)
+
+	event, ok := recorder.last(observability.EventRedisOperation)
+	if !ok {
+		t.Fatalf("redis operation event missing: %#v", recorder.events)
+	}
+
+	if got := event.MetricLabels["reason_class"]; got != string(RedisErrorKindAmbiguousState) {
+		t.Fatalf("reason_class = %q, want ambiguous_state", got)
+	}
+
+	if got := event.MetricLabels["redis_mode"]; got != testRedisModeCluster {
+		t.Fatalf("redis_mode = %q, want cluster", got)
+	}
+
+	rendered := event.LogFields["redis_key"] + event.MetricLabels["redis_key"]
+	if strings.Contains(rendered, "{secret}") {
+		t.Fatalf("redis key leaked into observation: %#v", event)
 	}
 }
 
@@ -1445,4 +1478,24 @@ func assertGenerationAdvanced(t *testing.T, before string, after string) {
 	if afterInt <= beforeInt {
 		t.Fatalf("generation did not advance: before=%d after=%d", beforeInt, afterInt)
 	}
+}
+
+type recordingStateObservability struct {
+	events []observability.Event
+}
+
+// Record stores one Redis state observation for assertions.
+func (r *recordingStateObservability) Record(_ context.Context, event observability.Event) {
+	r.events = append(r.events, event)
+}
+
+// last returns the latest state observation with the supplied event name.
+func (r *recordingStateObservability) last(name string) (observability.Event, bool) {
+	for index := len(r.events) - 1; index >= 0; index-- {
+		if r.events[index].Name == name {
+			return r.events[index], true
+		}
+	}
+
+	return observability.Event{}, false
 }

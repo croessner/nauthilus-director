@@ -62,6 +62,58 @@ func TestTargetConfigDecodesAndValidates(t *testing.T) {
 	}
 }
 
+// TestObservabilityValidationRejectsUnknownTracingExporter keeps startup fail-closed.
+func TestObservabilityValidationRejectsUnknownTracingExporter(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Observability.Tracing.Exporter = "zipkin"
+
+	err := NewLoader().Validate(cfg)
+	if err == nil {
+		t.Fatal("Validate accepted an unknown tracing exporter")
+	}
+
+	if !strings.Contains(err.Error(), "observability.tracing.exporter") {
+		t.Fatalf("error = %q, want tracing exporter validation", err.Error())
+	}
+}
+
+// TestObservabilityValidationRejectsInvalidSampleRatio keeps sampler config bounded.
+func TestObservabilityValidationRejectsInvalidSampleRatio(t *testing.T) {
+	for name, ratio := range map[string]float64{
+		"below": -0.01,
+		"above": 1.01,
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.Observability.Tracing.SampleRatio = ratio
+
+			err := NewLoader().Validate(cfg)
+			if err == nil {
+				t.Fatal("Validate accepted an invalid tracing sample ratio")
+			}
+
+			if !strings.Contains(err.Error(), "observability.tracing.sample_ratio") {
+				t.Fatalf("error = %q, want sample ratio validation", err.Error())
+			}
+		})
+	}
+}
+
+// TestObservabilityValidationRejectsUnsupportedMetricsPath prevents ignored routes.
+func TestObservabilityValidationRejectsUnsupportedMetricsPath(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Observability.Metrics.Path = "/custom-metrics"
+
+	err := NewLoader().Validate(cfg)
+	if err == nil {
+		t.Fatal("Validate accepted a non-/metrics path")
+	}
+
+	if !strings.Contains(err.Error(), "observability.metrics.path") {
+		t.Fatalf("error = %q, want metrics path validation", err.Error())
+	}
+}
+
 // TestUnknownFieldsAreRejected verifies strict decode behavior for typo safety.
 func TestUnknownFieldsAreRejected(t *testing.T) {
 	path := writeConfigFile(t, t.TempDir(), "unknown.yaml", `runtime:
@@ -85,9 +137,11 @@ func TestIncludesEnvPatchesExpansionAndLoaderKeys(t *testing.T) {
 	root := t.TempDir()
 	writeConfigFile(t, root, "base.yaml", `runtime:
   instance_name: included
-observability:
-  metrics:
-    path: "$5"
+auth:
+  authorities:
+    default:
+      http:
+        content_type: "$5"
 `)
 	writeConfigFile(t, root, "dev.yaml", `runtime:
   timeouts:
@@ -130,7 +184,7 @@ patch:
 	if got := snapshot.Config.Runtime.Timeouts.Auth.String(); got != "11s" {
 		t.Fatalf("runtime.timeouts.auth = %q, want 11s", got)
 	}
-	if got := snapshot.Config.Observability.Metrics.Path; got != "$5" {
+	if got := snapshot.Config.Auth.Authorities["default"].HTTP.ContentType; got != "$5" {
 		t.Fatalf("ordinary dollar value = %q, want $5", got)
 	}
 	if got := snapshot.Config.Observability.Tracing.Endpoint; got != "literal-${DIRECTOR_TEST_LITERAL}" {

@@ -17,13 +17,18 @@
 package rest_test
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
+	"github.com/croessner/nauthilus-director/internal/config"
+	"github.com/croessner/nauthilus-director/internal/observability"
 	"github.com/croessner/nauthilus-director/internal/rest"
+	"github.com/croessner/nauthilus-director/internal/rest/adapters"
 	"github.com/croessner/nauthilus-director/internal/rest/generated"
 )
 
@@ -32,10 +37,13 @@ const (
 	pathHealthz            = "/healthz"
 	pathReadyz             = "/readyz"
 	pathVersion            = "/api/v1/version"
+	pathMetrics            = "/metrics"
 	pathBackends           = "/api/v1/backends"
 	pathRouteLookup        = "/api/v1/route/lookup"
+	pathSessionWithQuery   = "/api/v1/sessions/session-123?token=do-not-use"
 	codeCredentialRejected = "credential_input_rejected"
 	secretLeakSentinel     = "do-not-leak"
+	restRequestsMetric     = "nauthilus_director_rest_requests_total"
 )
 
 // TestServerFoundationEndpoints verifies completed control API endpoints.
@@ -102,6 +110,74 @@ func TestRouteLookupWithoutCredentialsIsImplemented(t *testing.T) {
 	}
 }
 
+// TestServerRESTObservabilityUsesRouteTemplate verifies REST telemetry avoids raw paths.
+func TestServerRESTObservabilityUsesRouteTemplate(t *testing.T) {
+	recorder := &recordingRESTRecorder{}
+	server := rest.NewServer(rest.Options{
+		Version: testVersion,
+		HandlerOptions: adapters.HandlerOptions{
+			Observability: recorder,
+		},
+	})
+
+	_ = request(t, server, http.MethodGet, pathSessionWithQuery, "")
+
+	event, ok := recorder.event(observability.EventRESTRequest)
+	if !ok {
+		t.Fatalf("REST request event not recorded: %#v", recorder.events)
+	}
+
+	if got := event.MetricLabels["route"]; got != "/api/v1/sessions/{session_id}" {
+		t.Fatalf("route label = %q, want normalized session template", got)
+	}
+
+	if strings.Contains(event.MetricLabels["route"], "session-123") || strings.Contains(event.MetricLabels["route"], "token") {
+		t.Fatalf("route label leaked raw path or query: %#v", event.MetricLabels)
+	}
+
+	if got := event.MetricLabels["operation"]; got != "GetSession" {
+		t.Fatalf("operation label = %q, want GetSession", got)
+	}
+}
+
+// TestServerMetricsEndpointUsesGeneratedBoundary verifies /metrics returns Prometheus text.
+func TestServerMetricsEndpointUsesGeneratedBoundary(t *testing.T) {
+	cfg := testMetricsConfig()
+
+	runtime, err := observability.NewRuntime(cfg, observability.WithLogWriter(io.Discard))
+	if err != nil {
+		t.Fatalf("NewRuntime returned error: %v", err)
+	}
+
+	server := rest.NewServer(rest.Options{
+		Version: testVersion,
+		HandlerOptions: adapters.HandlerOptions{
+			Metrics:       runtime.MetricsProvider(),
+			Observability: runtime.Recorder(),
+		},
+	})
+
+	_ = request(t, server, http.MethodGet, pathVersion, "")
+	response := request(t, server, http.MethodGet, pathMetrics, "")
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusOK)
+	}
+
+	if contentType := response.Header().Get("Content-Type"); !strings.HasPrefix(contentType, "text/plain") {
+		t.Fatalf("content-type = %q, want text/plain", contentType)
+	}
+
+	body := response.Body.String()
+	if !strings.Contains(body, restRequestsMetric) {
+		t.Fatalf("metrics body missing REST request metric:\n%s", body)
+	}
+
+	if !strings.Contains(body, `route="/api/v1/version"`) {
+		t.Fatalf("metrics body missing generated route label:\n%s", body)
+	}
+}
+
 // request performs an in-process HTTP request without binding a local port.
 func request(t *testing.T, server http.Handler, method string, path string, body string) *httptest.ResponseRecorder {
 	t.Helper()
@@ -120,6 +196,43 @@ func request(t *testing.T, server http.Handler, method string, path string, body
 	server.ServeHTTP(response, request)
 
 	return response
+}
+
+// testMetricsConfig returns an enabled metrics config without remote tracing.
+func testMetricsConfig() config.ObservabilityConfig {
+	cfg := config.DefaultConfig().Observability
+	cfg.Metrics.RuntimeMetrics = false
+	cfg.Tracing.Enabled = false
+
+	return cfg
+}
+
+// recordingRESTRecorder stores REST observability events from the server middleware.
+type recordingRESTRecorder struct {
+	mu     sync.Mutex
+	events []observability.Event
+}
+
+// Record stores a copy of one event for route-template assertions.
+func (r *recordingRESTRecorder) Record(_ context.Context, event observability.Event) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.events = append(r.events, event)
+}
+
+// event returns the first recorded event with the requested name.
+func (r *recordingRESTRecorder) event(name string) (observability.Event, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	for _, event := range r.events {
+		if event.Name == name {
+			return event, true
+		}
+	}
+
+	return observability.Event{}, false
 }
 
 // decodeProblem reads a generated problem response.

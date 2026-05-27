@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	"github.com/croessner/nauthilus-director/internal/config"
+	"github.com/croessner/nauthilus-director/internal/observability"
 )
 
 // TestSafeReloadAppliesSupportedChanges verifies live-safe changes update the active snapshot.
@@ -85,5 +86,49 @@ func TestSafeReloadRejectsUnsafeChanges(t *testing.T) {
 
 	if !slices.Contains(result.Applied, "director.backends") {
 		t.Fatalf("Reload appears to have partially applied the rejected backend change: %#v", result.Applied)
+	}
+}
+
+// TestRuntimeObservationOperationsMatchControlVocabulary verifies public operation names stay stable.
+func TestRuntimeObservationOperationsMatchControlVocabulary(t *testing.T) {
+	recorder := &recordingRuntimeObservation{}
+	required := []string{
+		operationBackendInOut,
+		operationBackendWeight,
+		operationBackendMaintenance,
+		operationBackendDrain,
+		operationBackendRuntimeClear,
+		operationUserMove,
+		operationUserKick,
+		operationUserAffinityClear,
+		operationSessionKill,
+		operationSessionReap,
+		operationRouteLookup,
+		operationReload,
+	}
+
+	for _, operation := range required {
+		recordRuntimeObservation(
+			context.Background(),
+			recorder,
+			observability.EventReload,
+			observability.TraceBoundaryRESTRequest,
+			operation,
+			runtimeObservationResultOK,
+			runtimeObservationResultOK,
+			nil,
+			nil,
+		)
+	}
+
+	seen := map[string]bool{}
+	for _, event := range recorder.events {
+		seen[event.MetricLabels["operation"]] = true
+	}
+
+	for _, operation := range required {
+		if !seen[operation] {
+			t.Fatalf("operation %q was not observed in runtime labels: %#v", operation, recorder.events)
+		}
 	}
 }

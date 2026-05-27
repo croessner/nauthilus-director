@@ -41,11 +41,14 @@ const (
 
 const (
 	healthObservationFieldBackendID      = "backend_identifier"
+	healthObservationFieldBackendPool    = "backend_pool"
 	healthObservationFieldHealthStatus   = "health_status"
 	healthObservationFieldOperation      = "operation"
 	healthObservationFieldPreviousStatus = "previous_status"
+	healthObservationFieldProtocol       = "protocol"
 	healthObservationFieldReasonClass    = "reason_class"
 	healthObservationFieldResult         = "result"
+	healthObservationFieldShardTag       = "shard_tag"
 	healthObservationOperation           = "backend_health"
 	healthObservationResultTransition    = "transition"
 )
@@ -436,7 +439,7 @@ func (r *HealthRunner) checkBackend(ctx context.Context, candidate Backend) erro
 
 	if !candidate.Health.DeepCheck {
 		result := r.checker.CheckBackend(ctx, candidate, HealthCheckRequest{Timeout: r.config.Timeout})
-		r.storeLocal(candidate.Identifier, result)
+		r.storeLocal(candidate, result)
 
 		return nil
 	}
@@ -455,7 +458,7 @@ func (r *HealthRunner) checkBackend(ctx context.Context, candidate Backend) erro
 	}
 
 	result := r.checker.CheckBackend(ctx, candidate, HealthCheckRequest{Deep: true, Timeout: r.config.Timeout})
-	state := r.storeLocal(candidate.Identifier, result)
+	state := r.storeLocal(candidate, result)
 
 	_, err = r.coordinator.PublishHealthState(ctx, HealthPublishRequest{
 		InstanceID:        r.config.InstanceID,
@@ -469,8 +472,9 @@ func (r *HealthRunner) checkBackend(ctx context.Context, candidate Backend) erro
 }
 
 // storeLocal thresholds and stores one local health observation.
-func (r *HealthRunner) storeLocal(identifier string, result HealthCheckResult) HealthState {
+func (r *HealthRunner) storeLocal(candidate Backend, result HealthCheckResult) HealthState {
 	now := time.Now().UTC()
+	identifier := strings.TrimSpace(candidate.Identifier)
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -485,7 +489,7 @@ func (r *HealthRunner) storeLocal(identifier string, result HealthCheckResult) H
 	previous := r.local[identifier]
 	r.local[identifier] = state
 	if previous.Status != state.Status {
-		r.recordHealthTransition(context.Background(), identifier, previous, state)
+		r.recordHealthTransition(context.Background(), candidate, previous, state)
 	}
 
 	return state
@@ -504,23 +508,26 @@ func (r *HealthRunner) nextDelay() time.Duration {
 }
 
 // recordHealthTransition emits a classified backend health transition.
-func (r *HealthRunner) recordHealthTransition(ctx context.Context, identifier string, previous HealthState, current HealthState) {
+func (r *HealthRunner) recordHealthTransition(ctx context.Context, candidate Backend, previous HealthState, current HealthState) {
 	reasonClass := current.ReasonClass
 	if strings.TrimSpace(reasonClass) == "" {
 		reasonClass = string(current.Status)
 	}
 
 	event, err := observability.NewEvent(observability.EventBackendHealthTransition, observability.TraceBoundaryBackendSelect, map[string]string{
-		healthObservationFieldBackendID:      strings.TrimSpace(identifier),
+		healthObservationFieldBackendID:      strings.TrimSpace(candidate.Identifier),
 		healthObservationFieldHealthStatus:   string(current.Status),
 		healthObservationFieldOperation:      healthObservationOperation,
 		healthObservationFieldPreviousStatus: string(previous.Status),
 		healthObservationFieldReasonClass:    observability.NormalizeReasonClass(reasonClass),
 		healthObservationFieldResult:         healthObservationResultTransition,
 	}, map[string]string{
+		healthObservationFieldBackendPool: strings.TrimSpace(candidate.BackendPool),
 		healthObservationFieldOperation:   healthObservationOperation,
+		healthObservationFieldProtocol:    strings.TrimSpace(candidate.Protocol),
 		healthObservationFieldReasonClass: observability.NormalizeReasonClass(reasonClass),
 		healthObservationFieldResult:      healthObservationResultTransition,
+		healthObservationFieldShardTag:    strings.TrimSpace(candidate.ShardTag),
 	})
 	if err != nil {
 		return

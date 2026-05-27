@@ -54,7 +54,12 @@ func (s *RedisSessionStore) PublishInstanceHeartbeat(ctx context.Context, instan
 		return newStateError(RedisErrorKindAmbiguousState, "instance_heartbeat", "ttl required", nil)
 	}
 
-	return ClassifyRedisError("instance_heartbeat", s.client.Set(redisContext(ctx), instanceKey, "1", ttl).Err())
+	redisCtx := redisContext(ctx)
+	started := time.Now()
+	err = ClassifyRedisError("instance_heartbeat", s.client.Set(redisCtx, instanceKey, "1", ttl).Err())
+	s.recordRedisOperation(redisCtx, "instance_heartbeat", started, err)
+
+	return err
 }
 
 // AcquireHealthOwner creates or renews a fenced deep-health owner lease.
@@ -137,10 +142,18 @@ func (s *RedisSessionStore) ReadHealthState(ctx context.Context, backendIdentifi
 		return backend.HealthState{}, err
 	}
 
-	fields, err := s.client.HGetAll(redisContext(ctx), stateKey).Result()
+	redisCtx := redisContext(ctx)
+	started := time.Now()
+
+	fields, err := s.client.HGetAll(redisCtx, stateKey).Result()
 	if err != nil && !isRedisNil(err) {
-		return backend.HealthState{}, ClassifyRedisError("health_state_read", err)
+		classified := ClassifyRedisError("health_state_read", err)
+		s.recordRedisOperation(redisCtx, "health_state_read", started, classified)
+
+		return backend.HealthState{}, classified
 	}
+
+	s.recordRedisOperation(redisCtx, "health_state_read", started, nil)
 
 	return parseHealthStateFields(fields)
 }
@@ -152,10 +165,18 @@ func (s *RedisSessionStore) BackendSnapshot(ctx context.Context, backendIdentifi
 		return backend.RuntimeSnapshot{}, err
 	}
 
-	fields, err := s.client.HGetAll(redisContext(ctx), runtimeKey).Result()
+	redisCtx := redisContext(ctx)
+	started := time.Now()
+
+	fields, err := s.client.HGetAll(redisCtx, runtimeKey).Result()
 	if err != nil && !isRedisNil(err) {
-		return backend.RuntimeSnapshot{}, ClassifyRedisError("backend_snapshot", err)
+		classified := ClassifyRedisError("backend_snapshot", err)
+		s.recordRedisOperation(redisCtx, "backend_snapshot", started, classified)
+
+		return backend.RuntimeSnapshot{}, classified
 	}
+
+	s.recordRedisOperation(redisCtx, "backend_snapshot", started, nil)
 
 	override, activeSessions, err := parseRuntimeSnapshotFields(fields)
 	if err != nil {

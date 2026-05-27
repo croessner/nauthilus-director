@@ -18,6 +18,7 @@ package proxy
 
 import (
 	"context"
+	"time"
 
 	"github.com/croessner/nauthilus-director/internal/observability"
 )
@@ -33,11 +34,11 @@ const (
 
 // recordProxyStart emits the prepared proxy span start boundary.
 func recordProxyStart(ctx context.Context, config PipeConfig) {
-	recordProxyEvent(ctx, config, proxyResultOK, "start")
+	recordProxyEvent(ctx, config, proxyResultOK, "start", 0, Accounting{})
 }
 
 // recordProxyEnd emits the terminal proxy result using bounded reason classes.
-func recordProxyEnd(ctx context.Context, config PipeConfig, result Result, err error) {
+func recordProxyEnd(ctx context.Context, config PipeConfig, started time.Time, result Result, err error) {
 	metricResult := proxyResultOK
 	if err != nil {
 		metricResult = "failure"
@@ -49,11 +50,11 @@ func recordProxyEnd(ctx context.Context, config PipeConfig, result Result, err e
 		reason = ResultClientClosed
 	}
 
-	recordProxyEvent(ctx, config, metricResult, reason)
+	recordProxyEvent(ctx, config, metricResult, reason, time.Since(started), result.Accounted)
 }
 
 // recordProxyEvent normalizes low-cardinality proxy labels before recording.
-func recordProxyEvent(ctx context.Context, config PipeConfig, result string, reason string) {
+func recordProxyEvent(ctx context.Context, config PipeConfig, result string, reason string, duration time.Duration, accounted Accounting) {
 	recorder := observability.NormalizeRecorder(config.Observability)
 
 	event, err := observability.NewEvent(observability.EventProxyPipe, observability.TraceBoundaryProxyPipe, map[string]string{
@@ -67,6 +68,23 @@ func recordProxyEvent(ctx context.Context, config PipeConfig, result string, rea
 	})
 	if err != nil {
 		return
+	}
+
+	measurements := map[string]float64{}
+	if duration > 0 {
+		measurements[observability.MetricMeasurementDurationSeconds] = duration.Seconds()
+	}
+
+	if accounted.ClientToBackend > 0 {
+		measurements[observability.MetricMeasurementClientToBackendBytes] = float64(accounted.ClientToBackend)
+	}
+
+	if accounted.BackendToClient > 0 {
+		measurements[observability.MetricMeasurementBackendToClientBytes] = float64(accounted.BackendToClient)
+	}
+
+	if len(measurements) > 0 {
+		event.Measurements = observability.NewMetricMeasurements(measurements)
 	}
 
 	recorder.Record(ctx, event)

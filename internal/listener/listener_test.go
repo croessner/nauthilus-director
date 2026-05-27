@@ -31,11 +31,13 @@ import (
 	"os"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/croessner/nauthilus-director/internal/config"
 	"github.com/croessner/nauthilus-director/internal/nauthilus"
+	"github.com/croessner/nauthilus-director/internal/observability"
 	proxyproto "github.com/pires/go-proxyproto"
 )
 
@@ -231,6 +233,112 @@ func TestGracefulListenerShutdownClosesActiveSessions(t *testing.T) {
 	}
 }
 
+// TestListenerObservabilityClassifiesLifecycleEvents verifies listener reasons stay bounded.
+func TestListenerObservabilityClassifiesLifecycleEvents(t *testing.T) {
+	cfg := singleListenerConfig(testIMAPListener, tlsModeStartTLS)
+	entry := cfg.Director.Listeners[testIMAPListener]
+	entry.Address = "127.0.0.1:not-a-port"
+	cfg.Director.Listeners[testIMAPListener] = entry
+
+	recorder := &recordingListenerObservability{}
+
+	manager, err := NewManagerWithConfig(cfg, WithObservabilityRecorder(recorder))
+	if err != nil {
+		t.Fatalf("NewManagerWithConfig: %v", err)
+	}
+
+	if err := manager.Start(context.Background()); err == nil {
+		t.Fatal("Start accepted an invalid bind address")
+	}
+
+	event, ok := recorder.last(observability.EventListenerStart)
+	if !ok {
+		t.Fatalf("listener start event missing: %#v", recorder.snapshot())
+	}
+
+	if got := event.MetricLabels["reason_class"]; got != "bind_failed" {
+		t.Fatalf("bind reason_class = %q, want bind_failed", got)
+	}
+}
+
+// TestListenerObservabilityRecordsAcceptLoopStop verifies accept-loop exit is explicit.
+func TestListenerObservabilityRecordsAcceptLoopStop(t *testing.T) {
+	cfg := singleListenerConfig(testIMAPListener, tlsModeStartTLS)
+	recorder := &recordingListenerObservability{}
+	manager, _ := startManager(t, cfg, testIMAPListener, WithObservabilityRecorder(recorder))
+
+	stopCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	if err := manager.Stop(stopCtx); err != nil {
+		t.Fatalf("Stop returned error: %v", err)
+	}
+
+	event, ok := recorder.lastWithOperation(observability.EventListenerStop, "accept_loop")
+	if !ok {
+		t.Fatalf("accept loop stop event missing: %#v", recorder.snapshot())
+	}
+
+	if got := event.MetricLabels["reason_class"]; got != "closed" {
+		t.Fatalf("accept loop reason_class = %q, want closed", got)
+	}
+}
+
+// TestProxyProtocolObservabilityClassifiesAcceptAndReject verifies PROXY results are bounded.
+func TestProxyProtocolObservabilityClassifiesAcceptAndReject(t *testing.T) {
+	recorder := &recordingListenerObservability{}
+	handler := newRecordingHandler()
+	cfg := proxyListenerConfig([]string{trustedLocalhostCIDR})
+	_, address := startManager(
+		t,
+		cfg,
+		testIMAPListener,
+		WithObservabilityRecorder(recorder),
+		WithSessionHandlerFactory(handler.factory),
+	)
+
+	rejected, err := net.Dial(networkTCP, address)
+	if err != nil {
+		t.Fatalf("dial rejected proxy listener: %v", err)
+	}
+
+	_, _ = io.WriteString(rejected, "PROXY TCP4 broken\r\n")
+	expectNoGreeting(t, rejected)
+	_ = rejected.Close()
+
+	rejectedEvent, ok := recorder.lastWithResult(observability.EventProxyProtocol, "rejected")
+	if !ok {
+		t.Fatalf("proxy rejection event missing: %#v", recorder.snapshot())
+	}
+
+	if got := rejectedEvent.MetricLabels["reason_class"]; got != listenerReasonMalformed {
+		t.Fatalf("proxy reject reason_class = %q, want malformed", got)
+	}
+
+	accepted, err := net.Dial(networkTCP, address)
+	if err != nil {
+		t.Fatalf("dial accepted proxy listener: %v", err)
+	}
+	defer func() { _ = accepted.Close() }()
+
+	if _, err := io.WriteString(accepted, "PROXY TCP4 198.51.100.10 203.0.113.10 12345 143\r\n"); err != nil {
+		t.Fatalf("write proxy v1 header: %v", err)
+	}
+
+	if line := readLine(t, accepted); line != testGreeting {
+		t.Fatalf("greeting = %q, want %q", line, testGreeting)
+	}
+
+	acceptedEvent, ok := recorder.lastWithResult(observability.EventProxyProtocol, "accepted")
+	if !ok {
+		t.Fatalf("proxy accept event missing: %#v", recorder.snapshot())
+	}
+
+	if got := acceptedEvent.MetricLabels["reason_class"]; got != listenerResultOK {
+		t.Fatalf("proxy accept reason_class = %q, want ok", got)
+	}
+}
+
 // TestProxyProtocolRejectsEmptyTrustedCIDRs verifies fail-closed proxy config validation.
 func TestProxyProtocolRejectsEmptyTrustedCIDRs(t *testing.T) {
 	cfg := singleListenerConfig(testIMAPListener, tlsModeStartTLS)
@@ -371,7 +479,67 @@ type recordingHandler struct {
 	remote chan string
 }
 
+type recordingListenerObservability struct {
+	mu     sync.Mutex
+	events []observability.Event
+}
+
 type noopAuthenticator struct{}
+
+// Record stores one listener event for assertions.
+func (r *recordingListenerObservability) Record(_ context.Context, event observability.Event) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.events = append(r.events, event)
+}
+
+// last returns the most recent event with a matching name.
+func (r *recordingListenerObservability) last(name string) (observability.Event, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	for index := len(r.events) - 1; index >= 0; index-- {
+		if r.events[index].Name == name {
+			return r.events[index], true
+		}
+	}
+
+	return observability.Event{}, false
+}
+
+// lastWithOperation returns the latest matching event for one operation label.
+func (r *recordingListenerObservability) lastWithOperation(name string, operation string) (observability.Event, bool) {
+	return r.lastMatching(name, "operation", operation)
+}
+
+// lastWithResult returns the latest matching event for one result label.
+func (r *recordingListenerObservability) lastWithResult(name string, result string) (observability.Event, bool) {
+	return r.lastMatching(name, "result", result)
+}
+
+// lastMatching returns the latest event whose metric label equals the expected value.
+func (r *recordingListenerObservability) lastMatching(name string, label string, value string) (observability.Event, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	for index := len(r.events) - 1; index >= 0; index-- {
+		event := r.events[index]
+		if event.Name == name && event.MetricLabels[label] == value {
+			return event, true
+		}
+	}
+
+	return observability.Event{}, false
+}
+
+// snapshot returns a detached copy of recorded listener events.
+func (r *recordingListenerObservability) snapshot() []observability.Event {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	return append([]observability.Event(nil), r.events...)
+}
 
 // Authenticate returns a temporary failure without contacting an authority.
 func (noopAuthenticator) Authenticate(context.Context, nauthilus.AuthRequest) (nauthilus.AuthResult, error) {

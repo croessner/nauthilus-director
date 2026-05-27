@@ -46,21 +46,27 @@ const (
 	fieldBearer            = "bearer"
 	fieldClientIP          = "client_ip"
 	fieldCredential        = "credential"
+	fieldError             = "error"
 	fieldOAuth             = "oauth"
 	fieldPasswd            = "passwd"
 	fieldPassword          = "password"
 	fieldPrivateKey        = "private_key"
+	fieldProtected         = "protected"
 	fieldRawError          = "raw_error"
 	fieldRecipient         = "recipient"
 	fieldRemoteAddr        = "remote_addr"
 	fieldRequestID         = "request_id"
+	fieldRedisKey          = "redis_key"
 	fieldSASL              = "sasl"
 	fieldSASLBlob          = "sasl_blob"
+	fieldSaltFile          = "salt_file"
 	fieldSecret            = "secret"
 	fieldSessionID         = "session_id"
+	fieldSpanID            = "span_id"
 	fieldToken             = "token"
 	fieldTraceID           = "trace_id"
 	fieldUserHash          = "user_hash"
+	fieldUserKey           = "user_key"
 	fieldUsername          = "username"
 
 	reasonClassOK                     = "ok"
@@ -69,6 +75,7 @@ const (
 	reasonClassRuntimeOut             = "runtime_out"
 	reasonClassStaticHardMaintenance  = "static_hard_maintenance"
 	reasonClassStaticSoftMaintenance  = "static_soft_maintenance"
+	reasonClassTemporaryFailure       = "temporary_failure"
 )
 
 var allowedMetricLabels = map[string]struct{}{
@@ -99,12 +106,35 @@ var forbiddenMetricLabels = map[string]struct{}{
 	fieldRecipient:         {},
 	fieldRemoteAddr:        {},
 	fieldRequestID:         {},
+	fieldRedisKey:          {},
 	fieldSASLBlob:          {},
 	fieldSessionID:         {},
+	fieldSpanID:            {},
 	fieldToken:             {},
 	fieldTraceID:           {},
 	fieldUserHash:          {},
 	fieldUsername:          {},
+}
+
+var collapsedLogFields = map[string]struct{}{
+	fieldClientIP:   {},
+	fieldError:      {},
+	fieldRawError:   {},
+	fieldRecipient:  {},
+	fieldRemoteAddr: {},
+	fieldRequestID:  {},
+	fieldRedisKey:   {},
+	fieldSASLBlob:   {},
+	fieldSessionID:  {},
+	fieldUserHash:   {},
+	fieldUserKey:    {},
+	fieldUsername:   {},
+}
+
+var diagnosticLogFields = map[string]struct{}{
+	fieldBackendIdentifier: {},
+	fieldSpanID:            {},
+	fieldTraceID:           {},
 }
 
 var secretFieldFragments = []string{
@@ -114,6 +144,8 @@ var secretFieldFragments = []string{
 	fieldPasswd,
 	fieldPassword,
 	fieldPrivateKey,
+	fieldProtected,
+	fieldSaltFile,
 	fieldSASL,
 	fieldSecret,
 	fieldToken,
@@ -124,26 +156,41 @@ var allowedReasonClasses = map[string]struct{}{
 	"ambiguous_state":                 {},
 	"attach_retry":                    {},
 	"backend_connect":                 {},
+	"backend_auth_failed":             {},
+	"backend_closed":                  {},
+	"bind_failed":                     {},
+	"canceled":                        {},
 	"backend_runtime":                 {},
 	"cleared":                         {},
+	"client_closed":                   {},
 	"closed":                          {},
 	"config":                          {},
 	"conflict":                        {},
+	"control_action":                  {},
+	"credential_input":                {},
+	"denied":                          {},
 	"drain":                           {},
 	"health":                          {},
 	"healthy":                         {},
 	"hard_maintenance":                {},
+	"http_error":                      {},
+	"incomplete":                      {},
 	"initial_placement":               {},
 	"invalid_request":                 {},
 	"kicked":                          {},
+	"literal":                         {},
 	"max_connections":                 {},
+	"malformed":                       {},
+	"malformed_response":              {},
 	"moved":                           {},
 	"no_backend":                      {},
 	"not_found":                       {},
 	reasonClassOK:                     {},
 	reasonClassOther:                  {},
+	"protocol":                        {},
 	"protected_config":                {},
 	"reap":                            {},
+	"rejected":                        {},
 	"reload_safe":                     {},
 	"reload_unsafe":                   {},
 	"runtime_drain":                   {},
@@ -152,10 +199,19 @@ var allowedReasonClasses = map[string]struct{}{
 	"runtime_soft_maintenance":        {},
 	"selected":                        {},
 	"session_kill":                    {},
+	"shutdown":                        {},
+	"shutdown_timeout":                {},
+	"script_missing":                  {},
 	"soft_maintenance":                {},
+	"state_failed":                    {},
 	reasonClassStaticHardMaintenance:  {},
 	reasonClassStaticSoftMaintenance:  {},
+	reasonClassTemporaryFailure:       {},
+	"timeout":                         {},
+	"transport":                       {},
+	"untrusted":                       {},
 	"unavailable":                     {},
+	"unsupported":                     {},
 	"unknown":                         {},
 	"unhealthy":                       {},
 	"weight_zero":                     {},
@@ -221,6 +277,21 @@ func IsHighCardinalityFieldName(name string) bool {
 	_, forbidden := forbiddenMetricLabels[normalized]
 
 	return forbidden
+}
+
+// IsCollapsedLogFieldName reports whether logs may record only field presence.
+func IsCollapsedLogFieldName(name string) bool {
+	normalized := normalizeFieldName(name)
+	_, collapsed := collapsedLogFields[normalized]
+
+	return collapsed
+}
+
+// IsDiagnosticLogFieldAllowed reports whether logs may keep a high-cardinality value.
+func IsDiagnosticLogFieldAllowed(name string) bool {
+	_, allowed := diagnosticLogFields[normalizeFieldName(name)]
+
+	return allowed
 }
 
 // IsSafeRoutingAttribute reports whether an auth attribute can be echoed safely.

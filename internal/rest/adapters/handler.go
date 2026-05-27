@@ -630,7 +630,7 @@ func (h *Handler) GetHealthz(_ context.Context, _ generated.GetHealthzRequestObj
 // GetMetrics returns Prometheus-compatible metrics text.
 func (h *Handler) GetMetrics(ctx context.Context, _ generated.GetMetricsRequestObject) (generated.GetMetricsResponseObject, error) {
 	if h.metrics == nil {
-		return generated.GetMetrics200TextResponse("# HELP nauthilus_director_up Director process health.\n# TYPE nauthilus_director_up gauge\nnauthilus_director_up 1\n"), nil
+		return generated.GetMetrics200TextResponse(observability.DisabledMetricsText()), nil
 	}
 
 	metrics, err := h.metrics.Metrics(ctx)

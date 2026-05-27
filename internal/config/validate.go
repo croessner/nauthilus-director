@@ -38,6 +38,7 @@ func (l *Loader) Validate(config Config) error {
 
 	var problems []string
 	validateRuntime(config.Runtime, &problems)
+	validateObservability(config.Observability, &problems)
 	validateRedis(config.Storage.Redis, &problems)
 	validateAuthorities(config.Auth.Authorities, &problems)
 	validateDirector(config.Director, config.Auth.Authorities, &problems)
@@ -47,6 +48,35 @@ func (l *Loader) Validate(config Config) error {
 	}
 
 	return nil
+}
+
+// validateObservability rejects local telemetry settings the runtime cannot honor.
+func validateObservability(observability ObservabilityConfig, problems *[]string) {
+	if strings.TrimSpace(observability.Metrics.Path) != "/metrics" {
+		addProblem(problems, "observability.metrics.path must be /metrics")
+	}
+
+	if observability.Tracing.SampleRatio < 0 || observability.Tracing.SampleRatio > 1 {
+		addProblem(problems, "observability.tracing.sample_ratio must be between 0.0 and 1.0")
+	}
+
+	exporter := strings.ToLower(strings.TrimSpace(observability.Tracing.Exporter))
+	switch exporter {
+	case "otlp":
+		if observability.Tracing.Enabled && strings.TrimSpace(observability.Tracing.Endpoint) == "" {
+			addProblem(problems, "observability.tracing.endpoint is required when tracing is enabled")
+		}
+	case "", "none", "noop", "disabled":
+		if observability.Tracing.Enabled {
+			addProblem(problems, "observability.tracing.exporter must be otlp when tracing is enabled")
+		}
+	default:
+		addProblem(problems, "observability.tracing.exporter must be otlp or disabled/noop")
+	}
+
+	if observability.Tracing.Enabled && strings.TrimSpace(observability.Tracing.ServiceName) == "" {
+		addProblem(problems, "observability.tracing.service_name is required when tracing is enabled")
+	}
 }
 
 // validateRuntime enforces safe listener, auth and timeout defaults for process wiring.

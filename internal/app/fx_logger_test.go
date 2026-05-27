@@ -17,12 +17,16 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
+	"strings"
 	"testing"
 
 	"github.com/croessner/nauthilus-director/internal/config"
 	"github.com/croessner/nauthilus-director/internal/observability"
+	"go.uber.org/fx"
 	"go.uber.org/fx/fxevent"
 )
 
@@ -90,6 +94,35 @@ func TestFxLoggerRecordsErrorsWithoutRawText(t *testing.T) {
 	}
 }
 
+// TestFxLoggerUsesSharedRuntimeRedaction verifies Fx failures pass through the runtime recorder.
+func TestFxLoggerUsesSharedRuntimeRedaction(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Observability.Log.Level = fxLogLevelDebug
+	cfg.Observability.Metrics.Enabled = false
+	cfg.Observability.Tracing.Enabled = false
+
+	var output bytes.Buffer
+
+	runtime, err := observability.NewRuntime(cfg.Observability, observability.WithLogWriter(&output))
+	if err != nil {
+		t.Fatalf("NewRuntime returned error: %v", err)
+	}
+
+	logger := newFxEventLogger(runtimeOptions{
+		Snapshot: &config.Snapshot{Config: cfg},
+		Recorder: runtime.Recorder(),
+	})
+	logger.LogEvent(&fxevent.OnStartExecuted{FunctionName: testFxFunctionStartListener, Err: errors.New("token=fx-secret")})
+
+	if strings.Contains(output.String(), "fx-secret") {
+		t.Fatalf("Fx log leaked raw error text:\n%s", output.String())
+	}
+
+	if !strings.Contains(output.String(), "error_present") {
+		t.Fatalf("Fx log did not preserve error presence:\n%s", output.String())
+	}
+}
+
 // TestFxLoggerAllowsDebugEventsAtDebug verifies explicit debug logging includes Fx structure.
 func TestFxLoggerAllowsDebugEventsAtDebug(t *testing.T) {
 	recorder := &recordingFxRecorder{}
@@ -103,6 +136,33 @@ func TestFxLoggerAllowsDebugEventsAtDebug(t *testing.T) {
 
 	if recorder.events[0].LogFields[fxLogFieldLevel] != fxLogLevelDebug {
 		t.Fatalf("event level = %q, want debug", recorder.events[0].LogFields[fxLogFieldLevel])
+	}
+}
+
+// TestFxRecorderProviderUsesRuntimeRecorder verifies Fx receives the shared runtime recorder.
+func TestFxRecorderProviderUsesRuntimeRecorder(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Observability.Tracing.Enabled = false
+
+	runtime, err := observability.NewRuntime(cfg.Observability, observability.WithLogWriter(io.Discard))
+	if err != nil {
+		t.Fatalf("NewRuntime returned error: %v", err)
+	}
+
+	var recorder observability.Recorder
+
+	app := fx.New(
+		fx.NopLogger,
+		fx.Supply(runtime),
+		fx.Provide(provideRecorder),
+		fx.Populate(&recorder),
+	)
+	if err := app.Err(); err != nil {
+		t.Fatalf("fx app error: %v", err)
+	}
+
+	if recorder != runtime.Recorder() {
+		t.Fatal("Fx recorder provider did not return the runtime-owned recorder")
 	}
 }
 
