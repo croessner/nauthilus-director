@@ -51,6 +51,7 @@ const (
 	fieldPasswd            = "passwd"
 	fieldPassword          = "password"
 	fieldPrivateKey        = "private_key"
+	fieldProtected         = "protected"
 	fieldRawError          = "raw_error"
 	fieldRecipient         = "recipient"
 	fieldRemoteAddr        = "remote_addr"
@@ -58,6 +59,7 @@ const (
 	fieldRedisKey          = "redis_key"
 	fieldSASL              = "sasl"
 	fieldSASLBlob          = "sasl_blob"
+	fieldSaltFile          = "salt_file"
 	fieldSecret            = "secret"
 	fieldSessionID         = "session_id"
 	fieldSpanID            = "span_id"
@@ -107,6 +109,7 @@ var forbiddenMetricLabels = map[string]struct{}{
 	fieldRedisKey:          {},
 	fieldSASLBlob:          {},
 	fieldSessionID:         {},
+	fieldSpanID:            {},
 	fieldToken:             {},
 	fieldTraceID:           {},
 	fieldUserHash:          {},
@@ -128,6 +131,12 @@ var collapsedLogFields = map[string]struct{}{
 	fieldUsername:   {},
 }
 
+var diagnosticLogFields = map[string]struct{}{
+	fieldBackendIdentifier: {},
+	fieldSpanID:            {},
+	fieldTraceID:           {},
+}
+
 var secretFieldFragments = []string{
 	fieldBearer,
 	fieldCredential,
@@ -135,6 +144,8 @@ var secretFieldFragments = []string{
 	fieldPasswd,
 	fieldPassword,
 	fieldPrivateKey,
+	fieldProtected,
+	fieldSaltFile,
 	fieldSASL,
 	fieldSecret,
 	fieldToken,
@@ -270,6 +281,13 @@ func IsCollapsedLogFieldName(name string) bool {
 	_, collapsed := collapsedLogFields[normalized]
 
 	return collapsed
+}
+
+// IsDiagnosticLogFieldAllowed reports whether logs may keep a high-cardinality value.
+func IsDiagnosticLogFieldAllowed(name string) bool {
+	_, allowed := diagnosticLogFields[normalizeFieldName(name)]
+
+	return allowed
 }
 
 // IsSafeRoutingAttribute reports whether an auth attribute can be echoed safely.

@@ -17,9 +17,11 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
+	"strings"
 	"testing"
 
 	"github.com/croessner/nauthilus-director/internal/config"
@@ -89,6 +91,35 @@ func TestFxLoggerRecordsErrorsWithoutRawText(t *testing.T) {
 		if value == "password=secret" {
 			t.Fatalf("field %q leaked raw error text", name)
 		}
+	}
+}
+
+// TestFxLoggerUsesSharedRuntimeRedaction verifies Fx failures pass through the runtime recorder.
+func TestFxLoggerUsesSharedRuntimeRedaction(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Observability.Log.Level = fxLogLevelDebug
+	cfg.Observability.Metrics.Enabled = false
+	cfg.Observability.Tracing.Enabled = false
+
+	var output bytes.Buffer
+
+	runtime, err := observability.NewRuntime(cfg.Observability, observability.WithLogWriter(&output))
+	if err != nil {
+		t.Fatalf("NewRuntime returned error: %v", err)
+	}
+
+	logger := newFxEventLogger(runtimeOptions{
+		Snapshot: &config.Snapshot{Config: cfg},
+		Recorder: runtime.Recorder(),
+	})
+	logger.LogEvent(&fxevent.OnStartExecuted{FunctionName: testFxFunctionStartListener, Err: errors.New("token=fx-secret")})
+
+	if strings.Contains(output.String(), "fx-secret") {
+		t.Fatalf("Fx log leaked raw error text:\n%s", output.String())
+	}
+
+	if !strings.Contains(output.String(), "error_present") {
+		t.Fatalf("Fx log did not preserve error presence:\n%s", output.String())
 	}
 }
 

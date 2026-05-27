@@ -20,6 +20,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"maps"
 	"sort"
 	"strings"
 
@@ -28,15 +29,23 @@ import (
 )
 
 const (
-	logFieldEventName = "event_name"
-	logLevelDisabled  = "disabled"
-	logLevelWarn      = "warn"
+	logFieldComponent   = "component"
+	logFieldEventName   = "event_name"
+	logFieldOperation   = "operation"
+	logFieldReason      = "reason_class"
+	logFieldResult      = "result"
+	logLevelDebug       = "debug"
+	logLevelDisabled    = "disabled"
+	logLevelInfo        = "info"
+	logLevelWarn        = "warn"
+	logResultFailClosed = "fail_closed"
 )
 
 // structuredLogger writes normalized events through the standard slog API.
 type structuredLogger struct {
 	enabled bool
 	logger  *slog.Logger
+	policy  LogPolicy
 }
 
 // newStructuredLogger builds the configured structured logging sink.
@@ -62,6 +71,7 @@ func newStructuredLogger(cfg config.LogConfig, writer io.Writer) *structuredLogg
 	return &structuredLogger{
 		enabled: enabled,
 		logger:  slog.New(handler),
+		policy:  NewLogPolicy(cfg.RedactSecrets),
 	}
 }
 
@@ -71,17 +81,50 @@ func (l *structuredLogger) Record(ctx context.Context, event Event) error {
 		return nil
 	}
 
-	level := slogLevelForEvent(event)
+	fields := l.logFields(event)
+	level := slogLevelForFields(fields)
 
 	attrs := []slog.Attr{slog.String(logFieldEventName, event.Name)}
-	for _, name := range sortedLogFieldNames(event.LogFields) {
-		attrs = append(attrs, slog.String(name, event.LogFields[name]))
+	for _, name := range sortedLogFieldNames(fields) {
+		attrs = append(attrs, slog.String(name, fields[name]))
 	}
 
 	attrs = appendTraceCorrelationAttrs(ctx, attrs)
 	l.logger.LogAttrs(ctx, level, event.Name, attrs...)
 
 	return nil
+}
+
+// logFields merges event metadata and applies the runtime log-field policy.
+func (l *structuredLogger) logFields(event Event) LogFields {
+	raw := make(map[string]string, len(event.MetricLabels)+len(event.LogFields)+3)
+	maps.Copy(raw, event.MetricLabels)
+
+	maps.Copy(raw, event.LogFields)
+
+	fields := l.policy.Sanitize(raw)
+	addDefaultLogFields(fields, event)
+
+	return fields
+}
+
+// addDefaultLogFields ensures every runtime log has the core operator fields.
+func addDefaultLogFields(fields LogFields, event Event) {
+	if strings.TrimSpace(fields[logFieldComponent]) == "" {
+		fields[logFieldComponent] = componentFromEventName(event.Name)
+	}
+
+	if strings.TrimSpace(fields[logFieldOperation]) == "" {
+		fields[logFieldOperation] = operationFromEventName(event.Name)
+	}
+
+	if strings.TrimSpace(fields[logFieldResult]) == "" {
+		fields[logFieldResult] = defaultLogResult(event)
+	}
+
+	if strings.TrimSpace(fields[logFieldReason]) == "" {
+		fields[logFieldReason] = defaultLogReason(event, fields[logFieldResult])
+	}
 }
 
 // appendTraceCorrelationAttrs adds active span identifiers to structured logs.
@@ -98,12 +141,53 @@ func appendTraceCorrelationAttrs(ctx context.Context, attrs []slog.Attr) []slog.
 	)
 }
 
+// componentFromEventName derives a stable component from the event namespace.
+func componentFromEventName(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return metricOperationUnknown
+	}
+
+	component, _, _ := strings.Cut(name, ".")
+
+	return normalizeLogToken(component, metricOperationUnknown)
+}
+
+// operationFromEventName derives a stable operation when callers omit one.
+func operationFromEventName(name string) string {
+	operation := strings.ReplaceAll(strings.TrimSpace(name), ".", "_")
+
+	return normalizeLogToken(operation, metricOperationUnknown)
+}
+
+// defaultLogResult extracts a bounded result from event metadata.
+func defaultLogResult(event Event) string {
+	if value := normalizeLogToken(eventResult(event), ""); value != "" {
+		return value
+	}
+
+	return metricResultObserved
+}
+
+// defaultLogReason extracts or infers a bounded reason class.
+func defaultLogReason(event Event, result string) string {
+	if value := NormalizeReasonClass(eventReasonClass(event)); value != reasonClassOther || strings.TrimSpace(eventReasonClass(event)) != "" {
+		return value
+	}
+
+	if result == telemetryResultFailed || result == logResultFailClosed || result == reasonClassTemporaryFailure {
+		return reasonClassOther
+	}
+
+	return reasonClassOK
+}
+
 // slogLevel maps config strings to standard library log levels.
 func slogLevel(level string) (slog.Level, bool) {
 	switch strings.ToLower(strings.TrimSpace(level)) {
-	case "trace", "debug":
+	case "trace", logLevelDebug:
 		return slog.LevelDebug, true
-	case "", "info":
+	case "", logLevelInfo:
 		return slog.LevelInfo, true
 	case logLevelWarn, "warning":
 		return slog.LevelWarn, true
@@ -116,13 +200,13 @@ func slogLevel(level string) (slog.Level, bool) {
 	}
 }
 
-// slogLevelForEvent allows normalized events to carry their chosen severity.
-func slogLevelForEvent(event Event) slog.Level {
-	if event.LogFields == nil {
+// slogLevelForFields allows normalized events to carry their chosen severity.
+func slogLevelForFields(fields LogFields) slog.Level {
+	if fields == nil {
 		return slog.LevelInfo
 	}
 
-	level, enabled := slogLevel(event.LogFields["level"])
+	level, enabled := slogLevel(fields["level"])
 	if !enabled {
 		return slog.LevelInfo
 	}
