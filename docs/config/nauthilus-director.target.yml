@@ -312,6 +312,10 @@ director:
       lmtp:
         smtputf8: true
         client_auth:
+          # Client auth verifies the submitting LMTP peer. This block controls
+          # SASL peer auth with technical submitter credentials checked by
+          # Nauthilus, not recipient mailbox user credentials. Mutual TLS is
+          # configured through the listener tls client certificate settings.
           required: true
           authority: default
           mechanisms:
@@ -320,6 +324,9 @@ director:
             - xoauth2
             - oauthbearer
         capabilities:
+          # Capabilities are the desired listener surface. Runtime advertisement
+          # is mediated by implemented command support, TLS state, auth policy
+          # and backend-pool capabilities. CHUNKING requires full BDAT support.
           - CHUNKING
           - SMTPUTF8
           - STARTTLS
@@ -348,6 +355,10 @@ director:
       lmtp:
         smtputf8: true
         client_auth:
+          # Client auth verifies the submitting LMTP peer. This block controls
+          # SASL peer auth with technical submitter credentials checked by
+          # Nauthilus, not recipient mailbox user credentials. Mutual TLS is
+          # configured through the listener tls client certificate settings.
           required: true
           authority: default
           mechanisms:
@@ -356,6 +367,9 @@ director:
             - xoauth2
             - oauthbearer
         capabilities:
+          # Capabilities are the desired listener surface. Runtime advertisement
+          # is mediated by implemented command support, TLS state, auth policy
+          # and backend-pool capabilities. CHUNKING requires full BDAT support.
           - CHUNKING
           - SMTPUTF8
           - AUTH PLAIN LOGIN XOAUTH2 OAUTHBEARER

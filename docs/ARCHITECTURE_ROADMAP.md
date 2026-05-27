@@ -732,9 +732,9 @@ POST /api/v1/route/lookup
 GET  /metrics
 ```
 
-Route lookup is a director-only routing diagnostic. It does not authenticate credentials, does not call Nauthilus and does not ask Nauthilus for identity or routing input. The caller supplies an already known or operator-provided identity key, protocol, listener context and optional attributes; the director then explains how its configured resolver inputs, Redis affinity, runtime overrides, health and maintenance state would select a backend.
+Route lookup is a director-owned routing diagnostic. It does not authenticate credentials. For protocols where the caller supplies an already known identity key, protocol, listener context and optional attributes, the director explains how its configured resolver inputs, Redis affinity, runtime overrides, health and maintenance state would select a backend. For LMTP recipient diagnostics, the director may resolve a supplied recipient through the Nauthilus identity lookup path (`LookupIdentity` for gRPC or `mode=no-auth` for HTTP/JSON) before running the dry-run route explanation.
 
-The endpoint must be side-effect free. It may read Redis-backed affinity and runtime state, but it must not create sessions, refresh leases, mutate affinity, perform backend auth or trigger Nauthilus auth/lookup calls.
+The endpoint must be side-effect free. It may read Redis-backed affinity and runtime state and may perform the explicit LMTP no-auth identity lookup described above, but it must not authenticate credentials, create sessions, refresh leases, open delivery holds, mutate affinity, perform backend auth, connect to backends or trigger Nauthilus credential-authentication calls. Responses must state whether identity input was caller-supplied, read from existing director state or resolved through Nauthilus.
 
 Example request:
 
@@ -1037,7 +1037,7 @@ E2E tests:
 - authenticate through the public protocol listener, then assert backend routing externally
 - verify `auth_attribute` routing from Nauthilus-provided attributes
 - verify active-user stickiness across parallel connections and reconnects
-- verify route lookup does not call Nauthilus, create sessions or mutate Redis
+- verify route lookup does not authenticate credentials, create sessions or mutate Redis; LMTP recipient diagnostics may call only the no-auth Nauthilus identity lookup path
 - verify TLS/STARTTLS and backend TLS/SNI behavior with test certificates
 - scrape Prometheus metrics and optionally receive OTLP traces where the test environment provides collectors
 - keep credentials and SASL bearer material out of test logs
@@ -1162,14 +1162,19 @@ completion evidence lives in
 - Prometheus metrics
 - structured log correlation
 
-### M5: LMTP MVP
+### M5: LMTP Production
 
-- LMTP state machine
+- production-ready LMTP and LMTPS entrypoints within the M5 scope
+- LMTP state machine with DATA and BDAT handling
 - LMTP STARTTLS, implicit TLS and client-auth handling
-- recipient routing through the resolver model
+- recipient identity lookup through Nauthilus and routing through the resolver
+  model
+- delivery-scoped active-affinity holds for concurrent user-stateful placement
 - single-backend transaction support
 - same-backend-only multi-recipient handling
 - per-recipient status mapping
+- real Postfix-to-Director-to-Dovecot LMTP interoperability while preserving the
+  existing Dovecot IMAP lane
 
 ### M6: ManageSieve / Sieve proxy
 
