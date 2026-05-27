@@ -1,6 +1,9 @@
 # M4 Observability Specification
 
-Status: implementation-ready M4 specification
+Status: completed. The observability runtime, OpenTelemetry tracing,
+Prometheus `/metrics` provider, structured log policy, runtime instrumentation
+coverage and deterministic E2E proof are in place. `make guardrails` passed on
+2026-05-27.
 
 This document defines the observability polish milestone for
 `nauthilus-director`. M4 turns the existing secret-safe event vocabulary,
@@ -968,6 +971,27 @@ M4 is complete only when all items below are true:
       updated when behavior changes.
 - [ ] `make guardrails` is the final local gate before any commit or pull
       request that contains M4 implementation work.
+
+### Completion Evidence
+
+M4 closeout completed on 2026-05-27 after the required final review pass. The
+implementation includes the Fx-managed observability runtime and sink
+lifecycle, OpenTelemetry span boundaries and OTLP exporter wiring, Prometheus
+metric registration through the generated `/metrics` control route, structured
+log correlation and redaction policy, and runtime instrumentation at the
+listener, IMAP, Nauthilus auth, routing, Redis state, backend selection,
+backend health, runtime control, REST and proxy boundaries.
+
+The deterministic fake-service E2E lane proves observability through public
+IMAP sockets, generated REST endpoints, real `nauthilus-directorctl` commands
+and the production `nauthilus-director` binary. Focused runtime, logging,
+metrics, tracing, REST, listener, Nauthilus, proxy, state and runtime-control
+tests cover disabled modes, exporter lifecycle, secret redaction,
+low-cardinality metric labels, bounded reason classes, route templates, proxy
+byte accounting and Redis key safety. No separate Dovecot interop rerun was
+required for the closeout because the M4 changes remained observability-only
+and did not change IMAP wire semantics, backend authentication semantics or the
+runtime placement contract.
 
 ## Required M4 Review Pass
 
