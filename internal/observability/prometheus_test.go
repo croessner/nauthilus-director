@@ -228,6 +228,7 @@ func representativeMetricEvents(t *testing.T) []Event {
 		newMetricEvent(t, EventAffinityOpen, nil, backendLabels(reasonClassOK, reasonClassOK)),
 		measuredEvent(t, EventBackendSelect, nil, backendLabels(reasonClassOK, reasonClassOK), 0.001),
 		measuredEvent(t, EventBackendConnect, nil, backendLabels(reasonClassOK, reasonClassOK), 0.001),
+		newMetricEvent(t, EventBackendAuth, nil, backendAuthLabelsForTest(reasonClassOK, reasonClassOK)),
 		backendHealthEvent(t),
 		backendEffectiveEvent(t),
 		newMetricEvent(t, EventBackendRuntimeOperation, nil, operationLabels("backend_in_out", reasonClassOK, reasonClassOK)),
@@ -331,6 +332,14 @@ func authLabels(result string, reason string) map[string]string {
 	labels := protocolLabels(result, reason)
 	labels[metricLabelMechanism] = testMechanismPlain
 	labels[metricLabelTransport] = "http"
+
+	return labels
+}
+
+// backendAuthLabelsForTest returns bounded backend auth metric labels.
+func backendAuthLabelsForTest(result string, reason string) map[string]string {
+	labels := backendLabels(result, reason)
+	labels[metricLabelMechanism] = testMechanismPlain
 
 	return labels
 }

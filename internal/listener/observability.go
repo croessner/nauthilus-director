@@ -18,13 +18,21 @@ package listener
 
 import (
 	"context"
+	"errors"
+	"net"
 
 	"github.com/croessner/nauthilus-director/internal/observability"
+	proxyproto "github.com/pires/go-proxyproto"
 )
 
 const (
-	listenerOperation = "listener"
-	listenerResultOK  = "ok"
+	listenerOperation           = "listener"
+	listenerOperationAcceptLoop = "accept_loop"
+	listenerOperationProxyProto = "proxy_protocol"
+	listenerResultAccepted      = "accepted"
+	listenerResultOK            = "ok"
+	listenerResultRejected      = "rejected"
+	listenerReasonMalformed     = "malformed"
 
 	listenerFieldBackendPool = "backend_pool"
 	listenerFieldListener    = "listener"
@@ -40,12 +48,27 @@ const (
 
 // recordListenerEvent emits listener lifecycle state with low-cardinality labels.
 func (l *managedListener) recordListenerEvent(ctx context.Context, name string, result string, reason string) {
+	l.recordListenerOperation(ctx, name, listenerOperation, result, reason)
+}
+
+// recordAcceptLoopStop emits the accept-loop terminal state separately from shutdown drain.
+func (l *managedListener) recordAcceptLoopStop(result string, reason string) {
+	l.recordListenerOperation(context.Background(), observability.EventListenerStop, listenerOperationAcceptLoop, result, reason)
+}
+
+// recordProxyProtocol emits PROXY protocol handling without exposing endpoint addresses.
+func (l *managedListener) recordProxyProtocol(result string, reason string) {
+	l.recordListenerOperation(context.Background(), observability.EventProxyProtocol, listenerOperationProxyProto, result, reason)
+}
+
+// recordListenerOperation emits listener observations with reviewed label names.
+func (l *managedListener) recordListenerOperation(ctx context.Context, name string, operation string, result string, reason string) {
 	recorder := observability.NormalizeRecorder(l.observability)
 	fields := map[string]string{
 		listenerFieldBackendPool: l.config.listener.BackendPool,
 		listenerFieldListener:    l.name,
 		listenerFieldNetwork:     l.config.listener.Network,
-		listenerFieldOperation:   listenerOperation,
+		listenerFieldOperation:   operation,
 		listenerFieldProtocol:    l.config.listener.Protocol,
 		listenerFieldRemoteAddr:  l.boundAddress(),
 		listenerFieldResult:      result,
@@ -55,7 +78,7 @@ func (l *managedListener) recordListenerEvent(ctx context.Context, name string, 
 	labels := map[string]string{
 		listenerFieldBackendPool: l.config.listener.BackendPool,
 		listenerFieldListener:    l.name,
-		listenerFieldOperation:   listenerOperation,
+		listenerFieldOperation:   operation,
 		listenerFieldProtocol:    l.config.listener.Protocol,
 		listenerFieldResult:      result,
 		listenerFieldService:     l.config.listener.ServiceName,
@@ -73,4 +96,24 @@ func (l *managedListener) recordListenerEvent(ctx context.Context, name string, 
 	}
 
 	recorder.Record(ctx, event)
+}
+
+// proxyProtocolReasonClass maps transport setup failures into bounded classes.
+func proxyProtocolReasonClass(err error) string {
+	var netErr net.Error
+
+	switch {
+	case err == nil:
+		return listenerResultOK
+	case errors.Is(err, ErrProxyProtocolUntrustedPeer):
+		return "untrusted"
+	case errors.Is(err, ErrProxyProtocolUnsupportedCommand), errors.Is(err, ErrProxyProtocolUnsupportedFamily):
+		return "unsupported"
+	case errors.As(err, &netErr) && netErr.Timeout():
+		return "timeout"
+	case errors.Is(err, proxyproto.ErrNoProxyProtocol):
+		return listenerReasonMalformed
+	default:
+		return listenerReasonMalformed
+	}
 }

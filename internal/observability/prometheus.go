@@ -38,6 +38,7 @@ const (
 	metricNameActiveSessions          = "nauthilus_director_active_sessions"
 	metricNameAffinityOperations      = "nauthilus_director_affinity_operations_total"
 	metricNameBackendActiveSessions   = "nauthilus_director_backend_active_sessions"
+	metricNameBackendAuth             = "nauthilus_director_backend_auth_total"
 	metricNameBackendConnect          = "nauthilus_director_backend_connect_total"
 	metricNameBackendConnectSeconds   = "nauthilus_director_backend_connect_duration_seconds"
 	metricNameBackendDrainOperations  = "nauthilus_director_backend_drain_operations_total"
@@ -97,6 +98,7 @@ var (
 		metricLabelShardTag,
 	}
 	backendStateResultLabels    = append(cloneLabelNames(backendStateLabels), metricLabelResult)
+	backendAuthLabels           = append(cloneLabelNames(protocolBackendLabels), metricLabelMechanism)
 	operationResultReasonLabels = []string{
 		metricLabelOperation,
 		metricLabelResult,
@@ -158,6 +160,7 @@ type prometheusInstruments struct {
 	activeSessions           *prometheus.GaugeVec
 	affinityOperations       *prometheus.CounterVec
 	backendActiveSessions    *prometheus.GaugeVec
+	backendAuth              *prometheus.CounterVec
 	backendConnect           *prometheus.CounterVec
 	backendConnectSeconds    *prometheus.HistogramVec
 	backendDrainOperations   *prometheus.CounterVec
@@ -315,7 +318,7 @@ func (m *prometheusRuntime) recordTypedEvent(event Event) {
 // recordLifecycleMetric handles listener and session lifecycle observations.
 func (m *prometheusRuntime) recordLifecycleMetric(event Event) bool {
 	switch event.Name {
-	case EventListenerStart, EventListenerStop:
+	case EventListenerStart, EventListenerStop, EventProxyProtocol:
 		m.recordListenerLifecycle(event)
 	case EventSessionStart, EventSessionEnd:
 		m.recordSessionLifecycle(event)
@@ -341,6 +344,8 @@ func (m *prometheusRuntime) recordPlacementMetric(event Event) bool {
 		m.recordBackendSelection(event)
 	case EventBackendConnect:
 		m.recordBackendConnect(event)
+	case EventBackendAuth:
+		m.recordBackendAuth(event)
 	default:
 		return false
 	}
@@ -386,7 +391,7 @@ func (m *prometheusRuntime) recordRuntimeMetric(event Event) {
 
 // recordListenerLifecycle counts frontend listener starts and stops.
 func (m *prometheusRuntime) recordListenerLifecycle(event Event) {
-	labels := eventWithOperation(event, listenerOperationForEvent(event.Name))
+	labels := eventWithOperation(event, listenerOperationForEvent(event))
 	m.instrument.listenerLifecycle.WithLabelValues(metricValues(labels, listenerLifecycleLabels)...).Inc()
 }
 
@@ -433,6 +438,11 @@ func (m *prometheusRuntime) recordBackendSelection(event Event) {
 func (m *prometheusRuntime) recordBackendConnect(event Event) {
 	m.instrument.backendConnect.WithLabelValues(metricValues(event, protocolBackendLabels)...).Inc()
 	observeDuration(m.instrument.backendConnectSeconds, event, protocolBackendLabels)
+}
+
+// recordBackendAuth counts selected-backend authentication outcomes.
+func (m *prometheusRuntime) recordBackendAuth(event Event) {
+	m.instrument.backendAuth.WithLabelValues(metricValues(event, backendAuthLabels)...).Inc()
 }
 
 // recordBackendHealth updates aggregate health-state gauges without backend IDs.
@@ -514,6 +524,7 @@ func newPrometheusInstruments() (prometheusInstruments, error) {
 		activeSessions:           builders.gaugeVec(metricNameActiveSessions, "Active frontend sessions by bounded listener dimensions.", activeSessionLabels...),
 		affinityOperations:       builders.counterVec(metricNameAffinityOperations, "Total Redis-backed affinity operations.", protocolBackendLabels...),
 		backendActiveSessions:    builders.gaugeVec(metricNameBackendActiveSessions, "Backend active-session aggregate counts by bounded backend dimensions.", backendStateLabels...),
+		backendAuth:              builders.counterVec(metricNameBackendAuth, "Total selected backend authentication outcomes.", backendAuthLabels...),
 		backendConnect:           builders.counterVec(metricNameBackendConnect, "Total backend connection setup outcomes.", protocolBackendLabels...),
 		backendConnectSeconds:    builders.histogramVec(metricNameBackendConnectSeconds, "Backend connection setup duration in seconds.", backendConnectBuckets(), protocolBackendLabels...),
 		backendDrainOperations:   builders.counterVec(metricNameBackendDrainOperations, "Total backend drain runtime operations.", append(cloneLabelNames(operationResultReasonLabels), metricLabelMaintenanceMode)...),
@@ -551,6 +562,7 @@ func (i prometheusInstruments) collectors() []prometheus.Collector {
 		i.activeSessions,
 		i.affinityOperations,
 		i.backendActiveSessions,
+		i.backendAuth,
 		i.backendConnect,
 		i.backendConnectSeconds,
 		i.backendDrainOperations,
@@ -763,8 +775,13 @@ func metricLabelValue(labels map[string]string, name string, fallback string) st
 }
 
 // listenerOperationForEvent maps listener event names to lifecycle operations.
-func listenerOperationForEvent(name string) string {
-	switch name {
+func listenerOperationForEvent(event Event) string {
+	operation := strings.TrimSpace(event.MetricLabels[metricLabelOperation])
+	if operation != "" && operation != "listener" {
+		return operation
+	}
+
+	switch event.Name {
 	case EventListenerStart:
 		return "start"
 	case EventListenerStop:

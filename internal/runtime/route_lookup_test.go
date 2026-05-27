@@ -25,6 +25,7 @@ import (
 
 	"github.com/croessner/nauthilus-director/internal/backend"
 	"github.com/croessner/nauthilus-director/internal/config"
+	"github.com/croessner/nauthilus-director/internal/observability"
 	"github.com/croessner/nauthilus-director/internal/routing"
 	"github.com/croessner/nauthilus-director/internal/state"
 )
@@ -166,6 +167,37 @@ func TestRouteLookupResponseOmitsSecretBearingAttributeValues(t *testing.T) {
 	assertNoRouteLookupMutations(t, store)
 }
 
+// TestRouteLookupObservationIncludesDuration verifies diagnostic lookup latency is measured.
+func TestRouteLookupObservationIncludesDuration(t *testing.T) {
+	store := &countingRouteState{}
+	recorder := &recordingRuntimeObservation{}
+	service := newRouteLookupTestService(t, store, false, recorder)
+
+	_, err := service.Lookup(context.Background(), RouteLookupRequest{
+		Protocol:   routeLookupProtocol,
+		AccountKey: routeLookupAccount,
+		Attributes: map[string][]string{
+			routeLookupAttributeShard: {routeLookupShardA},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Lookup returned error: %v", err)
+	}
+
+	event, ok := recorder.last(observability.EventRouteLookup)
+	if !ok {
+		t.Fatalf("route lookup observation missing: %#v", recorder.events)
+	}
+
+	if got := event.MetricLabels["operation"]; got != operationRouteLookup {
+		t.Fatalf("operation = %q, want %q", got, operationRouteLookup)
+	}
+
+	if got := event.Measurements[observability.MetricMeasurementDurationSeconds]; got <= 0 {
+		t.Fatalf("duration = %f, want positive", got)
+	}
+}
+
 // routeLookupExclusionCases returns runtime states that should explain exclusions.
 func routeLookupExclusionCases(now time.Time) []routeLookupExclusionCase {
 	return []routeLookupExclusionCase{
@@ -216,7 +248,7 @@ func routeLookupExclusionCases(now time.Time) []routeLookupExclusionCase {
 }
 
 // newRouteLookupTestService builds the production route lookup service over fakes.
-func newRouteLookupTestService(t *testing.T, store *countingRouteState, enforceHealth bool) *RouteLookupService {
+func newRouteLookupTestService(t *testing.T, store *countingRouteState, enforceHealth bool, recorders ...observability.Recorder) *RouteLookupService {
 	t.Helper()
 
 	cfg := config.DefaultConfig().Normalize()
@@ -250,7 +282,7 @@ func newRouteLookupTestService(t *testing.T, store *countingRouteState, enforceH
 		t.Fatalf("NewBackendReadService returned error: %v", err)
 	}
 
-	service, err := NewRouteLookupService(RouteLookupServiceOptions{
+	options := RouteLookupServiceOptions{
 		Resolver:     mustRouteLookupTestResolver(t),
 		Selector:     selector,
 		BackendRead:  reader,
@@ -266,7 +298,12 @@ func newRouteLookupTestService(t *testing.T, store *countingRouteState, enforceH
 		DefaultPool:   routeLookupDefaultPool,
 		DefaultShard:  cfg.Director.Routing.EffectiveDefaultShard(),
 		DefaultTenant: "default",
-	})
+	}
+	if len(recorders) > 0 {
+		options.Observability = recorders[0]
+	}
+
+	service, err := NewRouteLookupService(options)
 	if err != nil {
 		t.Fatalf("NewRouteLookupService returned error: %v", err)
 	}
@@ -354,6 +391,26 @@ type countingRouteState struct {
 	killSessionCalls     int
 	setBackendCalls      int
 	clearBackendCalls    int
+}
+
+type recordingRuntimeObservation struct {
+	events []observability.Event
+}
+
+// Record stores a runtime observation for assertions.
+func (r *recordingRuntimeObservation) Record(_ context.Context, event observability.Event) {
+	r.events = append(r.events, event)
+}
+
+// last returns the latest runtime event with the supplied name.
+func (r *recordingRuntimeObservation) last(name string) (observability.Event, bool) {
+	for index := len(r.events) - 1; index >= 0; index-- {
+		if r.events[index].Name == name {
+			return r.events[index], true
+		}
+	}
+
+	return observability.Event{}, false
 }
 
 // BackendSnapshot records a read-only backend runtime state lookup.

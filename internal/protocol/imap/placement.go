@@ -35,30 +35,13 @@ import (
 
 // authenticateAndPlace maps frontend credentials through Nauthilus and director placement.
 func (s *Session) authenticateAndPlace(ctx context.Context, tag string, credentials *frontendCredentials) (commandOutcome, error) {
-	mechanism := ""
-	if credentials != nil {
-		mechanism = credentials.Mechanism().Normalized()
-	}
-
-	authCtx, authSpan := s.startObservationSpan(ctx, observability.TraceBoundaryNauthilusAuth, observationOperationAuth, observationResultStart, "", map[string]string{
-		obsFieldMechanism: mechanism,
-	})
-
-	authStarted := time.Now()
-	result, err := s.authenticateWithAuthority(authCtx, credentials)
-
-	authDuration := time.Since(authStarted)
+	result, err := s.authenticateWithAuthority(ctx, credentials)
 	if err != nil {
-		s.recordNauthilusAuth(authCtx, mechanism, observationResultFailure, reasonClass(err), authDuration)
-		authSpan.End(observationResultFailure, reasonClass(err))
-
 		return commandOutcome{}, s.writeTagged(tag, responseNo, authUnavailableText)
 	}
 
 	switch result.Decision {
 	case nauthilus.DecisionAuthenticated:
-		s.recordNauthilusAuth(authCtx, mechanism, observationResultOK, "", authDuration)
-		authSpan.End(observationResultOK, "")
 		if err := s.placeAuthenticatedSession(ctx, credentials, result); err != nil {
 			s.recordRoutingResolve(ctx, observationResultFailure, reasonClass(err), "", 0)
 
@@ -69,19 +52,10 @@ func (s *Session) authenticateAndPlace(ctx context.Context, tag string, credenti
 
 		return s.transitionAuthenticatedSession(ctx, tag, credentials)
 	case nauthilus.DecisionRejected:
-		s.recordNauthilusAuth(authCtx, mechanism, "rejected", "", authDuration)
-		authSpan.End("rejected", "")
-
 		return commandOutcome{}, s.writeTagged(tag, responseNo, rejectedAuthResponseText(result.StatusMessage))
 	case nauthilus.DecisionTemporaryFailure:
-		s.recordNauthilusAuth(authCtx, mechanism, observationResultFailure, "temporary_failure", authDuration)
-		authSpan.End(observationResultFailure, "temporary_failure")
-
 		return commandOutcome{}, s.writeTagged(tag, responseNo, authUnavailableText)
 	default:
-		s.recordNauthilusAuth(authCtx, mechanism, observationResultFailure, "ambiguous", authDuration)
-		authSpan.End(observationResultFailure, "ambiguous")
-
 		return commandOutcome{}, s.writeTagged(tag, responseNo, authUnavailableText)
 	}
 }
@@ -486,7 +460,7 @@ func (s *Session) transitionAuthenticatedSession(
 		obsFieldBackendIdentifier: s.placement.Backend.Backend.Identifier,
 		obsFieldShardTag:          s.placement.SelectedShardTag,
 	})
-	proxyResult, err := s.proxyRunner.Run(proxyCtx, proxy.PipeConfig{
+	_, err = s.proxyRunner.Run(proxyCtx, proxy.PipeConfig{
 		Frontend:          handoff.Frontend(),
 		Backend:           connection.Conn(),
 		BufferedToBackend: handoff.Buffered(),
@@ -496,7 +470,6 @@ func (s *Session) transitionAuthenticatedSession(
 		Lease:             s.proxyLease(),
 		Observability:     s.observability,
 	})
-	s.recordProxyPipe(proxyCtx, proxyResult, err)
 	proxySpan.End(resultLabel(err), reasonClass(err))
 
 	return commandOutcome{closeSession: true, flushed: true}, err

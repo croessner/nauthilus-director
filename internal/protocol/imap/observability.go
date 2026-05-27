@@ -24,11 +24,9 @@ import (
 	"time"
 
 	"github.com/croessner/nauthilus-director/internal/observability"
-	"github.com/croessner/nauthilus-director/internal/proxy"
 )
 
 const (
-	observationOperationAuth           = "auth"
 	observationOperationBackendAuth    = "backend_auth"
 	observationOperationBackendConnect = "backend_connect"
 	observationOperationBackendSelect  = "backend_select"
@@ -60,7 +58,6 @@ const (
 	obsFieldMechanism         = "mechanism"
 	obsFieldOperation         = "operation"
 	obsFieldProtocol          = "protocol"
-	obsFieldProxyResult       = "proxy_result"
 	obsFieldReasonClass       = "reason_class"
 	obsFieldRemoteAddr        = "remote_addr"
 	obsFieldResult            = "result"
@@ -87,13 +84,6 @@ func (s *Session) recordPreAuth(ctx context.Context, command string, result stri
 	s.recordObservation(ctx, observability.EventIMAPPreAuth, observability.TraceBoundaryIMAPPreAuth, observationOperationPreAuth, result, reason, map[string]string{
 		obsFieldCommand: strings.ToLower(strings.TrimSpace(command)),
 	})
-}
-
-// recordNauthilusAuth emits one authority authentication observation.
-func (s *Session) recordNauthilusAuth(ctx context.Context, mechanism string, result string, reason string, duration time.Duration) {
-	s.recordObservation(ctx, observability.EventNauthilusAuth, observability.TraceBoundaryNauthilusAuth, observationOperationAuth, result, reason, map[string]string{
-		obsFieldMechanism: strings.ToLower(strings.TrimSpace(mechanism)),
-	}, duration)
 }
 
 // recordRoutingResolve emits one director-owned routing observation.
@@ -141,27 +131,6 @@ func (s *Session) recordBackendAuth(ctx context.Context, result string, reason s
 	s.recordObservation(ctx, observability.EventBackendAuth, observability.TraceBoundaryBackendConnect, observationOperationBackendAuth, result, reason, map[string]string{
 		obsFieldMechanism: strings.ToLower(strings.TrimSpace(mechanism)),
 	})
-}
-
-// recordProxyPipe emits the transparent proxy lifecycle observation.
-func (s *Session) recordProxyPipe(ctx context.Context, result proxy.Result, err error) {
-	reason := reasonClass(err)
-	if reason == "" {
-		reason = result.Class
-	}
-
-	event := s.newObservation(ctx, observability.EventProxyPipe, observability.TraceBoundaryProxyPipe, observationOperationProxy, resultLabel(err), reason, map[string]string{
-		obsFieldProxyResult: result.Class,
-	})
-	if event.Name == "" {
-		return
-	}
-
-	event.Measurements = observability.NewMetricMeasurements(map[string]float64{
-		observability.MetricMeasurementBackendToClientBytes: float64(result.Accounted.BackendToClient),
-		observability.MetricMeasurementClientToBackendBytes: float64(result.Accounted.ClientToBackend),
-	})
-	observability.NormalizeRecorder(s.observability).Record(ctx, event)
 }
 
 // recordObservation builds a normalized event and drops impossible internal label mistakes.

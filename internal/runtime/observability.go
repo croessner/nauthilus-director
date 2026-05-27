@@ -21,6 +21,7 @@ import (
 	"maps"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/croessner/nauthilus-director/internal/observability"
 )
@@ -102,6 +103,7 @@ func recordRuntimeObservation(
 	reasonClass string,
 	fields map[string]string,
 	labels map[string]string,
+	duration ...time.Duration,
 ) {
 	operation = strings.TrimSpace(operation)
 	result = strings.TrimSpace(result)
@@ -135,10 +137,17 @@ func recordRuntimeObservation(
 		return
 	}
 
+	measurements := map[string]float64{}
 	if activeSessions, ok := numericObservation(fields, runtimeObservationFieldActiveSessions); ok {
-		event.Measurements = observability.NewMetricMeasurements(map[string]float64{
-			observability.MetricMeasurementActiveSessions: activeSessions,
-		})
+		measurements[observability.MetricMeasurementActiveSessions] = activeSessions
+	}
+
+	if len(duration) > 0 && duration[0] > 0 {
+		measurements[observability.MetricMeasurementDurationSeconds] = duration[0].Seconds()
+	}
+
+	if len(measurements) > 0 {
+		event.Measurements = observability.NewMetricMeasurements(measurements)
 	}
 
 	observability.NormalizeRecorder(recorder).Record(ctx, event)

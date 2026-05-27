@@ -29,6 +29,8 @@ const (
 	EventSessionEnd = "session.end"
 	// EventIMAPPreAuth records pre-auth IMAP command handling.
 	EventIMAPPreAuth = "imap.pre_auth"
+	// EventProxyProtocol records listener PROXY protocol handling.
+	EventProxyProtocol = "listener.proxy_protocol"
 	// EventNauthilusAuth records one Nauthilus authentication request outcome.
 	EventNauthilusAuth = "nauthilus.auth"
 	// EventRoutingResolve records director-owned routing resolution.

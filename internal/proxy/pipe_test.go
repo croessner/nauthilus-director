@@ -22,6 +22,8 @@ import (
 	"net"
 	"testing"
 	"time"
+
+	"github.com/croessner/nauthilus-director/internal/observability"
 )
 
 // TestPipeSendsBufferedBytesBeforeLiveCopy verifies frontend parser read-ahead is replayed first.
@@ -83,6 +85,57 @@ func TestPipeClassifiesClientCloseAndCountsBytes(t *testing.T) {
 
 	if result.Accounted.ClientToBackend != 3 {
 		t.Fatalf("client_to_backend bytes = %d, want 3", result.Accounted.ClientToBackend)
+	}
+}
+
+// TestPipeObservabilityCountsDirectionsAndCloseReason verifies proxy metrics inputs.
+func TestPipeObservabilityCountsDirectionsAndCloseReason(t *testing.T) {
+	frontendClient, frontendProxy := net.Pipe()
+	backendProxy, backendServer := net.Pipe()
+
+	defer func() { _ = backendServer.Close() }()
+
+	recorder := &recordingProxyObservability{}
+	resultCh := runTestPipe(t, PipeConfig{
+		Frontend:      frontendProxy,
+		Backend:       backendProxy,
+		IdleTimeout:   time.Second,
+		Observability: recorder,
+	})
+
+	if _, err := io.WriteString(frontendClient, "abc"); err != nil {
+		t.Fatalf("write frontend bytes: %v", err)
+	}
+
+	assertReadExact(t, backendServer, "abc")
+
+	if _, err := io.WriteString(backendServer, "xyz"); err != nil {
+		t.Fatalf("write backend bytes: %v", err)
+	}
+
+	assertReadExact(t, frontendClient, "xyz")
+	_ = frontendClient.Close()
+	_ = waitPipeResult(t, resultCh)
+
+	event, ok := recorder.last(observability.EventProxyPipe)
+	if !ok {
+		t.Fatalf("proxy event missing: %#v", recorder.events)
+	}
+
+	if got := event.MetricLabels["reason_class"]; got != ResultClientClosed {
+		t.Fatalf("reason_class = %q, want %q", got, ResultClientClosed)
+	}
+
+	if got := event.Measurements[observability.MetricMeasurementClientToBackendBytes]; got != 3 {
+		t.Fatalf("client_to_backend bytes = %f, want 3", got)
+	}
+
+	if got := event.Measurements[observability.MetricMeasurementBackendToClientBytes]; got != 3 {
+		t.Fatalf("backend_to_client bytes = %f, want 3", got)
+	}
+
+	if got := event.Measurements[observability.MetricMeasurementDurationSeconds]; got <= 0 {
+		t.Fatalf("duration = %f, want positive", got)
 	}
 }
 
@@ -220,6 +273,26 @@ type recordingLeaseLifecycle struct {
 	heartbeats   int
 	closes       int
 	heartbeatErr error
+}
+
+type recordingProxyObservability struct {
+	events []observability.Event
+}
+
+// Record stores one proxy event for assertions.
+func (r *recordingProxyObservability) Record(_ context.Context, event observability.Event) {
+	r.events = append(r.events, event)
+}
+
+// last returns the latest proxy event with the supplied name.
+func (r *recordingProxyObservability) last(name string) (observability.Event, bool) {
+	for index := len(r.events) - 1; index >= 0; index-- {
+		if r.events[index].Name == name {
+			return r.events[index], true
+		}
+	}
+
+	return observability.Event{}, false
 }
 
 // Heartbeat records one active lease refresh.
