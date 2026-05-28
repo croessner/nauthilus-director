@@ -55,12 +55,13 @@ const (
 
 // HealthState carries one secret-safe backend health observation.
 type HealthState struct {
-	Enabled     bool
-	Status      HealthStatus
-	ReasonClass string
-	CheckedAt   time.Time
-	ExpiresAt   time.Time
-	Generation  string
+	Enabled      bool
+	Status       HealthStatus
+	ReasonClass  string
+	Capabilities CapabilitySet
+	CheckedAt    time.Time
+	ExpiresAt    time.Time
+	Generation   string
 }
 
 // HealthOwnershipRequest describes one fenced health-owner lease request.
@@ -100,8 +101,9 @@ type HealthCheckRequest struct {
 
 // HealthCheckResult is a secret-safe backend health check outcome.
 type HealthCheckResult struct {
-	Healthy     bool
-	ReasonClass string
+	Healthy      bool
+	ReasonClass  string
+	Capabilities CapabilitySet
 }
 
 // HealthChecker performs protocol-specific backend health checks.
@@ -180,6 +182,7 @@ func (s HealthState) Normalize(now time.Time) (HealthState, error) {
 	}
 
 	s.ReasonClass = strings.TrimSpace(s.ReasonClass)
+	s.Capabilities = s.Capabilities.Normalize()
 	s.Generation = strings.TrimSpace(s.Generation)
 
 	return s, nil
@@ -433,7 +436,7 @@ func (r *HealthRunner) LocalState(identifier string) (HealthState, bool) {
 
 // checkBackend evaluates local light checks and owned deep checks for one backend.
 func (r *HealthRunner) checkBackend(ctx context.Context, candidate Backend) error {
-	if !candidate.Health.Enabled || candidate.Protocol != protocolIMAP {
+	if !candidate.Health.Enabled || !healthSupportedProtocol(candidate.Protocol) {
 		return nil
 	}
 
@@ -471,6 +474,16 @@ func (r *HealthRunner) checkBackend(ctx context.Context, candidate Backend) erro
 	return err
 }
 
+// healthSupportedProtocol reports whether a protocol has production health probes.
+func healthSupportedProtocol(protocol string) bool {
+	switch strings.ToLower(strings.TrimSpace(protocol)) {
+	case protocolIMAP, protocolLMTP:
+		return true
+	default:
+		return false
+	}
+}
+
 // storeLocal thresholds and stores one local health observation.
 func (r *HealthRunner) storeLocal(candidate Backend, result HealthCheckResult) HealthState {
 	now := time.Now().UTC()
@@ -486,6 +499,10 @@ func (r *HealthRunner) storeLocal(candidate Backend, result HealthCheckResult) H
 	}
 
 	state := tracker.Observe(result.Healthy, result.ReasonClass, now, r.config.StateTTL)
+	if result.Healthy {
+		state.Capabilities = result.Capabilities.Normalize()
+	}
+
 	previous := r.local[identifier]
 	r.local[identifier] = state
 	if previous.Status != state.Status {

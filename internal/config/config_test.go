@@ -114,6 +114,33 @@ func TestObservabilityValidationRejectsUnsupportedMetricsPath(t *testing.T) {
 	}
 }
 
+// TestGRPCCallerAuthValidationRejectsAmbiguousMethods verifies caller auth is fail-closed.
+func TestGRPCCallerAuthValidationRejectsAmbiguousMethods(t *testing.T) {
+	cfg := DefaultConfig()
+	authority := cfg.Auth.Authorities["default"]
+	authority.Transport = "grpc"
+	authority.GRPC.CallerAuth.Bearer.Enabled = true
+	authority.GRPC.CallerAuth.Bearer.TokenFile = Secret("bearer-token")
+	cfg.Auth.Authorities["default"] = authority
+
+	expectValidationError(t, cfg, "auth.authorities.default.grpc.caller_auth must enable only one caller auth method")
+}
+
+// TestGRPCCallerAuthValidationRequiresBasicUsername verifies basic caller auth is complete.
+func TestGRPCCallerAuthValidationRequiresBasicUsername(t *testing.T) {
+	cfg := DefaultConfig()
+	authority := cfg.Auth.Authorities["default"]
+	authority.Transport = "grpc"
+	authority.GRPC.CallerAuth.Basic.Username = ""
+	cfg.Auth.Authorities["default"] = authority
+
+	expectValidationError(
+		t,
+		cfg,
+		"auth.authorities.default.grpc.caller_auth.basic.username is required when basic caller auth is enabled",
+	)
+}
+
 // TestUnknownFieldsAreRejected verifies strict decode behavior for typo safety.
 func TestUnknownFieldsAreRejected(t *testing.T) {
 	path := writeConfigFile(t, t.TempDir(), "unknown.yaml", `runtime:
@@ -168,6 +195,9 @@ patch:
   - op: remove
     path: director.listeners.imap.imap.auth_mechanisms
     value: oauthbearer
+  - op: remove
+    path: director.listeners.imap.imap.capabilities
+    value: AUTH=OAUTHBEARER
   - op: replace
     path: observability.tracing.endpoint
     value: "literal-$${DIRECTOR_TEST_LITERAL}"
@@ -219,13 +249,171 @@ func TestIMAPValidationRejectsUnsupportedEnableCapability(t *testing.T) {
 	entry.IMAP.Capabilities = append(entry.IMAP.Capabilities, "ENABLE")
 	cfg.Director.Listeners["imap"] = entry
 
-	err := NewLoader().Validate(cfg)
-	if err == nil {
-		t.Fatal("Validate accepted unsupported IMAP ENABLE capability")
+	expectValidationError(t, cfg, "must not advertise unsupported ENABLE")
+}
+
+// TestIMAPValidationRejectsFalseCapabilityAdvertisements keeps IMAP capabilities policy-backed.
+func TestIMAPValidationRejectsFalseCapabilityAdvertisements(t *testing.T) {
+	t.Run("starttls on implicit listener", func(t *testing.T) {
+		cfg := DefaultConfig()
+		entry := cfg.Director.Listeners["imaps"]
+		entry.IMAP.Capabilities = append(entry.IMAP.Capabilities, "STARTTLS")
+		cfg.Director.Listeners["imaps"] = entry
+
+		expectValidationError(t, cfg, "STARTTLS for non-starttls listener TLS mode")
+	})
+
+	t.Run("auth mechanism not enabled", func(t *testing.T) {
+		cfg := DefaultConfig()
+		entry := cfg.Director.Listeners["imap"]
+		entry.IMAP.AuthMechanisms = []string{"plain"}
+		cfg.Director.Listeners["imap"] = entry
+
+		expectValidationError(t, cfg, "AUTH mechanism not enabled in auth_mechanisms XOAUTH2")
+	})
+}
+
+// TestLMTPValidationRejectsMissingProtocolConfig keeps LMTP listener config typed and explicit.
+func TestLMTPValidationRejectsMissingProtocolConfig(t *testing.T) {
+	cfg := DefaultConfig()
+	entry := cfg.Director.Listeners["lmtp"]
+	entry.LMTP = nil
+	cfg.Director.Listeners["lmtp"] = entry
+
+	expectValidationError(t, cfg, "director.listeners.lmtp.lmtp is required")
+}
+
+// TestListenerValidationRejectsUnsupportedProtocol keeps unknown listener protocols fail-closed.
+func TestListenerValidationRejectsUnsupportedProtocol(t *testing.T) {
+	cfg := DefaultConfig()
+	entry := cfg.Director.Listeners["lmtp"]
+	entry.Protocol = "pop3"
+	cfg.Director.Listeners["lmtp"] = entry
+
+	expectValidationError(t, cfg, "director.listeners.lmtp.protocol must be imap or lmtp")
+}
+
+// TestLMTPCapabilitiesNormalizeStableWireForms protects deterministic LHLO inputs.
+func TestLMTPCapabilitiesNormalizeStableWireForms(t *testing.T) {
+	cfg := DefaultConfig()
+	entry := cfg.Director.Listeners["lmtp"]
+	entry.LMTP.Capabilities = []string{" smtpUtf8 ", " auth   plain  xoauth2 ", "starttls", "AUTH PLAIN XOAUTH2"}
+	cfg.Director.Listeners["lmtp"] = entry
+
+	normalized := cfg.Normalize()
+	got := normalized.Director.Listeners["lmtp"].LMTP.Capabilities
+	want := []string{"SMTPUTF8", "AUTH PLAIN XOAUTH2", "STARTTLS"}
+
+	if !slices.Equal(got, want) {
+		t.Fatalf("LMTP capabilities = %v, want %v", got, want)
+	}
+}
+
+// TestLMTPValidationRejectsUnsupportedCapabilities keeps desired listener surface bounded.
+func TestLMTPValidationRejectsUnsupportedCapabilities(t *testing.T) {
+	cfg := DefaultConfig()
+	entry := cfg.Director.Listeners["lmtp"]
+	entry.LMTP.Capabilities = append(entry.LMTP.Capabilities, "PIPELINING")
+	cfg.Director.Listeners["lmtp"] = entry
+
+	expectValidationError(t, cfg, "contains unsupported capability PIPELINING")
+}
+
+// TestLMTPValidationAcceptsConfiguredChunking verifies validation allows mediated BDAT support.
+func TestLMTPValidationAcceptsConfiguredChunking(t *testing.T) {
+	cfg := DefaultConfig()
+	entry := cfg.Director.Listeners["lmtp"]
+	entry.LMTP.Capabilities = append(entry.LMTP.Capabilities, "CHUNKING")
+	cfg.Director.Listeners["lmtp"] = entry
+
+	if err := NewLoader().Validate(cfg); err != nil {
+		t.Fatalf("Validate returned error for configured CHUNKING: %v", err)
+	}
+}
+
+// TestLMTPStartTLSCapabilityMatchesListenerTLSMode rejects implicit TLS STARTTLS advertisement.
+func TestLMTPStartTLSCapabilityMatchesListenerTLSMode(t *testing.T) {
+	cfg := DefaultConfig()
+	entry := cfg.Director.Listeners["lmtps"]
+	entry.LMTP.Capabilities = append(entry.LMTP.Capabilities, "STARTTLS")
+	cfg.Director.Listeners["lmtps"] = entry
+
+	expectValidationError(t, cfg, "STARTTLS for non-starttls listener TLS mode")
+}
+
+// TestLMTPMTLSPeerAuthRequiresVerifiedClientCertificates prevents unauthenticated mTLS shortcuts.
+func TestLMTPMTLSPeerAuthRequiresVerifiedClientCertificates(t *testing.T) {
+	cfg := DefaultConfig()
+	entry := cfg.Director.Listeners["lmtp"]
+	entry.LMTP.ClientAuth.MTLS.SatisfiesRequired = true
+	entry.LMTP.ClientAuth.MTLS.IdentitySource = "subject_common_name"
+	entry.TLS.RequireClientCert = true
+	entry.TLS.ClientCA = ""
+	cfg.Director.Listeners["lmtp"] = entry
+
+	expectValidationError(t, cfg, "requires listener TLS to require and verify client certificates")
+}
+
+// TestLMTPMTLSPeerAuthRejectsUnsupportedIdentitySource keeps certificate identity mapping bounded.
+func TestLMTPMTLSPeerAuthRejectsUnsupportedIdentitySource(t *testing.T) {
+	cfg := DefaultConfig()
+	entry := cfg.Director.Listeners["lmtp"]
+	entry.LMTP.ClientAuth.MTLS.IdentitySource = "serial_number"
+	cfg.Director.Listeners["lmtp"] = entry
+
+	expectValidationError(t, cfg, "identity_source contains unsupported source serial_number")
+}
+
+// TestLMTPPoolValidationRejectsCrossProtocolBackends keeps LMTP pools internally typed.
+func TestLMTPPoolValidationRejectsCrossProtocolBackends(t *testing.T) {
+	cfg := DefaultConfig()
+	pool := cfg.Director.BackendPools["lmtp-default"]
+	pool.Backends = []string{"mailstore-a-imap"}
+	cfg.Director.BackendPools["lmtp-default"] = pool
+
+	expectValidationError(t, cfg, "backends references backend with different protocol mailstore-a-imap")
+}
+
+// TestLMTPBackendAuthValidationRejectsIncompleteSASLAndOAuth checks service credential completeness.
+func TestLMTPBackendAuthValidationRejectsIncompleteSASLAndOAuth(t *testing.T) {
+	t.Run("sasl", func(t *testing.T) {
+		cfg := DefaultConfig()
+		backend := cfg.Director.Backends["mailstore-a-lmtp"]
+		backend.Auth.SASL.Username = ""
+		cfg.Director.Backends["mailstore-a-lmtp"] = backend
+
+		expectValidationError(t, cfg, "auth.sasl.username is required in sasl mode")
+	})
+
+	t.Run("oauthbearer", func(t *testing.T) {
+		cfg := DefaultConfig()
+		backend := cfg.Director.Backends["mailstore-a-lmtp"]
+		backend.Auth.Mode = "oauthbearer"
+		backend.Auth.OAuthBearer.TokenFile = Secret("")
+		cfg.Director.Backends["mailstore-a-lmtp"] = backend
+
+		expectValidationError(t, cfg, "auth.oauthbearer.token_file is required in oauthbearer mode")
+	})
+}
+
+// TestConfigDumpRedactsLMTPProtectedValuesByDefault preserves protected metadata for LMTP paths.
+func TestConfigDumpRedactsLMTPProtectedValuesByDefault(t *testing.T) {
+	dump, err := NewLoader().DumpDefaults(DumpOptions{Format: "yaml"})
+	if err != nil {
+		t.Fatalf("DumpDefaults: %v", err)
 	}
 
-	if !strings.Contains(err.Error(), "must not advertise unsupported ENABLE") {
-		t.Fatalf("error = %q, want ENABLE validation", err.Error())
+	text := string(dump)
+	for _, secret := range []string{
+		"/etc/nauthilus-director/lmtp.key",
+		"/etc/nauthilus-director/lmtps.key",
+		"/etc/nauthilus-director/lmtp-backend-client.key",
+		"/etc/nauthilus-director/lmtp-backend-password",
+		"/etc/nauthilus-director/lmtp-backend-token",
+	} {
+		if strings.Contains(text, secret) {
+			t.Fatalf("default dump leaked protected LMTP value %q:\n%s", secret, text)
+		}
 	}
 }
 
@@ -498,6 +686,20 @@ func writeConfigFile(t *testing.T, root string, name string, content string) str
 	}
 
 	return path
+}
+
+// expectValidationError verifies typed config validation fails with a useful diagnostic.
+func expectValidationError(t *testing.T, cfg Config, want string) {
+	t.Helper()
+
+	err := NewLoader().Validate(cfg)
+	if err == nil {
+		t.Fatalf("Validate accepted config, want error containing %q", want)
+	}
+
+	if !strings.Contains(err.Error(), want) {
+		t.Fatalf("error = %q, want %q", err.Error(), want)
+	}
 }
 
 // containsString keeps slice assertions compact without pulling in another dependency.

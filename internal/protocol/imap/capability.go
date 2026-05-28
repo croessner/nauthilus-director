@@ -40,23 +40,52 @@ func (s *Session) handleCapability(command preauthCommand) error {
 
 // capabilities returns the implemented pre-auth capability set in stable wire order.
 func (s *Session) capabilities() []string {
-	capabilities := []string{capabilityIMAP4Rev1, capabilityID, capabilitySASLIR}
-	if s.startTLSAdvertised() {
-		capabilities = append(capabilities, capabilityStartTLS)
-	}
+	capabilities := make([]string, 0, len(s.context.Capabilities))
+	seen := make(map[string]struct{}, len(s.context.Capabilities))
 
-	for _, mechanism := range s.context.AuthMechanisms {
-		normalized := strings.ToUpper(strings.TrimSpace(mechanism))
-		if normalized == "" {
+	for _, configured := range s.context.Capabilities {
+		capability := s.effectiveCapability(configured)
+		if capability == "" {
 			continue
 		}
 
-		if supportedPreauthAuthMechanism(normalized) {
-			capabilities = append(capabilities, "AUTH="+normalized)
+		key := strings.ToUpper(capability)
+		if _, exists := seen[key]; exists {
+			continue
 		}
+
+		seen[key] = struct{}{}
+
+		capabilities = append(capabilities, capability)
 	}
 
 	return capabilities
+}
+
+// effectiveCapability returns one configured capability only when safe now.
+func (s *Session) effectiveCapability(configured string) string {
+	normalized := strings.ToUpper(strings.TrimSpace(configured))
+	switch {
+	case normalized == "IMAP4REV1":
+		return capabilityIMAP4Rev1
+	case normalized == capabilityID:
+		return capabilityID
+	case normalized == capabilitySASLIR:
+		return capabilitySASLIR
+	case normalized == capabilityStartTLS:
+		if s.startTLSPermitted() {
+			return capabilityStartTLS
+		}
+
+		return ""
+	case strings.HasPrefix(normalized, "AUTH="):
+		mechanism := strings.TrimPrefix(normalized, "AUTH=")
+		if supportedPreauthAuthMechanism(mechanism) && s.supportsAuthMechanism(mechanism) {
+			return "AUTH=" + strings.ToUpper(mechanism)
+		}
+	}
+
+	return ""
 }
 
 // supportedPreauthAuthMechanism reports whether command handling accepts the mechanism shape.
@@ -67,4 +96,39 @@ func supportedPreauthAuthMechanism(mechanism string) bool {
 	default:
 		return false
 	}
+}
+
+// configuredCapability reports whether the listener configured a capability token.
+func (s *Session) configuredCapability(capability string) bool {
+	normalized := strings.ToUpper(strings.TrimSpace(capability))
+	for _, configured := range s.context.Capabilities {
+		if strings.ToUpper(strings.TrimSpace(configured)) == normalized {
+			return true
+		}
+	}
+
+	return false
+}
+
+// authMechanismAdvertised reports whether AUTHENTICATE may use a mechanism now.
+func (s *Session) authMechanismAdvertised(mechanism string) bool {
+	normalized := "AUTH=" + strings.ToUpper(strings.TrimSpace(mechanism))
+	for _, capability := range s.capabilities() {
+		if strings.ToUpper(capability) == normalized {
+			return true
+		}
+	}
+
+	return false
+}
+
+// saslIRAdvertised reports whether initial responses are enabled for AUTHENTICATE.
+func (s *Session) saslIRAdvertised() bool {
+	for _, capability := range s.capabilities() {
+		if strings.EqualFold(capability, capabilitySASLIR) {
+			return true
+		}
+	}
+
+	return false
 }

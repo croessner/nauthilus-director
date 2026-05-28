@@ -23,11 +23,21 @@ import (
 
 	"github.com/croessner/nauthilus-director/internal/backend"
 	"github.com/croessner/nauthilus-director/internal/observability"
+	"github.com/croessner/nauthilus-director/internal/protocol/lmtp"
 	"github.com/croessner/nauthilus-director/internal/routing"
 	"github.com/croessner/nauthilus-director/internal/state"
 )
 
 const operationRouteLookup = "route_lookup"
+
+const (
+	routeLookupIdentityActiveAffinity = "active_affinity"
+	routeLookupIdentityCallerSupplied = "caller_supplied"
+	routeLookupIdentityNauthilus      = "nauthilus_lookup"
+	routeLookupIdentityNotApplicable  = "not_applicable"
+	routeLookupIdentityMethod         = "recipient_lookup"
+	routeLookupProtocolLMTP           = "lmtp"
+)
 
 // RouteLookupRequest describes a side-effect-free route diagnostic request.
 type RouteLookupRequest struct {
@@ -38,6 +48,7 @@ type RouteLookupRequest struct {
 	ClientIP        string
 	Tenant          string
 	AccountKey      string
+	Recipient       string
 	RequestedShard  string
 	IncludeAffinity bool
 	Attributes      map[string][]string
@@ -96,12 +107,41 @@ type RouteLookupEffects struct {
 	MaxConnections  bool
 }
 
+// RouteLookupIdentityState describes how account facts were obtained.
+type RouteLookupIdentityState struct {
+	Source          string
+	Authoritative   bool
+	NauthilusUsed   bool
+	AccountResolved bool
+}
+
+// RouteLookupIdentityLookuper resolves LMTP recipients without credential authentication.
+type RouteLookupIdentityLookuper interface {
+	LookupRouteIdentity(ctx context.Context, request RouteLookupIdentityLookupRequest) (RouteLookupIdentityLookupResult, error)
+}
+
+// RouteLookupIdentityLookupRequest carries secret-free identity lookup context.
+type RouteLookupIdentityLookupRequest struct {
+	Username string
+	ClientIP string
+	Protocol string
+	Method   string
+}
+
+// RouteLookupIdentityLookupResult carries canonical account facts for route lookup.
+type RouteLookupIdentityLookupResult struct {
+	Authenticated bool
+	Account       string
+	Attributes    map[string][]string
+}
+
 // RouteLookupResponse describes the read-only route lookup outcome.
 type RouteLookupResponse struct {
 	Routing         RouteLookupRoutingState
 	Affinity        RouteLookupAffinityState
 	Backends        []RouteLookupBackendState
 	Effects         RouteLookupEffects
+	Identity        RouteLookupIdentityState
 	SelectedBackend string
 	FailClosed      bool
 	ReasonClass     string
@@ -113,6 +153,7 @@ type RouteLookupServiceOptions struct {
 	Selector         backend.Selector
 	BackendRead      *BackendReadService
 	AffinityRead     state.AffinityStore
+	IdentityLookup   RouteLookupIdentityLookuper
 	ListenerContexts []RouteLookupListenerContext
 	DefaultPool      string
 	DefaultShard     string
@@ -126,6 +167,7 @@ type RouteLookupService struct {
 	selector         backend.Selector
 	backendRead      *BackendReadService
 	affinityRead     state.AffinityStore
+	identityLookup   RouteLookupIdentityLookuper
 	listenerContexts map[string]RouteLookupListenerContext
 	defaultPool      string
 	defaultShard     string
@@ -152,6 +194,7 @@ func NewRouteLookupService(options RouteLookupServiceOptions) (*RouteLookupServi
 		selector:         options.Selector,
 		backendRead:      options.BackendRead,
 		affinityRead:     options.AffinityRead,
+		identityLookup:   options.IdentityLookup,
 		listenerContexts: routeLookupListenerContexts(options.ListenerContexts),
 		defaultPool:      strings.TrimSpace(options.DefaultPool),
 		defaultShard:     strings.TrimSpace(options.DefaultShard),
@@ -169,6 +212,7 @@ func (r RouteLookupRequest) Normalize() RouteLookupRequest {
 	r.ClientIP = strings.TrimSpace(r.ClientIP)
 	r.Tenant = strings.TrimSpace(r.Tenant)
 	r.AccountKey = strings.TrimSpace(r.AccountKey)
+	r.Recipient = strings.TrimSpace(r.Recipient)
 	r.RequestedShard = strings.TrimSpace(r.RequestedShard)
 	r.Attributes = cloneAttributes(r.Attributes)
 
@@ -185,6 +229,13 @@ func (s *RouteLookupService) Lookup(ctx context.Context, request RouteLookupRequ
 	request = request.Normalize()
 	if err := s.applyDefaults(&request); err != nil {
 		s.recordRouteLookup(ctx, request, runtimeObservationResultFailure, "invalid_request", RouteLookupResponse{}, time.Since(started))
+
+		return RouteLookupResponse{}, err
+	}
+
+	identity, err := s.resolveLookupIdentity(ctx, &request)
+	if err != nil {
+		s.recordRouteLookup(ctx, request, runtimeObservationResultFailure, "identity", RouteLookupResponse{}, time.Since(started))
 
 		return RouteLookupResponse{}, err
 	}
@@ -213,6 +264,7 @@ func (s *RouteLookupService) Lookup(ctx context.Context, request RouteLookupRequ
 	explanation, err := s.explainSelection(ctx, selectionRequest)
 
 	response := routeLookupResponse(routingResult, affinity, explanation, request, selectionRequest, usedDefaultShard)
+	response.Identity = identity
 
 	if err != nil {
 		if backend.IsErrorKind(err, backend.ErrorKindNoBackend) {
@@ -306,10 +358,6 @@ func (s *RouteLookupService) applyDefaults(request *RouteLookupRequest) error {
 		return newRuntimeError(ErrorKindInvalidRequest, operationRouteLookup, "protocol required")
 	}
 
-	if request.AccountKey == "" {
-		return newRuntimeError(ErrorKindInvalidRequest, operationRouteLookup, "account key required")
-	}
-
 	if request.Tenant == "" {
 		request.Tenant = s.defaultTenant
 	}
@@ -327,6 +375,92 @@ func (s *RouteLookupService) applyDefaults(request *RouteLookupRequest) error {
 	}
 
 	return nil
+}
+
+// resolveLookupIdentity resolves optional LMTP recipient input before routing.
+func (s *RouteLookupService) resolveLookupIdentity(ctx context.Context, request *RouteLookupRequest) (RouteLookupIdentityState, error) {
+	if request.AccountKey != "" {
+		return RouteLookupIdentityState{
+			Source:          routeLookupIdentityCallerSupplied,
+			Authoritative:   true,
+			AccountResolved: true,
+		}, nil
+	}
+
+	if request.Protocol != routeLookupProtocolLMTP || request.Recipient == "" {
+		return RouteLookupIdentityState{Source: routeLookupIdentityNotApplicable}, newRuntimeError(ErrorKindInvalidRequest, operationRouteLookup, "account key required")
+	}
+
+	recipient, err := lmtp.ParseRecipientInput(request.Recipient)
+	if err != nil {
+		return RouteLookupIdentityState{Source: routeLookupIdentityNotApplicable}, newRuntimeError(ErrorKindInvalidRequest, operationRouteLookup, "recipient invalid")
+	}
+
+	if identity := s.resolveIdentityFromActiveAffinity(ctx, request, recipient.LookupName); identity.AccountResolved {
+		return identity, nil
+	}
+
+	if s.identityLookup == nil {
+		return RouteLookupIdentityState{Source: routeLookupIdentityNotApplicable}, newRuntimeError(ErrorKindUnavailable, operationRouteLookup, "identity lookup required")
+	}
+
+	result, err := s.identityLookup.LookupRouteIdentity(ctx, RouteLookupIdentityLookupRequest{
+		Username: recipient.LookupName,
+		ClientIP: request.ClientIP,
+		Protocol: request.Protocol,
+		Method:   routeLookupIdentityMethod,
+	})
+	if err != nil {
+		return RouteLookupIdentityState{Source: routeLookupIdentityNauthilus, NauthilusUsed: true}, err
+	}
+
+	if !result.Authenticated || strings.TrimSpace(result.Account) == "" {
+		return RouteLookupIdentityState{Source: routeLookupIdentityNauthilus, NauthilusUsed: true}, newRuntimeError(ErrorKindUnavailable, operationRouteLookup, "identity lookup failed")
+	}
+
+	request.AccountKey = strings.ToLower(strings.TrimSpace(result.Account))
+	request.Attributes = mergeLookupAttributes(result.Attributes, request.Attributes)
+
+	return RouteLookupIdentityState{
+		Source:          routeLookupIdentityNauthilus,
+		Authoritative:   true,
+		NauthilusUsed:   true,
+		AccountResolved: true,
+	}, nil
+}
+
+// resolveIdentityFromActiveAffinity uses an existing active pin before external lookup.
+func (s *RouteLookupService) resolveIdentityFromActiveAffinity(
+	ctx context.Context,
+	request *RouteLookupRequest,
+	lookupName string,
+) RouteLookupIdentityState {
+	if s.affinityRead == nil {
+		return RouteLookupIdentityState{Source: routeLookupIdentityNotApplicable}
+	}
+
+	accountKey := strings.ToLower(strings.TrimSpace(lookupName))
+	if accountKey == "" {
+		return RouteLookupIdentityState{Source: routeLookupIdentityNotApplicable}
+	}
+
+	record, err := s.affinityRead.LookupAffinity(ctx, state.AffinityKey{
+		Tenant:     request.Tenant,
+		AccountKey: accountKey,
+	})
+	if err != nil || !record.Present || record.ActiveSessionCount <= 0 || strings.TrimSpace(record.ShardTag) == "" {
+		return RouteLookupIdentityState{Source: routeLookupIdentityNotApplicable}
+	}
+
+	request.AccountKey = accountKey
+	request.IncludeAffinity = true
+
+	return RouteLookupIdentityState{
+		Source:          routeLookupIdentityActiveAffinity,
+		Authoritative:   false,
+		NauthilusUsed:   false,
+		AccountResolved: true,
+	}
 }
 
 // applyListenerDefaults merges immutable listener context into the lookup request.
@@ -542,6 +676,24 @@ func cloneAttributes(attributes map[string][]string) map[string][]string {
 	}
 
 	return cloned
+}
+
+// mergeLookupAttributes combines authority facts with caller-supplied safe diagnostics.
+func mergeLookupAttributes(authority map[string][]string, caller map[string][]string) map[string][]string {
+	merged := cloneAttributes(authority)
+	if len(caller) == 0 {
+		return merged
+	}
+
+	if merged == nil {
+		merged = make(map[string][]string, len(caller))
+	}
+
+	for key, values := range caller {
+		merged[key] = append([]string(nil), values...)
+	}
+
+	return merged
 }
 
 // recordRouteLookup emits one side-effect-free lookup observation.

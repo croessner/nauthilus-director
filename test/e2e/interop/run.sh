@@ -125,6 +125,7 @@ start_dovecot() {
 			--pull=missing \
 			--hostname "nauthilus-director-e2e-dovecot-${name//_/-}" \
 			--publish '127.0.0.1::31143' \
+			--publish '127.0.0.1::31024' \
 			--env "USER_PASSWORD=${interop_password}" \
 			"$dovecot_image" 2>/dev/null
 	)" || return 1
@@ -170,11 +171,23 @@ wait_mapped_dovecot() {
 }
 
 declare -A mapped_by_name=()
+declare -A mapped_lmtp_by_name=()
 for name in "${container_names[@]}"; do
 	mapped_by_name["$name"]="$(wait_mapped_dovecot "${container_by_name[$name]}")" || {
 		printf 'FAIL e2e-interop: Dovecot container %s did not become IMAP-login ready on port 31143\n' "$name" >&2
 		exit 1
 	}
+	for _ in {1..80}; do
+		mapped_lmtp_by_name["$name"]="$("$docker_cmd" port "${container_by_name[$name]}" 31024/tcp 2>/dev/null | head -n 1 || true)"
+		if [[ -n "${mapped_lmtp_by_name[$name]}" ]]; then
+			break
+		fi
+		sleep 0.25
+	done
+	if [[ -z "${mapped_lmtp_by_name[$name]}" ]]; then
+		printf 'FAIL e2e-interop: Dovecot container %s did not map LMTP port 31024\n' "$name" >&2
+		exit 1
+	fi
 done
 
 printf 'nauthilus-director e2e-interop: Dovecot IMAP backends mapped as default=(%s,%s), test_shard1=(%s,%s), test_shard2=(%s,%s)\n' \
@@ -184,6 +197,9 @@ printf 'nauthilus-director e2e-interop: Dovecot IMAP backends mapped as default=
 	"${mapped_by_name[shard1_b]}" \
 	"${mapped_by_name[shard2_a]}" \
 	"${mapped_by_name[shard2_b]}"
+printf 'nauthilus-director e2e-interop: Dovecot LMTP backends mapped as default=(%s,%s)\n' \
+	"${mapped_lmtp_by_name[default_a]}" \
+	"${mapped_lmtp_by_name[default_b]}"
 
 if ! "$docker_cmd" exec "${container_by_name[default_a]}" doveadm who >/dev/null 2>&1; then
 	printf 'nauthilus-director e2e-interop: doveadm who is unavailable; backend identity proof will use Director state only\n'
@@ -194,6 +210,8 @@ fi
 NAUTHILUS_DIRECTOR_INTEROP_BACKEND_ADDR="${mapped_by_name[default_a]}" \
 	NAUTHILUS_DIRECTOR_INTEROP_DEFAULT_A_ADDR="${mapped_by_name[default_a]}" \
 	NAUTHILUS_DIRECTOR_INTEROP_DEFAULT_B_ADDR="${mapped_by_name[default_b]}" \
+	NAUTHILUS_DIRECTOR_INTEROP_DEFAULT_A_LMTP_ADDR="${mapped_lmtp_by_name[default_a]}" \
+	NAUTHILUS_DIRECTOR_INTEROP_DEFAULT_B_LMTP_ADDR="${mapped_lmtp_by_name[default_b]}" \
 	NAUTHILUS_DIRECTOR_INTEROP_SHARD1_A_ADDR="${mapped_by_name[shard1_a]}" \
 	NAUTHILUS_DIRECTOR_INTEROP_SHARD1_B_ADDR="${mapped_by_name[shard1_b]}" \
 	NAUTHILUS_DIRECTOR_INTEROP_SHARD2_A_ADDR="${mapped_by_name[shard2_a]}" \
@@ -206,6 +224,6 @@ NAUTHILUS_DIRECTOR_INTEROP_BACKEND_ADDR="${mapped_by_name[default_a]}" \
 	NAUTHILUS_DIRECTOR_INTEROP_SHARD2_A_CONTAINER="${container_by_name[shard2_a]}" \
 	NAUTHILUS_DIRECTOR_INTEROP_SHARD2_B_CONTAINER="${container_by_name[shard2_b]}" \
 	NAUTHILUS_DIRECTOR_E2E_SERVER_BINARY="$tmpdir/nauthilus-director" \
-	"$go_cmd" test -mod=vendor -tags=interop -count=1 -run 'TestDovecot(CredentialReplayInterop|ClusterRuntimeInterop)' ./test/e2e
+	"$go_cmd" test -mod=vendor -tags=interop -count=1 -run 'TestDovecot(CredentialReplayInterop|ClusterRuntimeInterop|LMTPInterop)' ./test/e2e
 
-printf 'ok e2e-interop: real server binary, six Dovecot backends, health ownership, cluster affinity and runtime control passed\n'
+printf 'ok e2e-interop: real server binary, six Dovecot IMAP backends, Dovecot LMTP backend, swaks-to-Postfix submitter, curl IMAP delivery proof, health ownership, cluster affinity and runtime control passed\n'

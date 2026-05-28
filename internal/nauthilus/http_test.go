@@ -48,7 +48,7 @@ func TestHTTPAuthenticateSendsStrictNauthilusJSON(t *testing.T) {
 		assertFieldAbsent(t, captured, "service")
 
 		writer.Header().Set("Content-Type", defaultHTTPContentType)
-		_, _ = writer.Write([]byte(`{"ok":true,"account_field":"alice","backend":7,"attributes":{"tenant":["blue"]}}`))
+		_, _ = writer.Write([]byte(`{"ok":true,"account_field":"uid","backend":7,"attributes":{"uid":["alice"],"tenant":["blue"]}}`))
 	}))
 	defer server.Close()
 
@@ -88,7 +88,7 @@ func TestHTTPLookupIdentityUsesNoAuthMode(t *testing.T) {
 		assertForbiddenDirectorFieldsAbsent(t, captured)
 
 		writer.Header().Set("Content-Type", defaultHTTPContentType)
-		_, _ = writer.Write([]byte(`{"ok":true,"account_field":"lookup-account","attributes":{"shard":["s1"]}}`))
+		_, _ = writer.Write([]byte(`{"ok":true,"account_field":"mail","attributes":{"mail":["lookup-account"],"shard":["s1"]}}`))
 	}))
 	defer server.Close()
 
@@ -154,6 +154,8 @@ func TestHTTPAuthorityOutcomeClassification(t *testing.T) {
 		{name: "tempfail status", statusCode: http.StatusInternalServerError, body: `null`, want: DecisionTemporaryFailure, wantKind: ErrorKindTemporaryFailure},
 		{name: "malformed json", statusCode: http.StatusOK, body: `{`, want: DecisionTemporaryFailure, wantKind: ErrorKindMalformedResponse},
 		{name: "missing account", statusCode: http.StatusOK, body: `{"ok":true}`, want: DecisionTemporaryFailure, wantKind: ErrorKindMalformedResponse},
+		{name: "missing account attribute", statusCode: http.StatusOK, body: `{"ok":true,"account_field":"uid","attributes":{"mail":["alice"]}}`, want: DecisionTemporaryFailure, wantKind: ErrorKindMalformedResponse},
+		{name: "ambiguous account attribute", statusCode: http.StatusOK, body: `{"ok":true,"account_field":"uid","attributes":{"uid":["alice","alice@example.test"]}}`, want: DecisionTemporaryFailure, wantKind: ErrorKindMalformedResponse},
 	}
 
 	for _, testCase := range cases {

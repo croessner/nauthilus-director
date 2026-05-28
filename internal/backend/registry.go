@@ -24,6 +24,7 @@ import (
 	"net/netip"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/croessner/nauthilus-director/internal/config"
 )
@@ -60,6 +61,8 @@ type AuthConfig struct {
 	Mode             string
 	MasterUser       MasterUserConfig
 	CredentialReplay CredentialReplayConfig
+	SASL             SASLConfig
+	OAuthBearer      OAuthBearerConfig
 }
 
 // MasterUserConfig contains the configured administrative IMAP login identity.
@@ -75,6 +78,20 @@ type CredentialReplayConfig struct {
 	RequireBackendTLS bool
 	PreserveMechanism bool
 	AllowedMechanisms []string
+}
+
+// SASLConfig contains LMTP director-to-backend service credentials.
+type SASLConfig struct {
+	Mechanism  string
+	Username   string
+	Password   config.SecretString
+	RequireTLS bool
+}
+
+// OAuthBearerConfig contains LMTP director-to-backend bearer token material.
+type OAuthBearerConfig struct {
+	Token      config.SecretString
+	RequireTLS bool
 }
 
 // HealthConfig describes the credentialed backend health-check policy.
@@ -169,6 +186,7 @@ func IsErrorKind(err error, kind ErrorKind) bool {
 
 // StaticRegistry indexes backend config by protocol, pool and shard.
 type StaticRegistry struct {
+	mu       sync.RWMutex
 	pools    map[string]Pool
 	backends map[string]Backend
 	byShard  map[registryKey][]Backend
@@ -182,6 +200,32 @@ type registryKey struct {
 
 // NewStaticRegistry builds a fail-closed static backend registry from typed config.
 func NewStaticRegistry(director config.DirectorConfig) (*StaticRegistry, error) {
+	return buildStaticRegistry(director)
+}
+
+// Reload replaces the immutable backend snapshot used by new selections.
+func (r *StaticRegistry) Reload(director config.DirectorConfig) error {
+	if r == nil {
+		return newBackendError(ErrorKindConfig, "registry", "registry unavailable", nil)
+	}
+
+	next, err := buildStaticRegistry(director)
+	if err != nil {
+		return err
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.pools = next.pools
+	r.backends = next.backends
+	r.byShard = next.byShard
+
+	return nil
+}
+
+// buildStaticRegistry builds a detached registry snapshot from typed config.
+func buildStaticRegistry(director config.DirectorConfig) (*StaticRegistry, error) {
 	director = director.Normalize()
 
 	registry := &StaticRegistry{
@@ -242,6 +286,9 @@ func (r *StaticRegistry) AllBackends(_ context.Context) ([]Backend, error) {
 		return nil, newBackendError(ErrorKindConfig, "registry", "registry unavailable", nil)
 	}
 
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
 	identifiers := make([]string, 0, len(r.backends))
 	for identifier := range r.backends {
 		identifiers = append(identifiers, identifier)
@@ -268,6 +315,9 @@ func (r *StaticRegistry) BackendsForShard(_ context.Context, request RegistryReq
 		return nil, err
 	}
 
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
 	backends, ok := r.byShard[key]
 	if !ok {
 		return nil, newBackendError(ErrorKindNoBackend, "registry", "no backend for shard", nil)
@@ -287,6 +337,9 @@ func (r *StaticRegistry) Lookup(_ context.Context, identifier string) (Backend, 
 		return Backend{}, newBackendError(ErrorKindInvalidRequest, "registry", "backend identifier required", nil)
 	}
 
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
 	backend, ok := r.backends[identifier]
 	if !ok {
 		return Backend{}, newBackendError(ErrorKindNoBackend, "registry", "backend not found", nil)
@@ -305,6 +358,9 @@ func (r *StaticRegistry) Pool(_ context.Context, name string) (Pool, error) {
 	if name == "" {
 		return Pool{}, newBackendError(ErrorKindInvalidRequest, "registry", "backend pool required", nil)
 	}
+
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 
 	pool, ok := r.pools[name]
 	if !ok {
@@ -532,6 +588,16 @@ func newBackendAuthConfig(auth config.BackendAuthConfig) AuthConfig {
 			RequireBackendTLS: auth.CredentialReplay.RequireBackendTLS,
 			PreserveMechanism: auth.CredentialReplay.PreserveMechanism,
 			AllowedMechanisms: normalizeMechanisms(auth.CredentialReplay.AllowedMechanisms),
+		},
+		SASL: SASLConfig{
+			Mechanism:  strings.ToLower(strings.TrimSpace(auth.SASL.Mechanism)),
+			Username:   strings.TrimSpace(auth.SASL.Username),
+			Password:   auth.SASL.PasswordFile,
+			RequireTLS: auth.SASL.RequireTLS,
+		},
+		OAuthBearer: OAuthBearerConfig{
+			Token:      auth.OAuthBearer.TokenFile,
+			RequireTLS: auth.OAuthBearer.RequireTLS,
 		},
 	}
 }

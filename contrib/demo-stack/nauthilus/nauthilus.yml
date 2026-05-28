@@ -1,0 +1,95 @@
+# Copyright (C) 2026 Christian Rößner
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
+runtime:
+  instance_name: nauthilus-director-demo
+  servers:
+    http:
+      address: "0.0.0.0:8080"
+      http3: false
+    grpc:
+      authority:
+        enabled: true
+        address: "0.0.0.0:50051"
+        tls:
+          enabled: true
+          cert: /run/nauthilus-demo/grpc-tls/server.crt
+          key: /run/nauthilus-demo/grpc-tls/server.key
+          client_ca: ""
+          require_client_cert: false
+          min_tls_version: TLS1.2
+
+observability:
+  log:
+    level: info
+    json: true
+    add_source: false
+    debug_modules: []
+
+storage:
+  redis:
+    primary:
+      address: "valkey:6379"
+    database_number: 1
+    prefix: "nauthilus:"
+    pool_size: 16
+    idle_pool_size: 4
+    positive_cache_ttl: 1h
+    negative_cache_ttl: 15m
+    password_nonce: "demo-password-nonce-2026"
+    encryption_secret: "demo-encryption-secret-2026"
+
+auth:
+  backchannel:
+    basic_auth:
+      enabled: true
+      username: director
+      password: director-api-secret
+
+  pipeline:
+    max_concurrent_requests: 64
+    max_login_attempts: 1
+    local_cache_ttl: 5m
+
+  backends:
+    order:
+      - cache
+      - ldap
+
+    ldap:
+      default:
+        server_uri:
+          - "ldap://openldap:389"
+        bind_dn: "cn=admin,dc=demo,dc=local"
+        bind_pw: "admin"
+        lookup_pool_size: 5
+        lookup_idle_pool_size: 2
+        auth_pool_size: 5
+        auth_idle_pool_size: 2
+
+      search:
+        - protocol:
+            - imap
+            - lmtp
+          cache_name: ldap
+          base_dn: "ou=people,dc=demo,dc=local"
+          filter:
+            user: "(|(mail=%s)(uid=%s))"
+            list_accounts: "(mail=*)"
+          mapping:
+            account_field: mail
+            display_name_field: cn
+            unique_user_id_field: uid
+          attribute:
+            - uid
+            - cn
+            - mail
+            - mailShard
+
+  policy:
+    attribute_sources:
+      lua:
+        environment:
+          - name: director_context
+            script_path: /etc/nauthilus/lua/environment/director_context.lua

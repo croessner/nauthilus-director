@@ -23,12 +23,36 @@ const (
 	EventListenerStart = "listener.start"
 	// EventListenerStop records a frontend listener shutdown.
 	EventListenerStop = "listener.stop"
+	// EventListenerInventory records a listener runtime inventory read.
+	EventListenerInventory = "listener.inventory"
+	// EventListenerDrain records a listener runtime drain request.
+	EventListenerDrain = "listener.drain"
+	// EventListenerResume records a listener runtime resume request.
+	EventListenerResume = "listener.resume"
+	// EventListenerOperationFailure records classified listener runtime failures.
+	EventListenerOperationFailure = "listener.operation.failure"
 	// EventSessionStart records an accepted frontend protocol session.
 	EventSessionStart = "session.start"
 	// EventSessionEnd records the terminal frontend protocol session outcome.
 	EventSessionEnd = "session.end"
 	// EventIMAPPreAuth records pre-auth IMAP command handling.
 	EventIMAPPreAuth = "imap.pre_auth"
+	// EventLMTPBDATStream records LMTP BDAT chunk and completion outcomes.
+	EventLMTPBDATStream = "lmtp.bdat_stream"
+	// EventLMTPBackendStatus records bounded backend status classes for LMTP delivery.
+	EventLMTPBackendStatus = "lmtp.backend_status"
+	// EventLMTPCommand records LMTP command handling without transcript content.
+	EventLMTPCommand = "lmtp.command"
+	// EventLMTPDataStream records LMTP DATA forwarding outcomes.
+	EventLMTPDataStream = "lmtp.data_stream"
+	// EventLMTPRecipientRoute records per-recipient routing decisions.
+	EventLMTPRecipientRoute = "lmtp.recipient_route"
+	// EventLMTPRecipientStatus records per-recipient frontend status classes.
+	EventLMTPRecipientStatus = "lmtp.recipient_status"
+	// EventLMTPSameBackendPolicy records same-backend transaction policy failures.
+	EventLMTPSameBackendPolicy = "lmtp.same_backend_policy"
+	// EventLMTPTransaction records LMTP transaction lifecycle outcomes.
+	EventLMTPTransaction = "lmtp.transaction"
 	// EventProxyProtocol records listener PROXY protocol handling.
 	EventProxyProtocol = "listener.proxy_protocol"
 	// EventNauthilusAuth records one Nauthilus authentication request outcome.
@@ -134,6 +158,10 @@ func RuntimeEventNames() []string {
 		EventBackendRuntimeOperation,
 		EventBackendMaintenanceOperation,
 		EventBackendDrain,
+		EventListenerInventory,
+		EventListenerDrain,
+		EventListenerResume,
+		EventListenerOperationFailure,
 		EventSelectorExclusion,
 		EventSessionAttach,
 		EventSessionClose,

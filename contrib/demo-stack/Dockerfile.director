@@ -1,0 +1,44 @@
+# syntax=docker/dockerfile:1.7
+#
+# Copyright (C) 2026 Christian Rößner
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
+ARG GO_IMAGE=golang:1.26-alpine3.23
+ARG RUNTIME_IMAGE=alpine:3.23
+
+FROM ${GO_IMAGE} AS builder
+
+ARG VERSION=demo
+
+WORKDIR /src
+
+COPY go.mod go.sum ./
+COPY vendor ./vendor
+COPY cmd ./cmd
+COPY internal ./internal
+
+RUN go build -mod=vendor -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/nauthilus-director ./cmd/nauthilus-director
+RUN go build -mod=vendor -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/nauthilus-directorctl ./cmd/nauthilus-directorctl
+
+FROM ${RUNTIME_IMAGE}
+
+RUN apk add --no-cache ca-certificates openssl tzdata \
+    && addgroup -S director \
+    && adduser -S -D -H -G director director \
+    && mkdir -p /run/nauthilus-director/tls \
+    && chown -R director:director /run/nauthilus-director
+
+COPY --from=builder /out/nauthilus-director /usr/local/bin/nauthilus-director
+COPY --from=builder /out/nauthilus-directorctl /usr/local/bin/nauthilus-directorctl
+COPY contrib/demo-stack/director/entrypoint.sh /usr/local/bin/director-entrypoint.sh
+COPY contrib/demo-stack/tls/generate-grpc-tls.sh /usr/local/bin/generate-grpc-tls.sh
+
+RUN chmod 0755 /usr/local/bin/nauthilus-director /usr/local/bin/nauthilus-directorctl /usr/local/bin/director-entrypoint.sh /usr/local/bin/generate-grpc-tls.sh
+
+USER director:director
+
+EXPOSE 9090 10143 10993 11024
+
+ENTRYPOINT ["/usr/local/bin/director-entrypoint.sh"]
+CMD ["-config", "/etc/nauthilus-director/nauthilus-director.yml", "serve"]

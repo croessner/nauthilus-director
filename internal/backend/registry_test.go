@@ -26,14 +26,15 @@ import (
 )
 
 const (
-	testAccountKey    = "alice@example.test"
-	testBackendID     = "mailstore-a-imap"
-	testBackendIDLMTP = "mailstore-a-lmtp"
-	testPoolIMAP      = "imap-default"
-	testPoolLMTP      = "lmtp-default"
-	testProtocolLMTP  = "lmtp"
-	testShardTag      = "mailstore-a"
-	testTenant        = "default"
+	testAccountKey     = "alice@example.test"
+	testBackendID      = "mailstore-a-imap"
+	testBackendIDLMTP  = "mailstore-a-lmtp"
+	testBackendIDBLMTP = "mailstore-b-lmtp"
+	testPoolIMAP       = "imap-default"
+	testPoolLMTP       = "lmtp-default"
+	testProtocolLMTP   = "lmtp"
+	testShardTag       = "mailstore-a"
+	testTenant         = "default"
 )
 
 // TestStaticRegistryIndexesByProtocolPoolAndShard verifies config-backed backend lookup.
@@ -135,15 +136,23 @@ func TestStaticSelectorEnforcesListenerBackendPool(t *testing.T) {
 		t.Fatalf("Select error = %v, want ambiguous", err)
 	}
 
-	_, err = selector.Select(context.Background(), SelectionRequest{
+	result, err := selector.Select(context.Background(), SelectionRequest{
 		AccountKey:  testAccountKey,
 		Tenant:      testTenant,
 		ShardTag:    testShardTag,
 		Protocol:    testProtocolLMTP,
 		BackendPool: testPoolLMTP,
 	})
-	if !IsErrorKind(err, ErrorKindInvalidRequest) {
-		t.Fatalf("Select error = %v, want invalid_request", err)
+	if err != nil {
+		t.Fatalf("LMTP Select returned error: %v", err)
+	}
+
+	if result.Backend.Identifier != testBackendIDLMTP {
+		t.Fatalf("LMTP selected backend = %q, want %q", result.Backend.Identifier, testBackendIDLMTP)
+	}
+
+	if result.Backend.Auth.SASL.Username == "" || result.Backend.Auth.OAuthBearer.Token.IsZero() {
+		t.Fatalf("LMTP backend auth fields were not copied: %#v", result.Backend.Auth)
 	}
 }
 

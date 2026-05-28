@@ -46,6 +46,8 @@ const interopBackendAddressEnv = "NAUTHILUS_DIRECTOR_INTEROP_BACKEND_ADDR"
 const (
 	interopDefaultAAddressEnv       = "NAUTHILUS_DIRECTOR_INTEROP_DEFAULT_A_ADDR"
 	interopDefaultBAddressEnv       = "NAUTHILUS_DIRECTOR_INTEROP_DEFAULT_B_ADDR"
+	interopDefaultALMTPAddressEnv   = "NAUTHILUS_DIRECTOR_INTEROP_DEFAULT_A_LMTP_ADDR"
+	interopDefaultBLMTPAddressEnv   = "NAUTHILUS_DIRECTOR_INTEROP_DEFAULT_B_LMTP_ADDR"
 	interopShard1AAddressEnv        = "NAUTHILUS_DIRECTOR_INTEROP_SHARD1_A_ADDR"
 	interopShard1BAddressEnv        = "NAUTHILUS_DIRECTOR_INTEROP_SHARD1_B_ADDR"
 	interopShard2AAddressEnv        = "NAUTHILUS_DIRECTOR_INTEROP_SHARD2_A_ADDR"
@@ -319,6 +321,7 @@ func writeDovecotClusterProcessConfig(t *testing.T, options interopClusterProces
 		InsecureSkipVerify: true,
 	}
 	backendAuth := credentialReplayBackendAuth(false)
+	listenerCertPath, listenerKeyPath, _ := writeTestCertificate(t)
 	var content strings.Builder
 	fmt.Fprintf(&content, `patch:
   - op: remove
@@ -379,6 +382,8 @@ director:
       address: %q
       tls:
         mode: starttls
+        cert: %q
+        key: %q
       imap:
         capabilities: [IMAP4rev1, ID, SASL-IR, STARTTLS, AUTH=PLAIN]
         auth_mechanisms: [plain]
@@ -393,6 +398,8 @@ director:
 		options.AuthorityURL,
 		interopDefaultShard,
 		options.DirectorAddress,
+		listenerCertPath,
+		listenerKeyPath,
 		quotedYAMLStrings(interopClusterBackendIDs()),
 	)
 
@@ -596,7 +603,7 @@ func (f *clusterHTTPAuthority) handle(writer http.ResponseWriter, request *http.
 	writer.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(writer).Encode(map[string]any{
 		"ok":            true,
-		"account_field": username,
+		"account_field": "account",
 		"attributes":    interopAttributesForUser(username),
 	})
 }

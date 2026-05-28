@@ -280,6 +280,7 @@ director:
                     - IMAP4rev1
                     - ID
                     - SASL-IR
+                    - STARTTLS
                     - AUTH=PLAIN
                     - AUTH=XOAUTH2
                     - AUTH=OAUTHBEARER
@@ -333,7 +334,6 @@ director:
             backend_pool: lmtp-default
             lmtp:
                 capabilities:
-                    - CHUNKING
                     - SMTPUTF8
                     - STARTTLS
                     - AUTH PLAIN LOGIN XOAUTH2 OAUTHBEARER
@@ -344,6 +344,9 @@ director:
                         - login
                         - xoauth2
                         - oauthbearer
+                    mtls:
+                        identity_source: subject_common_name
+                        satisfies_required: false
                     required: true
                 smtputf8: true
             network: tcp
@@ -365,9 +368,7 @@ director:
             backend_pool: lmtp-default
             lmtp:
                 capabilities:
-                    - CHUNKING
                     - SMTPUTF8
-                    - STARTTLS
                     - AUTH PLAIN LOGIN XOAUTH2 OAUTHBEARER
                 client_auth:
                     authority: default
@@ -376,6 +377,9 @@ director:
                         - login
                         - xoauth2
                         - oauthbearer
+                    mtls:
+                        identity_source: subject_common_name
+                        satisfies_required: false
                     required: true
                 smtputf8: true
             network: tcp

@@ -36,12 +36,16 @@ const (
 	routeLookupAttributeToken = "token"
 	routeLookupBackendA       = "mailstore-a-imap"
 	routeLookupBackendB       = "mailstore-b-imap"
+	routeLookupCanonicalLMTP  = "canonical@example.test"
 	routeLookupDefaultPool    = "imap-default"
 	routeLookupListener       = "imap"
+	routeLookupPoolLMTP       = "lmtp-default"
 	routeLookupProtocol       = "imap"
 	routeLookupSecretValue    = "super-secret-value"
 	routeLookupShardA         = "mailstore-a"
 	routeLookupShardB         = "mailstore-b"
+	routeLookupTenantAttr     = "tenant"
+	routeLookupTenantBlue     = "blue"
 )
 
 // routeLookupExclusionCase describes one runtime exclusion explanation scenario.
@@ -198,6 +202,98 @@ func TestRouteLookupObservationIncludesDuration(t *testing.T) {
 	}
 }
 
+// TestRouteLookupResolvesLMTPRecipientWithoutMutations verifies hybrid recipient diagnostics.
+func TestRouteLookupResolvesLMTPRecipientWithoutMutations(t *testing.T) {
+	store := &countingRouteState{}
+	identity := &recordingRouteIdentityLookup{
+		result: RouteLookupIdentityLookupResult{
+			Authenticated: true,
+			Account:       "Canonical@EXAMPLE.TEST",
+			Attributes: map[string][]string{
+				routeLookupAttributeShard: {routeLookupShardA},
+				routeLookupTenantAttr:     {routeLookupTenantBlue},
+			},
+		},
+	}
+	service := newLMTPRouteLookupTestService(t, store, identity)
+
+	response, err := service.Lookup(context.Background(), RouteLookupRequest{
+		Protocol:        routeLookupProtocolLMTP,
+		ListenerName:    routeLookupProtocolLMTP,
+		Recipient:       "<Alias@EXAMPLE.TEST>",
+		IncludeAffinity: true,
+	})
+	if err != nil {
+		t.Fatalf("Lookup returned error: %v", err)
+	}
+
+	lookup := identity.singleRequest(t)
+	if lookup.Username != "Alias@example.test" || lookup.Protocol != routeLookupProtocolLMTP || lookup.Method != routeLookupIdentityMethod {
+		t.Fatalf("lookup context = %#v, want LMTP no-auth recipient lookup", lookup)
+	}
+
+	if response.Identity.Source != routeLookupIdentityNauthilus || !response.Identity.Authoritative || !response.Identity.NauthilusUsed || !response.Identity.AccountResolved {
+		t.Fatalf("identity state = %#v, want authoritative Nauthilus lookup", response.Identity)
+	}
+
+	if response.Routing.AccountKey != routeLookupCanonicalLMTP || response.Routing.Tenant != routeLookupTenantBlue {
+		t.Fatalf("routing = %#v, want resolved account and tenant", response.Routing)
+	}
+
+	if response.SelectedBackend != "mailstore-a-lmtp" {
+		t.Fatalf("selected backend = %q, want mailstore-a-lmtp", response.SelectedBackend)
+	}
+
+	assertNoRouteLookupMutations(t, store)
+}
+
+// TestRouteLookupUsesActiveAffinityBeforeNauthilus verifies hybrid recipient lookup ordering.
+func TestRouteLookupUsesActiveAffinityBeforeNauthilus(t *testing.T) {
+	store := &countingRouteState{
+		affinity: state.AffinityRecord{
+			Present:            true,
+			Status:             "found",
+			ShardTag:           routeLookupShardA,
+			Generation:         "affinity-lmtp-1",
+			ActiveSessionCount: 1,
+		},
+	}
+	identity := &recordingRouteIdentityLookup{
+		result: RouteLookupIdentityLookupResult{
+			Authenticated: true,
+			Account:       "should-not-be-used@example.test",
+		},
+	}
+	service := newLMTPRouteLookupTestService(t, store, identity)
+
+	response, err := service.Lookup(context.Background(), RouteLookupRequest{
+		Protocol:     routeLookupProtocolLMTP,
+		ListenerName: routeLookupProtocolLMTP,
+		Recipient:    "<Canonical@EXAMPLE.TEST>",
+	})
+	if err != nil {
+		t.Fatalf("Lookup returned error: %v", err)
+	}
+
+	if len(identity.requests) != 0 {
+		t.Fatalf("identity lookup calls = %d, want 0", len(identity.requests))
+	}
+
+	if response.Identity.Source != routeLookupIdentityActiveAffinity || response.Identity.Authoritative || response.Identity.NauthilusUsed || !response.Identity.AccountResolved {
+		t.Fatalf("identity state = %#v, want active-affinity resolution without Nauthilus", response.Identity)
+	}
+
+	if response.Routing.AccountKey != routeLookupCanonicalLMTP {
+		t.Fatalf("routing account = %q, want normalized recipient account", response.Routing.AccountKey)
+	}
+
+	if !response.Affinity.Requested || !response.Affinity.Active || response.Affinity.ShardTag != routeLookupShardA {
+		t.Fatalf("affinity = %#v, want active delivery affinity", response.Affinity)
+	}
+
+	assertNoRouteLookupMutations(t, store)
+}
+
 // routeLookupExclusionCases returns runtime states that should explain exclusions.
 func routeLookupExclusionCases(now time.Time) []routeLookupExclusionCase {
 	return []routeLookupExclusionCase{
@@ -311,6 +407,65 @@ func newRouteLookupTestService(t *testing.T, store *countingRouteState, enforceH
 	return service
 }
 
+// newLMTPRouteLookupTestService builds a service with LMTP recipient lookup enabled.
+func newLMTPRouteLookupTestService(t *testing.T, store *countingRouteState, identity RouteLookupIdentityLookuper) *RouteLookupService {
+	t.Helper()
+
+	cfg := config.DefaultConfig().Normalize()
+
+	registry, err := backend.NewStaticRegistry(cfg.Director)
+	if err != nil {
+		t.Fatalf("NewStaticRegistry returned error: %v", err)
+	}
+
+	effective := backend.NewEffectiveBackendPolicy(cfg.Director)
+	effective.EnforceHealth = false
+
+	selector, err := backend.NewRuntimeSelector(registry, store, backend.SelectionPolicy{
+		SoftAllowsActivePins:     cfg.Director.Maintenance.SoftAllowsActivePins,
+		DefaultShard:             cfg.Director.Routing.EffectiveDefaultShard(),
+		EffectiveBackend:         effective,
+		AllowHardDownFailover:    cfg.Director.Affinity.ActiveUserPinning.Failover.AllowOnHardDown,
+		AllowHardMaintenanceMove: cfg.Director.Affinity.ActiveUserPinning.Failover.AllowOnHardMaintenance,
+	})
+	if err != nil {
+		t.Fatalf("NewRuntimeSelector returned error: %v", err)
+	}
+
+	reader, err := NewBackendReadService(BackendReadServiceOptions{
+		Registry:  registry,
+		Snapshots: store,
+		Policy:    effective,
+	})
+	if err != nil {
+		t.Fatalf("NewBackendReadService returned error: %v", err)
+	}
+
+	service, err := NewRouteLookupService(RouteLookupServiceOptions{
+		Resolver:     mustRouteLookupTestResolver(t),
+		Selector:     selector,
+		BackendRead:  reader,
+		AffinityRead: store,
+		ListenerContexts: []RouteLookupListenerContext{
+			{
+				Name:        routeLookupProtocolLMTP,
+				Protocol:    routeLookupProtocolLMTP,
+				ServiceName: routeLookupProtocolLMTP,
+				BackendPool: routeLookupPoolLMTP,
+			},
+		},
+		DefaultPool:    routeLookupPoolLMTP,
+		DefaultShard:   cfg.Director.Routing.EffectiveDefaultShard(),
+		DefaultTenant:  "default",
+		IdentityLookup: identity,
+	})
+	if err != nil {
+		t.Fatalf("NewRouteLookupService returned error: %v", err)
+	}
+
+	return service
+}
+
 // mustRouteLookupTestResolver creates the same auth-attribute/hash chain used by lookup.
 func mustRouteLookupTestResolver(t *testing.T) routing.RoutingResolver {
 	t.Helper()
@@ -391,6 +546,33 @@ type countingRouteState struct {
 	killSessionCalls     int
 	setBackendCalls      int
 	clearBackendCalls    int
+}
+
+type recordingRouteIdentityLookup struct {
+	requests []RouteLookupIdentityLookupRequest
+	result   RouteLookupIdentityLookupResult
+	err      error
+}
+
+// LookupRouteIdentity records route-lookup recipient resolution input.
+func (r *recordingRouteIdentityLookup) LookupRouteIdentity(_ context.Context, request RouteLookupIdentityLookupRequest) (RouteLookupIdentityLookupResult, error) {
+	r.requests = append(r.requests, request)
+	if r.err != nil {
+		return RouteLookupIdentityLookupResult{}, r.err
+	}
+
+	return r.result, nil
+}
+
+// singleRequest returns the only recorded identity lookup request.
+func (r *recordingRouteIdentityLookup) singleRequest(t *testing.T) RouteLookupIdentityLookupRequest {
+	t.Helper()
+
+	if len(r.requests) != 1 {
+		t.Fatalf("identity lookup requests = %d, want 1", len(r.requests))
+	}
+
+	return r.requests[0]
 }
 
 type recordingRuntimeObservation struct {

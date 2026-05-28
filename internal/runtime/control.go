@@ -19,6 +19,7 @@ package runtime
 import (
 	"context"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -143,6 +144,19 @@ func (s *BackendReadService) effectiveBackend(ctx context.Context, entry backend
 // SafeReloadLoader loads and validates the next config snapshot for reload.
 type SafeReloadLoader func(context.Context) (config.Config, error)
 
+// SafeReloadApplier applies a validated safe snapshot to live runtime objects.
+type SafeReloadApplier interface {
+	ApplySafeReload(ctx context.Context, current config.Config, next config.Config) error
+}
+
+// SafeReloadApplierFunc adapts a function into a safe-reload applier.
+type SafeReloadApplierFunc func(context.Context, config.Config, config.Config) error
+
+// ApplySafeReload calls the wrapped function.
+func (f SafeReloadApplierFunc) ApplySafeReload(ctx context.Context, current config.Config, next config.Config) error {
+	return f(ctx, current, next)
+}
+
 // ReloadResult describes one safe-reload outcome.
 type ReloadResult struct {
 	Generation string
@@ -154,6 +168,7 @@ type SafeReloadService struct {
 	mu         sync.Mutex
 	current    config.Config
 	load       SafeReloadLoader
+	applier    SafeReloadApplier
 	generation int
 	recorder   observability.Recorder
 }
@@ -165,6 +180,7 @@ func NewSafeReloadService(current config.Config, load SafeReloadLoader, options 
 	return &SafeReloadService{
 		current:  current.Normalize(),
 		load:     load,
+		applier:  applied.reloadApplier,
 		recorder: applied.recorder,
 	}
 }
@@ -196,6 +212,16 @@ func (s *SafeReloadService) Reload(ctx context.Context) (ReloadResult, error) {
 	}
 
 	applied := safeReloadChanges(s.current, next)
+	if s.applier != nil {
+		if err := s.applier.ApplySafeReload(ctx, s.current, next); err != nil {
+			s.recordReload(ctx, runtimeObservationResultFailure, "reload_apply", map[string]string{
+				runtimeObservationFieldRejectedChanges: err.Error(),
+			})
+
+			return ReloadResult{}, newRuntimeError(ErrorKindConflict, operationReload, err.Error())
+		}
+	}
+
 	s.current = next
 	s.generation++
 
@@ -227,7 +253,31 @@ func unsafeReloadChanges(current config.Config, next config.Config) []string {
 		rejected = append(rejected, "storage.redis requires restart")
 	}
 
+	for _, listenerName := range changedExistingListeners(current.Director.Listeners, next.Director.Listeners) {
+		rejected = append(rejected, "director.listeners."+listenerName+" requires restart")
+	}
+
 	return rejected
+}
+
+// changedExistingListeners returns listeners whose live socket config cannot be hot-swapped safely.
+func changedExistingListeners(current map[string]config.ListenerConfig, next map[string]config.ListenerConfig) []string {
+	var changed []string
+
+	for name, currentListener := range current {
+		nextListener, ok := next[name]
+		if !ok {
+			continue
+		}
+
+		if !reflect.DeepEqual(currentListener, nextListener) {
+			changed = append(changed, name)
+		}
+	}
+
+	sort.Strings(changed)
+
+	return changed
 }
 
 // safeReloadChanges classifies supported live changes that the service applies to its snapshot.

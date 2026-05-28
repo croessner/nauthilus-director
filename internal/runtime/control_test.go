@@ -104,6 +104,10 @@ func TestRuntimeObservationOperationsMatchControlVocabulary(t *testing.T) {
 		operationSessionKill,
 		operationSessionReap,
 		operationRouteLookup,
+		operationListenerList,
+		operationListenerGet,
+		operationListenerDrain,
+		operationListenerResume,
 		operationReload,
 	}
 

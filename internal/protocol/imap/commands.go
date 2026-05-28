@@ -98,7 +98,7 @@ func (s *Session) handleAuthenticate(ctx context.Context, command preauthCommand
 	}
 
 	mechanism, err := newMechanismIdentity(command.arguments[0].value)
-	if err != nil || !s.supportsAuthMechanism(mechanism.Normalized()) {
+	if err != nil || !s.authMechanismAdvertised(mechanism.Normalized()) {
 		return commandOutcome{}, s.writeTagged(command.tag, responseNo, "Unsupported authentication mechanism")
 	}
 
@@ -138,6 +138,10 @@ var errInvalidInitialResponse = errors.New("imap: invalid authenticate initial r
 // authenticateResponsePayload returns the SASL payload from initial response or continuation.
 func (s *Session) authenticateResponsePayload(command preauthCommand) (string, error) {
 	if len(command.arguments) == 2 {
+		if !s.saslIRAdvertised() {
+			return "", errInvalidInitialResponse
+		}
+
 		return authenticateInitialResponse(command.arguments[1])
 	}
 

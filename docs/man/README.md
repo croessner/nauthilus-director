@@ -16,6 +16,11 @@ Generated config reference material should live under `docs/reference/` and be
 guarded by `make check-docs`. The config-format manpage may explain and link to
 those generated references instead of duplicating every default value by hand.
 
+`make install` installs the production binaries and manpages below `PREFIX`
+(`/usr/local` by default) and honors `DESTDIR` for staged package builds.
+`make uninstall` removes the same binary and manual-page paths without pruning
+parent directories.
+
 Initial manpages now document the implemented server binary, generated-client
 operator CLI and YAML configuration format. Future production hardening may
 expand this area with broader operational and failure-mode documentation.

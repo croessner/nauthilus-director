@@ -1,7 +1,7 @@
-# nauthilus-director target configuration draft.
+# nauthilus-director target configuration.
 #
-# This file sketches the intended production configuration shape. It follows the
-# same broad grouping style as Nauthilus config_v2: runtime, observability,
+# This file documents the intended production configuration shape. It follows
+# the same broad grouping style as Nauthilus config_v2: runtime, observability,
 # storage, auth, and one product-specific domain root. It is not a compatibility
 # promise for the archived proof-of-concept config in poc/nauthilus-director.yml.
 #
@@ -14,9 +14,8 @@
 # placeholders such as "${NAUTHILUS_DIRECTOR_REDIS_PASSWORD_FILE}". Expansion is
 # performed before typed validation; expanded secrets remain redacted by default.
 #
-# Stable foundation paths cover runtime, observability, storage.redis,
-# auth.authorities, IMAP listener/backend, routing and affinity. Later protocol
-# sections remain draft until their concrete delivery work starts.
+# Stable paths cover runtime, observability, storage.redis, auth.authorities,
+# protocol listeners, protocol backends, routing and affinity.
 ---
 runtime:
   instance_name: "nauthilus-director-01"
@@ -312,6 +311,10 @@ director:
       lmtp:
         smtputf8: true
         client_auth:
+          # Client auth verifies the submitting LMTP peer. This block controls
+          # SASL peer auth with technical submitter credentials checked by
+          # Nauthilus, not recipient mailbox user credentials. Mutual TLS is
+          # configured through the listener tls client certificate settings.
           required: true
           authority: default
           mechanisms:
@@ -319,8 +322,13 @@ director:
             - login
             - xoauth2
             - oauthbearer
+          mtls:
+            satisfies_required: false
+            identity_source: subject_common_name
         capabilities:
-          - CHUNKING
+          # Capabilities are the desired listener surface. Runtime advertisement
+          # is mediated by implemented command support, TLS state, auth policy
+          # and backend-pool capabilities. CHUNKING requires full BDAT support.
           - SMTPUTF8
           - STARTTLS
           - AUTH PLAIN LOGIN XOAUTH2 OAUTHBEARER
@@ -348,6 +356,10 @@ director:
       lmtp:
         smtputf8: true
         client_auth:
+          # Client auth verifies the submitting LMTP peer. This block controls
+          # SASL peer auth with technical submitter credentials checked by
+          # Nauthilus, not recipient mailbox user credentials. Mutual TLS is
+          # configured through the listener tls client certificate settings.
           required: true
           authority: default
           mechanisms:
@@ -355,8 +367,13 @@ director:
             - login
             - xoauth2
             - oauthbearer
+          mtls:
+            satisfies_required: false
+            identity_source: subject_common_name
         capabilities:
-          - CHUNKING
+          # Capabilities are the desired listener surface. Runtime advertisement
+          # is mediated by implemented command support, TLS state, auth policy
+          # and backend-pool capabilities. CHUNKING requires full BDAT support.
           - SMTPUTF8
           - AUTH PLAIN LOGIN XOAUTH2 OAUTHBEARER
 

@@ -33,9 +33,11 @@ const (
 	testBackendHealthOp   = "backend_health"
 	testHealthStatusField = "health_status"
 	testHealthUnhealthy   = "unhealthy"
+	testLMTPOperationData = "data"
 	testMechanismPlain    = "plain"
 	testPreviousStatus    = "previous_status"
 	testProtocolIMAP      = "imap"
+	testProtocolLMTP      = "lmtp"
 	testRedisKey          = "{alice}:session"
 	testRedisModeCluster  = "cluster"
 	testRedisOpen         = "open"
@@ -245,6 +247,13 @@ func representativeMetricEvents(t *testing.T) []Event {
 		newMetricEvent(t, EventSelectorExclusion, nil, operationLabels("selector_exclusion", "excluded", "runtime_out")),
 		newMetricEvent(t, EventSessionAttach, nil, operationLabels("session_attach", reasonClassOK, reasonClassOK)),
 		newMetricEvent(t, EventAffinityClear, nil, operationLabels("user_affinity_clear", reasonClassOK, reasonClassOK)),
+		measuredEvent(t, EventLMTPTransaction, nil, lmtpTransactionMetricLabels(reasonClassOK, reasonClassOK), 0.01),
+		newMetricEvent(t, EventLMTPRecipientRoute, nil, lmtpRecipientMetricLabels("accepted", reasonClassOK)),
+		newMetricEvent(t, EventLMTPSameBackendPolicy, nil, lmtpRecipientMetricLabels("tempfail", "same_backend")),
+		measuredEvent(t, EventLMTPDataStream, nil, lmtpStatusMetricLabels(reasonClassOK, reasonClassOK, "2xx"), 0.01),
+		measuredEvent(t, EventLMTPBDATStream, nil, lmtpStatusMetricLabels(reasonClassOK, reasonClassOK, "2xx"), 0.01),
+		newMetricEvent(t, EventLMTPRecipientStatus, nil, lmtpStatusMetricLabels(reasonClassOK, reasonClassOK, "2xx")),
+		newMetricEvent(t, EventLMTPBackendStatus, nil, lmtpBackendStatusMetricLabels(reasonClassOK, reasonClassOK, "2xx")),
 	}
 }
 
@@ -379,5 +388,55 @@ func restRequestLabels() map[string]string {
 		metricLabelResult:      reasonClassOK,
 		metricLabelRoute:       "/api/v1/version",
 		metricLabelStatusClass: "2xx",
+	}
+}
+
+// lmtpTransactionMetricLabels returns bounded LMTP transaction labels.
+func lmtpTransactionMetricLabels(result string, reason string) map[string]string {
+	return map[string]string{
+		metricLabelBackendPool: testBackendPool,
+		metricLabelListener:    testProtocolLMTP,
+		metricLabelOperation:   "transaction",
+		metricLabelProtocol:    testProtocolLMTP,
+		metricLabelReasonClass: reason,
+		metricLabelResult:      result,
+		metricLabelService:     testProtocolLMTP,
+		metricLabelTLSMode:     "starttls",
+	}
+}
+
+// lmtpRecipientMetricLabels returns bounded LMTP recipient route labels.
+func lmtpRecipientMetricLabels(result string, reason string) map[string]string {
+	return map[string]string{
+		metricLabelBackendPool: testBackendPool,
+		metricLabelListener:    testProtocolLMTP,
+		metricLabelOperation:   "recipient_route",
+		metricLabelProtocol:    testProtocolLMTP,
+		metricLabelReasonClass: reason,
+		metricLabelResult:      result,
+		metricLabelService:     testProtocolLMTP,
+		metricLabelShardTag:    testBackendShardTag,
+	}
+}
+
+// lmtpStatusMetricLabels returns bounded LMTP stream and recipient status labels.
+func lmtpStatusMetricLabels(result string, reason string, statusClass string) map[string]string {
+	labels := lmtpRecipientMetricLabels(result, reason)
+	labels[metricLabelOperation] = testLMTPOperationData
+	labels[metricLabelStatusClass] = statusClass
+
+	return labels
+}
+
+// lmtpBackendStatusMetricLabels returns bounded backend status labels.
+func lmtpBackendStatusMetricLabels(result string, reason string, statusClass string) map[string]string {
+	return map[string]string{
+		metricLabelBackendPool: testBackendPool,
+		metricLabelOperation:   "recipient_status",
+		metricLabelProtocol:    testProtocolLMTP,
+		metricLabelReasonClass: reason,
+		metricLabelResult:      result,
+		metricLabelShardTag:    testBackendShardTag,
+		metricLabelStatusClass: statusClass,
 	}
 }

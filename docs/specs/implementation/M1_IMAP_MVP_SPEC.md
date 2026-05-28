@@ -302,14 +302,18 @@ internal/protocol/imap/*_test.go
   before continuing live bidirectional copy.
 - Buffered proxy handoff is a performance requirement. Post-auth traffic must
   not be delayed, reparsed, reordered or dropped by the director.
-- Advertise only mechanisms and extensions M1 actually supports.
-- Implement and advertise `ID`.
-- Implement and advertise `SASL-IR`.
+- Advertise only configured mechanisms and extensions that M1 actually supports.
+- Treat omitted configurable capabilities as deny rules. Missing `ID`,
+  `STARTTLS`, `SASL-IR` or `AUTH=<mechanism>` must disable the related command,
+  initial-response shape or authentication mechanism instead of merely hiding it
+  from `CAPABILITY`.
+- Implement `ID` and advertise or accept it only when configured.
+- Implement `SASL-IR` and accept initial responses only when configured.
 - Do not implement or advertise `ENABLE`. If target config still lists
   `ENABLE`, M1 must adjust config/defaults or reject the unsupported
   advertisement during validation.
-- Advertise `STARTTLS` only before TLS is active and only for listener TLS mode
-  `starttls`.
+- Advertise and accept `STARTTLS` only when configured, before TLS is active and
+  only for listener TLS mode `starttls`.
 - Advertise `LOGINDISABLED` if plaintext password authentication is disabled
   before TLS by policy.
 
@@ -346,6 +350,8 @@ internal/protocol/imap/*_test.go
 
 - IMAP line parser, tags, command dispatch and invalid-command responses.
 - `CAPABILITY` output for plaintext, STARTTLS and implicit TLS states.
+- Missing `ID`, `STARTTLS`, `SASL-IR` and `AUTH=<mechanism>` capabilities deny
+  the associated pre-auth extension behavior.
 - `STARTTLS` state transition and post-STARTTLS capability behavior.
 - `ID NIL`, valid ID pairs, malformed ID, oversized ID and missing ID under
   `require_id_before_auth`.
@@ -360,7 +366,7 @@ internal/protocol/imap/*_test.go
   `AUTHENTICATE` are exercised over public sockets.
 - A pipelined pre-auth flow proves buffered post-auth handoff to the backend.
 - Capability output does not advertise unsupported `ENABLE` or missing
-  mechanisms.
+  mechanisms, and omitted capabilities disable the related extension behavior.
 
 ### Acceptance Criteria
 
@@ -1004,6 +1010,9 @@ M1 is complete only when all items below are true:
       header timeouts, TCP-only validation and public-socket tests.
 - [ ] IMAP greeting, `CAPABILITY`, `NOOP`, `LOGOUT`, `STARTTLS`, `LOGIN` and
       `AUTHENTICATE` are covered by unit and E2E tests.
+- [ ] Configured IMAP capabilities are the pre-auth extension boundary:
+      omitted `ID`, `STARTTLS`, `SASL-IR` and `AUTH=<mechanism>` entries are not
+      advertised and are not accepted.
 - [ ] IMAP `ID` is implemented, advertised, covered by unit and E2E tests, and
       maps usable client metadata into Nauthilus `client_id` context without
       populating HTTP-only `user_agent` or logging raw ID values.

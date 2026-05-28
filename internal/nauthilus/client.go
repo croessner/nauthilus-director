@@ -72,6 +72,10 @@ func NewClient(authority config.AuthorityConfig, options ClientOptions) (Client,
 	case transportHTTP:
 		return NewHTTPClientFromAuthority(authority, options.HTTPClient)
 	case transportGRPC:
+		if options.GRPCService == nil {
+			return NewGRPCClientFromAuthority(authority)
+		}
+
 		return NewGRPCClient(options.GRPCService)
 	default:
 		return nil, configError("transport must be http or grpc")

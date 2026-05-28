@@ -25,6 +25,8 @@ import (
 	"strings"
 )
 
+const lmtpBDATImplemented = true
+
 // Validate checks decoded typed config with validator/v10 and domain rules.
 func (l *Loader) Validate(config Config) error {
 	if l == nil {
@@ -197,6 +199,12 @@ func validateAuthorities(authorities map[string]AuthorityConfig, problems *[]str
 			if strings.TrimSpace(authority.GRPC.Address) == "" {
 				addProblem(problems, path+".grpc.address is required when transport is grpc")
 			}
+			if authority.GRPC.CallerAuth.Basic.Enabled && authority.GRPC.CallerAuth.Bearer.Enabled {
+				addProblem(problems, path+".grpc.caller_auth must enable only one caller auth method")
+			}
+			if authority.GRPC.CallerAuth.Basic.Enabled && strings.TrimSpace(authority.GRPC.CallerAuth.Basic.Username) == "" {
+				addProblem(problems, path+".grpc.caller_auth.basic.username is required when basic caller auth is enabled")
+			}
 			if authority.GRPC.CallerAuth.Basic.Enabled && authority.GRPC.CallerAuth.Basic.PasswordFile.IsZero() {
 				addProblem(problems, path+".grpc.caller_auth.basic.password_file is required when basic caller auth is enabled")
 			}
@@ -245,14 +253,24 @@ func validateDirector(director DirectorConfig, authorities map[string]AuthorityC
 		if _, ok := director.BackendPools[listener.BackendPool]; !ok {
 			addProblem(problems, path+".backend_pool references unknown pool "+listener.BackendPool)
 		}
+		switch listener.Protocol {
+		case protocolIMAP:
+		case protocolLMTP:
+		default:
+			addProblem(problems, path+".protocol must be imap or lmtp")
+		}
+
 		if listener.Protocol == protocolIMAP && listener.IMAP == nil {
 			addProblem(problems, path+".imap is required for imap listeners")
 		}
 		if listener.Protocol == protocolIMAP && listener.IMAP != nil {
-			validateIMAPListener(path+".imap", *listener.IMAP, problems)
+			validateIMAPListener(path+".imap", listener, *listener.IMAP, problems)
 		}
 		if listener.Protocol == protocolLMTP && listener.LMTP == nil {
 			addProblem(problems, path+".lmtp is required for lmtp listeners")
+		}
+		if listener.Protocol == protocolLMTP && listener.LMTP != nil {
+			validateLMTPListener(path+".lmtp", listener, authorities, problems)
 		}
 		if strings.TrimSpace(listener.TLS.Mode) == "" {
 			addProblem(problems, path+".tls.mode is required")
@@ -271,6 +289,8 @@ func validateDirector(director DirectorConfig, authorities map[string]AuthorityC
 
 	for name, pool := range director.BackendPools {
 		path := "director.backend_pools." + name
+		validateBackendPool(path, pool, problems)
+
 		for _, backendName := range pool.Backends {
 			backend, ok := director.Backends[backendName]
 			if !ok {
@@ -285,11 +305,12 @@ func validateDirector(director DirectorConfig, authorities map[string]AuthorityC
 
 	for name, backend := range director.Backends {
 		path := "director.backends." + name
+		validateBackendProtocol(path, backend.Protocol, problems)
 		requireNonNegativeInt(path+".weight", backend.Weight, problems)
 		requirePositiveInt(path+".max_connections", backend.MaxConnections, problems)
 		validateMaintenanceMode(path+".maintenance", backend.Maintenance, director.Maintenance.DefaultMode, problems)
 		validateBackendAddress(path+".address", backend.Address, problems)
-		validateBackendTLS(path+".tls", backend.TLS, problems)
+		validateBackendTLS(path+".tls", backend.Address, backend.TLS, problems)
 		validateBackendAuth(path+".auth", backend, problems)
 		if backend.HealthCheck.Enabled && backend.HealthCheck.PasswordFile.IsZero() {
 			addProblem(problems, path+".health_check.password_file is required when health check is enabled")
@@ -319,16 +340,53 @@ func validateMaintenanceMode(path string, value string, defaultMode string, prob
 	}
 }
 
+// validateBackendPool checks supported pool protocols and selector vocabulary.
+func validateBackendPool(path string, pool BackendPoolConfig, problems *[]string) {
+	protocol := strings.ToLower(strings.TrimSpace(pool.Protocol))
+	switch protocol {
+	case protocolIMAP:
+		if strings.ToLower(strings.TrimSpace(pool.Selector)) != "rendezvous_hash" {
+			addProblem(problems, path+".selector for IMAP pools must be rendezvous_hash")
+		}
+	case protocolLMTP:
+		if strings.ToLower(strings.TrimSpace(pool.Selector)) != "recipient_hash" {
+			addProblem(problems, path+".selector for LMTP pools must be recipient_hash")
+		}
+	default:
+		addProblem(problems, path+".protocol must be imap or lmtp")
+	}
+}
+
+// validateBackendProtocol rejects backend protocols without production support.
+func validateBackendProtocol(path string, protocol string, problems *[]string) {
+	switch strings.ToLower(strings.TrimSpace(protocol)) {
+	case protocolIMAP, protocolLMTP:
+	default:
+		addProblem(problems, path+".protocol must be imap or lmtp")
+	}
+}
+
 // validateIMAPListener rejects unsupported pre-auth advertisements and mechanisms.
-func validateIMAPListener(path string, imap IMAPListenerConfig, problems *[]string) {
+func validateIMAPListener(path string, listener ListenerConfig, imap IMAPListenerConfig, problems *[]string) {
+	allowedMechanisms := make(map[string]struct{}, len(imap.AuthMechanisms))
+	for _, mechanism := range imap.AuthMechanisms {
+		allowedMechanisms[strings.ToUpper(strings.TrimSpace(mechanism))] = struct{}{}
+	}
+
 	for _, capability := range imap.Capabilities {
 		normalized := strings.ToUpper(strings.TrimSpace(capability))
 		switch {
-		case normalized == "IMAP4REV1", normalized == "ID", normalized == "SASL-IR", normalized == "STARTTLS":
+		case normalized == "IMAP4REV1", normalized == "ID", normalized == "SASL-IR":
+		case normalized == "STARTTLS":
+			if listener.TLS.Mode != "starttls" {
+				addProblem(problems, path+".capabilities advertises STARTTLS for non-starttls listener TLS mode")
+			}
 		case strings.HasPrefix(normalized, "AUTH="):
 			mechanism := strings.TrimPrefix(normalized, "AUTH=")
 			if !validIMAPAuthMechanism(mechanism) {
 				addProblem(problems, path+".capabilities advertises unsupported mechanism "+capability)
+			} else if _, ok := allowedMechanisms[strings.ToUpper(strings.TrimSpace(mechanism))]; !ok {
+				addProblem(problems, path+".capabilities advertises AUTH mechanism not enabled in auth_mechanisms "+mechanism)
 			}
 		case normalized == "ENABLE":
 			addProblem(problems, path+".capabilities must not advertise unsupported ENABLE")
@@ -344,10 +402,140 @@ func validateIMAPListener(path string, imap IMAPListenerConfig, problems *[]stri
 	}
 }
 
+// validateLMTPListener rejects false listener advertisements and unsafe peer-auth policies.
+func validateLMTPListener(path string, listener ListenerConfig, authorities map[string]AuthorityConfig, problems *[]string) {
+	lmtp := listener.LMTP
+	if lmtp == nil {
+		addProblem(problems, path+" is required for lmtp listeners")
+
+		return
+	}
+
+	if lmtp.ClientAuth.Required {
+		if _, ok := authorities[lmtp.ClientAuth.Authority]; !ok {
+			addProblem(problems, path+".client_auth.authority references unknown authority "+lmtp.ClientAuth.Authority)
+		}
+	}
+
+	if len(lmtp.ClientAuth.Mechanisms) == 0 && lmtp.ClientAuth.Required && !lmtp.ClientAuth.MTLS.SatisfiesRequired {
+		addProblem(problems, path+".client_auth.mechanisms is required unless mTLS explicitly satisfies required peer auth")
+	}
+
+	for _, mechanism := range lmtp.ClientAuth.Mechanisms {
+		if !validLMTPAuthMechanism(mechanism) {
+			addProblem(problems, path+".client_auth.mechanisms contains unsupported mechanism "+mechanism)
+		}
+	}
+
+	validateLMTPClientMTLS(path+".client_auth.mtls", listener, lmtp.ClientAuth, problems)
+	validateLMTPCapabilities(path+".capabilities", listener, *lmtp, problems)
+}
+
+// validateLMTPClientMTLS rejects mTLS peer-auth settings that cannot verify a submitter identity.
+func validateLMTPClientMTLS(path string, listener ListenerConfig, auth LMTPClientAuthConfig, problems *[]string) {
+	if strings.TrimSpace(auth.MTLS.IdentitySource) != "" && !validLMTPMTLSIdentitySource(auth.MTLS.IdentitySource) {
+		addProblem(problems, path+".identity_source contains unsupported source "+auth.MTLS.IdentitySource)
+	}
+
+	if !auth.MTLS.SatisfiesRequired {
+		return
+	}
+
+	if !auth.Required {
+		addProblem(problems, path+".satisfies_required may be true only when client_auth.required is true")
+	}
+
+	if strings.TrimSpace(auth.MTLS.IdentitySource) == "" {
+		addProblem(problems, path+".identity_source is required when mTLS satisfies required peer auth")
+	}
+
+	if !listener.TLS.RequireClientCert || strings.TrimSpace(listener.TLS.ClientCA) == "" {
+		addProblem(problems, path+".satisfies_required requires listener TLS to require and verify client certificates")
+	}
+}
+
+// validateLMTPCapabilities rejects unsupported desired LMTP listener capabilities.
+func validateLMTPCapabilities(path string, listener ListenerConfig, lmtp LMTPListenerConfig, problems *[]string) {
+	for _, capability := range lmtp.Capabilities {
+		switch {
+		case capability == "SMTPUTF8":
+			if !lmtp.SMTPUTF8 {
+				addProblem(problems, path+" advertises SMTPUTF8 while smtputf8 is false")
+			}
+		case capability == "STARTTLS":
+			if listener.TLS.Mode != "starttls" {
+				addProblem(problems, path+" advertises STARTTLS for non-starttls listener TLS mode")
+			}
+		case capability == "CHUNKING":
+			if !lmtpBDATImplemented {
+				addProblem(problems, path+" advertises CHUNKING before BDAT support and backend capability mediation are implemented")
+			}
+		case strings.HasPrefix(capability, "AUTH "):
+			validateLMTPAuthCapability(path, capability, lmtp.ClientAuth.Mechanisms, problems)
+		case capability == "AUTH":
+			addProblem(problems, path+" AUTH capability requires at least one mechanism")
+		default:
+			addProblem(problems, path+" contains unsupported capability "+capability)
+		}
+	}
+}
+
+// validateLMTPAuthCapability checks AUTH mechanism vocabulary and listener policy consistency.
+func validateLMTPAuthCapability(path string, capability string, configuredMechanisms []string, problems *[]string) {
+	fields := strings.Fields(capability)
+	if len(fields) < 2 {
+		addProblem(problems, path+" AUTH capability requires at least one mechanism")
+
+		return
+	}
+
+	allowed := make(map[string]struct{}, len(configuredMechanisms))
+	for _, mechanism := range configuredMechanisms {
+		allowed[strings.ToUpper(strings.TrimSpace(mechanism))] = struct{}{}
+	}
+	if len(allowed) == 0 {
+		addProblem(problems, path+" AUTH capability requires client_auth.mechanisms")
+
+		return
+	}
+
+	for _, mechanism := range fields[1:] {
+		if !validLMTPAuthMechanism(mechanism) {
+			addProblem(problems, path+" advertises unsupported AUTH mechanism "+mechanism)
+
+			continue
+		}
+
+		if _, ok := allowed[strings.ToUpper(strings.TrimSpace(mechanism))]; !ok {
+			addProblem(problems, path+" advertises AUTH mechanism not enabled in client_auth.mechanisms "+mechanism)
+		}
+	}
+}
+
 // validIMAPAuthMechanism reports whether pre-auth command handling accepts this mechanism shape.
 func validIMAPAuthMechanism(mechanism string) bool {
 	switch strings.ToUpper(strings.TrimSpace(mechanism)) {
 	case "PLAIN", "XOAUTH2", "OAUTHBEARER":
+		return true
+	default:
+		return false
+	}
+}
+
+// validLMTPAuthMechanism reports whether LMTP peer auth may be configured for this mechanism.
+func validLMTPAuthMechanism(mechanism string) bool {
+	switch strings.ToUpper(strings.TrimSpace(mechanism)) {
+	case "PLAIN", "LOGIN", "XOAUTH2", "OAUTHBEARER":
+		return true
+	default:
+		return false
+	}
+}
+
+// validLMTPMTLSIdentitySource reports whether a verified client cert can provide this safe identity.
+func validLMTPMTLSIdentitySource(source string) bool {
+	switch strings.ToLower(strings.TrimSpace(source)) {
+	case "subject_common_name", "dns_san", "uri_san":
 		return true
 	default:
 		return false
@@ -376,7 +564,7 @@ func validateBackendAddress(path string, address string, problems *[]string) {
 }
 
 // validateBackendTLS checks TLS mode vocabulary and hostname-verification prerequisites.
-func validateBackendTLS(path string, tlsConfig BackendTLSConfig, problems *[]string) {
+func validateBackendTLS(path string, address string, tlsConfig BackendTLSConfig, problems *[]string) {
 	mode := strings.ToLower(strings.TrimSpace(tlsConfig.Mode))
 	switch mode {
 	case "disabled", "plaintext":
@@ -391,6 +579,22 @@ func validateBackendTLS(path string, tlsConfig BackendTLSConfig, problems *[]str
 	if strings.TrimSpace(tlsConfig.MinTLSVersion) == "" {
 		addProblem(problems, path+".min_tls_version is required when backend TLS is enabled")
 	}
+
+	if !tlsConfig.InsecureSkipVerify && strings.TrimSpace(tlsConfig.ServerName) == "" && backendAddressHostIsIP(address) {
+		addProblem(problems, path+".server_name is required when backend address is an IP address and certificate verification is enabled")
+	}
+}
+
+// backendAddressHostIsIP reports whether a backend address uses a literal IP host.
+func backendAddressHostIsIP(address string) bool {
+	host, _, err := net.SplitHostPort(strings.TrimSpace(address))
+	if err != nil {
+		return false
+	}
+
+	_, err = netip.ParseAddr(strings.TrimSpace(host))
+
+	return err == nil
 }
 
 // validateBackendAuth checks mode-specific backend authentication requirements.
@@ -406,6 +610,15 @@ func validateBackendAuth(path string, backend BackendConfig, problems *[]string)
 			return
 		}
 	}
+	if protocol == protocolLMTP {
+		switch mode {
+		case backendAuthModeNone, backendAuthModeMTLS, backendAuthModeSASL, backendAuthModeOAuthBearer:
+		default:
+			addProblem(problems, path+".mode for LMTP backends must be none, mtls, sasl, or oauthbearer")
+
+			return
+		}
+	}
 
 	switch mode {
 	case backendAuthModeMasterUser:
@@ -413,13 +626,57 @@ func validateBackendAuth(path string, backend BackendConfig, problems *[]string)
 	case backendAuthModeCredentialReplay:
 		validateCredentialReplayAuth(path+".credential_replay", backend.Auth.CredentialReplay, problems)
 	case backendAuthModeSASL:
-		if backend.Auth.SASL.PasswordFile.IsZero() {
-			addProblem(problems, path+".sasl.password_file is required in sasl mode")
-		}
-	case backendAuthModeNone, backendAuthModeMTLS:
+		validateSASLBackendAuth(path+".sasl", backend, problems)
+	case backendAuthModeOAuthBearer:
+		validateOAuthBearerBackendAuth(path+".oauthbearer", backend, problems)
+	case backendAuthModeMTLS:
+		validateMTLSBackendAuth(path+".mtls", backend, problems)
+	case backendAuthModeNone:
 	default:
-		addProblem(problems, path+".mode must be none, mtls, sasl, master_user, or credential_replay")
+		addProblem(problems, path+".mode must be none, mtls, sasl, oauthbearer, master_user, or credential_replay")
 	}
+}
+
+// validateSASLBackendAuth checks LMTP service credentials and optional verified TLS requirements.
+func validateSASLBackendAuth(path string, backend BackendConfig, problems *[]string) {
+	if !validBackendPasswordMechanism(backend.Auth.SASL.Mechanism) {
+		addProblem(problems, path+".mechanism must be plain or login")
+	}
+	if strings.TrimSpace(backend.Auth.SASL.Username) == "" {
+		addProblem(problems, path+".username is required in sasl mode")
+	}
+	if backend.Auth.SASL.PasswordFile.IsZero() {
+		addProblem(problems, path+".password_file is required in sasl mode")
+	}
+	if backend.Auth.SASL.RequireTLS && !backendTLSCanVerify(backend.TLS) {
+		addProblem(problems, path+".require_tls requires verified backend TLS")
+	}
+}
+
+// validateOAuthBearerBackendAuth checks token material and optional verified TLS requirements.
+func validateOAuthBearerBackendAuth(path string, backend BackendConfig, problems *[]string) {
+	if backend.Auth.OAuthBearer.TokenFile.IsZero() {
+		addProblem(problems, path+".token_file is required in oauthbearer mode")
+	}
+	if backend.Auth.OAuthBearer.RequireTLS && !backendTLSCanVerify(backend.TLS) {
+		addProblem(problems, path+".require_tls requires verified backend TLS")
+	}
+}
+
+// validateMTLSBackendAuth checks the client certificate material needed for backend mTLS auth.
+func validateMTLSBackendAuth(path string, backend BackendConfig, problems *[]string) {
+	if !backendTLSCanVerify(backend.TLS) {
+		addProblem(problems, path+" requires verified backend TLS")
+	}
+	if strings.TrimSpace(backend.TLS.Cert) == "" || backend.TLS.Key.IsZero() {
+		addProblem(problems, path+" requires backend tls.cert and tls.key")
+	}
+}
+
+// backendTLSCanVerify reports whether backend TLS can protect credential-bearing auth.
+func backendTLSCanVerify(tlsConfig BackendTLSConfig) bool {
+	mode := strings.ToLower(strings.TrimSpace(tlsConfig.Mode))
+	return (mode == "starttls" || mode == "implicit") && !tlsConfig.InsecureSkipVerify
 }
 
 // validateMasterUserAuth checks configured administrative IMAP login material.

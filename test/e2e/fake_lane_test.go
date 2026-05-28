@@ -214,6 +214,72 @@ func TestServerBinaryControlRESTCLIParity(t *testing.T) {
 	}
 }
 
+// TestServerBinaryListenerDrainResumeKeepsActiveStream exercises listener drain and resume through sockets and the CLI.
+func TestServerBinaryListenerDrainResumeKeepsActiveStream(t *testing.T) {
+	binary := e2eServerBinary(t)
+	ctl := buildDirectorctl(t)
+	redisFixture := startValkeySessionStore(t)
+	authority := startFakeHTTPAuthority(t, map[string][]string{
+		"account":   {e2eAccount},
+		"tenant":    {e2eTenant},
+		"mailShard": {e2eShardTag},
+	})
+	fakeBackend := startFakeIMAPBackend(t, fakeBackendOptions{})
+	directorAddress := loopbackAddress(t)
+	controlAddress := loopbackAddress(t)
+	controlURL := "http://" + controlAddress
+	configPath := writeProcessConfig(t, processConfigOptions{
+		RedisAddress:    redisFixture.addr,
+		AuthorityURL:    authority.URL(),
+		DirectorAddress: directorAddress,
+		ControlAddress:  controlAddress,
+		ControlEnabled:  true,
+		BackendAddress:  fakeBackend.Address(),
+		BackendTLS: config.BackendTLSConfig{
+			Mode:          "plaintext",
+			MinTLSVersion: "TLS1.2",
+		},
+		BackendAuth: masterUserBackendAuth(),
+	})
+	process := startDirectorProcess(t, binary, configPath)
+
+	waitForDirectorGreeting(t, directorAddress, process)
+	waitForControlReady(t, controlURL, process)
+
+	listOutput := runDirectorctl(t, ctl, controlURL, "listeners", "list")
+	assertCLIOutputFields(t, listOutput, "name="+e2eListenerName, "state=accepting", "bound_address="+directorAddress)
+
+	activeClient := dialPlain(t, directorAddress)
+	defer func() { _ = activeClient.Close() }()
+	activeReader := bufio.NewReader(activeClient)
+	expectLine(t, activeReader, "* OK nauthilus-director IMAP session ready\r\n")
+
+	softDrainOutput := runDirectorctl(t, ctl, controlURL, "listeners", "drain", e2eListenerName, "--mode", "soft", "--reason", "e2e soft listener drain")
+	assertCLIOutputFields(t, softDrainOutput, "name="+e2eListenerName, "state=draining", "active_local_sessions=1", "drain_mode=soft")
+	expectListenerRejectsNewConnections(t, directorAddress)
+
+	writeLine(t, activeClient, `A001 ID ("client_id" "listener-drain-e2e")`)
+	expectLine(t, activeReader, "* ID NIL\r\n")
+	expectLine(t, activeReader, "A001 OK ID completed\r\n")
+
+	resumeOutput := runDirectorctl(t, ctl, controlURL, "listeners", "resume", e2eListenerName, "--reason", "e2e listener resume")
+	assertCLIOutputFields(t, resumeOutput, "name="+e2eListenerName, "state=accepting", "bound_address="+directorAddress, "drain_mode=\"\"")
+
+	resumedClient := dialPlain(t, directorAddress)
+	resumedReader := bufio.NewReader(resumedClient)
+	expectLine(t, resumedReader, "* OK nauthilus-director IMAP session ready\r\n")
+	_ = resumedClient.Close()
+
+	code, output := runDirectorctlStatus(t, ctl, controlURL, "listeners", "drain", e2eListenerName, "--mode", "hard", "--reason", "missing grace proof")
+	if code != 2 || !strings.Contains(output, "--grace-seconds") {
+		t.Fatalf("hard drain without grace exit/output = %d/%q, want CLI usage rejection", code, output)
+	}
+
+	hardDrainOutput := runDirectorctl(t, ctl, controlURL, "listeners", "drain", e2eListenerName, "--mode", "hard", "--reason", "e2e hard listener drain", "--grace-seconds", "0")
+	assertCLIOutputFields(t, hardDrainOutput, "name="+e2eListenerName, "state=drained", "active_local_sessions=0", "drain_mode=hard")
+	expectRuntimeClosedConnection(t, activeClient)
+}
+
 // TestFakeHTTPAuthorityUsesRedisLeaseStore proves active affinity through Redis-compatible state.
 func TestFakeHTTPAuthorityUsesRedisLeaseStore(t *testing.T) {
 	fixture := startValkeySessionStore(t)
@@ -757,6 +823,7 @@ func writeProcessConfig(t *testing.T, options processConfigOptions) string {
 	if controlAddress == "" {
 		controlAddress = "127.0.0.1:0"
 	}
+	listenerCertPath, listenerKeyPath, _ := writeTestCertificate(t)
 
 	content := fmt.Sprintf(`patch:
   - op: remove
@@ -806,6 +873,8 @@ director:
       address: %q
       tls:
         mode: starttls
+        cert: %q
+        key: %q
       imap:
         capabilities: [IMAP4rev1, ID, SASL-IR, STARTTLS, AUTH=PLAIN]
         auth_mechanisms: [plain]
@@ -842,6 +911,8 @@ director:
 		options.RedisAddress,
 		options.AuthorityURL,
 		options.DirectorAddress,
+		listenerCertPath,
+		listenerKeyPath,
 		options.BackendAddress,
 		e2eShardTag,
 		backendTLS.Mode,
@@ -1662,7 +1733,7 @@ func lookupRoute(t *testing.T, baseURL string, userKey string, includeAffinity b
 		IncludeAffinity: &includeAffinity,
 		Listener:        &listenerName,
 		Protocol:        e2eProtocol,
-		UserKey:         userKey,
+		UserKey:         &userKey,
 	}
 
 	var response generated.RouteLookupResponse
@@ -1898,6 +1969,48 @@ func expectSessionClosed(t *testing.T, client net.Conn, reader *bufio.Reader) {
 	}
 }
 
+// expectRuntimeClosedConnection waits for a server-side close and fails if the socket only idles.
+func expectRuntimeClosedConnection(t *testing.T, client net.Conn) {
+	t.Helper()
+
+	if err := client.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+
+	buffer := make([]byte, 1)
+	_, err := client.Read(buffer)
+	if err == nil {
+		t.Fatal("connection remained readable after runtime close")
+	}
+
+	if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+		t.Fatalf("connection stayed open after runtime close: %v", err)
+	}
+}
+
+// expectListenerRejectsNewConnections verifies a drained listener stops accepting frontend sockets.
+func expectListenerRejectsNewConnections(t *testing.T, address string) {
+	t.Helper()
+
+	conn, err := net.DialTimeout("tcp", address, 100*time.Millisecond)
+	if err == nil {
+		_ = conn.Close()
+
+		t.Fatalf("dial %s succeeded, want drained listener to reject new connections", address)
+	}
+}
+
+// assertCLIOutputFields verifies compact key-value CLI output contains all expected fields.
+func assertCLIOutputFields(t *testing.T, output string, fields ...string) {
+	t.Helper()
+
+	for _, field := range fields {
+		if !strings.Contains(output, field) {
+			t.Fatalf("CLI output = %q, want field %q", output, field)
+		}
+	}
+}
+
 // waitForSessionIDs waits until the control reader sees the requested count.
 func waitForSessionIDs(t *testing.T, store *trackingSessionStore, count int) []string {
 	t.Helper()
@@ -2052,7 +2165,7 @@ func (f *fakeHTTPAuthority) handle(writer http.ResponseWriter, request *http.Req
 	writer.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(writer).Encode(map[string]any{
 		"ok":            true,
-		"account_field": e2eAccount,
+		"account_field": "account",
 		"attributes":    f.attributes,
 	})
 }
@@ -2073,8 +2186,10 @@ func newHTTPAuthenticator(t *testing.T, endpoint string) nauthilus.Authenticator
 }
 
 type fakeGRPCService struct {
-	mu    sync.Mutex
-	calls int
+	mu               sync.Mutex
+	calls            int
+	lookupCalls      []nauthilus.GRPCLookupIdentityRequest
+	lookupIdentities map[string]lmtpAuthorityIdentity
 }
 
 // Authenticate records one scaffolded gRPC auth request.
@@ -2086,7 +2201,7 @@ func (s *fakeGRPCService) Authenticate(_ context.Context, request *nauthilus.GRP
 	return &nauthilus.GRPCAuthResponse{
 		OK:           true,
 		Decision:     nauthilus.GRPCDecisionOK,
-		AccountField: request.Username,
+		AccountField: "account",
 		Attributes: map[string][]string{
 			"account":   {request.Username},
 			"tenant":    {e2eTenant},
@@ -2095,9 +2210,31 @@ func (s *fakeGRPCService) Authenticate(_ context.Context, request *nauthilus.GRP
 	}, nil
 }
 
-// LookupIdentity returns a temporary failure because route lookup must not call it.
-func (s *fakeGRPCService) LookupIdentity(context.Context, *nauthilus.GRPCLookupIdentityRequest) (*nauthilus.GRPCAuthResponse, error) {
-	return &nauthilus.GRPCAuthResponse{Decision: nauthilus.GRPCDecisionTempFail}, nil
+// LookupIdentity records a scaffolded recipient lookup and returns configured identity facts.
+func (s *fakeGRPCService) LookupIdentity(_ context.Context, request *nauthilus.GRPCLookupIdentityRequest) (*nauthilus.GRPCAuthResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.lookupCalls = append(s.lookupCalls, *request)
+	if s.lookupIdentities == nil {
+		return &nauthilus.GRPCAuthResponse{Decision: nauthilus.GRPCDecisionTempFail}, nil
+	}
+
+	identity, ok := s.lookupIdentities[request.Username]
+	if !ok {
+		return &nauthilus.GRPCAuthResponse{Decision: nauthilus.GRPCDecisionTempFail}, nil
+	}
+
+	return &nauthilus.GRPCAuthResponse{
+		OK:           true,
+		Decision:     nauthilus.GRPCDecisionOK,
+		AccountField: "account",
+		Attributes: map[string][]string{
+			"account":   {identity.Account},
+			"tenant":    {identity.Tenant},
+			"mailShard": {identity.Shard},
+		},
+	}, nil
 }
 
 // ListAccounts returns an empty account list for unused gRPC surface.
@@ -2111,6 +2248,20 @@ func (s *fakeGRPCService) AuthCalls() int {
 	defer s.mu.Unlock()
 
 	return s.calls
+}
+
+// SingleLookup returns the only recorded gRPC identity lookup.
+func (s *fakeGRPCService) SingleLookup(t *testing.T) nauthilus.GRPCLookupIdentityRequest {
+	t.Helper()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if len(s.lookupCalls) != 1 {
+		t.Fatalf("gRPC lookup calls = %d, want 1", len(s.lookupCalls))
+	}
+
+	return s.lookupCalls[0]
 }
 
 type fakeBackendOptions struct {

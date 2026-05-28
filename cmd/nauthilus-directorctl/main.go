@@ -50,13 +50,14 @@ const (
 )
 
 const (
-	commandStatus   = "status"
-	commandBackends = "backends"
-	commandConfig   = "config"
-	commandSessions = "sessions"
-	commandUsers    = "users"
-	commandRoute    = "route"
-	commandReload   = "reload"
+	commandStatus    = "status"
+	commandBackends  = "backends"
+	commandListeners = "listeners"
+	commandConfig    = "config"
+	commandSessions  = "sessions"
+	commandUsers     = "users"
+	commandRoute     = "route"
+	commandReload    = "reload"
 )
 
 type controlClientFactory func(address string, timeout time.Duration) (generated.ClientWithResponsesInterface, error)
@@ -174,6 +175,8 @@ func (app application) dispatch(args []string) int {
 		return app.runStatus(args[1:])
 	case commandBackends:
 		return app.runBackends(args[1:])
+	case commandListeners:
+		return app.runListeners(args[1:])
 	case commandConfig:
 		return app.runConfig(args[1:])
 	case commandSessions:
@@ -657,6 +660,211 @@ func (app application) runBackendsDrain(args []string) int {
 	}
 
 	return app.handleDrainBackendResponse(response)
+}
+
+// runListeners dispatches listener inventory and runtime-control commands.
+func (app application) runListeners(args []string) int {
+	if len(args) == 0 {
+		return app.usageError("listeners requires a subcommand")
+	}
+
+	switch args[0] {
+	case "list":
+		return app.runListenersList(args[1:])
+	case "show":
+		return app.runListenersShow(args[1:])
+	case "drain":
+		return app.runListenersDrain(args[1:])
+	case "resume":
+		return app.runListenersResume(args[1:])
+	default:
+		return app.usageError("unknown listeners subcommand %q", args[0])
+	}
+}
+
+// runListenersList lists process-local listener runtime state.
+func (app application) runListenersList(args []string) int {
+	line, err := parseCommandLine(args, nil)
+	if err != nil {
+		return app.usageError("%v", err)
+	}
+	if len(line.positionals) != 0 {
+		return app.usageError("listeners list does not accept positional arguments")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), app.options.Timeout)
+	defer cancel()
+
+	client, code := app.client()
+	if code != 0 {
+		return code
+	}
+
+	response, err := client.ListListenersWithResponse(ctx)
+	if err != nil {
+		return app.requestError("listeners list", err)
+	}
+	if response.StatusCode() != http.StatusOK {
+		return app.serverError("listeners list", response.StatusCode(), response.JSONDefault)
+	}
+	if response.JSON200 == nil {
+		return app.serverError("listeners list", http.StatusBadGateway, nil)
+	}
+
+	sort.Slice(response.JSON200.Listeners, func(left int, right int) bool {
+		return response.JSON200.Listeners[left].Name < response.JSON200.Listeners[right].Name
+	})
+
+	return app.writeObject(response.JSON200, func(writer io.Writer) error {
+		for _, listener := range response.JSON200.Listeners {
+			writeListenerLine(writer, listener)
+		}
+		return nil
+	})
+}
+
+// runListenersShow shows one process-local listener.
+func (app application) runListenersShow(args []string) int {
+	name, code := app.listenerNameArg(args, "listeners show")
+	if code != 0 {
+		return code
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), app.options.Timeout)
+	defer cancel()
+
+	client, code := app.client()
+	if code != 0 {
+		return code
+	}
+
+	response, err := client.GetListenerWithResponse(ctx, generated.ListenerName(name))
+	if err != nil {
+		return app.requestError("listeners show", err)
+	}
+	if response.StatusCode() != http.StatusOK {
+		return app.serverError("listeners show", response.StatusCode(), response.JSONDefault)
+	}
+	if response.JSON200 == nil {
+		return app.serverError("listeners show", http.StatusBadGateway, nil)
+	}
+
+	return app.writeObject(response.JSON200, func(writer io.Writer) error {
+		writeListenerLine(writer, *response.JSON200)
+		return nil
+	})
+}
+
+// runListenersDrain drains one process-local listener with explicit operator intent.
+func (app application) runListenersDrain(args []string) int {
+	line, err := parseCommandLine(args, []commandFlag{
+		valueFlag("mode"),
+		valueFlag("reason"),
+		valueFlag("grace-seconds"),
+	})
+	if err != nil {
+		return app.usageError("%v", err)
+	}
+	if len(line.positionals) != 1 {
+		return app.usageError("listeners drain requires exactly one listener name")
+	}
+
+	name := strings.TrimSpace(line.positionals[0])
+	if name == "" {
+		return app.usageError("listeners drain requires a non-empty listener name")
+	}
+
+	reason, ok := requiredValue(line, "reason")
+	if !ok {
+		return app.usageError("listeners drain requires --reason")
+	}
+
+	mode := generated.DrainMode(line.value("mode"))
+	if !mode.Valid() {
+		return app.usageError("drain mode must be soft or hard")
+	}
+
+	graceSeconds, err := optionalNonNegativeInt(line, "grace-seconds")
+	if err != nil {
+		return app.usageError("%v", err)
+	}
+	if mode == generated.DrainModeHard && len(line.all("grace-seconds")) == 0 {
+		return app.usageError("listeners drain --mode hard requires --grace-seconds")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), app.options.Timeout)
+	defer cancel()
+
+	client, code := app.client()
+	if code != 0 {
+		return code
+	}
+
+	body := generated.DrainListenerJSONRequestBody{
+		GraceSeconds: graceSeconds,
+		Mode:         mode,
+		Reason:       reason,
+	}
+	response, err := client.DrainListenerWithResponse(ctx, generated.ListenerName(name), body)
+	if err != nil {
+		return app.requestError("listeners drain", err)
+	}
+
+	return app.handleDrainListenerResponse(response)
+}
+
+// runListenersResume resumes one process-local listener from static config.
+func (app application) runListenersResume(args []string) int {
+	line, err := parseCommandLine(args, []commandFlag{valueFlag("reason")})
+	if err != nil {
+		return app.usageError("%v", err)
+	}
+	if len(line.positionals) != 1 {
+		return app.usageError("listeners resume requires exactly one listener name")
+	}
+
+	name := strings.TrimSpace(line.positionals[0])
+	if name == "" {
+		return app.usageError("listeners resume requires a non-empty listener name")
+	}
+
+	reason, ok := requiredValue(line, "reason")
+	if !ok {
+		return app.usageError("listeners resume requires --reason")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), app.options.Timeout)
+	defer cancel()
+
+	client, code := app.client()
+	if code != 0 {
+		return code
+	}
+
+	response, err := client.ResumeListenerWithResponse(ctx, generated.ListenerName(name), generated.ResumeListenerJSONRequestBody{Reason: reason})
+	if err != nil {
+		return app.requestError("listeners resume", err)
+	}
+
+	return app.handleResumeListenerResponse(response)
+}
+
+// listenerNameArg parses one non-empty listener name.
+func (app application) listenerNameArg(args []string, operation string) (string, int) {
+	line, err := parseCommandLine(args, nil)
+	if err != nil {
+		return "", app.usageError("%v", err)
+	}
+	if len(line.positionals) != 1 {
+		return "", app.usageError("%s requires exactly one listener name", operation)
+	}
+
+	name := strings.TrimSpace(line.positionals[0])
+	if name == "" {
+		return "", app.usageError("%s requires a non-empty listener name", operation)
+	}
+
+	return name, 0
 }
 
 // runConfig dispatches config inspection commands.
@@ -1233,6 +1441,7 @@ func (app application) runRouteLookup(args []string) int {
 	line, err := parseCommandLine(args, []commandFlag{
 		valueFlag("protocol"),
 		valueFlag("user"),
+		valueFlag("recipient"),
 		valueFlag("tenant"),
 		valueFlag("listener"),
 		valueFlag("service-name"),
@@ -1252,9 +1461,10 @@ func (app application) runRouteLookup(args []string) int {
 	if !ok {
 		return app.usageError("route lookup requires --protocol")
 	}
-	userKey, ok := requiredValue(line, "user")
-	if !ok {
-		return app.usageError("route lookup requires --user")
+	userKey := line.value("user")
+	recipient := line.value("recipient")
+	if userKey == "" && recipient == "" {
+		return app.usageError("route lookup requires --user or --recipient")
 	}
 
 	attributes, err := parseRouteAttributes(line.all("attribute"))
@@ -1265,7 +1475,12 @@ func (app application) runRouteLookup(args []string) int {
 	body := generated.LookupRouteJSONRequestBody{
 		Attributes: attributes,
 		Protocol:   protocol,
-		UserKey:    userKey,
+	}
+	if userKey != "" {
+		body.UserKey = &userKey
+	}
+	if recipient != "" {
+		body.Recipient = &recipient
 	}
 	if tenant := line.value("tenant"); tenant != "" {
 		body.Tenant = &tenant
@@ -1368,6 +1583,36 @@ func (app application) handleDrainBackendResponse(response *generated.DrainBacke
 		return app.serverError("backends drain", response.StatusCode(), response.JSONDefault)
 	}
 	return app.writeAccepted(response.JSON202)
+}
+
+// handleDrainListenerResponse renders an updated listener after drain.
+func (app application) handleDrainListenerResponse(response *generated.DrainListenerResponse) int {
+	if response.StatusCode() != http.StatusAccepted {
+		return app.serverError("listeners drain", response.StatusCode(), response.JSONDefault)
+	}
+	if response.JSON202 == nil {
+		return app.serverError("listeners drain", http.StatusBadGateway, nil)
+	}
+
+	return app.writeObject(response.JSON202, func(writer io.Writer) error {
+		writeListenerLine(writer, *response.JSON202)
+		return nil
+	})
+}
+
+// handleResumeListenerResponse renders an updated listener after resume.
+func (app application) handleResumeListenerResponse(response *generated.ResumeListenerResponse) int {
+	if response.StatusCode() != http.StatusAccepted {
+		return app.serverError("listeners resume", response.StatusCode(), response.JSONDefault)
+	}
+	if response.JSON202 == nil {
+		return app.serverError("listeners resume", http.StatusBadGateway, nil)
+	}
+
+	return app.writeObject(response.JSON202, func(writer io.Writer) error {
+		writeListenerLine(writer, *response.JSON202)
+		return nil
+	})
 }
 
 // handleMarkBackendInResponse renders a backend in-service response.
@@ -1689,11 +1934,12 @@ func requiredValue(line parsedCommandLine, name string) (string, bool) {
 
 // optionalNonNegativeInt returns a non-negative integer flag when set.
 func optionalNonNegativeInt(line parsedCommandLine, name string) (*int, error) {
-	value := line.value(name)
-	if value == "" {
+	values := line.all(name)
+	if len(values) == 0 {
 		return nil, nil
 	}
 
+	value := strings.TrimSpace(values[len(values)-1])
 	parsed, err := strconv.Atoi(value)
 	if err != nil || parsed < 0 {
 		return nil, fmt.Errorf("flag --%s must be a non-negative integer", name)
@@ -1764,6 +2010,32 @@ func writeBackendLine(writer io.Writer, backend generated.BackendDetail) {
 		backend.Runtime.Draining,
 		fieldValue(string(backend.Runtime.Maintenance)),
 		fieldValue(weight),
+	)
+}
+
+// writeListenerLine writes one scriptable listener text row.
+func writeListenerLine(writer io.Writer, listener generated.ListenerDetail) {
+	boundAddress := ""
+	if listener.BoundAddress != nil {
+		boundAddress = *listener.BoundAddress
+	}
+	drainMode := ""
+	if listener.DrainMode != nil {
+		drainMode = string(*listener.DrainMode)
+	}
+
+	_, _ = fmt.Fprintf(
+		writer,
+		"name=%s protocol=%s service_name=%s network=%s configured_address=%s bound_address=%s state=%s active_local_sessions=%d drain_mode=%s\n",
+		fieldValue(listener.Name),
+		fieldValue(listener.Protocol),
+		fieldValue(listener.ServiceName),
+		fieldValue(listener.Network),
+		fieldValue(listener.Address),
+		fieldValue(boundAddress),
+		fieldValue(string(listener.State)),
+		listener.ActiveLocalSessions,
+		fieldValue(drainMode),
 	)
 }
 
@@ -1839,6 +2111,16 @@ func writeRouteLine(writer io.Writer, route generated.RouteLookupResponse) {
 		fieldValue(route.Reason),
 		fieldValue(generation),
 	)
+	if route.IdentityResolution != nil {
+		_, _ = fmt.Fprintf(
+			writer,
+			" identity_source=%s identity_authoritative=%t identity_nauthilus=%t identity_account_resolved=%t",
+			fieldValue(route.IdentityResolution.Source),
+			route.IdentityResolution.Authoritative,
+			route.IdentityResolution.NauthilusUsed,
+			route.IdentityResolution.AccountResolved,
+		)
+	}
 	if route.Affinity != nil {
 		shardTag := ""
 		if route.Affinity.ShardTag != nil {

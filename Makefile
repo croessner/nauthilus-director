@@ -3,6 +3,16 @@ APP_NAME := nauthilus-director
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null)
 LDFLAGS := -ldflags "-X main.version=$(VERSION)"
 BIN_DIR ?= ./bin
+COMMANDS := $(APP_NAME) $(APP_NAME)ctl
+MAN1_PAGES := docs/man/nauthilus-director.1 docs/man/nauthilus-directorctl.1
+MAN5_PAGES := docs/man/nauthilus-director.yaml.5
+DESTDIR ?=
+PREFIX ?= /usr/local
+BINDIR ?= $(PREFIX)/bin
+MANDIR ?= $(PREFIX)/share/man
+INSTALL ?= install
+INSTALL_PROGRAM ?= $(INSTALL) -m 0755
+INSTALL_DATA ?= $(INSTALL) -m 0644
 GOLANGCI_LINT ?= golangci-lint
 GOLANGCI_NEW_FROM_REV ?= HEAD
 GO ?= go
@@ -19,13 +29,51 @@ all: build-check
 build:
 	@if [ ! -f go.mod ]; then \
 		echo "No production go.mod found yet; skipping build"; \
-	elif [ ! -d cmd/$(APP_NAME) ]; then \
-		echo "cmd/$(APP_NAME) is not present yet; running build-check instead"; \
-		$(MAKE) build-check; \
 	else \
 		mkdir -p $(BIN_DIR); \
-		$(GO) build -mod=vendor -trimpath $(LDFLAGS) -o $(BIN_DIR)/$(APP_NAME) ./cmd/$(APP_NAME); \
+		set -e; \
+		for command in $(COMMANDS); do \
+			test -d "cmd/$$command" || { echo "cmd/$$command is required"; exit 1; }; \
+			echo "==> go build $$command"; \
+			$(GO) build -mod=vendor -trimpath $(LDFLAGS) -o "$(BIN_DIR)/$$command" "./cmd/$$command"; \
+		done; \
 	fi
+
+install: install-bin install-man
+
+install-bin: build
+	$(INSTALL) -d "$(DESTDIR)$(BINDIR)"
+	@set -e; \
+	for command in $(COMMANDS); do \
+		$(INSTALL_PROGRAM) "$(BIN_DIR)/$$command" "$(DESTDIR)$(BINDIR)/$$command"; \
+	done
+
+install-man:
+	$(INSTALL) -d "$(DESTDIR)$(MANDIR)/man1" "$(DESTDIR)$(MANDIR)/man5"
+	@set -e; \
+	for page in $(MAN1_PAGES); do \
+		$(INSTALL_DATA) "$$page" "$(DESTDIR)$(MANDIR)/man1/$${page##*/}"; \
+	done; \
+	for page in $(MAN5_PAGES); do \
+		$(INSTALL_DATA) "$$page" "$(DESTDIR)$(MANDIR)/man5/$${page##*/}"; \
+	done
+
+uninstall: uninstall-bin uninstall-man
+
+uninstall-bin:
+	@set -e; \
+	for command in $(COMMANDS); do \
+		rm -f "$(DESTDIR)$(BINDIR)/$$command"; \
+	done
+
+uninstall-man:
+	@set -e; \
+	for page in $(MAN1_PAGES); do \
+		rm -f "$(DESTDIR)$(MANDIR)/man1/$${page##*/}"; \
+	done; \
+	for page in $(MAN5_PAGES); do \
+		rm -f "$(DESTDIR)$(MANDIR)/man5/$${page##*/}"; \
+	done
 
 # Build check target
 build-check:
@@ -159,4 +207,4 @@ poc-race:
 version:
 	@echo $(VERSION)
 
-.PHONY: all build build-check clean fix vet lint-config lint test race e2e e2e-interop docs-check generate-openapi check-openapi generate-docs check-docs copyright-check guardrails poc-test poc-race version
+.PHONY: all build install install-bin install-man uninstall uninstall-bin uninstall-man build-check clean fix vet lint-config lint test race e2e e2e-interop docs-check generate-openapi check-openapi generate-docs check-docs copyright-check guardrails poc-test poc-race version

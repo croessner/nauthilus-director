@@ -31,6 +31,10 @@ const (
 	pathContractReadyz             = "/readyz"
 	pathContractVersion            = "/api/v1/version"
 	pathContractBackendMaintenance = "/api/v1/backends/{identifier}/maintenance"
+	pathContractListeners          = "/api/v1/listeners"
+	pathContractListener           = "/api/v1/listeners/{name}"
+	pathContractListenerDrain      = "/api/v1/listeners/{name}/runtime/drain"
+	pathContractListenerResume     = "/api/v1/listeners/{name}/runtime/resume"
 	pathContractSession            = "/api/v1/sessions/{session_id}"
 	pathContractUserAffinity       = "/api/v1/users/{user_key}/affinity"
 )
@@ -49,6 +53,10 @@ func TestOpenAPIContractIncludesPlannedEndpointGroupSet(t *testing.T) {
 		{method: http.MethodGet, path: "/api/v1/config/defaults"},
 		{method: http.MethodGet, path: "/api/v1/config/non-default"},
 		{method: http.MethodPost, path: "/api/v1/reload"},
+		{method: http.MethodGet, path: pathContractListeners},
+		{method: http.MethodGet, path: pathContractListener},
+		{method: http.MethodPost, path: pathContractListenerDrain},
+		{method: http.MethodPost, path: pathContractListenerResume},
 		{method: http.MethodGet, path: "/api/v1/backends"},
 		{method: http.MethodGet, path: "/api/v1/backends/{identifier}"},
 		{method: http.MethodPost, path: pathContractBackendMaintenance},
@@ -75,6 +83,43 @@ func TestOpenAPIContractIncludesPlannedEndpointGroupSet(t *testing.T) {
 	for _, endpoint := range planned {
 		if operation := contract.Paths.Find(endpoint.path).GetOperation(endpoint.method); operation == nil {
 			t.Fatalf("OpenAPI contract missing %s %s", endpoint.method, endpoint.path)
+		}
+	}
+}
+
+// TestOpenAPIContractIncludesListenerOperations checks the listener v1 REST contract.
+func TestOpenAPIContractIncludesListenerOperations(t *testing.T) {
+	contract := loadContract(t)
+	expectedOperations := []struct {
+		method      string
+		path        string
+		operationID string
+	}{
+		{method: http.MethodGet, path: pathContractListeners, operationID: "listListeners"},
+		{method: http.MethodGet, path: pathContractListener, operationID: "getListener"},
+		{method: http.MethodPost, path: pathContractListenerDrain, operationID: "drainListener"},
+		{method: http.MethodPost, path: pathContractListenerResume, operationID: "resumeListener"},
+	}
+
+	for _, expected := range expectedOperations {
+		operation := contract.Paths.Find(expected.path).GetOperation(expected.method)
+		if operation == nil {
+			t.Fatalf("OpenAPI contract missing %s %s", expected.method, expected.path)
+		}
+
+		if operation.OperationID != expected.operationID {
+			t.Fatalf("%s %s operationId = %q, want %q", expected.method, expected.path, operation.OperationID, expected.operationID)
+		}
+	}
+
+	enumValues := contract.Components.Schemas["ListenerState"].Value.Enum
+	if len(enumValues) != 4 {
+		t.Fatalf("ListenerState enum length = %d, want 4", len(enumValues))
+	}
+
+	for _, expected := range []string{"accepting", "draining", "drained", "stopped"} {
+		if !schemaEnumContains(enumValues, expected) {
+			t.Fatalf("ListenerState enum missing %q: %#v", expected, enumValues)
 		}
 	}
 }
@@ -113,4 +158,15 @@ func loadContract(t *testing.T) *openapi3.T {
 	}
 
 	return contract
+}
+
+// schemaEnumContains reports whether an OpenAPI enum contains a string value.
+func schemaEnumContains(values []any, expected string) bool {
+	for _, value := range values {
+		if value == expected {
+			return true
+		}
+	}
+
+	return false
 }

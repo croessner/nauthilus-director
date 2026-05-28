@@ -83,6 +83,12 @@ fabric.properties
 server.crt
 server.key
 
+# Demo stack generated TLS material, in case a Docker volume is replaced by a local bind mount.
+/contrib/demo-stack/**/*.crt
+/contrib/demo-stack/**/*.key
+/contrib/demo-stack/**/*.csr
+/contrib/demo-stack/**/*.srl
+
 # Local planning, handoff, and scratch artifacts. Keep this directory out of Git.
 /temp/
 

@@ -14,7 +14,7 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-//nolint:goconst,wsl_v5 // CLI test tables repeat operator syntax intentionally.
+//nolint:dupl,goconst,wsl_v5 // CLI test tables and fake generated-client responses repeat operator syntax intentionally.
 package main
 
 import (
@@ -75,6 +75,11 @@ func TestNestedCommandsUseGeneratedClient(t *testing.T) {
 		{name: "backends weight", args: []string{"backends", "weight", "backend-a", "--weight", "0", "--reason", "drain placement"}, wantCalls: []string{"SetBackendWeight"}},
 		{name: "backends runtime clear", args: []string{"backends", "runtime", "clear", "backend-a", "--reason", "reset"}, wantCalls: []string{"ClearBackendRuntime"}},
 		{name: "backends runtime weight", args: []string{"backends", "runtime", "weight", "backend-a", "--weight", "100", "--reason", "restore"}, wantCalls: []string{"SetBackendWeight"}},
+		{name: "listeners list", args: []string{"listeners", "list"}, wantCalls: []string{"ListListeners"}},
+		{name: "listeners show", args: []string{"listeners", "show", "imap"}, wantCalls: []string{"GetListener"}},
+		{name: "listeners drain soft", args: []string{"listeners", "drain", "imap", "--mode", "soft", "--reason", "planned"}, wantCalls: []string{"DrainListener"}},
+		{name: "listeners drain hard", args: []string{"listeners", "drain", "imap", "--mode", "hard", "--reason", "planned", "--grace-seconds", "0"}, wantCalls: []string{"DrainListener"}},
+		{name: "listeners resume", args: []string{"listeners", "resume", "imap", "--reason", "done"}, wantCalls: []string{"ResumeListener"}},
 		{name: "config dump defaults", args: []string{"config", "dump", "-d"}, wantCalls: []string{"GetDefaultConfig"}},
 		{name: "config dump non default", args: []string{"config", "dump", "-n", "-P", "--format", "json"}, wantCalls: []string{"GetNonDefaultConfig"}},
 		{name: "sessions list", args: []string{"sessions", "list", "--protocol", "imap"}, wantCalls: []string{"ListSessions"}},
@@ -116,6 +121,8 @@ func TestMutatingCommandsRequireReason(t *testing.T) {
 		{"backends", "drain", "backend-a", "--mode", "soft"},
 		{"backends", "weight", "backend-a", "--weight", "0"},
 		{"backends", "runtime", "clear", "backend-a"},
+		{"listeners", "drain", "imap", "--mode", "soft"},
+		{"listeners", "resume", "imap"},
 		{"sessions", "kill", "session-a"},
 		{"users", "affinity", "set", "user-a", "--shard", "shard-a"},
 		{"users", "affinity", "clear", "user-a"},
@@ -198,6 +205,71 @@ func TestProtectedConfigForbiddenDoesNotPrintPartialOutput(t *testing.T) {
 	}
 }
 
+// TestListenerUsageValidationKeepsRequestsLocal verifies listener command errors fail before dispatch.
+func TestListenerUsageValidationKeepsRequestsLocal(t *testing.T) {
+	tests := []struct {
+		name       string
+		args       []string
+		wantStderr string
+	}{
+		{name: "empty show name", args: []string{"listeners", "show", ""}, wantStderr: "non-empty listener name"},
+		{name: "missing reason", args: []string{"listeners", "drain", "imap", "--mode", "soft"}, wantStderr: "--reason"},
+		{name: "invalid mode", args: []string{"listeners", "drain", "imap", "--mode", "later", "--reason", "planned"}, wantStderr: "soft or hard"},
+		{name: "empty grace", args: []string{"listeners", "drain", "imap", "--mode", "hard", "--reason", "planned", "--grace-seconds", ""}, wantStderr: "non-negative integer"},
+		{name: "negative grace", args: []string{"listeners", "drain", "imap", "--mode", "hard", "--reason", "planned", "--grace-seconds", "-1"}, wantStderr: "non-negative integer"},
+		{name: "hard without grace", args: []string{"listeners", "drain", "imap", "--mode", "hard", "--reason", "planned"}, wantStderr: "--grace-seconds"},
+		{name: "empty resume name", args: []string{"listeners", "resume", "", "--reason", "done"}, wantStderr: "non-empty listener name"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fake := newFakeControlClient()
+			stdout, stderr, code := runWithFakeClient(test.args, fake)
+			if code != 2 {
+				t.Fatalf("run returned exit code %d, want 2; stderr=%q", code, stderr)
+			}
+			if stdout != "" {
+				t.Fatalf("stdout = %q, want empty output", stdout)
+			}
+			if !strings.Contains(stderr, test.wantStderr) {
+				t.Fatalf("stderr = %q, want %q", stderr, test.wantStderr)
+			}
+			if len(fake.calls) != 0 {
+				t.Fatalf("calls = %#v, want none", fake.calls)
+			}
+		})
+	}
+}
+
+// TestHardListenerDrainZeroGraceSendsExplicitZero keeps immediate hard drain intentional.
+func TestHardListenerDrainZeroGraceSendsExplicitZero(t *testing.T) {
+	fake := newFakeControlClient()
+	_, stderr, code := runWithFakeClient([]string{
+		"listeners", "drain", "imap",
+		"--mode", "hard",
+		"--reason", "planned",
+		"--grace-seconds", "0",
+	}, fake)
+	if code != 0 {
+		t.Fatalf("run returned exit code %d, want 0; stderr=%q", code, stderr)
+	}
+	if !reflect.DeepEqual(fake.calls, []string{"DrainListener"}) {
+		t.Fatalf("calls = %#v, want DrainListener", fake.calls)
+	}
+	if fake.listenerDrainRequest.GraceSeconds == nil {
+		t.Fatal("grace_seconds was nil, want explicit zero")
+	}
+	if got := *fake.listenerDrainRequest.GraceSeconds; got != 0 {
+		t.Fatalf("grace_seconds = %d, want 0", got)
+	}
+	if fake.listenerDrainRequest.Mode != generated.DrainModeHard {
+		t.Fatalf("mode = %q, want hard", fake.listenerDrainRequest.Mode)
+	}
+	if fake.listenerDrainRequest.Reason != "planned" {
+		t.Fatalf("reason = %q, want planned", fake.listenerDrainRequest.Reason)
+	}
+}
+
 // TestRouteLookupAttributes verifies route lookup request shaping and repeated attributes.
 func TestRouteLookupAttributes(t *testing.T) {
 	fake := newFakeControlClient()
@@ -218,7 +290,7 @@ func TestRouteLookupAttributes(t *testing.T) {
 	}
 
 	request := fake.routeRequest
-	if request.Protocol != "imap" || request.UserKey != "user-a" || request.Listener == nil || *request.Listener != "imap" {
+	if request.Protocol != "imap" || request.UserKey == nil || *request.UserKey != "user-a" || request.Listener == nil || *request.Listener != "imap" {
 		t.Fatalf("route request = %#v, want protocol/user/listener", request)
 	}
 	if request.Tenant == nil || *request.Tenant != "blue" || request.ServiceName == nil || *request.ServiceName != "imap" {
@@ -238,6 +310,28 @@ func TestRouteLookupAttributes(t *testing.T) {
 	}
 }
 
+// TestRouteLookupRecipient verifies LMTP recipient diagnostics use the generated DTO field.
+func TestRouteLookupRecipient(t *testing.T) {
+	fake := newFakeControlClient()
+	_, stderr, code := runWithFakeClient([]string{
+		"route", "lookup",
+		"--protocol", "lmtp",
+		"--recipient", "user@example.test",
+	}, fake)
+	if code != 0 {
+		t.Fatalf("run returned exit code %d, want 0; stderr=%q", code, stderr)
+	}
+
+	request := fake.routeRequest
+	if request.Recipient == nil || *request.Recipient != "user@example.test" {
+		t.Fatalf("route request = %#v, want recipient", request)
+	}
+
+	if request.UserKey != nil {
+		t.Fatalf("route request = %#v, want no caller-supplied user key", request)
+	}
+}
+
 // TestHTTPStatusAndUsageExitCodes verifies stable local and remote failure mapping.
 func TestHTTPStatusAndUsageExitCodes(t *testing.T) {
 	fake := newFakeControlClient()
@@ -253,6 +347,21 @@ func TestHTTPStatusAndUsageExitCodes(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "HTTP 404: unknown backend") {
 		t.Fatalf("stderr = %q, want stable HTTP error", stderr)
+	}
+
+	listenerFake := newFakeControlClient()
+	listenerFake.getListenerStatus = http.StatusNotFound
+	listenerFake.getListenerProblem = &generated.ErrorResponse{Status: http.StatusNotFound, Code: "not_found", Message: "unknown listener"}
+
+	stdout, stderr, code = runWithFakeClient([]string{"listeners", "show", "missing"}, listenerFake)
+	if code != 1 {
+		t.Fatalf("listener server failure exit code = %d, want 1", code)
+	}
+	if stdout != "" {
+		t.Fatalf("listener stdout = %q, want empty output", stdout)
+	}
+	if !strings.Contains(stderr, "HTTP 404: unknown listener") {
+		t.Fatalf("listener stderr = %q, want stable HTTP error", stderr)
 	}
 
 	usageFake := newFakeControlClient()
@@ -295,6 +404,38 @@ func TestTextAndJSONOutputDeterministic(t *testing.T) {
 	if stdout != wantJSON {
 		t.Fatalf("JSON output = %q, want %q", stdout, wantJSON)
 	}
+
+	listenerTextFake := newFakeControlClient()
+	stdout, stderr, code = runWithFakeClient([]string{"listeners", "list"}, listenerTextFake)
+	if code != 0 {
+		t.Fatalf("listener text command returned exit code %d, want 0; stderr=%q", code, stderr)
+	}
+	wantListenerText := "name=imap protocol=imap service_name=imap-login network=tcp configured_address=127.0.0.1:1143 bound_address=127.0.0.1:1143 state=accepting active_local_sessions=1 drain_mode=\"\"\n"
+	if stdout != wantListenerText {
+		t.Fatalf("listener text output = %q, want %q", stdout, wantListenerText)
+	}
+
+	listenerJSONFake := newFakeControlClient()
+	stdout, stderr, code = runWithFakeClient([]string{"--output", "json", "listeners", "show", "imap"}, listenerJSONFake)
+	if code != 0 {
+		t.Fatalf("listener json command returned exit code %d, want 0; stderr=%q", code, stderr)
+	}
+	wantListenerJSON := "{\n" +
+		"  \"active_local_sessions\": 1,\n" +
+		"  \"address\": \"127.0.0.1:1143\",\n" +
+		"  \"bound_address\": \"127.0.0.1:1143\",\n" +
+		"  \"implicit_tls\": false,\n" +
+		"  \"name\": \"imap\",\n" +
+		"  \"network\": \"tcp\",\n" +
+		"  \"protocol\": \"imap\",\n" +
+		"  \"proxy_protocol\": false,\n" +
+		"  \"service_name\": \"imap-login\",\n" +
+		"  \"state\": \"accepting\",\n" +
+		"  \"tls_mode\": \"starttls\"\n" +
+		"}\n"
+	if stdout != wantListenerJSON {
+		t.Fatalf("listener JSON output = %q, want %q", stdout, wantListenerJSON)
+	}
 }
 
 // TestUsageErrorsDoNotPrintSecrets verifies rejected route facts do not echo secret values.
@@ -326,6 +467,9 @@ func TestManpagesDocumentImplementedSurface(t *testing.T) {
 	for _, want := range []string{
 		"backends maintenance enable",
 		"backends runtime clear",
+		"listeners list",
+		"listeners drain",
+		"listeners resume",
 		"config dump -d",
 		"config dump -n",
 		"sessions kill",
@@ -337,6 +481,7 @@ func TestManpagesDocumentImplementedSurface(t *testing.T) {
 		"--output",
 		"EXIT STATUS",
 		"protected config output",
+		"process-local",
 		"runtime state",
 		"YAML",
 	} {
@@ -414,10 +559,14 @@ type fakeControlClient struct {
 	nonDefaultConfigParams *generated.GetNonDefaultConfigParams
 	listSessionsParams     *generated.ListSessionsParams
 	routeRequest           generated.RouteLookupRequest
+	listenerDrainRequest   generated.ListenerDrainRequest
+	listenerResumeRequest  generated.ListenerResumeRequest
 	defaultConfigStatus    int
 	defaultConfigProblem   *generated.ErrorResponse
 	getBackendStatus       int
 	getBackendProblem      *generated.ErrorResponse
+	getListenerStatus      int
+	getListenerProblem     *generated.ErrorResponse
 }
 
 // newFakeControlClient creates a fake generated client with successful defaults.
@@ -425,6 +574,7 @@ func newFakeControlClient() *fakeControlClient {
 	return &fakeControlClient{
 		defaultConfigStatus: http.StatusOK,
 		getBackendStatus:    http.StatusOK,
+		getListenerStatus:   http.StatusOK,
 	}
 }
 
@@ -470,6 +620,25 @@ func backendB() generated.BackendDetail {
 			Maintenance: generated.MaintenanceModeSoft,
 		},
 		ShardTag: "shard-b",
+	}
+}
+
+// listenerA returns a stable listener fixture.
+func listenerA() generated.ListenerDetail {
+	boundAddress := "127.0.0.1:1143"
+
+	return generated.ListenerDetail{
+		ActiveLocalSessions: 1,
+		Address:             "127.0.0.1:1143",
+		BoundAddress:        &boundAddress,
+		ImplicitTLS:         false,
+		Name:                "imap",
+		Network:             "tcp",
+		Protocol:            "imap",
+		ProxyProtocol:       false,
+		ServiceName:         "imap-login",
+		State:               generated.Accepting,
+		TLSMode:             "starttls",
 	}
 }
 
@@ -645,6 +814,51 @@ func (fake *fakeControlClient) GetNonDefaultConfigWithResponse(_ context.Context
 	fake.record("GetNonDefaultConfig")
 	fake.nonDefaultConfigParams = params
 	return &generated.GetNonDefaultConfigResponse{HTTPResponse: httpResponse(http.StatusOK), JSON200: configDocument()}, nil
+}
+
+// ListListenersWithResponse records and returns listener list data.
+func (fake *fakeControlClient) ListListenersWithResponse(context.Context, ...generated.RequestEditorFn) (*generated.ListListenersResponse, error) {
+	fake.record("ListListeners")
+	return &generated.ListListenersResponse{
+		HTTPResponse: httpResponse(http.StatusOK),
+		JSON200:      &generated.ListenerListResponse{Listeners: []generated.ListenerDetail{listenerA()}},
+	}, nil
+}
+
+// GetListenerWithResponse records and returns listener detail data.
+func (fake *fakeControlClient) GetListenerWithResponse(context.Context, generated.ListenerName, ...generated.RequestEditorFn) (*generated.GetListenerResponse, error) {
+	fake.record("GetListener")
+	return &generated.GetListenerResponse{
+		HTTPResponse: httpResponse(fake.getListenerStatus),
+		JSON200:      &[]generated.ListenerDetail{listenerA()}[0],
+		JSONDefault:  fake.getListenerProblem,
+	}, nil
+}
+
+// DrainListenerWithBodyWithResponse records unsupported raw-body usage.
+func (fake *fakeControlClient) DrainListenerWithBodyWithResponse(context.Context, generated.ListenerName, string, io.Reader, ...generated.RequestEditorFn) (*generated.DrainListenerResponse, error) {
+	fake.record("DrainListenerWithBody")
+	return nil, nil
+}
+
+// DrainListenerWithResponse records and returns updated listener detail.
+func (fake *fakeControlClient) DrainListenerWithResponse(_ context.Context, _ generated.ListenerName, body generated.DrainListenerJSONRequestBody, _ ...generated.RequestEditorFn) (*generated.DrainListenerResponse, error) {
+	fake.record("DrainListener")
+	fake.listenerDrainRequest = body
+	return &generated.DrainListenerResponse{HTTPResponse: httpResponse(http.StatusAccepted), JSON202: &[]generated.ListenerDetail{listenerA()}[0]}, nil
+}
+
+// ResumeListenerWithBodyWithResponse records unsupported raw-body usage.
+func (fake *fakeControlClient) ResumeListenerWithBodyWithResponse(context.Context, generated.ListenerName, string, io.Reader, ...generated.RequestEditorFn) (*generated.ResumeListenerResponse, error) {
+	fake.record("ResumeListenerWithBody")
+	return nil, nil
+}
+
+// ResumeListenerWithResponse records and returns updated listener detail.
+func (fake *fakeControlClient) ResumeListenerWithResponse(_ context.Context, _ generated.ListenerName, body generated.ResumeListenerJSONRequestBody, _ ...generated.RequestEditorFn) (*generated.ResumeListenerResponse, error) {
+	fake.record("ResumeListener")
+	fake.listenerResumeRequest = body
+	return &generated.ResumeListenerResponse{HTTPResponse: httpResponse(http.StatusAccepted), JSON202: &[]generated.ListenerDetail{listenerA()}[0]}, nil
 }
 
 // ReloadWithResponse records and returns an accepted reload response.

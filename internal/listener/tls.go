@@ -33,15 +33,23 @@ func buildListenerTLSConfig(listener config.ListenerConfig) (*tls.Config, error)
 		return nil, err
 	}
 
-	if listener.TLS.Mode != tlsModeImplicit {
+	if listener.TLS.Mode != tlsModeImplicit && listener.TLS.Mode != tlsModeStartTLS {
 		return &tls.Config{MinVersion: minVersion}, nil
 	}
 
 	if strings.TrimSpace(listener.TLS.Cert) == "" {
+		if listener.TLS.Mode == tlsModeStartTLS {
+			return &tls.Config{MinVersion: minVersion}, nil
+		}
+
 		return nil, fmt.Errorf("listener tls.cert is required for implicit TLS")
 	}
 
 	if listener.TLS.Key.IsZero() {
+		if listener.TLS.Mode == tlsModeStartTLS {
+			return &tls.Config{MinVersion: minVersion}, nil
+		}
+
 		return nil, fmt.Errorf("listener tls.key is required for implicit TLS")
 	}
 

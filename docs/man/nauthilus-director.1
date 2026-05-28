@@ -1,7 +1,7 @@
 .\" Copyright (C) 2026 Christian Rößner
 .\"
 .\" SPDX-License-Identifier: AGPL-3.0-only
-.TH NAUTHILUS-DIRECTOR 1 "2026-05-26" "nauthilus-director" "User Commands"
+.TH NAUTHILUS-DIRECTOR 1 "2026-05-28" "nauthilus-director" "User Commands"
 .SH NAME
 nauthilus-director \- run and inspect the Nauthilus Director server process
 .SH SYNOPSIS
@@ -38,16 +38,20 @@ nauthilus-director \- run and inspect the Nauthilus Director server process
 .B nauthilus-director
 is the server binary for the Director process.
 Without a subcommand it starts the production server process, including the
-configured IMAP listeners and the in-process control API when enabled.
+configured IMAP, LMTP and LMTPS listeners and the in-process control API when
+enabled.
 The explicit
 .B serve
 subcommand is an alias for the same server startup path.
 .PP
-Runtime backend, session, user, route lookup and reload operations are managed
-through
+Runtime listener, backend, session, user, route lookup and reload operations
+are managed through
 .BR nauthilus-directorctl (1)
 against the running control API.
 Those runtime state changes do not rewrite YAML configuration files.
+Listener runtime drain and resume state is process-local and non-persistent;
+after restart, configured frontend listeners are started from the typed config
+snapshot.
 .SH OPTIONS
 .TP
 .B --version

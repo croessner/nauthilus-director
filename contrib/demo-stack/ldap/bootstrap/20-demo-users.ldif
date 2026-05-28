@@ -1,0 +1,43 @@
+# Copyright (C) 2026 Christian Rößner
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
+dn: uid=alice,ou=people,dc=demo,dc=local
+objectClass: inetOrgPerson
+objectClass: nauthilusDirectorDemoUser
+uid: alice
+cn: Alice Example
+sn: Example
+mail: alice@example.test
+mailShard: mailstore-a
+userPassword: demo-secret
+
+dn: uid=bob,ou=people,dc=demo,dc=local
+objectClass: inetOrgPerson
+objectClass: nauthilusDirectorDemoUser
+uid: bob
+cn: Bob Example
+sn: Example
+mail: bob@example.test
+mailShard: mailstore-b
+userPassword: demo-secret
+
+dn: uid=carol,ou=people,dc=demo,dc=local
+objectClass: inetOrgPerson
+objectClass: nauthilusDirectorDemoUser
+uid: carol
+cn: Carol Example
+sn: Example
+mail: carol@example.test
+mailShard: mailstore-c
+userPassword: demo-secret
+
+dn: uid=dave,ou=people,dc=demo,dc=local
+objectClass: inetOrgPerson
+objectClass: nauthilusDirectorDemoUser
+uid: dave
+cn: Dave Example
+sn: Example
+mail: dave@example.test
+mailShard: mailstore-a
+userPassword: demo-secret

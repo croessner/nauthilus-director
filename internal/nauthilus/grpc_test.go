@@ -31,10 +31,10 @@ func TestGRPCAuthenticateMapsAuthResult(t *testing.T) {
 			OK:             true,
 			Decision:       GRPCDecisionOK,
 			Session:        "grpc-session",
-			AccountField:   "alice",
+			AccountField:   "uid",
 			Backend:        42,
 			BackendRefName: "mailstore-a",
-			Attributes:     map[string][]string{"tenant": []string{"blue"}},
+			Attributes:     map[string][]string{"uid": []string{"alice"}, "tenant": []string{"blue"}},
 		},
 	}
 	client := newTestGRPCClient(t, service)
@@ -67,8 +67,8 @@ func TestGRPCLookupAndListAccountsMapBoundaries(t *testing.T) {
 			OK:           true,
 			Decision:     GRPCDecisionOK,
 			Session:      "lookup-session",
-			AccountField: "lookup-account",
-			Attributes:   map[string][]string{"shard": []string{"s1"}},
+			AccountField: "mail",
+			Attributes:   map[string][]string{"mail": []string{"lookup-account"}, "shard": []string{"s1"}},
 		},
 		listResponse: &GRPCListAccountsResponse{
 			Accounts: []string{"alpha@example.test", "zeta@example.test"},
@@ -123,6 +123,7 @@ func TestGRPCOutcomeClassification(t *testing.T) {
 		{name: "tempfail", response: &GRPCAuthResponse{Decision: GRPCDecisionTempFail}, want: DecisionTemporaryFailure, wantKind: ErrorKindTemporaryFailure},
 		{name: "nil response", want: DecisionTemporaryFailure, wantKind: ErrorKindMalformedResponse},
 		{name: "unknown decision", response: &GRPCAuthResponse{Decision: 99}, want: DecisionTemporaryFailure, wantKind: ErrorKindMalformedResponse},
+		{name: "missing account attribute", response: &GRPCAuthResponse{Decision: GRPCDecisionOK, AccountField: "uid"}, want: DecisionTemporaryFailure, wantKind: ErrorKindMalformedResponse},
 		{name: "transport", err: errors.New("grpc unavailable"), want: DecisionTemporaryFailure, wantKind: ErrorKindTransport},
 	}
 

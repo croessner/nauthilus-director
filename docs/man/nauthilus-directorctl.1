@@ -1,7 +1,7 @@
 .\" Copyright (C) 2026 Christian Rößner
 .\"
 .\" SPDX-License-Identifier: AGPL-3.0-only
-.TH NAUTHILUS-DIRECTORCTL 1 "2026-05-26" "nauthilus-director" "User Commands"
+.TH NAUTHILUS-DIRECTORCTL 1 "2026-05-28" "nauthilus-director" "User Commands"
 .SH NAME
 nauthilus-directorctl \- control a running Nauthilus Director
 .SH SYNOPSIS
@@ -23,6 +23,14 @@ JSON output returns generated response bodies where practical.
 .PP
 Mutation commands manage runtime state in the running Director.
 They do not edit or rewrite YAML configuration files.
+.PP
+Listener runtime control is process-local in v1.
+A listener drain or resume command affects only the Director process addressed
+by
+.B --address
+and does not fan out across a cluster.
+Drain state is runtime-only and is not persisted after process restart; the
+typed configuration snapshot remains the source of listener transport truth.
 .SH GLOBAL OPTIONS
 .TP
 .BR --address " " \fIurl\fR
@@ -99,6 +107,28 @@ Alias for
 .BI "backends runtime clear " identifier " --reason " text
 Clear runtime overrides for one backend.
 .TP
+.B listeners list
+List configured process-local frontend listeners and their runtime state.
+.TP
+.BI "listeners show " name
+Show one configured process-local frontend listener.
+.TP
+.BI "listeners drain " name " --mode " soft|hard " --reason " text
+Drain one process-local frontend listener without editing YAML configuration.
+Soft drain closes only the accept socket for new frontend connections and
+leaves active local sessions running.
+Hard drain requires an explicit
+.BI "--grace-seconds " seconds
+value, including
+.B 0
+for immediate local session closure intent.
+.TP
+.BI "listeners resume " name " --reason " text
+Resume one process-local frontend listener from the running Director's current
+configuration snapshot.
+Resume rebinds the listener from the current typed configuration and does not
+persist or clear any YAML setting.
+.TP
 .B config dump -d
 Read canonical default configuration from the running Director.
 .TP
@@ -155,6 +185,8 @@ and
 Terminate active sessions for one user.
 .TP
 .BI "route lookup --protocol imap --user " user-key
+.br
+.BI "route lookup --protocol lmtp --recipient " address
 Run a side-effect-free route lookup diagnostic.
 Optional flags are
 .BI "--listener " name
@@ -165,9 +197,22 @@ Optional flags are
 ,
 .BI "--backend-pool " pool
 ,
+.BI "--client-ip " address
+,
 .B --include-affinity
 and repeated
 .BI "--attribute " k=v .
+Use
+.B --user
+when the routing identity is already known.
+Use
+.B --recipient
+for LMTP recipient diagnostics.
+LMTP recipient diagnostics may resolve the supplied recipient through the
+configured Nauthilus no-auth identity lookup path before explaining the dry-run
+route.
+Route lookup does not authenticate credentials, create sessions, refresh
+leases, connect to backends or mutate runtime state.
 Credential-bearing attributes are rejected before the request is sent.
 .TP
 .B reload

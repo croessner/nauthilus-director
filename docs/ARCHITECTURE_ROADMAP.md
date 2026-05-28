@@ -608,12 +608,17 @@ Required frontend commands before proxy mode:
 - LOGIN
 - ID, optional
 
+IMAP `CAPABILITY` output is the effective configured pre-auth extension
+surface, not a blind list of parser code paths. Omitting `ID`, `STARTTLS`,
+`SASL-IR` or an `AUTH=<mechanism>` capability disables the related extension
+behavior for that listener; unsupported capabilities fail validation instead of
+being hidden at runtime. `LOGIN` remains an explicit pre-auth command rather
+than an advertised SASL mechanism.
+
 Optional later:
 
-- SASL-IR
 - AUTHENTICATE LOGIN
 - literal handling for LOGIN/AUTHENTICATE edge cases
-- command pipelining robustness
 
 After successful authentication, the director resolves routing facts, applies active affinity, selects the backend, performs the configured backend authentication step and transitions to transparent proxy mode.
 
@@ -658,6 +663,14 @@ The director uses a same-backend-only recipient routing strategy:
 - The director must not spool one message body for replay to multiple backend groups.
 
 LMTP must return per-recipient status. Multi-recipient routing must be safe, explicit and observable.
+
+LMTP `LHLO` output is the effective configured frontend surface. Omitted
+capabilities disable the related extension behavior for that session:
+`STARTTLS` is not accepted when not advertised, `AUTH` mechanisms are not
+inferred from peer-auth config, `CHUNKING` is required for `BDAT`, and
+`SMTPUTF8` is required before accepting the `MAIL FROM` `SMTPUTF8` parameter or
+SMTPUTF8-only envelope paths. Unsupported or backend-unsafe capabilities fail
+closed before sockets bind or before they are advertised.
 
 ## 13. Sieve / ManageSieve design
 
@@ -732,9 +745,9 @@ POST /api/v1/route/lookup
 GET  /metrics
 ```
 
-Route lookup is a director-only routing diagnostic. It does not authenticate credentials, does not call Nauthilus and does not ask Nauthilus for identity or routing input. The caller supplies an already known or operator-provided identity key, protocol, listener context and optional attributes; the director then explains how its configured resolver inputs, Redis affinity, runtime overrides, health and maintenance state would select a backend.
+Route lookup is a director-owned routing diagnostic. It does not authenticate credentials. For protocols where the caller supplies an already known identity key, protocol, listener context and optional attributes, the director explains how its configured resolver inputs, Redis affinity, runtime overrides, health and maintenance state would select a backend. For LMTP recipient diagnostics, the director may resolve a supplied recipient through the Nauthilus identity lookup path (`LookupIdentity` for gRPC or `mode=no-auth` for HTTP/JSON) before running the dry-run route explanation.
 
-The endpoint must be side-effect free. It may read Redis-backed affinity and runtime state, but it must not create sessions, refresh leases, mutate affinity, perform backend auth or trigger Nauthilus auth/lookup calls.
+The endpoint must be side-effect free. It may read Redis-backed affinity and runtime state and may perform the explicit LMTP no-auth identity lookup described above, but it must not authenticate credentials, create sessions, refresh leases, open delivery holds, mutate affinity, perform backend auth, connect to backends or trigger Nauthilus credential-authentication calls. Responses must state whether identity input was caller-supplied, read from existing director state or resolved through Nauthilus.
 
 Example request:
 
@@ -913,9 +926,10 @@ sasl_blob
 raw_error
 ```
 
-Prometheus metrics should include sessions, auth totals/durations, routing resolver totals/durations, backend selection totals, backend health, backend maintenance, proxy bytes/durations, LMTP recipient totals, REST requests and Redis operation health.
+Prometheus metrics should include sessions, auth totals/durations, routing resolver totals/durations, backend selection totals, backend health, backend maintenance, proxy bytes/durations, LMTP transaction totals/durations, LMTP recipient route/status totals, LMTP same-backend policy failures, LMTP DATA/BDAT stream totals/durations, LMTP backend status classes, REST requests and Redis operation health.
 
 `backend_pool` and `shard_tag` are acceptable labels; raw backend identifiers are not metrics labels. Per-backend details belong in REST, logs and traces.
+LMTP observability must also keep raw recipients, envelope senders, message identifiers, subjects and DATA/BDAT content out of logs, traces and metric labels.
 
 ## 18. Health checks and maintenance
 
@@ -1037,7 +1051,7 @@ E2E tests:
 - authenticate through the public protocol listener, then assert backend routing externally
 - verify `auth_attribute` routing from Nauthilus-provided attributes
 - verify active-user stickiness across parallel connections and reconnects
-- verify route lookup does not call Nauthilus, create sessions or mutate Redis
+- verify route lookup does not authenticate credentials, create sessions or mutate Redis; LMTP recipient diagnostics may call only the no-auth Nauthilus identity lookup path
 - verify TLS/STARTTLS and backend TLS/SNI behavior with test certificates
 - scrape Prometheus metrics and optionally receive OTLP traces where the test environment provides collectors
 - keep credentials and SASL bearer material out of test logs
@@ -1127,18 +1141,22 @@ backends, two explicit shards and distributed deep-health ownership.
 ### M3: REST API and client
 
 Status: completed. The v1 generated OpenAPI REST boundary, generated client
-SDK, `nauthilus-directorctl`, route lookup, safe reload, config documentation
-guardrails, manpages and REST/CLI parity proof are in place. The
-M3 route-lookup follow-up is closed by the M2/M3 implementation. Binary-entry
-E2E proves CLI and REST state parity against the running
-`nauthilus-director` process, and Docker interop proves the same control
-surface against six real Dovecot backends behind three Director processes.
+SDK, `nauthilus-directorctl`, process-local listener runtime control, route
+lookup, safe reload, config documentation guardrails, manpages and REST/CLI
+parity proof are in place. The M3 route-lookup follow-up is closed by the
+M2/M3 implementation, and the listener runtime-control follow-up is closed by
+public-socket E2E proof through the production server and CLI binaries.
+Binary-entry E2E proves CLI and REST state parity against the running
+`nauthilus-director` process, and Docker interop proves the shared runtime
+control surface against six real Dovecot backends behind three Director
+processes.
 
 - OpenAPI-first workflow
 - generated REST server boundary
 - reproducible OpenAPI generation and stale-output check
 - `/healthz`, `/readyz`
 - backend list/show/maintenance/runtime operations
+- process-local listener list/show/drain/resume operations
 - session list/show/kill
 - user list/show/move/kick/affinity
 - route lookup
@@ -1147,7 +1165,8 @@ surface against six real Dovecot backends behind three Director processes.
 - generated config documentation and stale-doc guardrails
 - initial manpages for stable server/client command surfaces and the config file
   format
-- E2E proof for REST and CLI managing the same Redis-backed runtime state
+- E2E proof for REST and CLI managing the same Redis-backed runtime state and
+  process-local listener socket state
 
 ### M4: Observability
 
@@ -1162,14 +1181,29 @@ completion evidence lives in
 - Prometheus metrics
 - structured log correlation
 
-### M5: LMTP MVP
+### M5: LMTP Production
 
-- LMTP state machine
+Status: completed. The production LMTP/LMTPS listener path, LMTP transaction
+state machine, DATA/BDAT backend forwarding, peer authentication, recipient
+identity lookup, runtime-aware same-backend placement, delivery-scoped
+affinity, route lookup integration, observability coverage, deterministic
+fake-service E2E proof and real Postfix-to-Director-to-Dovecot interop lane are
+in place. The detailed completion evidence lives in
+`docs/specs/implementation/M5_LMTP_PRODUCTION_SPEC.md`.
+
+- production-ready LMTP and LMTPS entrypoints within the M5 scope
+- LMTP state machine with DATA and BDAT handling
 - LMTP STARTTLS, implicit TLS and client-auth handling
-- recipient routing through the resolver model
+- truthfully mediated LMTP capability enforcement, including SMTPUTF8 and
+  CHUNKING/BDAT boundaries
+- recipient identity lookup through Nauthilus and routing through the resolver
+  model
+- delivery-scoped active-affinity holds for concurrent user-stateful placement
 - single-backend transaction support
 - same-backend-only multi-recipient handling
 - per-recipient status mapping
+- real Postfix-to-Director-to-Dovecot LMTP interoperability while preserving the
+  existing Dovecot IMAP lane
 
 ### M6: ManageSieve / Sieve proxy
 

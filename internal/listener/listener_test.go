@@ -47,12 +47,16 @@ const (
 	testGRPCAuthority    = "grpc-authority"
 	testIMAPListener     = "imap"
 	testIMAPSListener    = "imaps"
+	testLMTPListener     = "lmtp"
+	testLMTPSListener    = "lmtps"
+	testLoopbackAny      = "127.0.0.1:0"
 	trustedLocalhostCIDR = "127.0.0.1/32"
 )
 
-// TestManagerSelectsOnlyIMAPListeners verifies that the manager starts only protocol=imap entries.
-func TestManagerSelectsOnlyIMAPListeners(t *testing.T) {
+// TestManagerSelectsSupportedProtocolListeners verifies that startup plans include IMAP and LMTP listeners.
+func TestManagerSelectsSupportedProtocolListeners(t *testing.T) {
 	cfg := config.DefaultConfig()
+	cfg = withTestListenerCertificates(t, cfg)
 
 	manager, err := NewManagerWithConfig(cfg)
 	if err != nil {
@@ -60,16 +64,33 @@ func TestManagerSelectsOnlyIMAPListeners(t *testing.T) {
 	}
 
 	got := manager.ListenerNames()
-	want := []string{testIMAPListener, testIMAPSListener}
+	want := []string{testIMAPListener, testIMAPSListener, testLMTPListener, testLMTPSListener}
 
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("listener names = %v, want %v", got, want)
 	}
 }
 
+// TestManagerRejectsUnsupportedProtocolBeforeBind verifies unknown protocols fail during planning.
+func TestManagerRejectsUnsupportedProtocolBeforeBind(t *testing.T) {
+	cfg := singleListenerConfig(t, testIMAPListener, tlsModeStartTLS)
+	entry := cfg.Director.Listeners[testIMAPListener]
+	entry.Protocol = "pop3"
+	cfg.Director.Listeners[testIMAPListener] = entry
+
+	_, err := NewManagerWithConfig(cfg)
+	if err == nil {
+		t.Fatal("NewManagerWithConfig accepted an unsupported protocol")
+	}
+
+	if !strings.Contains(err.Error(), "unsupported protocol pop3") {
+		t.Fatalf("error = %q, want unsupported protocol rejection", err.Error())
+	}
+}
+
 // TestSessionOptionsIncludeAuthorityBearerTokenLimit verifies IMAP sessions inherit authority bearer limits.
 func TestSessionOptionsIncludeAuthorityBearerTokenLimit(t *testing.T) {
-	cfg := singleListenerConfig(testIMAPListener, tlsModeStartTLS)
+	cfg := singleListenerConfig(t, testIMAPListener, tlsModeStartTLS)
 	authority := cfg.Auth.Authorities["default"]
 	authority.Mechanisms.Bearer.TokenMaxBytes = 42
 	cfg.Auth.Authorities["default"] = authority
@@ -97,7 +118,7 @@ func TestSessionOptionsIncludeAuthorityBearerTokenLimit(t *testing.T) {
 
 // TestManagerSelectsConfiguredListenerAuthorityTransport verifies listener authority selection.
 func TestManagerSelectsConfiguredListenerAuthorityTransport(t *testing.T) {
-	cfg := singleListenerConfig(testIMAPListener, tlsModeStartTLS)
+	cfg := singleListenerConfig(t, testIMAPListener, tlsModeStartTLS)
 	authority := cfg.Auth.Authorities["default"]
 	authority.Transport = testGRPCTransport
 	cfg.Auth.Authorities[testGRPCAuthority] = authority
@@ -151,9 +172,10 @@ func TestManagerSelectsConfiguredListenerAuthorityTransport(t *testing.T) {
 
 // TestStartTLSListenerStartsWithoutImplicitTLS verifies cleartext IMAP listener setup.
 func TestStartTLSListenerStartsWithoutImplicitTLS(t *testing.T) {
-	cfg := singleListenerConfig(testIMAPListener, tlsModeStartTLS)
+	cfg := singleListenerConfig(t, testIMAPListener, tlsModeStartTLS)
+	handler := newRecordingHandler()
 
-	manager, address := startManager(t, cfg, testIMAPListener)
+	manager, address := startManager(t, cfg, testIMAPListener, WithSessionHandlerFactory(handler.factory))
 
 	snapshots := manager.Snapshots()
 	if len(snapshots) != 1 {
@@ -176,16 +198,149 @@ func TestStartTLSListenerStartsWithoutImplicitTLS(t *testing.T) {
 	}
 }
 
+// TestIMAPAndLMTPListenersStartThroughProtocolFactory verifies shared transport startup is protocol-generic.
+func TestIMAPAndLMTPListenersStartThroughProtocolFactory(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg = withTestListenerCertificates(t, cfg)
+
+	imapEntry := cfg.Director.Listeners[testIMAPListener]
+	imapEntry.Address = testLoopbackAny
+	cfg.Director.Listeners[testIMAPListener] = imapEntry
+
+	lmtpEntry := cfg.Director.Listeners[testLMTPListener]
+	lmtpEntry.Address = testLoopbackAny
+	lmtpEntry.TLS.Mode = tlsModeStartTLS
+	cfg.Director.Listeners[testLMTPListener] = lmtpEntry
+
+	cfg.Director.Listeners = map[string]config.ListenerConfig{
+		testIMAPListener: imapEntry,
+		testLMTPListener: lmtpEntry,
+	}
+
+	protocols := make(chan string, 2)
+
+	manager, err := NewManagerWithConfig(
+		cfg,
+		WithSessionHandlerFactory(func(options SessionOptions) SessionHandler {
+			protocols <- options.Config.Protocol
+
+			return newRecordingHandler()
+		}),
+	)
+	if err != nil {
+		t.Fatalf("NewManagerWithConfig: %v", err)
+	}
+
+	startCtx, cancelStart := context.WithTimeout(context.Background(), time.Second)
+	defer cancelStart()
+
+	if err := manager.Start(startCtx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	t.Cleanup(func() {
+		stopCtx, cancelStop := context.WithTimeout(context.Background(), time.Second)
+		defer cancelStop()
+
+		_ = manager.Stop(stopCtx)
+	})
+
+	if _, ok := manager.BoundAddress(testIMAPListener); !ok {
+		t.Fatal("IMAP listener did not bind")
+	}
+
+	if _, ok := manager.BoundAddress(testLMTPListener); !ok {
+		t.Fatal("LMTP listener did not bind")
+	}
+
+	if got := manager.ListenerNames(); !reflect.DeepEqual(got, []string{testIMAPListener, testLMTPListener}) {
+		t.Fatalf("listener names = %v, want IMAP and LMTP", got)
+	}
+
+	if len(protocols) != 2 {
+		t.Fatalf("handler factory calls = %d, want 2", len(protocols))
+	}
+}
+
+// TestReloadAddsLMTPAndDrainsRemovedListener verifies live listener add/remove behavior.
+func TestReloadAddsLMTPAndDrainsRemovedListener(t *testing.T) {
+	current := singleListenerConfig(t, testIMAPListener, tlsModeStartTLS)
+	next := current
+	imapEntry := current.Director.Listeners[testIMAPListener]
+	lmtpEntry := config.DefaultConfig().Director.Listeners[testLMTPListener]
+	lmtpCertPath, lmtpKeyPath := writeTestCertificate(t)
+	lmtpEntry.Address = testLoopbackAny
+	lmtpEntry.TLS.Mode = tlsModeStartTLS
+	lmtpEntry.TLS.Cert = lmtpCertPath
+	lmtpEntry.TLS.Key = config.Secret(lmtpKeyPath)
+	lmtpEntry.TLS.ClientCA = ""
+	lmtpEntry.TLS.RequireClientCert = false
+	lmtpEntry.ProxyProtocol.Enabled = false
+	next.Director.Listeners = map[string]config.ListenerConfig{
+		testIMAPListener: imapEntry,
+		testLMTPListener: lmtpEntry,
+	}
+
+	manager, err := NewManagerWithConfig(current, WithSessionHandlerFactory(func(SessionOptions) SessionHandler {
+		return newRecordingHandler()
+	}))
+	if err != nil {
+		t.Fatalf("NewManagerWithConfig: %v", err)
+	}
+
+	startCtx, cancelStart := context.WithTimeout(context.Background(), time.Second)
+	defer cancelStart()
+
+	if err := manager.Start(startCtx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	t.Cleanup(func() {
+		stopCtx, cancelStop := context.WithTimeout(context.Background(), time.Second)
+		defer cancelStop()
+
+		_ = manager.Stop(stopCtx)
+	})
+
+	reloadCtx, cancelReload := context.WithTimeout(context.Background(), time.Second)
+	defer cancelReload()
+
+	if err := manager.Reload(reloadCtx, next); err != nil {
+		t.Fatalf("Reload add LMTP: %v", err)
+	}
+
+	lmtpAddress, ok := manager.BoundAddress(testLMTPListener)
+	if !ok {
+		t.Fatal("LMTP listener did not bind after reload")
+	}
+
+	conn, err := net.Dial(networkTCP, lmtpAddress)
+	if err != nil {
+		t.Fatalf("dial reloaded LMTP listener: %v", err)
+	}
+
+	_ = conn.Close()
+
+	if err := manager.Reload(reloadCtx, current); err != nil {
+		t.Fatalf("Reload remove LMTP: %v", err)
+	}
+
+	if _, ok := manager.BoundAddress(testLMTPListener); ok {
+		t.Fatal("removed LMTP listener still exposes a bound address")
+	}
+}
+
 // TestIMAPSListenerWrapsAcceptedConnectionsInTLS verifies implicit TLS before IMAP greeting.
 func TestIMAPSListenerWrapsAcceptedConnectionsInTLS(t *testing.T) {
 	certPath, keyPath := writeTestCertificate(t)
-	cfg := singleListenerConfig(testIMAPSListener, tlsModeImplicit)
+	cfg := singleListenerConfig(t, testIMAPSListener, tlsModeImplicit)
 	entry := cfg.Director.Listeners[testIMAPSListener]
 	entry.TLS.Cert = certPath
 	entry.TLS.Key = config.Secret(keyPath)
 	cfg.Director.Listeners[testIMAPSListener] = entry
+	handler := newRecordingHandler()
 
-	_, address := startManager(t, cfg, testIMAPSListener)
+	_, address := startManager(t, cfg, testIMAPSListener, WithSessionHandlerFactory(handler.factory))
 
 	dialer := &net.Dialer{Timeout: time.Second}
 	tlsConfig := &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12}
@@ -205,10 +360,11 @@ func TestIMAPSListenerWrapsAcceptedConnectionsInTLS(t *testing.T) {
 
 // TestGracefulListenerShutdownClosesActiveSessions verifies deadline-enforced shutdown.
 func TestGracefulListenerShutdownClosesActiveSessions(t *testing.T) {
-	cfg := singleListenerConfig(testIMAPListener, tlsModeStartTLS)
+	cfg := singleListenerConfig(t, testIMAPListener, tlsModeStartTLS)
 	cfg.Runtime.Process.ShutdownTimeout = config.NewDuration(20 * time.Millisecond)
+	handler := newRecordingHandler()
 
-	manager, address := startManager(t, cfg, testIMAPListener)
+	manager, address := startManager(t, cfg, testIMAPListener, WithSessionHandlerFactory(handler.factory))
 
 	conn, err := net.Dial(networkTCP, address)
 	if err != nil {
@@ -233,9 +389,264 @@ func TestGracefulListenerShutdownClosesActiveSessions(t *testing.T) {
 	}
 }
 
+// TestSoftDrainStopsNewAcceptsAndPreservesActiveConnection verifies socket-only drain behavior.
+func TestSoftDrainStopsNewAcceptsAndPreservesActiveConnection(t *testing.T) {
+	cfg := singleListenerConfig(t, testIMAPListener, tlsModeStartTLS)
+	handler := newRecordingHandler()
+
+	manager, address := startManager(t, cfg, testIMAPListener, WithSessionHandlerFactory(handler.factory))
+
+	conn, err := net.Dial(networkTCP, address)
+	if err != nil {
+		t.Fatalf("dial listener: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	_ = readLine(t, conn)
+	_ = waitForListenerSnapshot(t, manager, testIMAPListener, func(snapshot Snapshot) bool {
+		return snapshot.ActiveLocalSessions == 1 && snapshot.State == StateAccepting
+	})
+
+	snapshot := drainListener(t, manager, DrainRequest{Name: testIMAPListener, Mode: DrainModeSoft})
+	if snapshot.State != StateDraining || snapshot.DrainMode != DrainModeSoft {
+		t.Fatalf("soft drain snapshot = %#v, want draining soft", snapshot)
+	}
+
+	if snapshot.BoundAddress != "" {
+		t.Fatalf("soft-drained bound address = %q, want empty", snapshot.BoundAddress)
+	}
+
+	if _, ok := manager.BoundAddress(testIMAPListener); ok {
+		t.Fatal("soft-drained listener still exposes a bound address")
+	}
+
+	expectDialFailure(t, address)
+	expectIdleConnectionOpen(t, conn)
+}
+
+// TestHardDrainClosesActiveConnectionsAfterGrace verifies explicit grace handling.
+func TestHardDrainClosesActiveConnectionsAfterGrace(t *testing.T) {
+	cfg := singleListenerConfig(t, testIMAPListener, tlsModeStartTLS)
+	handler := newRecordingHandler()
+
+	manager, address := startManager(t, cfg, testIMAPListener, WithSessionHandlerFactory(handler.factory))
+
+	conn, err := net.Dial(networkTCP, address)
+	if err != nil {
+		t.Fatalf("dial listener: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	_ = readLine(t, conn)
+
+	grace := 20 * time.Millisecond
+
+	snapshot := drainListener(t, manager, DrainRequest{Name: testIMAPListener, Mode: DrainModeHard, Grace: &grace})
+	if snapshot.State != StateDrained || snapshot.ActiveLocalSessions != 0 || snapshot.DrainMode != DrainModeHard {
+		t.Fatalf("hard drain snapshot = %#v, want drained hard with no active sessions", snapshot)
+	}
+
+	expectConnectionClosed(t, conn)
+	expectDialFailure(t, address)
+}
+
+// TestHardDrainWithZeroGraceClosesActiveConnectionsImmediately verifies explicit zero grace.
+func TestHardDrainWithZeroGraceClosesActiveConnectionsImmediately(t *testing.T) {
+	cfg := singleListenerConfig(t, testIMAPListener, tlsModeStartTLS)
+	handler := newRecordingHandler()
+
+	manager, address := startManager(t, cfg, testIMAPListener, WithSessionHandlerFactory(handler.factory))
+
+	conn, err := net.Dial(networkTCP, address)
+	if err != nil {
+		t.Fatalf("dial listener: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	_ = readLine(t, conn)
+
+	grace := time.Duration(0)
+
+	snapshot := drainListener(t, manager, DrainRequest{Name: testIMAPListener, Mode: DrainModeHard, Grace: &grace})
+	if snapshot.State != StateDrained || snapshot.ActiveLocalSessions != 0 {
+		t.Fatalf("zero-grace hard drain snapshot = %#v, want drained with no active sessions", snapshot)
+	}
+
+	expectConnectionClosed(t, conn)
+	expectDialFailure(t, address)
+}
+
+// TestResumeRebindsSoftDrainedListener verifies runtime drain is reversible from config.
+func TestResumeRebindsSoftDrainedListener(t *testing.T) {
+	cfg := singleListenerConfig(t, testIMAPListener, tlsModeStartTLS)
+	handler := newRecordingHandler()
+
+	manager, address := startManager(t, cfg, testIMAPListener, WithSessionHandlerFactory(handler.factory))
+
+	drainListener(t, manager, DrainRequest{Name: testIMAPListener, Mode: DrainModeSoft})
+	expectDialFailure(t, address)
+
+	snapshot := resumeListener(t, manager, testIMAPListener)
+	if snapshot.State != StateAccepting || snapshot.BoundAddress == "" || snapshot.DrainMode != "" {
+		t.Fatalf("resume snapshot = %#v, want accepting with a bound address", snapshot)
+	}
+
+	conn, err := net.Dial(networkTCP, snapshot.BoundAddress)
+	if err != nil {
+		t.Fatalf("dial resumed listener: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	if line := readLine(t, conn); line != testGreeting {
+		t.Fatalf("resumed greeting = %q, want %q", line, testGreeting)
+	}
+}
+
+// TestResumeFailsClosedWhenBindFails verifies failed rebinds remain non-accepting.
+func TestResumeFailsClosedWhenBindFails(t *testing.T) {
+	address := reserveTCPAddress(t)
+	cfg := singleListenerConfig(t, testIMAPListener, tlsModeStartTLS)
+	entry := cfg.Director.Listeners[testIMAPListener]
+	entry.Address = address
+	cfg.Director.Listeners[testIMAPListener] = entry
+
+	manager, _ := startManager(t, cfg, testIMAPListener, WithSessionHandlerFactory(newRecordingHandler().factory))
+	drainListener(t, manager, DrainRequest{Name: testIMAPListener, Mode: DrainModeSoft})
+
+	blocker, err := net.Listen(networkTCP, address)
+	if err != nil {
+		t.Fatalf("reserve drained listener address: %v", err)
+	}
+	defer func() { _ = blocker.Close() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	snapshot, err := manager.Resume(ctx, testIMAPListener)
+	if err == nil {
+		t.Fatal("Resume succeeded while the configured address was already bound")
+	}
+
+	if snapshot.State != StateStopped || snapshot.BoundAddress != "" {
+		t.Fatalf("failed resume snapshot = %#v, want stopped and unbound", snapshot)
+	}
+}
+
+// TestRepeatedDrainAndResumeCallsAreDeterministic verifies safe idempotent operations.
+func TestRepeatedDrainAndResumeCallsAreDeterministic(t *testing.T) {
+	cfg := singleListenerConfig(t, testIMAPListener, tlsModeStartTLS)
+	manager, _ := startManager(t, cfg, testIMAPListener, WithSessionHandlerFactory(newRecordingHandler().factory))
+
+	softSnapshots := []Snapshot{
+		drainListener(t, manager, DrainRequest{Name: testIMAPListener, Mode: DrainModeSoft}),
+		drainListener(t, manager, DrainRequest{Name: testIMAPListener, Mode: DrainModeSoft}),
+	}
+	if softSnapshots[0].State != StateDrained || softSnapshots[1].State != StateDrained {
+		t.Fatalf("repeated soft drain states = %q/%q, want drained", softSnapshots[0].State, softSnapshots[1].State)
+	}
+
+	resumeSnapshots := []Snapshot{
+		resumeListener(t, manager, testIMAPListener),
+		resumeListener(t, manager, testIMAPListener),
+	}
+	if resumeSnapshots[0].State != StateAccepting || resumeSnapshots[1].State != StateAccepting {
+		t.Fatalf("repeated resume states = %q/%q, want accepting", resumeSnapshots[0].State, resumeSnapshots[1].State)
+	}
+
+	grace := time.Duration(0)
+	hardSnapshots := []Snapshot{
+		drainListener(t, manager, DrainRequest{Name: testIMAPListener, Mode: DrainModeHard, Grace: &grace}),
+		drainListener(t, manager, DrainRequest{Name: testIMAPListener, Mode: DrainModeHard, Grace: &grace}),
+	}
+
+	if hardSnapshots[0].State != StateDrained || hardSnapshots[1].State != StateDrained {
+		t.Fatalf("repeated hard drain states = %q/%q, want drained", hardSnapshots[0].State, hardSnapshots[1].State)
+	}
+}
+
+// TestDrainRequestValidationRequiresExplicitHardGrace verifies fail-closed drain input.
+func TestDrainRequestValidationRequiresExplicitHardGrace(t *testing.T) {
+	cfg := singleListenerConfig(t, testIMAPListener, tlsModeStartTLS)
+	manager, _ := startManager(t, cfg, testIMAPListener, WithSessionHandlerFactory(newRecordingHandler().factory))
+
+	negativeGrace := -time.Second
+	testCases := []DrainRequest{
+		{Name: "", Mode: DrainModeSoft},
+		{Name: testIMAPListener, Mode: DrainMode("unknown")},
+		{Name: testIMAPListener, Mode: DrainModeHard},
+		{Name: testIMAPListener, Mode: DrainModeHard, Grace: &negativeGrace},
+		{Name: testIMAPListener, Mode: DrainModeSoft, Grace: &negativeGrace},
+	}
+
+	for _, testCase := range testCases {
+		if _, err := manager.Drain(context.Background(), testCase); err == nil {
+			t.Fatalf("Drain(%#v) succeeded, want validation error", testCase)
+		}
+	}
+}
+
+// TestReloadKeepsRuntimeDrainedListenerUnbound verifies reload does not duplicate drained sockets.
+func TestReloadKeepsRuntimeDrainedListenerUnbound(t *testing.T) {
+	cfg := singleListenerConfig(t, testIMAPListener, tlsModeStartTLS)
+	manager, address := startManager(t, cfg, testIMAPListener, WithSessionHandlerFactory(newRecordingHandler().factory))
+
+	drainListener(t, manager, DrainRequest{Name: testIMAPListener, Mode: DrainModeSoft})
+
+	reloadCtx, cancelReload := context.WithTimeout(context.Background(), time.Second)
+	defer cancelReload()
+
+	if err := manager.Reload(reloadCtx, cfg); err != nil {
+		t.Fatalf("Reload after runtime drain: %v", err)
+	}
+
+	if _, ok := manager.BoundAddress(testIMAPListener); ok {
+		t.Fatal("safe reload rebound a runtime-drained listener")
+	}
+
+	expectDialFailure(t, address)
+
+	snapshot := resumeListener(t, manager, testIMAPListener)
+	if snapshot.State != StateAccepting || snapshot.BoundAddress == "" {
+		t.Fatalf("resume after reload snapshot = %#v, want accepting", snapshot)
+	}
+}
+
+// TestListenerSnapshotsExposeRuntimeStateOnly verifies inventory stays secret-safe.
+func TestListenerSnapshotsExposeRuntimeStateOnly(t *testing.T) {
+	cfg := singleListenerConfig(t, testIMAPListener, tlsModeStartTLS)
+	handler := newRecordingHandler()
+
+	manager, address := startManager(t, cfg, testIMAPListener, WithSessionHandlerFactory(handler.factory))
+
+	conn, err := net.Dial(networkTCP, address)
+	if err != nil {
+		t.Fatalf("dial listener: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	_ = readLine(t, conn)
+
+	accepting := waitForListenerSnapshot(t, manager, testIMAPListener, func(snapshot Snapshot) bool {
+		return snapshot.State == StateAccepting && snapshot.ActiveLocalSessions == 1
+	})
+	if accepting.BoundAddress == "" || accepting.Address == "" || accepting.Protocol == "" || accepting.ServiceName == "" {
+		t.Fatalf("accepting snapshot missing listener summary fields: %#v", accepting)
+	}
+
+	drained := drainListener(t, manager, DrainRequest{Name: testIMAPListener, Mode: DrainModeSoft})
+	if drained.State != StateDraining || drained.DrainMode != DrainModeSoft || drained.BoundAddress != "" {
+		t.Fatalf("soft-drained snapshot = %#v, want draining soft without bound address", drained)
+	}
+
+	assertSnapshotFieldAbsent(t, "RemoteAddr")
+	assertSnapshotFieldAbsent(t, "SessionID")
+	assertSnapshotFieldAbsent(t, "Username")
+	assertSnapshotFieldAbsent(t, "Recipient")
+}
+
 // TestListenerObservabilityClassifiesLifecycleEvents verifies listener reasons stay bounded.
 func TestListenerObservabilityClassifiesLifecycleEvents(t *testing.T) {
-	cfg := singleListenerConfig(testIMAPListener, tlsModeStartTLS)
+	cfg := singleListenerConfig(t, testIMAPListener, tlsModeStartTLS)
 	entry := cfg.Director.Listeners[testIMAPListener]
 	entry.Address = "127.0.0.1:not-a-port"
 	cfg.Director.Listeners[testIMAPListener] = entry
@@ -263,7 +674,7 @@ func TestListenerObservabilityClassifiesLifecycleEvents(t *testing.T) {
 
 // TestListenerObservabilityRecordsAcceptLoopStop verifies accept-loop exit is explicit.
 func TestListenerObservabilityRecordsAcceptLoopStop(t *testing.T) {
-	cfg := singleListenerConfig(testIMAPListener, tlsModeStartTLS)
+	cfg := singleListenerConfig(t, testIMAPListener, tlsModeStartTLS)
 	recorder := &recordingListenerObservability{}
 	manager, _ := startManager(t, cfg, testIMAPListener, WithObservabilityRecorder(recorder))
 
@@ -288,7 +699,7 @@ func TestListenerObservabilityRecordsAcceptLoopStop(t *testing.T) {
 func TestProxyProtocolObservabilityClassifiesAcceptAndReject(t *testing.T) {
 	recorder := &recordingListenerObservability{}
 	handler := newRecordingHandler()
-	cfg := proxyListenerConfig([]string{trustedLocalhostCIDR})
+	cfg := proxyListenerConfig(t, []string{trustedLocalhostCIDR})
 	_, address := startManager(
 		t,
 		cfg,
@@ -341,7 +752,7 @@ func TestProxyProtocolObservabilityClassifiesAcceptAndReject(t *testing.T) {
 
 // TestProxyProtocolRejectsEmptyTrustedCIDRs verifies fail-closed proxy config validation.
 func TestProxyProtocolRejectsEmptyTrustedCIDRs(t *testing.T) {
-	cfg := singleListenerConfig(testIMAPListener, tlsModeStartTLS)
+	cfg := singleListenerConfig(t, testIMAPListener, tlsModeStartTLS)
 	entry := cfg.Director.Listeners[testIMAPListener]
 	entry.ProxyProtocol.Enabled = true
 	entry.ProxyProtocol.TrustedCIDRs = nil
@@ -359,7 +770,7 @@ func TestProxyProtocolRejectsEmptyTrustedCIDRs(t *testing.T) {
 // TestProxyProtocolV1AcceptedFromTrustedPeer verifies trusted v1 headers become session context.
 func TestProxyProtocolV1AcceptedFromTrustedPeer(t *testing.T) {
 	recorder := newRecordingHandler()
-	cfg := proxyListenerConfig([]string{trustedLocalhostCIDR})
+	cfg := proxyListenerConfig(t, []string{trustedLocalhostCIDR})
 	_, address := startManager(t, cfg, testIMAPListener, WithSessionHandlerFactory(recorder.factory))
 
 	conn, err := net.Dial(networkTCP, address)
@@ -382,7 +793,7 @@ func TestProxyProtocolV1AcceptedFromTrustedPeer(t *testing.T) {
 // TestProxyProtocolV2AcceptedFromTrustedPeer verifies trusted v2 headers become session context.
 func TestProxyProtocolV2AcceptedFromTrustedPeer(t *testing.T) {
 	recorder := newRecordingHandler()
-	cfg := proxyListenerConfig([]string{trustedLocalhostCIDR})
+	cfg := proxyListenerConfig(t, []string{trustedLocalhostCIDR})
 	_, address := startManager(t, cfg, testIMAPListener, WithSessionHandlerFactory(recorder.factory))
 
 	conn, err := net.Dial(networkTCP, address)
@@ -409,7 +820,7 @@ func TestProxyProtocolV2AcceptedFromTrustedPeer(t *testing.T) {
 
 // TestProxyProtocolRejectsUntrustedPeer verifies direct clients cannot supply source addresses.
 func TestProxyProtocolRejectsUntrustedPeer(t *testing.T) {
-	cfg := proxyListenerConfig([]string{"192.0.2.0/24"})
+	cfg := proxyListenerConfig(t, []string{"192.0.2.0/24"})
 
 	expectProxyRejection(t, cfg, func(t *testing.T, conn net.Conn) {
 		t.Helper()
@@ -420,7 +831,7 @@ func TestProxyProtocolRejectsUntrustedPeer(t *testing.T) {
 
 // TestProxyProtocolRejectsMissingHeader verifies enabled listeners require a PROXY preface.
 func TestProxyProtocolRejectsMissingHeader(t *testing.T) {
-	cfg := proxyListenerConfig([]string{trustedLocalhostCIDR})
+	cfg := proxyListenerConfig(t, []string{trustedLocalhostCIDR})
 
 	expectProxyRejection(t, cfg, func(t *testing.T, conn net.Conn) {
 		t.Helper()
@@ -431,7 +842,7 @@ func TestProxyProtocolRejectsMissingHeader(t *testing.T) {
 
 // TestProxyProtocolRejectsMalformedHeader verifies malformed PROXY input fails closed.
 func TestProxyProtocolRejectsMalformedHeader(t *testing.T) {
-	cfg := proxyListenerConfig([]string{trustedLocalhostCIDR})
+	cfg := proxyListenerConfig(t, []string{trustedLocalhostCIDR})
 
 	expectProxyRejection(t, cfg, func(t *testing.T, conn net.Conn) {
 		t.Helper()
@@ -442,7 +853,7 @@ func TestProxyProtocolRejectsMalformedHeader(t *testing.T) {
 
 // TestProxyProtocolRejectsUnsupportedFamily verifies only stream TCP families are accepted.
 func TestProxyProtocolRejectsUnsupportedFamily(t *testing.T) {
-	cfg := proxyListenerConfig([]string{trustedLocalhostCIDR})
+	cfg := proxyListenerConfig(t, []string{trustedLocalhostCIDR})
 
 	header := &proxyproto.Header{
 		Version:           2,
@@ -463,7 +874,7 @@ func TestProxyProtocolRejectsUnsupportedFamily(t *testing.T) {
 
 // TestProxyProtocolRejectsLocalCommand verifies v2 LOCAL commands never reach IMAP.
 func TestProxyProtocolRejectsLocalCommand(t *testing.T) {
-	cfg := proxyListenerConfig([]string{trustedLocalhostCIDR})
+	cfg := proxyListenerConfig(t, []string{trustedLocalhostCIDR})
 
 	expectProxyRejection(t, cfg, func(t *testing.T, conn net.Conn) {
 		t.Helper()
@@ -612,12 +1023,15 @@ func expectProxyRejection(t *testing.T, cfg config.Config, writeInput func(*test
 	recorder.expectNoSession(t)
 }
 
-// singleListenerConfig returns a default config narrowed to one IMAP-family listener.
-func singleListenerConfig(name string, tlsMode string) config.Config {
+// singleListenerConfig returns a default config narrowed to one listener.
+func singleListenerConfig(t *testing.T, name string, tlsMode string) config.Config {
+	t.Helper()
+
 	cfg := config.DefaultConfig()
 	entry := cfg.Director.Listeners[name]
 	entry.Address = "127.0.0.1:0"
 	entry.TLS.Mode = tlsMode
+	entry = withTestListenerCertificate(t, entry)
 	entry.ProxyProtocol.Enabled = false
 	entry.ProxyProtocol.TrustedCIDRs = nil
 	cfg.Director.Listeners = map[string]config.ListenerConfig{name: entry}
@@ -625,9 +1039,39 @@ func singleListenerConfig(name string, tlsMode string) config.Config {
 	return cfg
 }
 
+// withTestListenerCertificates assigns temporary certificates to every configured listener.
+func withTestListenerCertificates(t *testing.T, cfg config.Config) config.Config {
+	t.Helper()
+
+	for name, entry := range cfg.Director.Listeners {
+		cfg.Director.Listeners[name] = withTestListenerCertificate(t, entry)
+	}
+
+	return cfg
+}
+
+// withTestListenerCertificate assigns a temporary certificate when the listener can negotiate TLS.
+func withTestListenerCertificate(t *testing.T, entry config.ListenerConfig) config.ListenerConfig {
+	t.Helper()
+
+	if entry.TLS.Mode != tlsModeStartTLS && entry.TLS.Mode != tlsModeImplicit {
+		return entry
+	}
+
+	certPath, keyPath := writeTestCertificate(t)
+	entry.TLS.Cert = certPath
+	entry.TLS.Key = config.Secret(keyPath)
+	entry.TLS.ClientCA = ""
+	entry.TLS.RequireClientCert = false
+
+	return entry
+}
+
 // proxyListenerConfig returns one STARTTLS listener that requires trusted PROXY headers.
-func proxyListenerConfig(trustedCIDRs []string) config.Config {
-	cfg := singleListenerConfig(testIMAPListener, tlsModeStartTLS)
+func proxyListenerConfig(t *testing.T, trustedCIDRs []string) config.Config {
+	t.Helper()
+
+	cfg := singleListenerConfig(t, testIMAPListener, tlsModeStartTLS)
 	cfg.Runtime.Timeouts.Preauth = config.NewDuration(200 * time.Millisecond)
 	entry := cfg.Director.Listeners[testIMAPListener]
 	entry.ProxyProtocol.Enabled = true
@@ -699,6 +1143,138 @@ func expectNoGreeting(t *testing.T, conn net.Conn) {
 	n, err := conn.Read(buffer)
 	if err == nil || n > 0 {
 		t.Fatalf("read %d bytes %q from rejected connection, want no greeting and an error", n, string(buffer[:n]))
+	}
+}
+
+// drainListener applies one listener drain request with a bounded test context.
+func drainListener(t *testing.T, manager *Manager, request DrainRequest) Snapshot {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	snapshot, err := manager.Drain(ctx, request)
+	if err != nil {
+		t.Fatalf("Drain(%#v) returned error: %v", request, err)
+	}
+
+	return snapshot
+}
+
+// resumeListener resumes one listener with a bounded test context.
+func resumeListener(t *testing.T, manager *Manager, listenerName string) Snapshot {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	snapshot, err := manager.Resume(ctx, listenerName)
+	if err != nil {
+		t.Fatalf("Resume(%q) returned error: %v", listenerName, err)
+	}
+
+	return snapshot
+}
+
+// waitForListenerSnapshot waits until a listener snapshot satisfies a predicate.
+func waitForListenerSnapshot(t *testing.T, manager *Manager, listenerName string, accept func(Snapshot) bool) Snapshot {
+	t.Helper()
+
+	deadline := time.Now().Add(time.Second)
+
+	var last Snapshot
+
+	for time.Now().Before(deadline) {
+		for _, snapshot := range manager.Snapshots() {
+			if snapshot.Name != listenerName {
+				continue
+			}
+
+			last = snapshot
+			if accept(snapshot) {
+				return snapshot
+			}
+		}
+
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	t.Fatalf("timed out waiting for listener %q snapshot, last=%#v", listenerName, last)
+
+	return Snapshot{}
+}
+
+// expectDialFailure verifies a listener address no longer accepts new sockets.
+func expectDialFailure(t *testing.T, address string) {
+	t.Helper()
+
+	conn, err := net.DialTimeout(networkTCP, address, 100*time.Millisecond)
+	if err == nil {
+		_ = conn.Close()
+
+		t.Fatalf("dial %s succeeded, want listener to reject new connections", address)
+	}
+}
+
+// expectIdleConnectionOpen verifies an accepted stream remains open without new output.
+func expectIdleConnectionOpen(t *testing.T, conn net.Conn) {
+	t.Helper()
+
+	if err := conn.SetReadDeadline(time.Now().Add(50 * time.Millisecond)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+
+	buffer := make([]byte, 1)
+
+	_, err := conn.Read(buffer)
+	if netErr, ok := err.(net.Error); !ok || !netErr.Timeout() {
+		t.Fatalf("idle connection read error = %v, want timeout from still-open stream", err)
+	}
+}
+
+// expectConnectionClosed verifies a server-side runtime close reached the client.
+func expectConnectionClosed(t *testing.T, conn net.Conn) {
+	t.Helper()
+
+	if err := conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+
+	buffer := make([]byte, 1)
+
+	_, err := conn.Read(buffer)
+	if err == nil {
+		t.Fatal("active connection remained readable after hard drain")
+	}
+
+	if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+		t.Fatalf("active connection stayed open after hard drain: %v", err)
+	}
+}
+
+// reserveTCPAddress returns a currently free loopback address for fixed-bind tests.
+func reserveTCPAddress(t *testing.T) string {
+	t.Helper()
+
+	ln, err := net.Listen(networkTCP, testLoopbackAny)
+	if err != nil {
+		t.Fatalf("reserve TCP address: %v", err)
+	}
+
+	address := ln.Addr().String()
+	if err := ln.Close(); err != nil {
+		t.Fatalf("release reserved TCP address: %v", err)
+	}
+
+	return address
+}
+
+// assertSnapshotFieldAbsent verifies snapshots do not expose high-cardinality facts.
+func assertSnapshotFieldAbsent(t *testing.T, fieldName string) {
+	t.Helper()
+
+	if _, ok := reflect.TypeFor[Snapshot]().FieldByName(fieldName); ok {
+		t.Fatalf("Snapshot exposes forbidden field %q", fieldName)
 	}
 }
 

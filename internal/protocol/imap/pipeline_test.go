@@ -56,7 +56,7 @@ func TestIMAPHTTPAuthBodyUsesProtocolAndClientID(t *testing.T) {
 		}
 
 		writer.Header().Set("Content-Type", "application/json")
-		_, _ = writer.Write([]byte(`{"ok":true,"account_field":"alice@example.test","attributes":{"account":["alice@example.test"],"tenant":["` + defaultTenantName + `"],"mailShard":["mailstore-a"]}}`))
+		_, _ = writer.Write([]byte(`{"ok":true,"account_field":"account","attributes":{"account":["alice@example.test"],"tenant":["` + defaultTenantName + `"],"mailShard":["mailstore-a"]}}`))
 	}))
 	defer server.Close()
 

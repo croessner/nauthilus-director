@@ -1,21 +1,28 @@
-# Real IMAP Interoperability Lane
+# Real Interoperability Lane
 
-`make e2e-interop` is the real-server IMAP interoperability lane. It is
-separate from the deterministic fake-service guardrail lane run by `make e2e`,
-and it must not replace fake-service coverage for edge cases, forced failures,
-routing, active affinity, runtime control, or secret-safe observability.
+`make e2e-interop` is the real-server interoperability lane for IMAP regression
+coverage and LMTP delivery proof. It is separate from the deterministic
+fake-service guardrail lane run by `make e2e`, and it must not replace
+fake-service coverage for edge cases, forced failures, routing, active affinity,
+runtime control, or secret-safe observability.
 
 The lane should skip with a stable non-error message when Docker is not
 available or when the matching production protocol entrypoint does not exist.
 It must use pinned container images or digests so local and CI runs do not
 drift silently.
 
-The IMAP lane uses the Dovecot project-provided `dovecot/dovecot:2.4.3-dev`
-image by default. Dovecot's own Docker documentation describes versioned image
+The LMTP scenario runs `swaks` and `curl` from a short-lived pinned tool
+container. `swaks` submits into the real Postfix SMTP listener, and
+`curl --url imap...` verifies the delivered test message through the real
+Dovecot IMAP backend.
+
+The lane uses the Dovecot project-provided `dovecot/dovecot:2.4.3-dev` image by
+default and the pinned `chrroessner/postfix:3.11.1` image for the LMTP
+submitting peer. Dovecot's own Docker documentation describes versioned image
 names and the `-dev` test flavor; the script pins that tag instead of using
 `latest`.
 
-The current lane has two scenarios:
+The current lane has three scenarios:
 
 - a single production `nauthilus-director` process with fake Nauthilus
   authentication and one real Dovecot IMAP backend, proving frontend `LOGIN`,
@@ -31,6 +38,14 @@ The current lane has two scenarios:
   affinity, `nauthilus-directorctl sessions kill`, `users kick`, `users move
   --strategy new_sessions_only`, hard backend drain and affinity clear through
   the public control API
+- one production `nauthilus-director` process proxying LMTP to real Dovecot
+  LMTPS backends and IMAP to the matching real Dovecot IMAP backends. A pinned
+  Postfix container accepts a `swaks` SMTP submission and relays through
+  Director to Dovecot LMTP. The same scenario verifies the delivered message
+  with `curl --url imap...`, and also proves `CHUNKING` capability exposure,
+  same-backend recipient handling, different-backend temporary failure before
+  message body, and a delivery-scoped LMTP hold influencing concurrent IMAP
+  placement through public sockets and `nauthilus-directorctl`
 
 The cluster scenario optionally confirms backend identity through `doveadm who`
 inside the Dovecot containers when that command is available. The Director

@@ -68,6 +68,30 @@ func (e DrainMode) Valid() bool {
 	}
 }
 
+// Defines values for ListenerState.
+const (
+	Accepting ListenerState = "accepting"
+	Drained   ListenerState = "drained"
+	Draining  ListenerState = "draining"
+	Stopped   ListenerState = "stopped"
+)
+
+// Valid indicates whether the value is a known member of the ListenerState enum.
+func (e ListenerState) Valid() bool {
+	switch e {
+	case Accepting:
+		return true
+	case Drained:
+		return true
+	case Draining:
+		return true
+	case Stopped:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for MaintenanceMode.
 const (
 	MaintenanceModeDisabled MaintenanceMode = "disabled"
@@ -246,6 +270,42 @@ type ErrorResponse struct {
 	Status    int     `json:"status"`
 }
 
+// ListenerDetail defines model for ListenerDetail.
+type ListenerDetail struct {
+	ActiveLocalSessions int           `json:"active_local_sessions"`
+	Address             string        `json:"address"`
+	BoundAddress        *string       `json:"bound_address,omitempty"`
+	DrainMode           *DrainMode    `json:"drain_mode,omitempty"`
+	ImplicitTLS         bool          `json:"implicit_tls"`
+	Name                string        `json:"name"`
+	Network             string        `json:"network"`
+	Protocol            string        `json:"protocol"`
+	ProxyProtocol       bool          `json:"proxy_protocol"`
+	ServiceName         string        `json:"service_name"`
+	State               ListenerState `json:"state"`
+	TLSMode             string        `json:"tls_mode"`
+}
+
+// ListenerDrainRequest defines model for ListenerDrainRequest.
+type ListenerDrainRequest struct {
+	GraceSeconds *int      `json:"grace_seconds,omitempty"`
+	Mode         DrainMode `json:"mode"`
+	Reason       string    `json:"reason"`
+}
+
+// ListenerListResponse defines model for ListenerListResponse.
+type ListenerListResponse struct {
+	Listeners []ListenerDetail `json:"listeners"`
+}
+
+// ListenerResumeRequest defines model for ListenerResumeRequest.
+type ListenerResumeRequest struct {
+	Reason string `json:"reason"`
+}
+
+// ListenerState defines model for ListenerState.
+type ListenerState string
+
 // MaintenanceMode defines model for MaintenanceMode.
 type MaintenanceMode string
 
@@ -297,6 +357,14 @@ type RouteLookupEffects struct {
 	RuntimeOverride bool `json:"runtime_override"`
 }
 
+// RouteLookupIdentityResolution defines model for RouteLookupIdentityResolution.
+type RouteLookupIdentityResolution struct {
+	AccountResolved bool   `json:"account_resolved"`
+	Authoritative   bool   `json:"authoritative"`
+	NauthilusUsed   bool   `json:"nauthilus_used"`
+	Source          string `json:"source"`
+}
+
 // RouteLookupRequest defines model for RouteLookupRequest.
 type RouteLookupRequest struct {
 	Attributes      *map[string][]string `json:"attributes,omitempty"`
@@ -305,24 +373,26 @@ type RouteLookupRequest struct {
 	IncludeAffinity *bool                `json:"include_affinity,omitempty"`
 	Listener        *string              `json:"listener,omitempty"`
 	Protocol        string               `json:"protocol"`
+	Recipient       *string              `json:"recipient,omitempty"`
 	ServiceName     *string              `json:"service_name,omitempty"`
 	Tenant          *string              `json:"tenant,omitempty"`
-	UserKey         string               `json:"user_key"`
+	UserKey         *string              `json:"user_key,omitempty"`
 }
 
 // RouteLookupResponse defines model for RouteLookupResponse.
 type RouteLookupResponse struct {
-	AffectedBy        RouteLookupEffects          `json:"affected_by"`
-	Affinity          *RouteLookupAffinity        `json:"affinity,omitempty"`
-	Backends          []RouteLookupBackendSummary `json:"backends"`
-	FailClosed        bool                        `json:"fail_closed"`
-	Healthy           bool                        `json:"healthy"`
-	Maintenance       bool                        `json:"maintenance"`
-	Reason            string                      `json:"reason"`
-	Routing           RouteLookupRouting          `json:"routing"`
-	RoutingGeneration *string                     `json:"routing_generation,omitempty"`
-	SelectedBackend   string                      `json:"selected_backend"`
-	ShardTag          string                      `json:"shard_tag"`
+	AffectedBy         RouteLookupEffects             `json:"affected_by"`
+	Affinity           *RouteLookupAffinity           `json:"affinity,omitempty"`
+	Backends           []RouteLookupBackendSummary    `json:"backends"`
+	FailClosed         bool                           `json:"fail_closed"`
+	Healthy            bool                           `json:"healthy"`
+	IdentityResolution *RouteLookupIdentityResolution `json:"identity_resolution,omitempty"`
+	Maintenance        bool                           `json:"maintenance"`
+	Reason             string                         `json:"reason"`
+	Routing            RouteLookupRouting             `json:"routing"`
+	RoutingGeneration  *string                        `json:"routing_generation,omitempty"`
+	SelectedBackend    string                         `json:"selected_backend"`
+	ShardTag           string                         `json:"shard_tag"`
 }
 
 // RouteLookupRouting defines model for RouteLookupRouting.
@@ -418,6 +488,9 @@ type Identifier = string
 // IncludeProtected defines model for IncludeProtected.
 type IncludeProtected = bool
 
+// ListenerName defines model for ListenerName.
+type ListenerName = string
+
 // SessionID defines model for SessionID.
 type SessionID = string
 
@@ -489,6 +562,12 @@ type MarkBackendOutJSONRequestBody = RuntimeReasonRequest
 // SetBackendWeightJSONRequestBody defines body for SetBackendWeight for application/json ContentType.
 type SetBackendWeightJSONRequestBody = RuntimeWeightRequest
 
+// DrainListenerJSONRequestBody defines body for DrainListener for application/json ContentType.
+type DrainListenerJSONRequestBody = ListenerDrainRequest
+
+// ResumeListenerJSONRequestBody defines body for ResumeListener for application/json ContentType.
+type ResumeListenerJSONRequestBody = ListenerResumeRequest
+
 // LookupRouteJSONRequestBody defines body for LookupRoute for application/json ContentType.
 type LookupRouteJSONRequestBody = RouteLookupRequest
 
@@ -545,6 +624,18 @@ type ServerInterface interface {
 	// Return non-default effective configuration.
 	// (GET /api/v1/config/non-default)
 	GetNonDefaultConfig(w http.ResponseWriter, r *http.Request, params GetNonDefaultConfigParams)
+	// List configured process-local frontend listeners.
+	// (GET /api/v1/listeners)
+	ListListeners(w http.ResponseWriter, r *http.Request)
+	// Show one configured process-local frontend listener.
+	// (GET /api/v1/listeners/{name})
+	GetListener(w http.ResponseWriter, r *http.Request, name ListenerName)
+	// Drain one process-local frontend listener.
+	// (POST /api/v1/listeners/{name}/runtime/drain)
+	DrainListener(w http.ResponseWriter, r *http.Request, name ListenerName)
+	// Resume one process-local frontend listener.
+	// (POST /api/v1/listeners/{name}/runtime/resume)
+	ResumeListener(w http.ResponseWriter, r *http.Request, name ListenerName)
 	// Request configuration reload.
 	// (POST /api/v1/reload)
 	Reload(w http.ResponseWriter, r *http.Request)
@@ -958,6 +1049,98 @@ func (siw *ServerInterfaceWrapper) GetNonDefaultConfig(w http.ResponseWriter, r 
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.GetNonDefaultConfig(w, r, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ListListeners operation middleware
+func (siw *ServerInterfaceWrapper) ListListeners(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListListeners(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetListener operation middleware
+func (siw *ServerInterfaceWrapper) GetListener(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "name" -------------
+	var name ListenerName
+
+	err = runtime.BindStyledParameterWithOptions("simple", "name", r.PathValue("name"), &name, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "name", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetListener(w, r, name)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// DrainListener operation middleware
+func (siw *ServerInterfaceWrapper) DrainListener(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "name" -------------
+	var name ListenerName
+
+	err = runtime.BindStyledParameterWithOptions("simple", "name", r.PathValue("name"), &name, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "name", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.DrainListener(w, r, name)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ResumeListener operation middleware
+func (siw *ServerInterfaceWrapper) ResumeListener(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "name" -------------
+	var name ListenerName
+
+	err = runtime.BindStyledParameterWithOptions("simple", "name", r.PathValue("name"), &name, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "name", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ResumeListener(w, r, name)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -1464,6 +1647,10 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/config/defaults", wrapper.GetDefaultConfig)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/config/effective", wrapper.GetEffectiveConfig)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/config/non-default", wrapper.GetNonDefaultConfig)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/listeners", wrapper.ListListeners)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/listeners/{name}", wrapper.GetListener)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/api/v1/listeners/{name}/runtime/drain", wrapper.DrainListener)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/api/v1/listeners/{name}/runtime/resume", wrapper.ResumeListener)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/api/v1/reload", wrapper.Reload)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/api/v1/route/lookup", wrapper.LookupRoute)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/sessions", wrapper.ListSessions)
@@ -1952,6 +2139,163 @@ type GetNonDefaultConfigdefaultJSONResponse struct {
 }
 
 func (response GetNonDefaultConfigdefaultJSONResponse) VisitGetNonDefaultConfigResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListListenersRequestObject struct {
+}
+
+type ListListenersResponseObject interface {
+	VisitListListenersResponse(w http.ResponseWriter) error
+}
+
+type ListListeners200JSONResponse ListenerListResponse
+
+func (response ListListeners200JSONResponse) VisitListListenersResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListListenersdefaultJSONResponse struct {
+	Body       ErrorResponse
+	StatusCode int
+}
+
+func (response ListListenersdefaultJSONResponse) VisitListListenersResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetListenerRequestObject struct {
+	Name ListenerName `json:"name"`
+}
+
+type GetListenerResponseObject interface {
+	VisitGetListenerResponse(w http.ResponseWriter) error
+}
+
+type GetListener200JSONResponse ListenerDetail
+
+func (response GetListener200JSONResponse) VisitGetListenerResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetListenerdefaultJSONResponse struct {
+	Body       ErrorResponse
+	StatusCode int
+}
+
+func (response GetListenerdefaultJSONResponse) VisitGetListenerResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type DrainListenerRequestObject struct {
+	Name ListenerName `json:"name"`
+	Body *DrainListenerJSONRequestBody
+}
+
+type DrainListenerResponseObject interface {
+	VisitDrainListenerResponse(w http.ResponseWriter) error
+}
+
+type DrainListener202JSONResponse ListenerDetail
+
+func (response DrainListener202JSONResponse) VisitDrainListenerResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(202)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type DrainListenerdefaultJSONResponse struct {
+	Body       ErrorResponse
+	StatusCode int
+}
+
+func (response DrainListenerdefaultJSONResponse) VisitDrainListenerResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ResumeListenerRequestObject struct {
+	Name ListenerName `json:"name"`
+	Body *ResumeListenerJSONRequestBody
+}
+
+type ResumeListenerResponseObject interface {
+	VisitResumeListenerResponse(w http.ResponseWriter) error
+}
+
+type ResumeListener202JSONResponse ListenerDetail
+
+func (response ResumeListener202JSONResponse) VisitResumeListenerResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(202)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ResumeListenerdefaultJSONResponse struct {
+	Body       ErrorResponse
+	StatusCode int
+}
+
+func (response ResumeListenerdefaultJSONResponse) VisitResumeListenerResponse(w http.ResponseWriter) error {
 
 	var buf bytes.Buffer
 	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
@@ -2688,6 +3032,18 @@ type StrictServerInterface interface {
 	// Return non-default effective configuration.
 	// (GET /api/v1/config/non-default)
 	GetNonDefaultConfig(ctx context.Context, request GetNonDefaultConfigRequestObject) (GetNonDefaultConfigResponseObject, error)
+	// List configured process-local frontend listeners.
+	// (GET /api/v1/listeners)
+	ListListeners(ctx context.Context, request ListListenersRequestObject) (ListListenersResponseObject, error)
+	// Show one configured process-local frontend listener.
+	// (GET /api/v1/listeners/{name})
+	GetListener(ctx context.Context, request GetListenerRequestObject) (GetListenerResponseObject, error)
+	// Drain one process-local frontend listener.
+	// (POST /api/v1/listeners/{name}/runtime/drain)
+	DrainListener(ctx context.Context, request DrainListenerRequestObject) (DrainListenerResponseObject, error)
+	// Resume one process-local frontend listener.
+	// (POST /api/v1/listeners/{name}/runtime/resume)
+	ResumeListener(ctx context.Context, request ResumeListenerRequestObject) (ResumeListenerResponseObject, error)
 	// Request configuration reload.
 	// (POST /api/v1/reload)
 	Reload(ctx context.Context, request ReloadRequestObject) (ReloadResponseObject, error)
@@ -3122,6 +3478,122 @@ func (sh *strictHandler) GetNonDefaultConfig(w http.ResponseWriter, r *http.Requ
 		sh.options.ResponseErrorHandlerFunc(w, r, err)
 	} else if validResponse, ok := response.(GetNonDefaultConfigResponseObject); ok {
 		if err := validResponse.VisitGetNonDefaultConfigResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// ListListeners operation middleware
+func (sh *strictHandler) ListListeners(w http.ResponseWriter, r *http.Request) {
+	var request ListListenersRequestObject
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.ListListeners(ctx, request.(ListListenersRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ListListeners")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ListListenersResponseObject); ok {
+		if err := validResponse.VisitListListenersResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// GetListener operation middleware
+func (sh *strictHandler) GetListener(w http.ResponseWriter, r *http.Request, name ListenerName) {
+	var request GetListenerRequestObject
+
+	request.Name = name
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.GetListener(ctx, request.(GetListenerRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetListener")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetListenerResponseObject); ok {
+		if err := validResponse.VisitGetListenerResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// DrainListener operation middleware
+func (sh *strictHandler) DrainListener(w http.ResponseWriter, r *http.Request, name ListenerName) {
+	var request DrainListenerRequestObject
+
+	request.Name = name
+
+	var body DrainListenerJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.DrainListener(ctx, request.(DrainListenerRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "DrainListener")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(DrainListenerResponseObject); ok {
+		if err := validResponse.VisitDrainListenerResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// ResumeListener operation middleware
+func (sh *strictHandler) ResumeListener(w http.ResponseWriter, r *http.Request, name ListenerName) {
+	var request ResumeListenerRequestObject
+
+	request.Name = name
+
+	var body ResumeListenerJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.ResumeListener(ctx, request.(ResumeListenerRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ResumeListener")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ResumeListenerResponseObject); ok {
+		if err := validResponse.VisitResumeListenerResponse(w); err != nil {
 			sh.options.ResponseErrorHandlerFunc(w, r, err)
 		}
 	} else if response != nil {

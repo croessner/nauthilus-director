@@ -19,6 +19,7 @@ package app
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -26,8 +27,10 @@ import (
 	"github.com/croessner/nauthilus-director/internal/backend"
 	"github.com/croessner/nauthilus-director/internal/config"
 	"github.com/croessner/nauthilus-director/internal/listener"
+	"github.com/croessner/nauthilus-director/internal/nauthilus"
 	"github.com/croessner/nauthilus-director/internal/observability"
 	"github.com/croessner/nauthilus-director/internal/protocol/imap"
+	"github.com/croessner/nauthilus-director/internal/protocol/lmtp"
 	"github.com/croessner/nauthilus-director/internal/proxy"
 	"github.com/croessner/nauthilus-director/internal/rest"
 	"github.com/croessner/nauthilus-director/internal/rest/adapters"
@@ -41,6 +44,8 @@ import (
 const (
 	defaultReapInterval = 5 * time.Second
 	defaultReapLimit    = 100
+	protocolIMAP        = "imap"
+	protocolLMTP        = "lmtp"
 )
 
 // Options configures one production server process instance.
@@ -76,6 +81,27 @@ type healthRunnerHandle struct {
 
 type reaperHandle struct {
 	reaper *runtimectl.Reaper
+}
+
+type protocolHealthChecker struct {
+	imap backend.HealthChecker
+	lmtp backend.HealthChecker
+}
+
+type backendCapabilityReader interface {
+	PoolSupportsCapability(ctx context.Context, backendPool string, capability string) (bool, error)
+}
+
+// CheckBackend dispatches health checks to the matching protocol checker.
+func (c protocolHealthChecker) CheckBackend(ctx context.Context, target backend.Backend, request backend.HealthCheckRequest) backend.HealthCheckResult {
+	switch strings.ToLower(strings.TrimSpace(target.Protocol)) {
+	case protocolIMAP:
+		return c.imap.CheckBackend(ctx, target, request)
+	case protocolLMTP:
+		return c.lmtp.CheckBackend(ctx, target, request)
+	default:
+		return backend.HealthCheckResult{ReasonClass: "protocol"}
+	}
 }
 
 // Run starts the production Fx application and blocks until the context is cancelled.
@@ -241,7 +267,7 @@ func provideListenerManager(
 		cfg,
 		listener.WithLocalSessionRegistry(localSessions),
 		listener.WithObservabilityRecorder(recorder),
-		listener.WithSessionHandlerFactory(sessionHandlerFactory(resolver, store, selector, recorder)),
+		listener.WithSessionHandlerFactory(sessionHandlerFactory(resolver, store, selector, selector, recorder)),
 	)
 }
 
@@ -267,6 +293,14 @@ func provideRouteLookupService(
 	return routeLookupService(cfg, registry, selector, reader, store, recorder)
 }
 
+// provideListenerRuntimeService creates the process-local listener runtime coordinator.
+func provideListenerRuntimeService(
+	manager *listener.Manager,
+	recorder observability.Recorder,
+) *runtimectl.ListenerService {
+	return runtimectl.NewListenerService(manager, runtimectl.WithObservabilityRecorder(recorder))
+}
+
 // provideControlHandle creates the optional in-process REST control listener.
 func provideControlHandle(
 	cfg config.Config,
@@ -276,8 +310,11 @@ func provideControlHandle(
 	recorder observability.Recorder,
 	metrics observability.MetricsProvider,
 	backendReader *runtimectl.BackendReadService,
+	registry *backend.StaticRegistry,
 	store *state.RedisSessionStore,
 	localSessions *runtimectl.LocalSessionRegistry,
+	listenerManager *listener.Manager,
+	listenerRuntime *runtimectl.ListenerService,
 	routeLookup *runtimectl.RouteLookupService,
 ) (controlHandle, error) {
 	if !cfg.Runtime.Servers.Control.Enabled {
@@ -289,20 +326,21 @@ func provideControlHandle(
 		Version:    options.Version,
 		ConfigPath: options.ConfigPath,
 		HandlerOptions: adapters.HandlerOptions{
-			Version:        options.Version,
-			ConfigPath:     options.ConfigPath,
-			Loader:         loader,
-			Snapshot:       snapshot,
-			BackendReader:  backendReader,
-			BackendMutator: runtimectl.NewBackendService(store, localSessions, runtimectl.WithObservabilityRecorder(recorder)),
-			SessionReader:  runtimeReader,
-			SessionMutator: runtimectl.NewSessionService(store, localSessions, runtimectl.WithObservabilityRecorder(recorder)),
-			UserReader:     runtimeReader,
-			UserMutator:    runtimectl.NewUserService(store, localSessions, runtimectl.WithObservabilityRecorder(recorder)),
-			RouteLookup:    routeLookup,
-			Reload:         safeReloadService(cfg, loader, options.ConfigPath, recorder),
-			Metrics:        metrics,
-			Observability:  recorder,
+			Version:         options.Version,
+			ConfigPath:      options.ConfigPath,
+			Loader:          loader,
+			Snapshot:        snapshot,
+			BackendReader:   backendReader,
+			BackendMutator:  runtimectl.NewBackendService(store, localSessions, runtimectl.WithObservabilityRecorder(recorder)),
+			SessionReader:   runtimeReader,
+			SessionMutator:  runtimectl.NewSessionService(store, localSessions, runtimectl.WithObservabilityRecorder(recorder)),
+			UserReader:      runtimeReader,
+			UserMutator:     runtimectl.NewUserService(store, localSessions, runtimectl.WithObservabilityRecorder(recorder)),
+			RouteLookup:     routeLookup,
+			ListenerRuntime: listenerRuntime,
+			Reload:          safeReloadService(cfg, loader, options.ConfigPath, recorder, registry, listenerManager),
+			Metrics:         metrics,
+			Observability:   recorder,
 		},
 	})
 
@@ -321,6 +359,9 @@ func registerObservabilityLifecycle(lifecycle fx.Lifecycle, runtime *observabili
 		OnStop:  runtime.Shutdown,
 	})
 }
+
+// registerListenerRuntimeService ensures Fx constructs listener runtime control.
+func registerListenerRuntimeService(*runtimectl.ListenerService) {}
 
 // provideHealthRunnerHandle creates the optional backend health worker.
 func provideHealthRunnerHandle(
@@ -446,50 +487,149 @@ func reaper(
 	return reaper, nil
 }
 
-// sessionHandlerFactory injects runtime routing state into listener-owned IMAP sessions.
+// sessionHandlerFactory dispatches configured listener protocols to protocol-owned handlers.
 func sessionHandlerFactory(
 	resolver routing.RoutingResolver,
 	store state.SessionStore,
 	selector backend.Selector,
+	capabilities backendCapabilityReader,
 	recorder observability.Recorder,
 ) listener.SessionHandlerFactory {
 	return func(options listener.SessionOptions) listener.SessionHandler {
-		capabilities, mechanisms, requireID := imapListenerOptions(options.Config)
-
-		return imap.NewHandler(imap.SessionConfig{
-			ListenerName:           options.ListenerName,
-			AuthorityName:          options.Config.Authority,
-			AuthorityTransport:     options.AuthorityTransport,
-			ServiceName:            options.Config.ServiceName,
-			Network:                options.Config.Network,
-			BackendPool:            options.Config.BackendPool,
-			DirectorInstanceID:     options.DirectorInstanceID,
-			DefaultTenant:          options.DefaultTenant,
-			DefaultShard:           options.DefaultShard,
-			TLSMode:                options.Config.TLS.Mode,
-			Capabilities:           capabilities,
-			AuthMechanisms:         mechanisms,
-			MaxBearerTokenBytes:    options.BearerTokenMaxBytes,
-			RequireIDBeforeAuth:    requireID,
-			SessionLeaseTTL:        options.SessionLeaseTTL,
-			SessionIdleGrace:       options.SessionIdleGrace,
-			PreauthTimeout:         options.Timeouts.Preauth.Std(),
-			AuthTimeout:            options.Timeouts.Auth.Std(),
-			BackendConnectTimeout:  options.Timeouts.BackendConnect.Std(),
-			ProxyIdleTimeout:       options.Timeouts.ProxyIdle.Std(),
-			MaxPreauthLineBytes:    options.Security.MaxPreauthLineBytes,
-			MaxPreauthLiteralBytes: options.Security.MaxPreauthLiteralBytes,
-			FrontendTLSConfig:      options.FrontendTLSConfig,
-			Authenticator:          options.Authenticator,
-			RoutingResolver:        resolver,
-			SessionStore:           store,
-			BackendSelector:        selector,
-			BackendConnector:       imap.NewTCPBackendConnector(nil),
-			ProxyRunner:            proxy.NewPipe(),
-			LocalSessions:          options.LocalSessions,
-			Observability:          recorder,
-		})
+		switch strings.ToLower(strings.TrimSpace(options.Config.Protocol)) {
+		case protocolIMAP:
+			return imapSessionHandler(options, resolver, store, selector, recorder)
+		case protocolLMTP:
+			return lmtpSessionHandler(options, resolver, store, selector, capabilities)
+		default:
+			return unsupportedProtocolHandler{protocol: options.Config.Protocol}
+		}
 	}
+}
+
+type unsupportedProtocolHandler struct {
+	protocol string
+}
+
+// Serve rejects streams for protocols that passed neither config validation nor dispatch.
+func (h unsupportedProtocolHandler) Serve(context.Context, net.Conn) error {
+	return errors.New("unsupported listener protocol " + h.protocol)
+}
+
+// imapSessionHandler builds the production IMAP pre-auth and proxy pipeline.
+func imapSessionHandler(
+	options listener.SessionOptions,
+	resolver routing.RoutingResolver,
+	store state.SessionStore,
+	selector backend.Selector,
+	recorder observability.Recorder,
+) listener.SessionHandler {
+	capabilities, mechanisms, requireID := imapListenerOptions(options.Config)
+
+	return imap.NewHandler(imap.SessionConfig{
+		ListenerName:           options.ListenerName,
+		AuthorityName:          options.Config.Authority,
+		AuthorityTransport:     options.AuthorityTransport,
+		ServiceName:            options.Config.ServiceName,
+		Network:                options.Config.Network,
+		BackendPool:            options.Config.BackendPool,
+		DirectorInstanceID:     options.DirectorInstanceID,
+		DefaultTenant:          options.DefaultTenant,
+		DefaultShard:           options.DefaultShard,
+		TLSMode:                options.Config.TLS.Mode,
+		Capabilities:           capabilities,
+		AuthMechanisms:         mechanisms,
+		MaxBearerTokenBytes:    options.BearerTokenMaxBytes,
+		RequireIDBeforeAuth:    requireID,
+		SessionLeaseTTL:        options.SessionLeaseTTL,
+		SessionIdleGrace:       options.SessionIdleGrace,
+		PreauthTimeout:         options.Timeouts.Preauth.Std(),
+		AuthTimeout:            options.Timeouts.Auth.Std(),
+		BackendConnectTimeout:  options.Timeouts.BackendConnect.Std(),
+		ProxyIdleTimeout:       options.Timeouts.ProxyIdle.Std(),
+		MaxPreauthLineBytes:    options.Security.MaxPreauthLineBytes,
+		MaxPreauthLiteralBytes: options.Security.MaxPreauthLiteralBytes,
+		FrontendTLSConfig:      options.FrontendTLSConfig,
+		Authenticator:          options.Authenticator,
+		RoutingResolver:        resolver,
+		SessionStore:           store,
+		BackendSelector:        selector,
+		BackendConnector:       imap.NewTCPBackendConnector(nil),
+		ProxyRunner:            proxy.NewPipe(),
+		LocalSessions:          options.LocalSessions,
+		Observability:          recorder,
+	})
+}
+
+// lmtpSessionHandler builds the LMTP frontend protocol boundary.
+func lmtpSessionHandler(
+	options listener.SessionOptions,
+	resolver routing.RoutingResolver,
+	store state.SessionStore,
+	selector backend.Selector,
+	capabilityReader backendCapabilityReader,
+) listener.SessionHandler {
+	var (
+		listenerCapabilities []string
+		peerAuth             config.LMTPClientAuthConfig
+	)
+
+	if options.Config.LMTP != nil {
+		listenerCapabilities = options.Config.LMTP.Capabilities
+		peerAuth = options.Config.LMTP.ClientAuth
+	}
+
+	return lmtp.NewHandler(lmtp.SessionConfig{
+		ListenerName:            options.ListenerName,
+		AuthorityName:           options.Config.Authority,
+		AuthorityTransport:      options.AuthorityTransport,
+		ServiceName:             options.Config.ServiceName,
+		Network:                 options.Config.Network,
+		BackendPool:             options.Config.BackendPool,
+		DirectorInstanceID:      options.DirectorInstanceID,
+		DefaultTenant:           options.DefaultTenant,
+		DefaultShard:            options.DefaultShard,
+		TLSMode:                 options.Config.TLS.Mode,
+		Capabilities:            listenerCapabilities,
+		PreauthTimeout:          options.Timeouts.Preauth.Std(),
+		AuthTimeout:             options.Timeouts.Auth.Std(),
+		BackendConnectTimeout:   options.Timeouts.BackendConnect.Std(),
+		SessionLeaseTTL:         options.SessionLeaseTTL,
+		SessionIdleGrace:        options.SessionIdleGrace,
+		MaxLineBytes:            options.Security.MaxPreauthLineBytes,
+		MaxBearerTokenBytes:     options.BearerTokenMaxBytes,
+		RequirePeerAuth:         peerAuth.Required,
+		RequireTLSClientCert:    options.Config.TLS.RequireClientCert,
+		PeerAuthMechanisms:      peerAuth.Mechanisms,
+		FrontendTLSConfig:       options.FrontendTLSConfig,
+		Authenticator:           options.Authenticator,
+		IdentityLookuper:        options.IdentityLookuper,
+		RoutingResolver:         resolver,
+		SessionStore:            store,
+		BackendSelector:         selector,
+		BackendConnector:        lmtp.NewTCPBackendConnector(nil),
+		BackendChunkingAllowed:  lmtpBackendChunkingAllowed(capabilityReader, options.Config.BackendPool),
+		RecipientLookupRequired: true,
+		Observability:           options.Observability,
+		MTLSPeerAuth: lmtp.MTLSPeerAuthConfig{
+			SatisfiesRequired: peerAuth.MTLS.SatisfiesRequired,
+			IdentitySource:    peerAuth.MTLS.IdentitySource,
+		},
+	})
+}
+
+// lmtpBackendChunkingAllowed checks fresh backend-pool proof before advertising BDAT.
+func lmtpBackendChunkingAllowed(capabilities backendCapabilityReader, backendPool string) bool {
+	if capabilities == nil {
+		return false
+	}
+
+	allowed, err := capabilities.PoolSupportsCapability(context.Background(), backendPool, "CHUNKING")
+	if err != nil {
+		return false
+	}
+
+	return allowed
 }
 
 // imapListenerOptions extracts IMAP-specific values from a listener config.
@@ -520,12 +660,72 @@ func routeLookupService(
 		Selector:         selector,
 		BackendRead:      reader,
 		AffinityRead:     store,
+		IdentityLookup:   routeLookupIdentityLookuper(cfg),
 		ListenerContexts: routeLookupListenerContexts(cfg),
 		DefaultPool:      defaultBackendPool(cfg),
 		DefaultShard:     cfg.Director.Routing.EffectiveDefaultShard(),
 		DefaultTenant:    "default",
 		Observability:    recorder,
 	})
+}
+
+// routeLookupIdentityLookuper returns the default authority lookup client when it is locally constructible.
+func routeLookupIdentityLookuper(cfg config.Config) runtimectl.RouteLookupIdentityLookuper {
+	listenerNames := make([]string, 0, len(cfg.Director.Listeners))
+	for listenerName := range cfg.Director.Listeners {
+		listenerNames = append(listenerNames, listenerName)
+	}
+
+	for _, listenerName := range sortedStrings(listenerNames) {
+		listener := cfg.Director.Listeners[listenerName]
+		if !strings.EqualFold(listener.Protocol, protocolLMTP) {
+			continue
+		}
+
+		authority, ok := cfg.Auth.Authorities[listener.Authority]
+		if !ok {
+			continue
+		}
+
+		client, err := nauthilus.NewClient(authority, nauthilus.ClientOptions{})
+		if err == nil {
+			return nauthilusRouteLookupIdentity{lookuper: client}
+		}
+	}
+
+	return nil
+}
+
+type nauthilusRouteLookupIdentity struct {
+	lookuper nauthilus.IdentityLookuper
+}
+
+// LookupRouteIdentity adapts runtime recipient diagnostics to the Nauthilus no-auth lookup boundary.
+func (l nauthilusRouteLookupIdentity) LookupRouteIdentity(
+	ctx context.Context,
+	request runtimectl.RouteLookupIdentityLookupRequest,
+) (runtimectl.RouteLookupIdentityLookupResult, error) {
+	if l.lookuper == nil {
+		return runtimectl.RouteLookupIdentityLookupResult{}, errors.New("identity lookup unavailable")
+	}
+
+	result, err := l.lookuper.LookupIdentity(ctx, nauthilus.IdentityLookupRequest{
+		Context: nauthilus.RequestContext{
+			Username: request.Username,
+			ClientIP: request.ClientIP,
+			Protocol: request.Protocol,
+			Method:   request.Method,
+		},
+	})
+	if err != nil {
+		return runtimectl.RouteLookupIdentityLookupResult{}, err
+	}
+
+	return runtimectl.RouteLookupIdentityLookupResult{
+		Authenticated: result.Decision == nauthilus.DecisionAuthenticated,
+		Account:       result.Account,
+		Attributes:    result.Attributes,
+	}, nil
 }
 
 // routingResolver builds the shared account-to-shard resolver chain.
@@ -558,10 +758,6 @@ func shardTags(cfg config.Config, registry backend.Registry) []string {
 	if registry != nil {
 		if backends, err := registry.AllBackends(context.Background()); err == nil {
 			for _, entry := range backends {
-				if entry.Protocol != "imap" {
-					continue
-				}
-
 				if shard := strings.TrimSpace(entry.ShardTag); shard != "" {
 					shards[shard] = struct{}{}
 				}
@@ -599,7 +795,7 @@ func routeLookupListenerContexts(cfg config.Config) []runtimectl.RouteLookupList
 // defaultBackendPool returns the first configured IMAP backend pool.
 func defaultBackendPool(cfg config.Config) string {
 	for _, configured := range cfg.Director.Listeners {
-		if strings.EqualFold(configured.Protocol, "imap") && strings.TrimSpace(configured.BackendPool) != "" {
+		if strings.EqualFold(configured.Protocol, protocolIMAP) && strings.TrimSpace(configured.BackendPool) != "" {
 			return configured.BackendPool
 		}
 	}
@@ -636,7 +832,10 @@ func healthRunner(
 	return backend.NewHealthRunner(
 		registry,
 		store,
-		imap.NewHealthChecker(imap.NewTCPBackendConnector(nil)),
+		protocolHealthChecker{
+			imap: imap.NewHealthChecker(imap.NewTCPBackendConnector(nil)),
+			lmtp: lmtp.NewHealthChecker(lmtp.NewTCPBackendConnector(nil)),
+		},
 		backend.HealthRunnerConfig{
 			InstanceID: cfg.Runtime.InstanceName,
 			Interval:   cfg.Director.Health.Interval.Std(),
@@ -668,6 +867,8 @@ func safeReloadService(
 	loader *config.Loader,
 	configPath string,
 	recorder observability.Recorder,
+	registry *backend.StaticRegistry,
+	listenerManager *listener.Manager,
 ) *runtimectl.SafeReloadService {
 	return runtimectl.NewSafeReloadService(current, func(context.Context) (config.Config, error) {
 		snapshot, err := loader.Load(config.LoadOptions{Path: configPath})
@@ -676,7 +877,27 @@ func safeReloadService(
 		}
 
 		return snapshot.Config, nil
-	}, runtimectl.WithObservabilityRecorder(recorder))
+	}, runtimectl.WithObservabilityRecorder(recorder), runtimectl.WithSafeReloadApplier(runtimectl.SafeReloadApplierFunc(
+		func(ctx context.Context, _ config.Config, next config.Config) error {
+			if registry != nil {
+				if _, err := backend.NewStaticRegistry(next.Director); err != nil {
+					return err
+				}
+			}
+
+			if listenerManager != nil {
+				if err := listenerManager.Reload(ctx, next); err != nil {
+					return err
+				}
+			}
+
+			if registry != nil {
+				return registry.Reload(next.Director)
+			}
+
+			return nil
+		},
+	)))
 }
 
 // contextWithTimeout adds a shutdown deadline when none exists already.

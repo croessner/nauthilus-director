@@ -36,9 +36,19 @@ type recordingFxRecorder struct {
 	events []observability.Event
 }
 
+type fakeBackendCapabilityReader struct {
+	allowed bool
+	err     error
+}
+
 // Record stores emitted Fx log events for assertions.
 func (r *recordingFxRecorder) Record(_ context.Context, event observability.Event) {
 	r.events = append(r.events, event)
+}
+
+// PoolSupportsCapability returns the configured fake capability decision.
+func (r fakeBackendCapabilityReader) PoolSupportsCapability(context.Context, string, string) (bool, error) {
+	return r.allowed, r.err
 }
 
 // TestFxLoggerFiltersDebugEventsAtInfo verifies Fx wiring chatter stays below info logs.
@@ -64,6 +74,21 @@ func TestFxLoggerFiltersDebugEventsAtInfo(t *testing.T) {
 
 	if event.LogFields[fxLogFieldEvent] != "started" {
 		t.Fatalf("event = %q, want started", event.LogFields[fxLogFieldEvent])
+	}
+}
+
+// TestLMTPBackendChunkingAllowedFailsClosed verifies app wiring suppresses unsafe BDAT.
+func TestLMTPBackendChunkingAllowedFailsClosed(t *testing.T) {
+	if lmtpBackendChunkingAllowed(nil, "lmtp-default") {
+		t.Fatal("nil capability reader allowed CHUNKING")
+	}
+
+	if lmtpBackendChunkingAllowed(fakeBackendCapabilityReader{err: errors.New("redis unavailable")}, "lmtp-default") {
+		t.Fatal("capability reader error allowed CHUNKING")
+	}
+
+	if !lmtpBackendChunkingAllowed(fakeBackendCapabilityReader{allowed: true}, "lmtp-default") {
+		t.Fatal("fresh backend capability proof did not allow CHUNKING")
 	}
 }
 

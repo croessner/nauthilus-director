@@ -242,6 +242,51 @@ func TestTraceAttributesApplyDiagnosticPolicy(t *testing.T) {
 	}
 }
 
+// TestMailContentFieldsCollapseBeforeLogsAndTraces verifies message-specific values never pass through raw.
+func TestMailContentFieldsCollapseBeforeLogsAndTraces(t *testing.T) {
+	rawValues := map[string]string{
+		fieldAuthorizationHeader: "Bearer raw-token",
+		fieldEnvelopeSender:      "sender@example.test",
+		fieldMessageBody:         "Subject: private\r\n\r\nsecret body",
+		fieldMessageContent:      "DATA private text",
+		fieldMessageID:           "<private-message@example.test>",
+		fieldRecipient:           testDiagnosticAccount,
+		fieldSubject:             "private subject",
+	}
+
+	logFields := SanitizeLogFields(rawValues)
+	traceFields := SanitizeTraceFields(rawValues)
+
+	for name, value := range rawValues {
+		if _, ok := logFields[name]; ok {
+			t.Fatalf("raw log field %q remained", name)
+		}
+
+		if _, ok := traceFields[name]; ok {
+			t.Fatalf("raw trace field %q remained", name)
+		}
+
+		if logFields[name+logFieldPresentSuffix] != logBoolTrue {
+			t.Fatalf("log presence for %q = %q, want true", name, logFields[name+logFieldPresentSuffix])
+		}
+
+		if traceFields[name+logFieldPresentSuffix] != logBoolTrue {
+			t.Fatalf("trace presence for %q = %q, want true", name, traceFields[name+logFieldPresentSuffix])
+		}
+
+		assertNoSanitizedValue(t, logFields, value)
+		assertNoSanitizedValue(t, traceFields, value)
+	}
+
+	if _, err := NewEvent(EventLMTPRecipientRoute, TraceBoundaryLMTPTransaction, nil, map[string]string{fieldRecipient: testDiagnosticAccount}); err == nil {
+		t.Fatal("NewEvent accepted recipient as a metric label")
+	}
+
+	if _, err := NewEvent(EventLMTPDataStream, TraceBoundaryLMTPTransaction, nil, map[string]string{fieldMessageBody: "private body"}); err == nil {
+		t.Fatal("NewEvent accepted message_body as a metric label")
+	}
+}
+
 // TestBackendIdentifierPolicyDiffersBySink keeps logs/traces separate from metrics.
 func TestBackendIdentifierPolicyDiffersBySink(t *testing.T) {
 	if err := ValidateMetricLabels(fieldBackendIdentifier); err == nil {
@@ -267,6 +312,10 @@ func TestRuntimeEventVocabularyCoversControlSurface(t *testing.T) {
 		EventBackendRuntimeOperation:     false,
 		EventBackendMaintenanceOperation: false,
 		EventBackendDrain:                false,
+		EventListenerInventory:           false,
+		EventListenerDrain:               false,
+		EventListenerResume:              false,
+		EventListenerOperationFailure:    false,
 		EventSelectorExclusion:           false,
 		EventSessionAttach:               false,
 		EventSessionClose:                false,
@@ -305,7 +354,14 @@ func TestRuntimeEventVocabularyCoversControlSurface(t *testing.T) {
 func TestReasonClassNormalizationKeepsMetricValuesBounded(t *testing.T) {
 	tests := map[string]string{
 		testReasonClassRuntimeOut:                  testReasonClassRuntimeOut,
+		reasonClassAuth:                            reasonClassAuth,
+		reasonClassBackendStatus:                   reasonClassBackendStatus,
+		reasonClassBDAT:                            reasonClassBDAT,
+		reasonClassData:                            reasonClassData,
+		reasonClassParser:                          reasonClassParser,
+		reasonClassRouting:                         reasonClassRouting,
 		"Runtime Hard Maintenance":                 testReasonClassRuntimeHardMaintenance,
+		reasonClassSameBackend:                     reasonClassSameBackend,
 		"dial tcp 127.0.0.1:143: secret token":     testReasonClassOther,
 		"session_id":                               testReasonClassOther,
 		"custom per-user backend error alice@test": testReasonClassOther,
@@ -314,6 +370,17 @@ func TestReasonClassNormalizationKeepsMetricValuesBounded(t *testing.T) {
 	for input, want := range tests {
 		if got := NormalizeReasonClass(input); got != want {
 			t.Fatalf("NormalizeReasonClass(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+// assertNoSanitizedValue verifies sanitized fields do not contain one raw value.
+func assertNoSanitizedValue(t *testing.T, fields map[string]string, value string) {
+	t.Helper()
+
+	for name, current := range fields {
+		if current == value {
+			t.Fatalf("sanitized field %q leaked %q", name, value)
 		}
 	}
 }

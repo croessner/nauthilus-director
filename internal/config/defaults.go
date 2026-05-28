@@ -360,15 +360,30 @@ func defaultIMAPListener(serviceName string, address string, tlsMode string, cer
 			MinTLSVersion: "TLS1.2",
 		},
 		IMAP: &IMAPListenerConfig{
-			Capabilities:        []string{"IMAP4rev1", "ID", "SASL-IR", "AUTH=PLAIN", "AUTH=XOAUTH2", "AUTH=OAUTHBEARER"},
+			Capabilities:        defaultIMAPCapabilities(tlsMode),
 			AuthMechanisms:      []string{"plain", "xoauth2", "oauthbearer"},
 			RequireIDBeforeAuth: false,
 		},
 	}
 }
 
-// defaultLMTPListener builds draft LMTP listener defaults for target-config decoding.
+// defaultIMAPCapabilities returns the conservative implemented IMAP surface.
+func defaultIMAPCapabilities(tlsMode string) []string {
+	capabilities := []string{"IMAP4rev1", "ID", "SASL-IR"}
+	if tlsMode == "starttls" {
+		capabilities = append(capabilities, "STARTTLS")
+	}
+
+	return append(capabilities, "AUTH=PLAIN", "AUTH=XOAUTH2", "AUTH=OAUTHBEARER")
+}
+
+// defaultLMTPListener builds conservative LMTP listener defaults for typed config decoding.
 func defaultLMTPListener(serviceName string, address string, tlsMode string, cert string, key string) ListenerConfig {
+	capabilities := []string{"SMTPUTF8", "AUTH PLAIN LOGIN XOAUTH2 OAUTHBEARER"}
+	if tlsMode == "starttls" {
+		capabilities = append([]string{"SMTPUTF8", "STARTTLS"}, "AUTH PLAIN LOGIN XOAUTH2 OAUTHBEARER")
+	}
+
 	return ListenerConfig{
 		Protocol:    "lmtp",
 		ServiceName: serviceName,
@@ -392,8 +407,11 @@ func defaultLMTPListener(serviceName string, address string, tlsMode string, cer
 				Required:   true,
 				Authority:  "default",
 				Mechanisms: []string{"plain", "login", "xoauth2", "oauthbearer"},
+				MTLS: LMTPClientMTLSAuthConfig{
+					IdentitySource: "subject_common_name",
+				},
 			},
-			Capabilities: []string{"CHUNKING", "SMTPUTF8", "STARTTLS", "AUTH PLAIN LOGIN XOAUTH2 OAUTHBEARER"},
+			Capabilities: capabilities,
 		},
 	}
 }
