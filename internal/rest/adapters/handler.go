@@ -98,6 +98,14 @@ type RouteLookupService interface {
 	Lookup(ctx context.Context, request runtime.RouteLookupRequest) (runtime.RouteLookupResponse, error)
 }
 
+// ListenerRuntimeService exposes process-local listener runtime control to REST adapters.
+type ListenerRuntimeService interface {
+	ListListeners(ctx context.Context, request runtime.ListListenersRequest) (runtime.ListListenersResult, error)
+	GetListener(ctx context.Context, request runtime.GetListenerRequest) (runtime.ListenerDetail, error)
+	DrainListener(ctx context.Context, request runtime.DrainListenerRequest) (runtime.ListenerMutationResult, error)
+	ResumeListener(ctx context.Context, request runtime.ResumeListenerRequest) (runtime.ListenerMutationResult, error)
+}
+
 // ReloadService exposes safe config reload behavior to REST adapters.
 type ReloadService interface {
 	Reload(ctx context.Context) (runtime.ReloadResult, error)
@@ -147,6 +155,7 @@ type HandlerOptions struct {
 	UserReader                UserReader
 	UserMutator               UserMutator
 	RouteLookup               RouteLookupService
+	ListenerRuntime           ListenerRuntimeService
 	Reload                    ReloadService
 	Metrics                   MetricsProvider
 	Observability             observability.Recorder
@@ -167,6 +176,7 @@ type Handler struct {
 	userReader                UserReader
 	userMutator               UserMutator
 	routeLookup               RouteLookupService
+	listenerRuntime           ListenerRuntimeService
 	reload                    ReloadService
 	metrics                   MetricsProvider
 	protectedConfigAuthorizer ProtectedConfigAuthorizer
@@ -189,6 +199,7 @@ func NewHandler(options HandlerOptions) *Handler {
 		userReader:                options.UserReader,
 		userMutator:               options.UserMutator,
 		routeLookup:               options.RouteLookup,
+		listenerRuntime:           options.ListenerRuntime,
 		reload:                    options.Reload,
 		metrics:                   options.Metrics,
 		protectedConfigAuthorizer: options.ProtectedConfigAuthorizer,
@@ -420,6 +431,83 @@ func (h *Handler) GetNonDefaultConfig(ctx context.Context, request generated.Get
 			return generated.GetNonDefaultConfig200JSONResponse(document)
 		},
 	), nil
+}
+
+// ListListeners returns process-local frontend listener inventory.
+func (h *Handler) ListListeners(ctx context.Context, _ generated.ListListenersRequestObject) (generated.ListListenersResponseObject, error) {
+	if h.listenerRuntime == nil {
+		return generated.ListListenersdefaultJSONResponse{StatusCode: http.StatusServiceUnavailable, Body: h.runtimeUnavailable("ListListeners")}, nil
+	}
+
+	result, err := h.listenerRuntime.ListListeners(ctx, runtime.ListListenersRequest{Actor: actorFromContext(ctx)})
+	if err != nil {
+		return generated.ListListenersdefaultJSONResponse{StatusCode: statusForError(err), Body: h.problemFromError("ListListeners", err)}, nil
+	}
+
+	return generated.ListListeners200JSONResponse{Listeners: listenerDetails(result.Listeners)}, nil
+}
+
+// GetListener returns one configured process-local frontend listener.
+func (h *Handler) GetListener(ctx context.Context, request generated.GetListenerRequestObject) (generated.GetListenerResponseObject, error) {
+	if h.listenerRuntime == nil {
+		return generated.GetListenerdefaultJSONResponse{StatusCode: http.StatusServiceUnavailable, Body: h.runtimeUnavailable("GetListener")}, nil
+	}
+
+	detail, err := h.listenerRuntime.GetListener(ctx, runtime.GetListenerRequest{
+		Name:  request.Name,
+		Actor: actorFromContext(ctx),
+	})
+	if err != nil {
+		return generated.GetListenerdefaultJSONResponse{StatusCode: statusForError(err), Body: h.problemFromError("GetListener", err)}, nil
+	}
+
+	return generated.GetListener200JSONResponse(listenerDetail(detail)), nil
+}
+
+// DrainListener starts an auditable process-local listener drain.
+func (h *Handler) DrainListener(ctx context.Context, request generated.DrainListenerRequestObject) (generated.DrainListenerResponseObject, error) {
+	if request.Body == nil {
+		return generated.DrainListenerdefaultJSONResponse{StatusCode: http.StatusBadRequest, Body: h.problem(http.StatusBadRequest, "invalid_request", "request body is required", "DrainListener")}, nil
+	}
+
+	if h.listenerRuntime == nil {
+		return generated.DrainListenerdefaultJSONResponse{StatusCode: http.StatusServiceUnavailable, Body: h.runtimeUnavailable("DrainListener")}, nil
+	}
+
+	result, err := h.listenerRuntime.DrainListener(ctx, runtime.DrainListenerRequest{
+		Name:   request.Name,
+		Mode:   runtime.ListenerDrainMode(request.Body.Mode),
+		Reason: request.Body.Reason,
+		Grace:  durationFromSeconds(request.Body.GraceSeconds),
+		Actor:  actorFromContext(ctx),
+	})
+	if err != nil {
+		return generated.DrainListenerdefaultJSONResponse{StatusCode: statusForError(err), Body: h.problemFromError("DrainListener", err)}, nil
+	}
+
+	return generated.DrainListener202JSONResponse(listenerDetail(result.Listener)), nil
+}
+
+// ResumeListener resumes one process-local listener from the typed config snapshot.
+func (h *Handler) ResumeListener(ctx context.Context, request generated.ResumeListenerRequestObject) (generated.ResumeListenerResponseObject, error) {
+	if request.Body == nil {
+		return generated.ResumeListenerdefaultJSONResponse{StatusCode: http.StatusBadRequest, Body: h.problem(http.StatusBadRequest, "invalid_request", "request body is required", "ResumeListener")}, nil
+	}
+
+	if h.listenerRuntime == nil {
+		return generated.ResumeListenerdefaultJSONResponse{StatusCode: http.StatusServiceUnavailable, Body: h.runtimeUnavailable("ResumeListener")}, nil
+	}
+
+	result, err := h.listenerRuntime.ResumeListener(ctx, runtime.ResumeListenerRequest{
+		Name:   request.Name,
+		Reason: request.Body.Reason,
+		Actor:  actorFromContext(ctx),
+	})
+	if err != nil {
+		return generated.ResumeListenerdefaultJSONResponse{StatusCode: statusForError(err), Body: h.problemFromError("ResumeListener", err)}, nil
+	}
+
+	return generated.ResumeListener202JSONResponse(listenerDetail(result.Listener)), nil
 }
 
 // Reload applies supported live config changes and rejects unsafe ones.
@@ -1110,6 +1198,46 @@ func backendDetail(state backend.EffectiveBackendState) generated.BackendDetail 
 	}
 }
 
+// listenerDetails adapts runtime listener snapshots into generated DTOs.
+func listenerDetails(details []runtime.ListenerDetail) []generated.ListenerDetail {
+	listeners := make([]generated.ListenerDetail, 0, len(details))
+	for _, detail := range details {
+		listeners = append(listeners, listenerDetail(detail))
+	}
+
+	return listeners
+}
+
+// listenerDetail adapts one runtime listener snapshot into a generated DTO.
+func listenerDetail(detail runtime.ListenerDetail) generated.ListenerDetail {
+	return generated.ListenerDetail{
+		ActiveLocalSessions: detail.ActiveLocalSessions,
+		Address:             detail.Address,
+		BoundAddress:        stringPtrIfNotEmpty(detail.BoundAddress),
+		DrainMode:           listenerDrainMode(detail.DrainMode),
+		ImplicitTLS:         detail.ImplicitTLS,
+		Name:                detail.Name,
+		Network:             detail.Network,
+		Protocol:            detail.Protocol,
+		ProxyProtocol:       detail.ProxyProtocol,
+		ServiceName:         detail.ServiceName,
+		State:               generated.ListenerState(detail.State),
+		TLSMode:             detail.TLSMode,
+	}
+}
+
+// listenerDrainMode adapts optional runtime drain mode values.
+func listenerDrainMode(mode runtime.ListenerDrainMode) *generated.DrainMode {
+	value := strings.TrimSpace(string(mode))
+	if value == "" {
+		return nil
+	}
+
+	generatedMode := generated.DrainMode(value)
+
+	return &generatedMode
+}
+
 // routeLookupRequest adapts generated route lookup DTOs into domain input.
 func routeLookupRequest(body generated.LookupRouteJSONRequestBody) runtime.RouteLookupRequest {
 	return runtime.RouteLookupRequest{
@@ -1439,6 +1567,17 @@ func pointerString(value *string) string {
 // pointerBool unwraps optional generated boolean fields.
 func pointerBool(value *bool) bool {
 	return value != nil && *value
+}
+
+// durationFromSeconds converts optional generated second values into runtime durations.
+func durationFromSeconds(value *int) *time.Duration {
+	if value == nil {
+		return nil
+	}
+
+	duration := time.Duration(*value) * time.Second
+
+	return &duration
 }
 
 // stringPtrIfNotEmpty returns an optional generated string when value is present.

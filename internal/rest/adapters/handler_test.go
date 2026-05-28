@@ -18,10 +18,13 @@ package adapters
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/croessner/nauthilus-director/internal/rest/generated"
 	"github.com/croessner/nauthilus-director/internal/runtime"
@@ -31,6 +34,9 @@ const (
 	testBackendIdentifier = "mailstore-a-imap"
 	testConfigView        = configViewDefaults
 	testHandlerVersion    = "test"
+	testListenerBound     = "127.0.0.1:2143"
+	testListenerName      = "imap"
+	testListenerReason    = "node maintenance"
 )
 
 // TestLookupRouteUsesInjectedSideEffectFreeDomainService verifies route lookup is no longer a stub.
@@ -151,6 +157,252 @@ func TestRuntimeErrorsMapToStableStatuses(t *testing.T) {
 	}
 }
 
+// TestListListenersMapsRuntimeDetails verifies listener inventory uses generated DTOs.
+func TestListListenersMapsRuntimeDetails(t *testing.T) {
+	listenerRuntime := &recordingListenerRuntime{
+		listResult: runtime.ListListenersResult{Listeners: []runtime.ListenerDetail{
+			listenerRuntimeDetail(testListenerName, runtime.ListenerStateDraining, 3),
+		}},
+	}
+	handler := NewHandler(HandlerOptions{Version: testHandlerVersion, ListenerRuntime: listenerRuntime})
+
+	response, err := handler.ListListeners(context.Background(), generated.ListListenersRequestObject{})
+	if err != nil {
+		t.Fatalf("ListListeners returned error: %v", err)
+	}
+
+	list, ok := response.(generated.ListListeners200JSONResponse)
+	if !ok {
+		t.Fatalf("ListListeners response = %T, want 200 listener list", response)
+	}
+
+	if listenerRuntime.listCalls != 1 {
+		t.Fatalf("ListListeners calls = %d, want 1", listenerRuntime.listCalls)
+	}
+
+	if len(list.Listeners) != 1 {
+		t.Fatalf("listeners = %d, want 1", len(list.Listeners))
+	}
+
+	detail := list.Listeners[0]
+	if detail.Name != testListenerName || detail.State != generated.ListenerState(runtime.ListenerStateDraining) || detail.ActiveLocalSessions != 3 {
+		t.Fatalf("listener detail = %#v, want mapped runtime detail", detail)
+	}
+
+	if detail.BoundAddress == nil || *detail.BoundAddress != testListenerBound {
+		t.Fatalf("bound address = %#v, want configured safe bound address", detail.BoundAddress)
+	}
+
+	if detail.DrainMode == nil || *detail.DrainMode != generated.DrainModeSoft {
+		t.Fatalf("drain mode = %#v, want soft", detail.DrainMode)
+	}
+
+	assertListenerDTOSecretSafe(t, detail)
+}
+
+// TestGetListenerMapsKnownAndUnknownNames verifies lookup status mapping.
+func TestGetListenerMapsKnownAndUnknownNames(t *testing.T) {
+	listenerRuntime := &recordingListenerRuntime{
+		getResult: listenerRuntimeDetail(testListenerName, runtime.ListenerStateAccepting, 0),
+	}
+	handler := NewHandler(HandlerOptions{Version: testHandlerVersion, ListenerRuntime: listenerRuntime})
+
+	response, err := handler.GetListener(context.Background(), generated.GetListenerRequestObject{Name: testListenerName})
+	if err != nil {
+		t.Fatalf("GetListener returned error: %v", err)
+	}
+
+	detail, ok := response.(generated.GetListener200JSONResponse)
+	if !ok {
+		t.Fatalf("GetListener response = %T, want 200 detail", response)
+	}
+
+	if listenerRuntime.getRequest.Name != testListenerName {
+		t.Fatalf("get request name = %q, want %q", listenerRuntime.getRequest.Name, testListenerName)
+	}
+
+	if detail.Name != testListenerName || detail.State != generated.ListenerState(runtime.ListenerStateAccepting) {
+		t.Fatalf("GetListener detail = %#v, want accepting listener", detail)
+	}
+
+	listenerRuntime.getErr = newRuntimeError(runtime.ErrorKindNotFound, "listener_get", "listener not found")
+
+	response, err = handler.GetListener(context.Background(), generated.GetListenerRequestObject{Name: "missing"})
+	if err != nil {
+		t.Fatalf("GetListener missing returned error: %v", err)
+	}
+
+	problem, ok := response.(generated.GetListenerdefaultJSONResponse)
+	if !ok {
+		t.Fatalf("GetListener missing response = %T, want problem", response)
+	}
+
+	if problem.StatusCode != http.StatusNotFound {
+		t.Fatalf("GetListener missing status = %d, want 404", problem.StatusCode)
+	}
+}
+
+// TestDrainListenerMapsRequestAndResponse verifies drain DTO conversion in both directions.
+func TestDrainListenerMapsRequestAndResponse(t *testing.T) {
+	graceSeconds := 7
+	listenerRuntime := &recordingListenerRuntime{
+		drainResult: runtime.ListenerMutationResult{
+			Listener: listenerRuntimeDetail(testListenerName, runtime.ListenerStateDrained, 0),
+		},
+	}
+	handler := NewHandler(HandlerOptions{Version: testHandlerVersion, ListenerRuntime: listenerRuntime})
+
+	response, err := handler.DrainListener(context.Background(), generated.DrainListenerRequestObject{
+		Name: testListenerName,
+		Body: &generated.DrainListenerJSONRequestBody{
+			GraceSeconds: &graceSeconds,
+			Mode:         generated.DrainModeHard,
+			Reason:       testListenerReason,
+		},
+	})
+	if err != nil {
+		t.Fatalf("DrainListener returned error: %v", err)
+	}
+
+	if listenerRuntime.drainRequest.Name != testListenerName {
+		t.Fatalf("drain name = %q, want %q", listenerRuntime.drainRequest.Name, testListenerName)
+	}
+
+	if listenerRuntime.drainRequest.Mode != runtime.ListenerDrainModeHard {
+		t.Fatalf("drain mode = %q, want hard", listenerRuntime.drainRequest.Mode)
+	}
+
+	if listenerRuntime.drainRequest.Reason != testListenerReason {
+		t.Fatalf("drain reason = %q, want %q", listenerRuntime.drainRequest.Reason, testListenerReason)
+	}
+
+	if listenerRuntime.drainRequest.Grace == nil || *listenerRuntime.drainRequest.Grace != 7*time.Second {
+		t.Fatalf("drain grace = %v, want 7s", listenerRuntime.drainRequest.Grace)
+	}
+
+	detail, ok := response.(generated.DrainListener202JSONResponse)
+	if !ok {
+		t.Fatalf("DrainListener response = %T, want 202 detail", response)
+	}
+
+	if detail.State != generated.ListenerState(runtime.ListenerStateDrained) {
+		t.Fatalf("drain response state = %q, want drained", detail.State)
+	}
+}
+
+// TestDrainListenerHardModeRequiresExplicitGrace verifies runtime validation reaches REST clients.
+func TestDrainListenerHardModeRequiresExplicitGrace(t *testing.T) {
+	manager := &adapterListenerManager{
+		drainDetail: listenerRuntimeDetail(testListenerName, runtime.ListenerStateDrained, 0),
+	}
+	handler := NewHandler(HandlerOptions{
+		Version:         testHandlerVersion,
+		ListenerRuntime: runtime.NewListenerService(manager),
+	})
+
+	response, err := handler.DrainListener(context.Background(), generated.DrainListenerRequestObject{
+		Name: testListenerName,
+		Body: &generated.DrainListenerJSONRequestBody{
+			Mode:   generated.DrainModeHard,
+			Reason: testListenerReason,
+		},
+	})
+	if err != nil {
+		t.Fatalf("DrainListener returned error: %v", err)
+	}
+
+	problem, ok := response.(generated.DrainListenerdefaultJSONResponse)
+	if !ok {
+		t.Fatalf("DrainListener response = %T, want problem", response)
+	}
+
+	if problem.StatusCode != http.StatusBadRequest {
+		t.Fatalf("hard drain status = %d, want 400", problem.StatusCode)
+	}
+
+	if !strings.Contains(problem.Body.Message, "hard drain requires explicit grace") {
+		t.Fatalf("hard drain message = %q, want explicit grace diagnostic", problem.Body.Message)
+	}
+
+	if manager.drainCalls != 0 {
+		t.Fatalf("manager drain calls = %d, want validation before manager access", manager.drainCalls)
+	}
+}
+
+// TestResumeListenerMapsRequestAndResponse verifies resume returns updated listener detail.
+func TestResumeListenerMapsRequestAndResponse(t *testing.T) {
+	listenerRuntime := &recordingListenerRuntime{
+		resumeResult: runtime.ListenerMutationResult{
+			Listener: listenerRuntimeDetail(testListenerName, runtime.ListenerStateAccepting, 0),
+		},
+	}
+	handler := NewHandler(HandlerOptions{Version: testHandlerVersion, ListenerRuntime: listenerRuntime})
+
+	response, err := handler.ResumeListener(context.Background(), generated.ResumeListenerRequestObject{
+		Name: testListenerName,
+		Body: &generated.ResumeListenerJSONRequestBody{Reason: testListenerReason},
+	})
+	if err != nil {
+		t.Fatalf("ResumeListener returned error: %v", err)
+	}
+
+	if listenerRuntime.resumeRequest.Name != testListenerName || listenerRuntime.resumeRequest.Reason != testListenerReason {
+		t.Fatalf("resume request = %#v, want name and reason", listenerRuntime.resumeRequest)
+	}
+
+	detail, ok := response.(generated.ResumeListener202JSONResponse)
+	if !ok {
+		t.Fatalf("ResumeListener response = %T, want 202 detail", response)
+	}
+
+	if detail.State != generated.ListenerState(runtime.ListenerStateAccepting) {
+		t.Fatalf("resume response state = %q, want accepting", detail.State)
+	}
+}
+
+// TestListenerErrorMappingCoversRuntimeStatuses verifies public listener status mapping.
+func TestListenerErrorMappingCoversRuntimeStatuses(t *testing.T) {
+	testCases := []struct {
+		name   string
+		err    error
+		status int
+	}{
+		{name: "bad request", err: newRuntimeError(runtime.ErrorKindInvalidRequest, "listener", "bad request"), status: http.StatusBadRequest},
+		{name: "not found", err: newRuntimeError(runtime.ErrorKindNotFound, "listener", "not found"), status: http.StatusNotFound},
+		{name: "conflict", err: newRuntimeError(runtime.ErrorKindConflict, "listener", "conflict"), status: http.StatusConflict},
+		{name: "unavailable", err: newRuntimeError(runtime.ErrorKindUnavailable, "listener", "unavailable"), status: http.StatusServiceUnavailable},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			handler := NewHandler(HandlerOptions{
+				Version:         testHandlerVersion,
+				ListenerRuntime: &recordingListenerRuntime{drainErr: testCase.err},
+			})
+
+			response, err := handler.DrainListener(context.Background(), generated.DrainListenerRequestObject{
+				Name: testListenerName,
+				Body: &generated.DrainListenerJSONRequestBody{
+					Mode:   generated.DrainModeSoft,
+					Reason: testListenerReason,
+				},
+			})
+			if err != nil {
+				t.Fatalf("DrainListener returned error: %v", err)
+			}
+
+			problem, ok := response.(generated.DrainListenerdefaultJSONResponse)
+			if !ok {
+				t.Fatalf("DrainListener response = %T, want problem", response)
+			}
+
+			if problem.StatusCode != testCase.status {
+				t.Fatalf("status = %d, want %d", problem.StatusCode, testCase.status)
+			}
+		})
+	}
+}
+
 // recordingRouteLookup captures route lookup calls without mutating state.
 type recordingRouteLookup struct {
 	calls int
@@ -184,3 +436,124 @@ func (r *recordingProtectedAudit) AuditProtectedConfigRead(_ context.Context, ev
 
 	return nil
 }
+
+// recordingListenerRuntime captures listener runtime requests for adapter assertions.
+type recordingListenerRuntime struct {
+	listCalls     int
+	listResult    runtime.ListListenersResult
+	listErr       error
+	getRequest    runtime.GetListenerRequest
+	getResult     runtime.ListenerDetail
+	getErr        error
+	drainRequest  runtime.DrainListenerRequest
+	drainResult   runtime.ListenerMutationResult
+	drainErr      error
+	resumeRequest runtime.ResumeListenerRequest
+	resumeResult  runtime.ListenerMutationResult
+	resumeErr     error
+}
+
+// ListListeners records inventory calls and returns configured snapshots.
+func (r *recordingListenerRuntime) ListListeners(context.Context, runtime.ListListenersRequest) (runtime.ListListenersResult, error) {
+	r.listCalls++
+	if r.listErr != nil {
+		return runtime.ListListenersResult{}, r.listErr
+	}
+
+	return r.listResult, nil
+}
+
+// GetListener records a single listener lookup and returns configured detail.
+func (r *recordingListenerRuntime) GetListener(_ context.Context, request runtime.GetListenerRequest) (runtime.ListenerDetail, error) {
+	r.getRequest = request
+	if r.getErr != nil {
+		return runtime.ListenerDetail{}, r.getErr
+	}
+
+	return r.getResult, nil
+}
+
+// DrainListener records a listener drain and returns the configured mutation detail.
+func (r *recordingListenerRuntime) DrainListener(_ context.Context, request runtime.DrainListenerRequest) (runtime.ListenerMutationResult, error) {
+	r.drainRequest = request
+	if r.drainErr != nil {
+		return runtime.ListenerMutationResult{}, r.drainErr
+	}
+
+	return r.drainResult, nil
+}
+
+// ResumeListener records a listener resume and returns the configured mutation detail.
+func (r *recordingListenerRuntime) ResumeListener(_ context.Context, request runtime.ResumeListenerRequest) (runtime.ListenerMutationResult, error) {
+	r.resumeRequest = request
+	if r.resumeErr != nil {
+		return runtime.ListenerMutationResult{}, r.resumeErr
+	}
+
+	return r.resumeResult, nil
+}
+
+// adapterListenerManager lets REST tests exercise the real runtime listener service.
+type adapterListenerManager struct {
+	drainCalls  int
+	drainDetail runtime.ListenerDetail
+}
+
+// Snapshots returns no inventory because validation tests do not need snapshots.
+func (m *adapterListenerManager) Snapshots() []runtime.ListenerDetail {
+	return nil
+}
+
+// Drain records manager access after runtime validation.
+func (m *adapterListenerManager) Drain(context.Context, runtime.ListenerManagerDrainRequest) (runtime.ListenerDetail, error) {
+	m.drainCalls++
+
+	return m.drainDetail, nil
+}
+
+// Resume is unused by validation tests and returns a stopped detail.
+func (m *adapterListenerManager) Resume(context.Context, string) (runtime.ListenerDetail, error) {
+	return runtime.ListenerDetail{}, nil
+}
+
+// listenerRuntimeDetail builds one secret-safe listener runtime projection.
+func listenerRuntimeDetail(name string, state runtime.ListenerState, active int) runtime.ListenerDetail {
+	detail := runtime.ListenerDetail{
+		Name:                name,
+		Protocol:            "imap",
+		ServiceName:         "imap-login",
+		Network:             "tcp",
+		Address:             "127.0.0.1:1143",
+		TLSMode:             "starttls",
+		ImplicitTLS:         false,
+		ProxyProtocol:       true,
+		BoundAddress:        testListenerBound,
+		State:               state,
+		ActiveLocalSessions: active,
+	}
+	if state == runtime.ListenerStateDraining || state == runtime.ListenerStateDrained {
+		detail.DrainMode = runtime.ListenerDrainModeSoft
+	}
+
+	return detail
+}
+
+// assertListenerDTOSecretSafe rejects fields outside the public listener contract.
+func assertListenerDTOSecretSafe(t *testing.T, detail generated.ListenerDetail) {
+	t.Helper()
+
+	payload, err := json.Marshal(detail)
+	if err != nil {
+		t.Fatalf("marshal listener DTO: %v", err)
+	}
+
+	rendered := string(payload)
+	for _, forbidden := range []string{"peer", "username", "recipient", "session_id", "credential", "private_key"} {
+		if strings.Contains(rendered, forbidden) {
+			t.Fatalf("listener DTO exposed forbidden field %q in %s", forbidden, rendered)
+		}
+	}
+}
+
+var _ ListenerRuntimeService = (*recordingListenerRuntime)(nil)
+var _ runtime.ListenerManager = (*adapterListenerManager)(nil)

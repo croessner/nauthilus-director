@@ -495,6 +495,25 @@ func backendB() generated.BackendDetail {
 	}
 }
 
+// listenerA returns a stable listener fixture.
+func listenerA() generated.ListenerDetail {
+	boundAddress := "127.0.0.1:1143"
+
+	return generated.ListenerDetail{
+		ActiveLocalSessions: 1,
+		Address:             "127.0.0.1:1143",
+		BoundAddress:        &boundAddress,
+		ImplicitTLS:         false,
+		Name:                "imap",
+		Network:             "tcp",
+		Protocol:            "imap",
+		ProxyProtocol:       false,
+		ServiceName:         "imap-login",
+		State:               generated.Accepting,
+		TLSMode:             "starttls",
+	}
+}
+
 // sessionA returns a stable session fixture.
 func sessionA() generated.SessionDetail {
 	return generated.SessionDetail{
@@ -667,6 +686,45 @@ func (fake *fakeControlClient) GetNonDefaultConfigWithResponse(_ context.Context
 	fake.record("GetNonDefaultConfig")
 	fake.nonDefaultConfigParams = params
 	return &generated.GetNonDefaultConfigResponse{HTTPResponse: httpResponse(http.StatusOK), JSON200: configDocument()}, nil
+}
+
+// ListListenersWithResponse records and returns listener list data.
+func (fake *fakeControlClient) ListListenersWithResponse(context.Context, ...generated.RequestEditorFn) (*generated.ListListenersResponse, error) {
+	fake.record("ListListeners")
+	return &generated.ListListenersResponse{
+		HTTPResponse: httpResponse(http.StatusOK),
+		JSON200:      &generated.ListenerListResponse{Listeners: []generated.ListenerDetail{listenerA()}},
+	}, nil
+}
+
+// GetListenerWithResponse records and returns listener detail data.
+func (fake *fakeControlClient) GetListenerWithResponse(context.Context, generated.ListenerName, ...generated.RequestEditorFn) (*generated.GetListenerResponse, error) {
+	fake.record("GetListener")
+	return &generated.GetListenerResponse{HTTPResponse: httpResponse(http.StatusOK), JSON200: &[]generated.ListenerDetail{listenerA()}[0]}, nil
+}
+
+// DrainListenerWithBodyWithResponse records unsupported raw-body usage.
+func (fake *fakeControlClient) DrainListenerWithBodyWithResponse(context.Context, generated.ListenerName, string, io.Reader, ...generated.RequestEditorFn) (*generated.DrainListenerResponse, error) {
+	fake.record("DrainListenerWithBody")
+	return nil, nil
+}
+
+// DrainListenerWithResponse records and returns updated listener detail.
+func (fake *fakeControlClient) DrainListenerWithResponse(context.Context, generated.ListenerName, generated.DrainListenerJSONRequestBody, ...generated.RequestEditorFn) (*generated.DrainListenerResponse, error) {
+	fake.record("DrainListener")
+	return &generated.DrainListenerResponse{HTTPResponse: httpResponse(http.StatusAccepted), JSON202: &[]generated.ListenerDetail{listenerA()}[0]}, nil
+}
+
+// ResumeListenerWithBodyWithResponse records unsupported raw-body usage.
+func (fake *fakeControlClient) ResumeListenerWithBodyWithResponse(context.Context, generated.ListenerName, string, io.Reader, ...generated.RequestEditorFn) (*generated.ResumeListenerResponse, error) {
+	fake.record("ResumeListenerWithBody")
+	return nil, nil
+}
+
+// ResumeListenerWithResponse records and returns updated listener detail.
+func (fake *fakeControlClient) ResumeListenerWithResponse(context.Context, generated.ListenerName, generated.ResumeListenerJSONRequestBody, ...generated.RequestEditorFn) (*generated.ResumeListenerResponse, error) {
+	fake.record("ResumeListener")
+	return &generated.ResumeListenerResponse{HTTPResponse: httpResponse(http.StatusAccepted), JSON202: &[]generated.ListenerDetail{listenerA()}[0]}, nil
 }
 
 // ReloadWithResponse records and returns an accepted reload response.

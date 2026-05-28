@@ -19,6 +19,8 @@ tags:
     description: Liveness, readiness and version checks.
   - name: config
     description: Read-only configuration inspection and reload control.
+  - name: listeners
+    description: Process-local frontend listener inventory and runtime control.
   - name: backends
     description: Backend inventory, maintenance and runtime overrides.
   - name: sessions
@@ -148,6 +150,84 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/AcceptedResponse"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/v1/listeners:
+    get:
+      operationId: listListeners
+      tags:
+        - listeners
+      summary: List configured process-local frontend listeners.
+      responses:
+        "200":
+          description: Listener list.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListenerListResponse"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/v1/listeners/{name}:
+    parameters:
+      - $ref: "#/components/parameters/ListenerName"
+    get:
+      operationId: getListener
+      tags:
+        - listeners
+      summary: Show one configured process-local frontend listener.
+      responses:
+        "200":
+          description: Listener detail.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListenerDetail"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/v1/listeners/{name}/runtime/drain:
+    parameters:
+      - $ref: "#/components/parameters/ListenerName"
+    post:
+      operationId: drainListener
+      tags:
+        - listeners
+      summary: Drain one process-local frontend listener.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ListenerDrainRequest"
+      responses:
+        "202":
+          description: Drain request was accepted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListenerDetail"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/v1/listeners/{name}/runtime/resume:
+    parameters:
+      - $ref: "#/components/parameters/ListenerName"
+    post:
+      operationId: resumeListener
+      tags:
+        - listeners
+      summary: Resume one process-local frontend listener.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ListenerResumeRequest"
+      responses:
+        "202":
+          description: Resume request was accepted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListenerDetail"
         default:
           $ref: "#/components/responses/Error"
   /api/v1/backends:
@@ -622,6 +702,13 @@ components:
       schema:
         type: string
         minLength: 1
+    ListenerName:
+      name: name
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 1
     SessionID:
       name: session_id
       in: path
@@ -745,6 +832,92 @@ components:
       enum:
         - soft
         - hard
+    ListenerState:
+      type: string
+      enum:
+        - accepting
+        - draining
+        - drained
+        - stopped
+    ListenerDetail:
+      type: object
+      additionalProperties: false
+      required:
+        - name
+        - protocol
+        - service_name
+        - network
+        - address
+        - tls_mode
+        - implicit_tls
+        - proxy_protocol
+        - state
+        - active_local_sessions
+      properties:
+        name:
+          type: string
+          minLength: 1
+        protocol:
+          type: string
+          minLength: 1
+        service_name:
+          type: string
+          minLength: 1
+        network:
+          type: string
+          minLength: 1
+        address:
+          type: string
+          minLength: 1
+        bound_address:
+          type: string
+        tls_mode:
+          type: string
+        implicit_tls:
+          type: boolean
+        proxy_protocol:
+          type: boolean
+        state:
+          $ref: "#/components/schemas/ListenerState"
+        active_local_sessions:
+          type: integer
+          minimum: 0
+        drain_mode:
+          $ref: "#/components/schemas/DrainMode"
+    ListenerListResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - listeners
+      properties:
+        listeners:
+          type: array
+          items:
+            $ref: "#/components/schemas/ListenerDetail"
+    ListenerDrainRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - mode
+        - reason
+      properties:
+        mode:
+          $ref: "#/components/schemas/DrainMode"
+        reason:
+          type: string
+          minLength: 1
+        grace_seconds:
+          type: integer
+          minimum: 0
+    ListenerResumeRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - reason
+      properties:
+        reason:
+          type: string
+          minLength: 1
     ErrorResponse:
       type: object
       additionalProperties: false
