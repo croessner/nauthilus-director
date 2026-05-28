@@ -357,6 +357,7 @@ func (s *SessionService) recordSessionOperation(
 // LocalSessionInfo describes one locally proxied session for acceleration indexes.
 type LocalSessionInfo struct {
 	SessionID         string
+	ListenerName      string
 	Tenant            string
 	UserHash          string
 	BackendIdentifier string
@@ -388,10 +389,11 @@ func (f LocalSessionHandleFunc) CloseRuntimeSession(ctx context.Context, control
 
 // LocalSessionRegistry indexes sessions owned by the current process only.
 type LocalSessionRegistry struct {
-	mu        sync.Mutex
-	bySession map[string]localSessionEntry
-	byUser    map[UserKey]map[string]struct{}
-	byBackend map[string]map[string]struct{}
+	mu         sync.Mutex
+	bySession  map[string]localSessionEntry
+	byListener map[string]map[string]struct{}
+	byUser     map[UserKey]map[string]struct{}
+	byBackend  map[string]map[string]struct{}
 }
 
 type localSessionEntry struct {
@@ -402,9 +404,10 @@ type localSessionEntry struct {
 // NewLocalSessionRegistry creates an empty local active-session accelerator.
 func NewLocalSessionRegistry() *LocalSessionRegistry {
 	return &LocalSessionRegistry{
-		bySession: make(map[string]localSessionEntry),
-		byUser:    make(map[UserKey]map[string]struct{}),
-		byBackend: make(map[string]map[string]struct{}),
+		bySession:  make(map[string]localSessionEntry),
+		byListener: make(map[string]map[string]struct{}),
+		byUser:     make(map[UserKey]map[string]struct{}),
+		byBackend:  make(map[string]map[string]struct{}),
 	}
 }
 
@@ -426,6 +429,10 @@ func (r *LocalSessionRegistry) Register(info LocalSessionInfo, handle LocalSessi
 	r.mu.Lock()
 
 	r.bySession[info.SessionID] = localSessionEntry{info: info, handle: handle}
+	if info.ListenerName != "" {
+		addLocalIndex(r.byListener, info.ListenerName, info.SessionID)
+	}
+
 	if key := info.UserKey(); key.UserHash != "" && key.Tenant != "" {
 		addLocalIndex(r.byUser, key, info.SessionID)
 	}
@@ -456,6 +463,24 @@ func (r *LocalSessionRegistry) CloseSession(
 	}
 
 	return closeLocalEntries(ctx, control, r.entriesForSessions([]string{sessionID}))
+}
+
+// CloseListener closes locally owned sessions accepted by one listener.
+func (r *LocalSessionRegistry) CloseListener(
+	ctx context.Context,
+	listenerName string,
+	control LocalSessionControl,
+) (int, error) {
+	if r == nil {
+		return 0, nil
+	}
+
+	listenerName = strings.TrimSpace(listenerName)
+	if listenerName == "" {
+		return 0, nil
+	}
+
+	return closeLocalEntries(ctx, control, entriesForIndexedKey(r, r.byListener, listenerName))
 }
 
 // CloseUser closes locally owned sessions for one affinity key.
@@ -510,6 +535,7 @@ func (r *LocalSessionRegistry) CloseAll(ctx context.Context, control LocalSessio
 // Normalize returns local session info with stable index fields trimmed.
 func (i LocalSessionInfo) Normalize() LocalSessionInfo {
 	i.SessionID = strings.TrimSpace(i.SessionID)
+	i.ListenerName = strings.TrimSpace(i.ListenerName)
 	i.Tenant = strings.TrimSpace(i.Tenant)
 	i.UserHash = strings.TrimSpace(i.UserHash)
 	i.BackendIdentifier = strings.TrimSpace(i.BackendIdentifier)
@@ -546,6 +572,10 @@ func (r *LocalSessionRegistry) unregister(info LocalSessionInfo) {
 	defer r.mu.Unlock()
 
 	delete(r.bySession, info.SessionID)
+
+	if info.ListenerName != "" {
+		removeLocalIndex(r.byListener, info.ListenerName, info.SessionID)
+	}
 
 	if key := info.UserKey(); key.Tenant != "" && key.UserHash != "" {
 		removeLocalIndex(r.byUser, key, info.SessionID)

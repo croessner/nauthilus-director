@@ -269,6 +269,31 @@ func TestBackendDrainClosesEveryLocalSessionForBackend(t *testing.T) {
 	}
 }
 
+// TestCloseListenerClosesOnlyListenerLocalSessions verifies listener-scoped local acceleration.
+func TestCloseListenerClosesOnlyListenerLocalSessions(t *testing.T) {
+	registry := NewLocalSessionRegistry()
+	first := &recordingLocalHandle{}
+	second := &recordingLocalHandle{}
+	other := &recordingLocalHandle{}
+
+	registerTestLocalSession(t, registry, LocalSessionInfo{SessionID: runtimeTestSessionA, ListenerName: routeLookupListener}, first)
+	registerTestLocalSession(t, registry, LocalSessionInfo{SessionID: runtimeTestSessionB, ListenerName: routeLookupListener}, second)
+	registerTestLocalSession(t, registry, LocalSessionInfo{SessionID: runtimeTestSessionC, ListenerName: routeLookupProtocolLMTP}, other)
+
+	closed, err := registry.CloseListener(context.Background(), routeLookupListener, LocalSessionControl{Action: "listener_hard_drain"})
+	if err != nil {
+		t.Fatalf("CloseListener returned error: %v", err)
+	}
+
+	if closed != 2 || first.closed != 1 || second.closed != 1 {
+		t.Fatalf("listener sessions closed = count:%d handles:%d/%d, want two", closed, first.closed, second.closed)
+	}
+
+	if other.closed != 0 {
+		t.Fatalf("unrelated listener session closed = %d, want 0", other.closed)
+	}
+}
+
 // TestReaperRunOnceReportsRepairCounts verifies lifecycle repair delegates through the service.
 func TestReaperRunOnceReportsRepairCounts(t *testing.T) {
 	store := &recordingSessionStateStore{

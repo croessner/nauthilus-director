@@ -25,6 +25,7 @@ import (
 	"net"
 	"reflect"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -44,6 +45,37 @@ const (
 	networkTCP4       = "tcp4"
 	networkTCP6       = "tcp6"
 	defaultTLSMinName = "TLS1.2"
+)
+
+var (
+	// ErrListenerNotFound reports a runtime operation for an unknown configured listener.
+	ErrListenerNotFound = errors.New("listener not found")
+	// ErrListenerManagerStopped reports a runtime operation while the manager is not running.
+	ErrListenerManagerStopped = errors.New("listener manager stopped")
+)
+
+// State describes one listener's process-local runtime state.
+type State string
+
+const (
+	// StateAccepting means the listener socket is bound and accepting sockets.
+	StateAccepting State = "accepting"
+	// StateDraining means accepts are stopped while active local sessions remain.
+	StateDraining State = "draining"
+	// StateDrained means accepts are stopped and no local sessions remain.
+	StateDrained State = "drained"
+	// StateStopped means startup or resume failed and the listener is not bound.
+	StateStopped State = "stopped"
+)
+
+// DrainMode describes how listener runtime drain handles active local sessions.
+type DrainMode string
+
+const (
+	// DrainModeSoft closes only the accept socket and keeps active streams running.
+	DrainModeSoft DrainMode = "soft"
+	// DrainModeHard closes the accept socket and then closes active streams after grace.
+	DrainModeHard DrainMode = "hard"
 )
 
 // SessionHandler owns one accepted frontend stream.
@@ -91,15 +123,25 @@ type ManagerOption func(*managerOptions)
 
 // Snapshot is a secret-safe summary of configured listener lifecycle state.
 type Snapshot struct {
-	Name          string
-	Protocol      string
-	ServiceName   string
-	Network       string
-	Address       string
-	TLSMode       string
-	ImplicitTLS   bool
-	ProxyProtocol bool
-	BoundAddress  string
+	Name                string
+	Protocol            string
+	ServiceName         string
+	Network             string
+	Address             string
+	TLSMode             string
+	ImplicitTLS         bool
+	ProxyProtocol       bool
+	BoundAddress        string
+	State               State
+	ActiveLocalSessions int
+	DrainMode           DrainMode
+}
+
+// DrainRequest asks the manager to runtime-drain one configured listener.
+type DrainRequest struct {
+	Name  string
+	Mode  DrainMode
+	Grace *time.Duration
 }
 
 // Manager starts, stops and tracks configured frontend protocol listeners.
@@ -332,8 +374,80 @@ func (m *Manager) Reload(ctx context.Context, cfg config.Config) error {
 	return nil
 }
 
+// Drain stops accepts for one configured listener without editing configuration.
+func (m *Manager) Drain(ctx context.Context, request DrainRequest) (Snapshot, error) {
+	request, err := request.normalize()
+	if err != nil {
+		return Snapshot{}, err
+	}
+
+	if m == nil {
+		return Snapshot{}, ErrListenerManagerStopped
+	}
+
+	m.startMu.Lock()
+	defer m.startMu.Unlock()
+
+	if !m.started {
+		return Snapshot{}, ErrListenerManagerStopped
+	}
+
+	entry := m.listenerByName(request.Name)
+	if entry == nil {
+		return Snapshot{}, ErrListenerNotFound
+	}
+
+	switch request.Mode {
+	case DrainModeSoft:
+		err = entry.softDrain()
+	case DrainModeHard:
+		err = entry.hardDrain(ctx, *request.Grace, m.options.localSessions)
+	default:
+		err = errors.New("unsupported listener drain mode")
+	}
+
+	if err != nil {
+		return Snapshot{}, err
+	}
+
+	return entry.snapshot(), nil
+}
+
+// Resume rebinds one configured listener from the current typed config snapshot.
+func (m *Manager) Resume(ctx context.Context, name string) (Snapshot, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return Snapshot{}, errors.New("listener name required")
+	}
+
+	if m == nil {
+		return Snapshot{}, ErrListenerManagerStopped
+	}
+
+	m.startMu.Lock()
+	defer m.startMu.Unlock()
+
+	if !m.started {
+		return Snapshot{}, ErrListenerManagerStopped
+	}
+
+	entry := m.listenerByName(name)
+	if entry == nil {
+		return Snapshot{}, ErrListenerNotFound
+	}
+
+	if err := entry.resume(ctx); err != nil {
+		return entry.snapshot(), err
+	}
+
+	return entry.snapshot(), nil
+}
+
 // Snapshots returns the configured listeners without exposing high-cardinality session data.
 func (m *Manager) Snapshots() []Snapshot {
+	m.startMu.Lock()
+	defer m.startMu.Unlock()
+
 	snapshots := make([]Snapshot, 0, len(m.listeners))
 
 	for _, entry := range m.listeners {
@@ -345,6 +459,9 @@ func (m *Manager) Snapshots() []Snapshot {
 
 // BoundAddress returns the bound address for a started listener.
 func (m *Manager) BoundAddress(name string) (string, bool) {
+	m.startMu.Lock()
+	defer m.startMu.Unlock()
+
 	for _, entry := range m.listeners {
 		if entry.name == name && entry.boundAddress() != "" {
 			return entry.boundAddress(), true
@@ -356,12 +473,57 @@ func (m *Manager) BoundAddress(name string) (string, bool) {
 
 // ListenerNames returns configured supported listener names in deterministic order.
 func (m *Manager) ListenerNames() []string {
+	m.startMu.Lock()
+	defer m.startMu.Unlock()
+
 	names := make([]string, 0, len(m.listeners))
 	for _, entry := range m.listeners {
 		names = append(names, entry.name)
 	}
 
 	return names
+}
+
+// listenerByName returns the manager-owned listener with a matching configured name.
+func (m *Manager) listenerByName(name string) *managedListener {
+	for _, entry := range m.listeners {
+		if entry.name == name {
+			return entry
+		}
+	}
+
+	return nil
+}
+
+// normalize validates listener drain input before socket state changes happen.
+func (r DrainRequest) normalize() (DrainRequest, error) {
+	r.Name = strings.TrimSpace(r.Name)
+	r.Mode = DrainMode(strings.ToLower(strings.TrimSpace(string(r.Mode))))
+
+	if r.Name == "" {
+		return DrainRequest{}, errors.New("listener name required")
+	}
+
+	switch r.Mode {
+	case DrainModeSoft:
+		if r.Grace != nil && *r.Grace < 0 {
+			return DrainRequest{}, errors.New("listener drain grace must not be negative")
+		}
+
+		return r, nil
+	case DrainModeHard:
+		if r.Grace == nil {
+			return DrainRequest{}, errors.New("hard listener drain requires explicit grace")
+		}
+
+		if *r.Grace < 0 {
+			return DrainRequest{}, errors.New("listener drain grace must not be negative")
+		}
+
+		return r, nil
+	default:
+		return DrainRequest{}, errors.New("unsupported listener drain mode")
+	}
 }
 
 // rejectChangedListeners rejects in-place listener changes that need a restart.

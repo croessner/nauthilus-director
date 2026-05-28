@@ -494,6 +494,7 @@ func (s *Session) registerLocalProxySession(frontend net.Conn, backendConn net.C
 
 	unregister, err := s.localSessions.Register(runtimectl.LocalSessionInfo{
 		SessionID:         s.context.ID,
+		ListenerName:      s.context.ListenerName,
 		Tenant:            s.placementAffinityKey().Tenant,
 		UserHash:          s.placementAffinityKey().AccountKey,
 		BackendIdentifier: s.placement.Backend.Backend.Identifier,

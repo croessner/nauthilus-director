@@ -28,6 +28,7 @@ import (
 	"github.com/croessner/nauthilus-director/internal/config"
 	"github.com/croessner/nauthilus-director/internal/nauthilus"
 	"github.com/croessner/nauthilus-director/internal/observability"
+	runtimectl "github.com/croessner/nauthilus-director/internal/runtime"
 )
 
 // managedListener owns one configured network listener and its active sessions.
@@ -43,6 +44,8 @@ type managedListener struct {
 	mu        sync.Mutex
 	listener  net.Listener
 	active    map[net.Conn]struct{}
+	state     State
+	drainMode DrainMode
 	acceptWG  sync.WaitGroup
 	sessionWG sync.WaitGroup
 }
@@ -135,13 +138,23 @@ func newManagedListener(
 		listenConfig:  options.listenConfig,
 		observability: observability.NormalizeRecorder(options.observability),
 		active:        map[net.Conn]struct{}{},
+		state:         StateStopped,
 	}, nil
 }
 
 // start binds the configured address and starts the accept loop.
 func (l *managedListener) start(ctx context.Context) error {
+	l.mu.Lock()
+	if l.listener != nil {
+		l.mu.Unlock()
+
+		return nil
+	}
+	l.mu.Unlock()
+
 	ln, err := l.listenConfig.Listen(ctx, l.config.listener.Network, l.config.listener.Address)
 	if err != nil {
+		l.markStopped()
 		l.recordListenerEvent(ctx, observability.EventListenerStart, "failure", "bind_failed")
 
 		return fmt.Errorf("start listener %s on %s/%s: %w", l.name, l.config.listener.Network, l.config.listener.Address, err)
@@ -149,6 +162,8 @@ func (l *managedListener) start(ctx context.Context) error {
 
 	l.mu.Lock()
 	l.listener = ln
+	l.state = StateAccepting
+	l.drainMode = ""
 	l.mu.Unlock()
 
 	l.acceptWG.Add(1)
@@ -161,18 +176,11 @@ func (l *managedListener) start(ctx context.Context) error {
 
 // stop closes the listener and waits for active sessions or the shutdown context.
 func (l *managedListener) stop(ctx context.Context) error {
-	l.mu.Lock()
-	ln := l.listener
-	l.listener = nil
-	l.mu.Unlock()
-
-	if ln != nil {
-		_ = ln.Close()
-	}
-
+	l.closeAcceptSocket("")
 	l.acceptWG.Wait()
 
 	if waitGroupDone(ctx, &l.sessionWG) {
+		l.markStopped()
 		l.recordListenerEvent(ctx, observability.EventListenerStop, listenerResultOK, "")
 
 		return nil
@@ -181,11 +189,13 @@ func (l *managedListener) stop(ctx context.Context) error {
 	l.closeActiveConnections()
 
 	if waitGroupDone(context.Background(), &l.sessionWG) {
+		l.markStopped()
 		l.recordListenerEvent(ctx, observability.EventListenerStop, listenerResultOK, "")
 
 		return nil
 	}
 
+	l.markStopped()
 	l.recordListenerEvent(ctx, observability.EventListenerStop, "failure", "shutdown_timeout")
 
 	return ctx.Err()
@@ -193,16 +203,27 @@ func (l *managedListener) stop(ctx context.Context) error {
 
 // snapshot returns secret-safe listener state for tests and manager diagnostics.
 func (l *managedListener) snapshot() Snapshot {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	boundAddress := ""
+	if l.listener != nil && l.state == StateAccepting {
+		boundAddress = l.listener.Addr().String()
+	}
+
 	return Snapshot{
-		Name:          l.name,
-		Protocol:      l.config.listener.Protocol,
-		ServiceName:   l.config.listener.ServiceName,
-		Network:       l.config.listener.Network,
-		Address:       l.config.listener.Address,
-		TLSMode:       l.config.listener.TLS.Mode,
-		ImplicitTLS:   l.config.listener.TLS.Mode == tlsModeImplicit,
-		ProxyProtocol: l.config.listener.ProxyProtocol.Enabled,
-		BoundAddress:  l.boundAddress(),
+		Name:                l.name,
+		Protocol:            l.config.listener.Protocol,
+		ServiceName:         l.config.listener.ServiceName,
+		Network:             l.config.listener.Network,
+		Address:             l.config.listener.Address,
+		TLSMode:             l.config.listener.TLS.Mode,
+		ImplicitTLS:         l.config.listener.TLS.Mode == tlsModeImplicit,
+		ProxyProtocol:       l.config.listener.ProxyProtocol.Enabled,
+		BoundAddress:        boundAddress,
+		State:               l.state,
+		ActiveLocalSessions: len(l.active),
+		DrainMode:           l.drainMode,
 	}
 }
 
@@ -236,6 +257,7 @@ func (l *managedListener) acceptLoop(ln net.Listener) {
 			return
 		}
 
+		l.trackConnection(conn)
 		l.sessionWG.Add(1)
 		go l.serveConnection(conn)
 	}
@@ -245,7 +267,6 @@ func (l *managedListener) acceptLoop(ln net.Listener) {
 func (l *managedListener) serveConnection(conn net.Conn) {
 	defer l.sessionWG.Done()
 
-	l.trackConnection(conn)
 	defer l.untrackConnection(conn)
 	defer func() { _ = conn.Close() }()
 
@@ -298,6 +319,7 @@ func (l *managedListener) untrackConnection(conn net.Conn) {
 	defer l.mu.Unlock()
 
 	delete(l.active, conn)
+	l.refreshDrainedStateLocked()
 }
 
 // closeActiveConnections closes every active connection after the graceful drain expires.
@@ -312,6 +334,140 @@ func (l *managedListener) closeActiveConnections() {
 
 	for _, conn := range active {
 		_ = conn.Close()
+	}
+}
+
+// softDrain closes only the accept socket while preserving active streams.
+func (l *managedListener) softDrain() error {
+	l.closeAcceptSocket(DrainModeSoft)
+	l.acceptWG.Wait()
+
+	return nil
+}
+
+// hardDrain closes accepts, waits grace and closes active local streams.
+func (l *managedListener) hardDrain(
+	ctx context.Context,
+	grace time.Duration,
+	localSessions *runtimectl.LocalSessionRegistry,
+) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	l.closeAcceptSocket(DrainModeHard)
+	l.acceptWG.Wait()
+
+	if err := waitForDrainGrace(ctx, grace); err != nil {
+		return err
+	}
+
+	if localSessions != nil {
+		_, err := localSessions.CloseListener(ctx, l.name, runtimectl.LocalSessionControl{
+			Action: "listener_hard_drain",
+			Reason: "listener hard drain",
+		})
+		if err != nil {
+			return err
+		}
+	}
+
+	l.closeActiveConnections()
+
+	if waitGroupDone(ctx, &l.sessionWG) {
+		l.markDrained()
+
+		return nil
+	}
+
+	return ctx.Err()
+}
+
+// resume rebinds the configured address for a previously drained listener.
+func (l *managedListener) resume(ctx context.Context) error {
+	l.mu.Lock()
+	alreadyAccepting := l.listener != nil && l.state == StateAccepting
+	l.mu.Unlock()
+
+	if alreadyAccepting {
+		return nil
+	}
+
+	return l.start(ctx)
+}
+
+// closeAcceptSocket detaches and closes the current accept socket.
+func (l *managedListener) closeAcceptSocket(mode DrainMode) net.Listener {
+	l.mu.Lock()
+	ln := l.listener
+	l.listener = nil
+
+	switch mode {
+	case DrainModeSoft, DrainModeHard:
+		l.drainMode = mode
+		l.refreshDrainedStateLocked()
+	default:
+		l.drainMode = ""
+		l.state = StateStopped
+	}
+	l.mu.Unlock()
+
+	if ln != nil {
+		_ = ln.Close()
+	}
+
+	return ln
+}
+
+// markStopped records a non-accepting listener after startup, resume or full stop failure.
+func (l *managedListener) markStopped() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	l.listener = nil
+	l.drainMode = ""
+	l.state = StateStopped
+}
+
+// markDrained records completion of a runtime drain after active streams close.
+func (l *managedListener) markDrained() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if l.listener == nil && l.state != StateStopped {
+		l.state = StateDrained
+	}
+}
+
+// refreshDrainedStateLocked updates runtime drain state while l.mu is held.
+func (l *managedListener) refreshDrainedStateLocked() {
+	if l.listener != nil || l.drainMode == "" || l.state == StateStopped {
+		return
+	}
+
+	if len(l.active) > 0 {
+		l.state = StateDraining
+
+		return
+	}
+
+	l.state = StateDrained
+}
+
+// waitForDrainGrace waits for the explicit hard-drain grace duration.
+func waitForDrainGrace(ctx context.Context, grace time.Duration) error {
+	if grace <= 0 {
+		return ctx.Err()
+	}
+
+	timer := time.NewTimer(grace)
+	defer timer.Stop()
+
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 

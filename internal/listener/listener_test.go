@@ -389,6 +389,261 @@ func TestGracefulListenerShutdownClosesActiveSessions(t *testing.T) {
 	}
 }
 
+// TestSoftDrainStopsNewAcceptsAndPreservesActiveConnection verifies socket-only drain behavior.
+func TestSoftDrainStopsNewAcceptsAndPreservesActiveConnection(t *testing.T) {
+	cfg := singleListenerConfig(t, testIMAPListener, tlsModeStartTLS)
+	handler := newRecordingHandler()
+
+	manager, address := startManager(t, cfg, testIMAPListener, WithSessionHandlerFactory(handler.factory))
+
+	conn, err := net.Dial(networkTCP, address)
+	if err != nil {
+		t.Fatalf("dial listener: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	_ = readLine(t, conn)
+	_ = waitForListenerSnapshot(t, manager, testIMAPListener, func(snapshot Snapshot) bool {
+		return snapshot.ActiveLocalSessions == 1 && snapshot.State == StateAccepting
+	})
+
+	snapshot := drainListener(t, manager, DrainRequest{Name: testIMAPListener, Mode: DrainModeSoft})
+	if snapshot.State != StateDraining || snapshot.DrainMode != DrainModeSoft {
+		t.Fatalf("soft drain snapshot = %#v, want draining soft", snapshot)
+	}
+
+	if snapshot.BoundAddress != "" {
+		t.Fatalf("soft-drained bound address = %q, want empty", snapshot.BoundAddress)
+	}
+
+	if _, ok := manager.BoundAddress(testIMAPListener); ok {
+		t.Fatal("soft-drained listener still exposes a bound address")
+	}
+
+	expectDialFailure(t, address)
+	expectIdleConnectionOpen(t, conn)
+}
+
+// TestHardDrainClosesActiveConnectionsAfterGrace verifies explicit grace handling.
+func TestHardDrainClosesActiveConnectionsAfterGrace(t *testing.T) {
+	cfg := singleListenerConfig(t, testIMAPListener, tlsModeStartTLS)
+	handler := newRecordingHandler()
+
+	manager, address := startManager(t, cfg, testIMAPListener, WithSessionHandlerFactory(handler.factory))
+
+	conn, err := net.Dial(networkTCP, address)
+	if err != nil {
+		t.Fatalf("dial listener: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	_ = readLine(t, conn)
+
+	grace := 20 * time.Millisecond
+
+	snapshot := drainListener(t, manager, DrainRequest{Name: testIMAPListener, Mode: DrainModeHard, Grace: &grace})
+	if snapshot.State != StateDrained || snapshot.ActiveLocalSessions != 0 || snapshot.DrainMode != DrainModeHard {
+		t.Fatalf("hard drain snapshot = %#v, want drained hard with no active sessions", snapshot)
+	}
+
+	expectConnectionClosed(t, conn)
+	expectDialFailure(t, address)
+}
+
+// TestHardDrainWithZeroGraceClosesActiveConnectionsImmediately verifies explicit zero grace.
+func TestHardDrainWithZeroGraceClosesActiveConnectionsImmediately(t *testing.T) {
+	cfg := singleListenerConfig(t, testIMAPListener, tlsModeStartTLS)
+	handler := newRecordingHandler()
+
+	manager, address := startManager(t, cfg, testIMAPListener, WithSessionHandlerFactory(handler.factory))
+
+	conn, err := net.Dial(networkTCP, address)
+	if err != nil {
+		t.Fatalf("dial listener: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	_ = readLine(t, conn)
+
+	grace := time.Duration(0)
+
+	snapshot := drainListener(t, manager, DrainRequest{Name: testIMAPListener, Mode: DrainModeHard, Grace: &grace})
+	if snapshot.State != StateDrained || snapshot.ActiveLocalSessions != 0 {
+		t.Fatalf("zero-grace hard drain snapshot = %#v, want drained with no active sessions", snapshot)
+	}
+
+	expectConnectionClosed(t, conn)
+	expectDialFailure(t, address)
+}
+
+// TestResumeRebindsSoftDrainedListener verifies runtime drain is reversible from config.
+func TestResumeRebindsSoftDrainedListener(t *testing.T) {
+	cfg := singleListenerConfig(t, testIMAPListener, tlsModeStartTLS)
+	handler := newRecordingHandler()
+
+	manager, address := startManager(t, cfg, testIMAPListener, WithSessionHandlerFactory(handler.factory))
+
+	drainListener(t, manager, DrainRequest{Name: testIMAPListener, Mode: DrainModeSoft})
+	expectDialFailure(t, address)
+
+	snapshot := resumeListener(t, manager, testIMAPListener)
+	if snapshot.State != StateAccepting || snapshot.BoundAddress == "" || snapshot.DrainMode != "" {
+		t.Fatalf("resume snapshot = %#v, want accepting with a bound address", snapshot)
+	}
+
+	conn, err := net.Dial(networkTCP, snapshot.BoundAddress)
+	if err != nil {
+		t.Fatalf("dial resumed listener: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	if line := readLine(t, conn); line != testGreeting {
+		t.Fatalf("resumed greeting = %q, want %q", line, testGreeting)
+	}
+}
+
+// TestResumeFailsClosedWhenBindFails verifies failed rebinds remain non-accepting.
+func TestResumeFailsClosedWhenBindFails(t *testing.T) {
+	address := reserveTCPAddress(t)
+	cfg := singleListenerConfig(t, testIMAPListener, tlsModeStartTLS)
+	entry := cfg.Director.Listeners[testIMAPListener]
+	entry.Address = address
+	cfg.Director.Listeners[testIMAPListener] = entry
+
+	manager, _ := startManager(t, cfg, testIMAPListener, WithSessionHandlerFactory(newRecordingHandler().factory))
+	drainListener(t, manager, DrainRequest{Name: testIMAPListener, Mode: DrainModeSoft})
+
+	blocker, err := net.Listen(networkTCP, address)
+	if err != nil {
+		t.Fatalf("reserve drained listener address: %v", err)
+	}
+	defer func() { _ = blocker.Close() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	snapshot, err := manager.Resume(ctx, testIMAPListener)
+	if err == nil {
+		t.Fatal("Resume succeeded while the configured address was already bound")
+	}
+
+	if snapshot.State != StateStopped || snapshot.BoundAddress != "" {
+		t.Fatalf("failed resume snapshot = %#v, want stopped and unbound", snapshot)
+	}
+}
+
+// TestRepeatedDrainAndResumeCallsAreDeterministic verifies safe idempotent operations.
+func TestRepeatedDrainAndResumeCallsAreDeterministic(t *testing.T) {
+	cfg := singleListenerConfig(t, testIMAPListener, tlsModeStartTLS)
+	manager, _ := startManager(t, cfg, testIMAPListener, WithSessionHandlerFactory(newRecordingHandler().factory))
+
+	softSnapshots := []Snapshot{
+		drainListener(t, manager, DrainRequest{Name: testIMAPListener, Mode: DrainModeSoft}),
+		drainListener(t, manager, DrainRequest{Name: testIMAPListener, Mode: DrainModeSoft}),
+	}
+	if softSnapshots[0].State != StateDrained || softSnapshots[1].State != StateDrained {
+		t.Fatalf("repeated soft drain states = %q/%q, want drained", softSnapshots[0].State, softSnapshots[1].State)
+	}
+
+	resumeSnapshots := []Snapshot{
+		resumeListener(t, manager, testIMAPListener),
+		resumeListener(t, manager, testIMAPListener),
+	}
+	if resumeSnapshots[0].State != StateAccepting || resumeSnapshots[1].State != StateAccepting {
+		t.Fatalf("repeated resume states = %q/%q, want accepting", resumeSnapshots[0].State, resumeSnapshots[1].State)
+	}
+
+	grace := time.Duration(0)
+	hardSnapshots := []Snapshot{
+		drainListener(t, manager, DrainRequest{Name: testIMAPListener, Mode: DrainModeHard, Grace: &grace}),
+		drainListener(t, manager, DrainRequest{Name: testIMAPListener, Mode: DrainModeHard, Grace: &grace}),
+	}
+
+	if hardSnapshots[0].State != StateDrained || hardSnapshots[1].State != StateDrained {
+		t.Fatalf("repeated hard drain states = %q/%q, want drained", hardSnapshots[0].State, hardSnapshots[1].State)
+	}
+}
+
+// TestDrainRequestValidationRequiresExplicitHardGrace verifies fail-closed drain input.
+func TestDrainRequestValidationRequiresExplicitHardGrace(t *testing.T) {
+	cfg := singleListenerConfig(t, testIMAPListener, tlsModeStartTLS)
+	manager, _ := startManager(t, cfg, testIMAPListener, WithSessionHandlerFactory(newRecordingHandler().factory))
+
+	negativeGrace := -time.Second
+	testCases := []DrainRequest{
+		{Name: "", Mode: DrainModeSoft},
+		{Name: testIMAPListener, Mode: DrainMode("unknown")},
+		{Name: testIMAPListener, Mode: DrainModeHard},
+		{Name: testIMAPListener, Mode: DrainModeHard, Grace: &negativeGrace},
+		{Name: testIMAPListener, Mode: DrainModeSoft, Grace: &negativeGrace},
+	}
+
+	for _, testCase := range testCases {
+		if _, err := manager.Drain(context.Background(), testCase); err == nil {
+			t.Fatalf("Drain(%#v) succeeded, want validation error", testCase)
+		}
+	}
+}
+
+// TestReloadKeepsRuntimeDrainedListenerUnbound verifies reload does not duplicate drained sockets.
+func TestReloadKeepsRuntimeDrainedListenerUnbound(t *testing.T) {
+	cfg := singleListenerConfig(t, testIMAPListener, tlsModeStartTLS)
+	manager, address := startManager(t, cfg, testIMAPListener, WithSessionHandlerFactory(newRecordingHandler().factory))
+
+	drainListener(t, manager, DrainRequest{Name: testIMAPListener, Mode: DrainModeSoft})
+
+	reloadCtx, cancelReload := context.WithTimeout(context.Background(), time.Second)
+	defer cancelReload()
+
+	if err := manager.Reload(reloadCtx, cfg); err != nil {
+		t.Fatalf("Reload after runtime drain: %v", err)
+	}
+
+	if _, ok := manager.BoundAddress(testIMAPListener); ok {
+		t.Fatal("safe reload rebound a runtime-drained listener")
+	}
+
+	expectDialFailure(t, address)
+
+	snapshot := resumeListener(t, manager, testIMAPListener)
+	if snapshot.State != StateAccepting || snapshot.BoundAddress == "" {
+		t.Fatalf("resume after reload snapshot = %#v, want accepting", snapshot)
+	}
+}
+
+// TestListenerSnapshotsExposeRuntimeStateOnly verifies inventory stays secret-safe.
+func TestListenerSnapshotsExposeRuntimeStateOnly(t *testing.T) {
+	cfg := singleListenerConfig(t, testIMAPListener, tlsModeStartTLS)
+	handler := newRecordingHandler()
+
+	manager, address := startManager(t, cfg, testIMAPListener, WithSessionHandlerFactory(handler.factory))
+
+	conn, err := net.Dial(networkTCP, address)
+	if err != nil {
+		t.Fatalf("dial listener: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	_ = readLine(t, conn)
+
+	accepting := waitForListenerSnapshot(t, manager, testIMAPListener, func(snapshot Snapshot) bool {
+		return snapshot.State == StateAccepting && snapshot.ActiveLocalSessions == 1
+	})
+	if accepting.BoundAddress == "" || accepting.Address == "" || accepting.Protocol == "" || accepting.ServiceName == "" {
+		t.Fatalf("accepting snapshot missing listener summary fields: %#v", accepting)
+	}
+
+	drained := drainListener(t, manager, DrainRequest{Name: testIMAPListener, Mode: DrainModeSoft})
+	if drained.State != StateDraining || drained.DrainMode != DrainModeSoft || drained.BoundAddress != "" {
+		t.Fatalf("soft-drained snapshot = %#v, want draining soft without bound address", drained)
+	}
+
+	assertSnapshotFieldAbsent(t, "RemoteAddr")
+	assertSnapshotFieldAbsent(t, "SessionID")
+	assertSnapshotFieldAbsent(t, "Username")
+	assertSnapshotFieldAbsent(t, "Recipient")
+}
+
 // TestListenerObservabilityClassifiesLifecycleEvents verifies listener reasons stay bounded.
 func TestListenerObservabilityClassifiesLifecycleEvents(t *testing.T) {
 	cfg := singleListenerConfig(t, testIMAPListener, tlsModeStartTLS)
@@ -888,6 +1143,138 @@ func expectNoGreeting(t *testing.T, conn net.Conn) {
 	n, err := conn.Read(buffer)
 	if err == nil || n > 0 {
 		t.Fatalf("read %d bytes %q from rejected connection, want no greeting and an error", n, string(buffer[:n]))
+	}
+}
+
+// drainListener applies one listener drain request with a bounded test context.
+func drainListener(t *testing.T, manager *Manager, request DrainRequest) Snapshot {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	snapshot, err := manager.Drain(ctx, request)
+	if err != nil {
+		t.Fatalf("Drain(%#v) returned error: %v", request, err)
+	}
+
+	return snapshot
+}
+
+// resumeListener resumes one listener with a bounded test context.
+func resumeListener(t *testing.T, manager *Manager, listenerName string) Snapshot {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	snapshot, err := manager.Resume(ctx, listenerName)
+	if err != nil {
+		t.Fatalf("Resume(%q) returned error: %v", listenerName, err)
+	}
+
+	return snapshot
+}
+
+// waitForListenerSnapshot waits until a listener snapshot satisfies a predicate.
+func waitForListenerSnapshot(t *testing.T, manager *Manager, listenerName string, accept func(Snapshot) bool) Snapshot {
+	t.Helper()
+
+	deadline := time.Now().Add(time.Second)
+
+	var last Snapshot
+
+	for time.Now().Before(deadline) {
+		for _, snapshot := range manager.Snapshots() {
+			if snapshot.Name != listenerName {
+				continue
+			}
+
+			last = snapshot
+			if accept(snapshot) {
+				return snapshot
+			}
+		}
+
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	t.Fatalf("timed out waiting for listener %q snapshot, last=%#v", listenerName, last)
+
+	return Snapshot{}
+}
+
+// expectDialFailure verifies a listener address no longer accepts new sockets.
+func expectDialFailure(t *testing.T, address string) {
+	t.Helper()
+
+	conn, err := net.DialTimeout(networkTCP, address, 100*time.Millisecond)
+	if err == nil {
+		_ = conn.Close()
+
+		t.Fatalf("dial %s succeeded, want listener to reject new connections", address)
+	}
+}
+
+// expectIdleConnectionOpen verifies an accepted stream remains open without new output.
+func expectIdleConnectionOpen(t *testing.T, conn net.Conn) {
+	t.Helper()
+
+	if err := conn.SetReadDeadline(time.Now().Add(50 * time.Millisecond)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+
+	buffer := make([]byte, 1)
+
+	_, err := conn.Read(buffer)
+	if netErr, ok := err.(net.Error); !ok || !netErr.Timeout() {
+		t.Fatalf("idle connection read error = %v, want timeout from still-open stream", err)
+	}
+}
+
+// expectConnectionClosed verifies a server-side runtime close reached the client.
+func expectConnectionClosed(t *testing.T, conn net.Conn) {
+	t.Helper()
+
+	if err := conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+
+	buffer := make([]byte, 1)
+
+	_, err := conn.Read(buffer)
+	if err == nil {
+		t.Fatal("active connection remained readable after hard drain")
+	}
+
+	if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+		t.Fatalf("active connection stayed open after hard drain: %v", err)
+	}
+}
+
+// reserveTCPAddress returns a currently free loopback address for fixed-bind tests.
+func reserveTCPAddress(t *testing.T) string {
+	t.Helper()
+
+	ln, err := net.Listen(networkTCP, testLoopbackAny)
+	if err != nil {
+		t.Fatalf("reserve TCP address: %v", err)
+	}
+
+	address := ln.Addr().String()
+	if err := ln.Close(); err != nil {
+		t.Fatalf("release reserved TCP address: %v", err)
+	}
+
+	return address
+}
+
+// assertSnapshotFieldAbsent verifies snapshots do not expose high-cardinality facts.
+func assertSnapshotFieldAbsent(t *testing.T, fieldName string) {
+	t.Helper()
+
+	if _, ok := reflect.TypeFor[Snapshot]().FieldByName(fieldName); ok {
+		t.Fatalf("Snapshot exposes forbidden field %q", fieldName)
 	}
 }
 
