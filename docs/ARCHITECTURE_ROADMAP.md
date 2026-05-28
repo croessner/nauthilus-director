@@ -1141,18 +1141,22 @@ backends, two explicit shards and distributed deep-health ownership.
 ### M3: REST API and client
 
 Status: completed. The v1 generated OpenAPI REST boundary, generated client
-SDK, `nauthilus-directorctl`, route lookup, safe reload, config documentation
-guardrails, manpages and REST/CLI parity proof are in place. The
-M3 route-lookup follow-up is closed by the M2/M3 implementation. Binary-entry
-E2E proves CLI and REST state parity against the running
-`nauthilus-director` process, and Docker interop proves the same control
-surface against six real Dovecot backends behind three Director processes.
+SDK, `nauthilus-directorctl`, process-local listener runtime control, route
+lookup, safe reload, config documentation guardrails, manpages and REST/CLI
+parity proof are in place. The M3 route-lookup follow-up is closed by the
+M2/M3 implementation, and the listener runtime-control follow-up is closed by
+public-socket E2E proof through the production server and CLI binaries.
+Binary-entry E2E proves CLI and REST state parity against the running
+`nauthilus-director` process, and Docker interop proves the shared runtime
+control surface against six real Dovecot backends behind three Director
+processes.
 
 - OpenAPI-first workflow
 - generated REST server boundary
 - reproducible OpenAPI generation and stale-output check
 - `/healthz`, `/readyz`
 - backend list/show/maintenance/runtime operations
+- process-local listener list/show/drain/resume operations
 - session list/show/kill
 - user list/show/move/kick/affinity
 - route lookup
@@ -1161,7 +1165,8 @@ surface against six real Dovecot backends behind three Director processes.
 - generated config documentation and stale-doc guardrails
 - initial manpages for stable server/client command surfaces and the config file
   format
-- E2E proof for REST and CLI managing the same Redis-backed runtime state
+- E2E proof for REST and CLI managing the same Redis-backed runtime state and
+  process-local listener socket state
 
 ### M4: Observability
 

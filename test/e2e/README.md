@@ -24,6 +24,9 @@ The default lane is fake-service based and deterministic:
 - CLI commands through `nauthilus-directorctl` when the control API exists
 - REST calls through the control listener when `runtime.servers.control` is
   runnable from the server binary
+- listener runtime control proof through `nauthilus-directorctl listeners ...`,
+  including process-local soft drain, resume, hard drain with explicit zero
+  grace, and public frontend socket observations
 
 Fake services must expose counters or request observations that prove protocol
 mapping, routing, and backend behavior without logging credentials, SASL blobs,

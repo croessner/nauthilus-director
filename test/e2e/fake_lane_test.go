@@ -214,6 +214,72 @@ func TestServerBinaryControlRESTCLIParity(t *testing.T) {
 	}
 }
 
+// TestServerBinaryListenerDrainResumeKeepsActiveStream exercises listener drain and resume through sockets and the CLI.
+func TestServerBinaryListenerDrainResumeKeepsActiveStream(t *testing.T) {
+	binary := e2eServerBinary(t)
+	ctl := buildDirectorctl(t)
+	redisFixture := startValkeySessionStore(t)
+	authority := startFakeHTTPAuthority(t, map[string][]string{
+		"account":   {e2eAccount},
+		"tenant":    {e2eTenant},
+		"mailShard": {e2eShardTag},
+	})
+	fakeBackend := startFakeIMAPBackend(t, fakeBackendOptions{})
+	directorAddress := loopbackAddress(t)
+	controlAddress := loopbackAddress(t)
+	controlURL := "http://" + controlAddress
+	configPath := writeProcessConfig(t, processConfigOptions{
+		RedisAddress:    redisFixture.addr,
+		AuthorityURL:    authority.URL(),
+		DirectorAddress: directorAddress,
+		ControlAddress:  controlAddress,
+		ControlEnabled:  true,
+		BackendAddress:  fakeBackend.Address(),
+		BackendTLS: config.BackendTLSConfig{
+			Mode:          "plaintext",
+			MinTLSVersion: "TLS1.2",
+		},
+		BackendAuth: masterUserBackendAuth(),
+	})
+	process := startDirectorProcess(t, binary, configPath)
+
+	waitForDirectorGreeting(t, directorAddress, process)
+	waitForControlReady(t, controlURL, process)
+
+	listOutput := runDirectorctl(t, ctl, controlURL, "listeners", "list")
+	assertCLIOutputFields(t, listOutput, "name="+e2eListenerName, "state=accepting", "bound_address="+directorAddress)
+
+	activeClient := dialPlain(t, directorAddress)
+	defer func() { _ = activeClient.Close() }()
+	activeReader := bufio.NewReader(activeClient)
+	expectLine(t, activeReader, "* OK nauthilus-director IMAP session ready\r\n")
+
+	softDrainOutput := runDirectorctl(t, ctl, controlURL, "listeners", "drain", e2eListenerName, "--mode", "soft", "--reason", "e2e soft listener drain")
+	assertCLIOutputFields(t, softDrainOutput, "name="+e2eListenerName, "state=draining", "active_local_sessions=1", "drain_mode=soft")
+	expectListenerRejectsNewConnections(t, directorAddress)
+
+	writeLine(t, activeClient, `A001 ID ("client_id" "listener-drain-e2e")`)
+	expectLine(t, activeReader, "* ID NIL\r\n")
+	expectLine(t, activeReader, "A001 OK ID completed\r\n")
+
+	resumeOutput := runDirectorctl(t, ctl, controlURL, "listeners", "resume", e2eListenerName, "--reason", "e2e listener resume")
+	assertCLIOutputFields(t, resumeOutput, "name="+e2eListenerName, "state=accepting", "bound_address="+directorAddress, "drain_mode=\"\"")
+
+	resumedClient := dialPlain(t, directorAddress)
+	resumedReader := bufio.NewReader(resumedClient)
+	expectLine(t, resumedReader, "* OK nauthilus-director IMAP session ready\r\n")
+	_ = resumedClient.Close()
+
+	code, output := runDirectorctlStatus(t, ctl, controlURL, "listeners", "drain", e2eListenerName, "--mode", "hard", "--reason", "missing grace proof")
+	if code != 2 || !strings.Contains(output, "--grace-seconds") {
+		t.Fatalf("hard drain without grace exit/output = %d/%q, want CLI usage rejection", code, output)
+	}
+
+	hardDrainOutput := runDirectorctl(t, ctl, controlURL, "listeners", "drain", e2eListenerName, "--mode", "hard", "--reason", "e2e hard listener drain", "--grace-seconds", "0")
+	assertCLIOutputFields(t, hardDrainOutput, "name="+e2eListenerName, "state=drained", "active_local_sessions=0", "drain_mode=hard")
+	expectRuntimeClosedConnection(t, activeClient)
+}
+
 // TestFakeHTTPAuthorityUsesRedisLeaseStore proves active affinity through Redis-compatible state.
 func TestFakeHTTPAuthorityUsesRedisLeaseStore(t *testing.T) {
 	fixture := startValkeySessionStore(t)
@@ -1900,6 +1966,48 @@ func expectSessionClosed(t *testing.T, client net.Conn, reader *bufio.Reader) {
 	_, err := reader.ReadString('\n')
 	if err == nil {
 		t.Fatal("session stayed readable after runtime control close")
+	}
+}
+
+// expectRuntimeClosedConnection waits for a server-side close and fails if the socket only idles.
+func expectRuntimeClosedConnection(t *testing.T, client net.Conn) {
+	t.Helper()
+
+	if err := client.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+
+	buffer := make([]byte, 1)
+	_, err := client.Read(buffer)
+	if err == nil {
+		t.Fatal("connection remained readable after runtime close")
+	}
+
+	if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+		t.Fatalf("connection stayed open after runtime close: %v", err)
+	}
+}
+
+// expectListenerRejectsNewConnections verifies a drained listener stops accepting frontend sockets.
+func expectListenerRejectsNewConnections(t *testing.T, address string) {
+	t.Helper()
+
+	conn, err := net.DialTimeout("tcp", address, 100*time.Millisecond)
+	if err == nil {
+		_ = conn.Close()
+
+		t.Fatalf("dial %s succeeded, want drained listener to reject new connections", address)
+	}
+}
+
+// assertCLIOutputFields verifies compact key-value CLI output contains all expected fields.
+func assertCLIOutputFields(t *testing.T, output string, fields ...string) {
+	t.Helper()
+
+	for _, field := range fields {
+		if !strings.Contains(output, field) {
+			t.Fatalf("CLI output = %q, want field %q", output, field)
+		}
 	}
 }
 

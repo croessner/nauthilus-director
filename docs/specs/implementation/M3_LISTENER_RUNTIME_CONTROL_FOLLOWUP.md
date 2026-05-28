@@ -1,13 +1,16 @@
 # M3 Listener Runtime Control Follow-up
 
-Status: implementation-ready follow-up with local v1 decisions resolved
+Status: completed. The local v1 listener runtime-control surface is
+implemented, documented and covered by public-boundary E2E. `make
+check-openapi`, `make test`, `make build-check`, `make e2e` and `make
+guardrails` passed on 2026-05-28.
 
-This document defines the missing listener-level runtime control surface for
-`nauthilus-director`. The current production code can manage backend, user and
-session runtime state through the generated REST API and
-`nauthilus-directorctl`, and safe reload can add or remove configured protocol
-listeners. It does not yet expose an operator command that temporarily drains or
-resumes one listener without editing YAML configuration.
+This document defines the listener-level runtime control surface for
+`nauthilus-director`. Before this follow-up, production code could manage
+backend, user and session runtime state through the generated REST API and
+`nauthilus-directorctl`, and safe reload could add or remove configured
+protocol listeners. The missing operator workflow was a temporary listener
+drain or resume command that did not edit YAML configuration.
 
 This follow-up belongs to M3 because it extends the REST and generated-client
 operator control surface. It must not be folded into M6 ManageSieve or a later
@@ -33,14 +36,15 @@ This follow-up is governed by:
 If this document conflicts with those source documents, fix the drift before
 implementation continues.
 
-## Current Behavior
+## Original Gap
 
 `nauthilus-directorctl` currently exposes runtime control for backends, users
 and sessions. Backend drain is available as
 `backends drain <identifier> --mode soft|hard --reason <text>`, and it is backed
 by `POST /api/v1/backends/{identifier}/runtime/drain`.
 
-Listener lifecycle is available only through configuration and safe reload:
+Before this follow-up, listener lifecycle was available only through
+configuration and safe reload:
 
 - adding a listener to YAML and running `reload` starts the new configured
   listener when the change is safe;
@@ -411,6 +415,50 @@ Run `make generate-openapi` after changing the OpenAPI spec, then run
   command.
 - Observability remains low-cardinality and secret-safe.
 - E2E proves the externally visible socket behavior, not only internal state.
+
+## Closeout Evidence
+
+The deterministic fake-service E2E lane now includes
+`TestServerBinaryListenerDrainResumeKeepsActiveStream`. The test starts the
+production `nauthilus-director` binary with a public IMAP listener and the REST
+control API, builds and runs the real `nauthilus-directorctl` binary, and proves
+listener runtime control through public sockets and generated-client CLI
+commands:
+
+- `nauthilus-directorctl listeners list` observes the configured `imap`
+  listener in `accepting` state with a bound address.
+- A frontend IMAP connection succeeds before drain and remains open.
+- `nauthilus-directorctl listeners drain imap --mode soft --reason ...` moves
+  the addressed process-local listener to `draining` without editing YAML.
+- New frontend connections to the same listener address are rejected while the
+  listener is soft-drained.
+- The already accepted IMAP stream continues during soft drain by completing an
+  `ID` command.
+- `nauthilus-directorctl listeners resume imap --reason ...` restores new
+  accepts from the current typed config snapshot.
+- The CLI rejects hard drain without `--grace-seconds` before sending a
+  request.
+- `nauthilus-directorctl listeners drain imap --mode hard --grace-seconds 0
+  --reason ...` closes the active local stream and returns `drained`.
+
+Operator-facing documentation now states the v1 semantics explicitly in
+`docs/man/nauthilus-directorctl.1`, `docs/man/nauthilus-director.1`,
+`test/e2e/README.md` and `docs/ARCHITECTURE_ROADMAP.md`: listener runtime
+control is process-local, non-persistent, does not edit YAML, soft drain stops
+only new accepts, hard drain requires explicit grace and resume rebinds from the
+current typed config.
+
+Validation evidence from the closeout run:
+
+- `make check-openapi`: passed; generated OpenAPI artifacts are fresh.
+- `make test`: passed.
+- `make build-check`: passed.
+- `make e2e`: passed and exercised the production server binary plus CLI.
+- `make guardrails`: passed.
+
+The final review found no YAML persistence path for listener runtime mutations,
+no cluster-wide fan-out, no Redis pub/sub listener orchestration and no listener
+state persistence across process restart.
 
 ## Review Checklist
 
