@@ -199,6 +199,12 @@ func validateAuthorities(authorities map[string]AuthorityConfig, problems *[]str
 			if strings.TrimSpace(authority.GRPC.Address) == "" {
 				addProblem(problems, path+".grpc.address is required when transport is grpc")
 			}
+			if authority.GRPC.CallerAuth.Basic.Enabled && authority.GRPC.CallerAuth.Bearer.Enabled {
+				addProblem(problems, path+".grpc.caller_auth must enable only one caller auth method")
+			}
+			if authority.GRPC.CallerAuth.Basic.Enabled && strings.TrimSpace(authority.GRPC.CallerAuth.Basic.Username) == "" {
+				addProblem(problems, path+".grpc.caller_auth.basic.username is required when basic caller auth is enabled")
+			}
 			if authority.GRPC.CallerAuth.Basic.Enabled && authority.GRPC.CallerAuth.Basic.PasswordFile.IsZero() {
 				addProblem(problems, path+".grpc.caller_auth.basic.password_file is required when basic caller auth is enabled")
 			}

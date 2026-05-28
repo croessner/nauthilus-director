@@ -114,6 +114,33 @@ func TestObservabilityValidationRejectsUnsupportedMetricsPath(t *testing.T) {
 	}
 }
 
+// TestGRPCCallerAuthValidationRejectsAmbiguousMethods verifies caller auth is fail-closed.
+func TestGRPCCallerAuthValidationRejectsAmbiguousMethods(t *testing.T) {
+	cfg := DefaultConfig()
+	authority := cfg.Auth.Authorities["default"]
+	authority.Transport = "grpc"
+	authority.GRPC.CallerAuth.Bearer.Enabled = true
+	authority.GRPC.CallerAuth.Bearer.TokenFile = Secret("bearer-token")
+	cfg.Auth.Authorities["default"] = authority
+
+	expectValidationError(t, cfg, "auth.authorities.default.grpc.caller_auth must enable only one caller auth method")
+}
+
+// TestGRPCCallerAuthValidationRequiresBasicUsername verifies basic caller auth is complete.
+func TestGRPCCallerAuthValidationRequiresBasicUsername(t *testing.T) {
+	cfg := DefaultConfig()
+	authority := cfg.Auth.Authorities["default"]
+	authority.Transport = "grpc"
+	authority.GRPC.CallerAuth.Basic.Username = ""
+	cfg.Auth.Authorities["default"] = authority
+
+	expectValidationError(
+		t,
+		cfg,
+		"auth.authorities.default.grpc.caller_auth.basic.username is required when basic caller auth is enabled",
+	)
+}
+
 // TestUnknownFieldsAreRejected verifies strict decode behavior for typo safety.
 func TestUnknownFieldsAreRejected(t *testing.T) {
 	path := writeConfigFile(t, t.TempDir(), "unknown.yaml", `runtime:
