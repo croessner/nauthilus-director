@@ -23,6 +23,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"net"
+	"reflect"
 	"sort"
 	"sync"
 	"time"
@@ -105,6 +106,8 @@ type Snapshot struct {
 type Manager struct {
 	listeners       []*managedListener
 	shutdownTimeout time.Duration
+	cfg             config.Config
+	options         managerOptions
 	startMu         sync.Mutex
 	started         bool
 }
@@ -151,6 +154,21 @@ func NewManagerWithConfig(cfg config.Config, opts ...ManagerOption) (*Manager, e
 		opt(&options)
 	}
 
+	managed, err := managedListenersFromConfig(cfg, options)
+	if err != nil {
+		return nil, err
+	}
+
+	return &Manager{
+		listeners:       managed,
+		shutdownTimeout: cfg.Runtime.Process.ShutdownTimeout.Std(),
+		cfg:             cfg,
+		options:         options,
+	}, nil
+}
+
+// managedListenersFromConfig builds detached listener lifecycle objects from one snapshot.
+func managedListenersFromConfig(cfg config.Config, options managerOptions) ([]*managedListener, error) {
 	listenerNames, err := sortedSupportedListenerNames(cfg.Director.Listeners)
 	if err != nil {
 		return nil, err
@@ -183,10 +201,7 @@ func NewManagerWithConfig(cfg config.Config, opts ...ManagerOption) (*Manager, e
 		managed = append(managed, entry)
 	}
 
-	return &Manager{
-		listeners:       managed,
-		shutdownTimeout: cfg.Runtime.Process.ShutdownTimeout.Std(),
-	}, nil
+	return managed, nil
 }
 
 // WithSessionHandlerFactory replaces the default protocol session handler factory.
@@ -266,6 +281,57 @@ func (m *Manager) Stop(ctx context.Context) error {
 	return stopManagedListeners(stopCtx, m.listeners)
 }
 
+// Reload adds new listeners and gracefully drains listeners removed from the snapshot.
+func (m *Manager) Reload(ctx context.Context, cfg config.Config) error {
+	if m == nil {
+		return errors.New("listener manager unavailable")
+	}
+
+	cfg = cfg.Normalize()
+
+	nextListeners, err := managedListenersFromConfig(cfg, m.options)
+	if err != nil {
+		return err
+	}
+
+	m.startMu.Lock()
+	defer m.startMu.Unlock()
+
+	if err := rejectChangedListeners(m.listeners, nextListeners); err != nil {
+		return err
+	}
+
+	if !m.started {
+		m.listeners = nextListeners
+		m.shutdownTimeout = cfg.Runtime.Process.ShutdownTimeout.Std()
+		m.cfg = cfg
+
+		return nil
+	}
+
+	oldByName := listenersByName(m.listeners)
+
+	started, err := startAddedListeners(ctx, oldByName, nextListeners)
+	if err != nil {
+		_ = stopManagedListeners(context.Background(), started)
+
+		return err
+	}
+
+	stopCtx, cancel := contextWithShutdownTimeout(ctx, m.shutdownTimeout)
+	defer cancel()
+
+	if err := stopRemovedListeners(stopCtx, oldByName, nextListeners); err != nil {
+		return err
+	}
+
+	m.listeners = mergedReloadListeners(m.listeners, nextListeners, started)
+	m.shutdownTimeout = cfg.Runtime.Process.ShutdownTimeout.Std()
+	m.cfg = cfg
+
+	return nil
+}
+
 // Snapshots returns the configured listeners without exposing high-cardinality session data.
 func (m *Manager) Snapshots() []Snapshot {
 	snapshots := make([]Snapshot, 0, len(m.listeners))
@@ -296,6 +362,92 @@ func (m *Manager) ListenerNames() []string {
 	}
 
 	return names
+}
+
+// rejectChangedListeners rejects in-place listener changes that need a restart.
+func rejectChangedListeners(current []*managedListener, next []*managedListener) error {
+	currentByName := listenersByName(current)
+	for _, entry := range next {
+		existing, ok := currentByName[entry.name]
+		if !ok {
+			continue
+		}
+
+		if !reflect.DeepEqual(existing.config.listener, entry.config.listener) {
+			return errors.New("listener " + entry.name + ": existing listener changes require restart")
+		}
+	}
+
+	return nil
+}
+
+// listenersByName indexes listener objects by their stable configured name.
+func listenersByName(listeners []*managedListener) map[string]*managedListener {
+	index := make(map[string]*managedListener, len(listeners))
+	for _, entry := range listeners {
+		index[entry.name] = entry
+	}
+
+	return index
+}
+
+// startAddedListeners starts sockets that are present only in the next snapshot.
+func startAddedListeners(ctx context.Context, oldByName map[string]*managedListener, next []*managedListener) ([]*managedListener, error) {
+	started := make([]*managedListener, 0)
+
+	for _, entry := range next {
+		if _, exists := oldByName[entry.name]; exists {
+			continue
+		}
+
+		if err := entry.start(ctx); err != nil {
+			return started, err
+		}
+
+		started = append(started, entry)
+	}
+
+	return started, nil
+}
+
+// stopRemovedListeners drains sockets that disappeared from the next snapshot.
+func stopRemovedListeners(ctx context.Context, oldByName map[string]*managedListener, next []*managedListener) error {
+	nextByName := listenersByName(next)
+
+	var removed []*managedListener
+
+	for name, entry := range oldByName {
+		if _, exists := nextByName[name]; !exists {
+			removed = append(removed, entry)
+		}
+	}
+
+	sort.Slice(removed, func(left int, right int) bool {
+		return removed[left].name < removed[right].name
+	})
+
+	return stopManagedListeners(ctx, removed)
+}
+
+// mergedReloadListeners keeps unchanged listeners and installs newly started listeners in config order.
+func mergedReloadListeners(current []*managedListener, next []*managedListener, started []*managedListener) []*managedListener {
+	currentByName := listenersByName(current)
+	startedByName := listenersByName(started)
+
+	merged := make([]*managedListener, 0, len(next))
+	for _, entry := range next {
+		if existing, ok := currentByName[entry.name]; ok {
+			merged = append(merged, existing)
+
+			continue
+		}
+
+		if replacement, ok := startedByName[entry.name]; ok {
+			merged = append(merged, replacement)
+		}
+	}
+
+	return merged
 }
 
 // defaultSessionHandlerFactory returns a fail-closed handler when app wiring does not provide one.

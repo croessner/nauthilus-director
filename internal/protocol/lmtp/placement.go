@@ -53,6 +53,7 @@ type RecipientPlacement struct {
 	Backend          backend.SelectionResult
 	SelectedShardTag string
 	HoldID           string
+	BackendCounted   bool
 	hold             *deliveryHold
 }
 
@@ -91,6 +92,18 @@ func (s *Session) handleRecipientPlacement(ctx context.Context, recipient Recipi
 
 	placement, err := s.openRecipientHold(ctx, recipient, routingResult, initial)
 	if err != nil {
+		return RecipientPlacement{}, err
+	}
+
+	if !s.transaction.acceptsBackend(placement.Backend.Backend.Identifier) {
+		_ = s.closeRecipientPlacement(ctx, &placement)
+
+		return RecipientPlacement{}, errDifferentBackendRecipient
+	}
+
+	if err := s.accountRecipientBackend(ctx, &placement); err != nil {
+		_ = s.closeRecipientPlacement(ctx, &placement)
+
 		return RecipientPlacement{}, err
 	}
 
@@ -239,13 +252,6 @@ func (s *Session) openRecipientHold(
 		}
 	}
 
-	selected, err = s.attachSelectedBackend(ctx, record.Key, selectionRequest, selected, holdID)
-	if err != nil {
-		_, _ = s.sessionStore.CloseSession(context.Background(), record.Key, holdID)
-
-		return RecipientPlacement{}, err
-	}
-
 	hold := s.startDeliveryHeartbeat(ctx, record.Key, holdID)
 
 	return RecipientPlacement{
@@ -259,6 +265,30 @@ func (s *Session) openRecipientHold(
 		HoldID:           holdID,
 		hold:             hold,
 	}, nil
+}
+
+// accountRecipientBackend attaches exactly one delivery hold to backend active-use state.
+func (s *Session) accountRecipientBackend(ctx context.Context, placement *RecipientPlacement) error {
+	if placement == nil || placement.hold == nil || placement.BackendCounted {
+		return nil
+	}
+
+	if s.transaction.backendAccountedHoldID != "" {
+		return nil
+	}
+
+	selectionRequest := s.selectionRequest(placement.Routing, placement.SelectedShardTag, placement.Affinity)
+
+	selected, err := s.attachSelectedBackend(ctx, placement.hold.key, selectionRequest, placement.Backend, placement.HoldID)
+	if err != nil {
+		return err
+	}
+
+	placement.Backend = selected
+	placement.BackendCounted = true
+	s.transaction.backendAccountedHoldID = placement.HoldID
+
+	return nil
 }
 
 // attachSelectedBackend registers backend counts and retries same-shard placement on attach races.
@@ -401,6 +431,10 @@ func (s *Session) closeRecipientPlacement(ctx context.Context, placement *Recipi
 		placement.hold.cancel()
 		<-placement.hold.done
 		_, closeErr = s.sessionStore.CloseSession(ctx, placement.hold.key, placement.hold.sessionID)
+		if placement.BackendCounted && placement.HoldID == s.transaction.backendAccountedHoldID {
+			s.transaction.backendAccountedHoldID = ""
+			placement.BackendCounted = false
+		}
 	})
 
 	return closeErr

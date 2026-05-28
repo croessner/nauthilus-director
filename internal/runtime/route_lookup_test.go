@@ -247,6 +247,53 @@ func TestRouteLookupResolvesLMTPRecipientWithoutMutations(t *testing.T) {
 	assertNoRouteLookupMutations(t, store)
 }
 
+// TestRouteLookupUsesActiveAffinityBeforeNauthilus verifies hybrid recipient lookup ordering.
+func TestRouteLookupUsesActiveAffinityBeforeNauthilus(t *testing.T) {
+	store := &countingRouteState{
+		affinity: state.AffinityRecord{
+			Present:            true,
+			Status:             "found",
+			ShardTag:           routeLookupShardA,
+			Generation:         "affinity-lmtp-1",
+			ActiveSessionCount: 1,
+		},
+	}
+	identity := &recordingRouteIdentityLookup{
+		result: RouteLookupIdentityLookupResult{
+			Authenticated: true,
+			Account:       "should-not-be-used@example.test",
+		},
+	}
+	service := newLMTPRouteLookupTestService(t, store, identity)
+
+	response, err := service.Lookup(context.Background(), RouteLookupRequest{
+		Protocol:     routeLookupProtocolLMTP,
+		ListenerName: routeLookupProtocolLMTP,
+		Recipient:    "<Canonical@EXAMPLE.TEST>",
+	})
+	if err != nil {
+		t.Fatalf("Lookup returned error: %v", err)
+	}
+
+	if len(identity.requests) != 0 {
+		t.Fatalf("identity lookup calls = %d, want 0", len(identity.requests))
+	}
+
+	if response.Identity.Source != routeLookupIdentityActiveAffinity || response.Identity.Authoritative || response.Identity.NauthilusUsed || !response.Identity.AccountResolved {
+		t.Fatalf("identity state = %#v, want active-affinity resolution without Nauthilus", response.Identity)
+	}
+
+	if response.Routing.AccountKey != routeLookupCanonicalLMTP {
+		t.Fatalf("routing account = %q, want normalized recipient account", response.Routing.AccountKey)
+	}
+
+	if !response.Affinity.Requested || !response.Affinity.Active || response.Affinity.ShardTag != routeLookupShardA {
+		t.Fatalf("affinity = %#v, want active delivery affinity", response.Affinity)
+	}
+
+	assertNoRouteLookupMutations(t, store)
+}
+
 // routeLookupExclusionCases returns runtime states that should explain exclusions.
 func routeLookupExclusionCases(now time.Time) []routeLookupExclusionCase {
 	return []routeLookupExclusionCase{

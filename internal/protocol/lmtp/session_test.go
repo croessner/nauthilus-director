@@ -605,6 +605,38 @@ func TestRecipientPlacementDifferentBackendTempfailsBeforeData(t *testing.T) {
 	harness.expectLine(t, "250 2.0.0 Message accepted\r\n")
 
 	store.assertOpened(t, 2)
+	store.assertAttached(t, 1)
+	store.assertClosed(t, 2)
+}
+
+// TestRecipientBackendAccountingCountsOneBackendTransaction verifies multi-recipient delivery uses one backend count.
+func TestRecipientBackendAccountingCountsOneBackendTransaction(t *testing.T) {
+	identity := identityLookuperForRecipients(map[string]string{
+		testRecipientFirst:  testPlacementShardA,
+		testRecipientSecond: testPlacementShardA,
+	})
+	resolver := &recordingRoutingResolver{}
+	store := &recordingDeliveryStore{}
+	selector := &recordingBackendSelector{}
+	config := placementSessionConfig(identity, resolver, store, selector)
+
+	harness := startLMTPHarness(t, config)
+	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+	harness.write(t, "LHLO submitter.example\r\n")
+	harness.drainLHLO(t)
+	harness.write(t, "MAIL FROM:<sender@example.test>\r\n")
+	harness.expectLine(t, "250 2.0.0 Sender accepted\r\n")
+	harness.write(t, "RCPT TO:<first@example.test>\r\n")
+	harness.expectLine(t, "250 2.0.0 Recipient accepted\r\n")
+	harness.write(t, "RCPT TO:<second@example.test>\r\n")
+	harness.expectLine(t, "250 2.0.0 Recipient accepted\r\n")
+	harness.write(t, "DATA\r\n")
+	harness.expectLine(t, "354 2.0.0 End data with <CR><LF>.<CR><LF>\r\n")
+	harness.write(t, "line-one\r\n.\r\n")
+	harness.expectLine(t, "250 2.0.0 Message accepted\r\n")
+
+	store.assertOpened(t, 2)
+	store.assertAttached(t, 1)
 	store.assertClosed(t, 2)
 }
 
@@ -1445,6 +1477,18 @@ func (s *recordingDeliveryStore) assertOpened(t *testing.T, want int) {
 
 	if len(s.opens) != want {
 		t.Fatalf("open calls = %d, want %d", len(s.opens), want)
+	}
+}
+
+// assertAttached verifies the number of backend active-use accounting attachments.
+func (s *recordingDeliveryStore) assertAttached(t *testing.T, want int) {
+	t.Helper()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if len(s.attachments) != want {
+		t.Fatalf("attachment calls = %d, want %d", len(s.attachments), want)
 	}
 }
 

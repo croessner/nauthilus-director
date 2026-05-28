@@ -92,7 +92,7 @@ type backendCapabilityReader interface {
 	PoolSupportsCapability(ctx context.Context, backendPool string, capability string) (bool, error)
 }
 
-// CheckBackend dispatches health checks to the matching protocol implementation.
+// CheckBackend dispatches health checks to the matching protocol checker.
 func (c protocolHealthChecker) CheckBackend(ctx context.Context, target backend.Backend, request backend.HealthCheckRequest) backend.HealthCheckResult {
 	switch strings.ToLower(strings.TrimSpace(target.Protocol)) {
 	case protocolIMAP:
@@ -302,8 +302,10 @@ func provideControlHandle(
 	recorder observability.Recorder,
 	metrics observability.MetricsProvider,
 	backendReader *runtimectl.BackendReadService,
+	registry *backend.StaticRegistry,
 	store *state.RedisSessionStore,
 	localSessions *runtimectl.LocalSessionRegistry,
+	listenerManager *listener.Manager,
 	routeLookup *runtimectl.RouteLookupService,
 ) (controlHandle, error) {
 	if !cfg.Runtime.Servers.Control.Enabled {
@@ -326,7 +328,7 @@ func provideControlHandle(
 			UserReader:     runtimeReader,
 			UserMutator:    runtimectl.NewUserService(store, localSessions, runtimectl.WithObservabilityRecorder(recorder)),
 			RouteLookup:    routeLookup,
-			Reload:         safeReloadService(cfg, loader, options.ConfigPath, recorder),
+			Reload:         safeReloadService(cfg, loader, options.ConfigPath, recorder, registry, listenerManager),
 			Metrics:        metrics,
 			Observability:  recorder,
 		},
@@ -851,6 +853,8 @@ func safeReloadService(
 	loader *config.Loader,
 	configPath string,
 	recorder observability.Recorder,
+	registry *backend.StaticRegistry,
+	listenerManager *listener.Manager,
 ) *runtimectl.SafeReloadService {
 	return runtimectl.NewSafeReloadService(current, func(context.Context) (config.Config, error) {
 		snapshot, err := loader.Load(config.LoadOptions{Path: configPath})
@@ -859,7 +863,27 @@ func safeReloadService(
 		}
 
 		return snapshot.Config, nil
-	}, runtimectl.WithObservabilityRecorder(recorder))
+	}, runtimectl.WithObservabilityRecorder(recorder), runtimectl.WithSafeReloadApplier(runtimectl.SafeReloadApplierFunc(
+		func(ctx context.Context, _ config.Config, next config.Config) error {
+			if registry != nil {
+				if _, err := backend.NewStaticRegistry(next.Director); err != nil {
+					return err
+				}
+			}
+
+			if listenerManager != nil {
+				if err := listenerManager.Reload(ctx, next); err != nil {
+					return err
+				}
+			}
+
+			if registry != nil {
+				return registry.Reload(next.Director)
+			}
+
+			return nil
+		},
+	)))
 }
 
 // contextWithTimeout adds a shutdown deadline when none exists already.

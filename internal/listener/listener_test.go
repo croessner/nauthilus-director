@@ -260,6 +260,69 @@ func TestIMAPAndLMTPListenersStartThroughProtocolFactory(t *testing.T) {
 	}
 }
 
+// TestReloadAddsLMTPAndDrainsRemovedListener verifies live listener add/remove behavior.
+func TestReloadAddsLMTPAndDrainsRemovedListener(t *testing.T) {
+	current := singleListenerConfig(testIMAPListener, tlsModeStartTLS)
+	next := current
+	imapEntry := current.Director.Listeners[testIMAPListener]
+	lmtpEntry := config.DefaultConfig().Director.Listeners[testLMTPListener]
+	lmtpEntry.Address = testLoopbackAny
+	lmtpEntry.TLS.Mode = tlsModeStartTLS
+	lmtpEntry.ProxyProtocol.Enabled = false
+	next.Director.Listeners = map[string]config.ListenerConfig{
+		testIMAPListener: imapEntry,
+		testLMTPListener: lmtpEntry,
+	}
+
+	manager, err := NewManagerWithConfig(current, WithSessionHandlerFactory(func(SessionOptions) SessionHandler {
+		return newRecordingHandler()
+	}))
+	if err != nil {
+		t.Fatalf("NewManagerWithConfig: %v", err)
+	}
+
+	startCtx, cancelStart := context.WithTimeout(context.Background(), time.Second)
+	defer cancelStart()
+
+	if err := manager.Start(startCtx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	t.Cleanup(func() {
+		stopCtx, cancelStop := context.WithTimeout(context.Background(), time.Second)
+		defer cancelStop()
+
+		_ = manager.Stop(stopCtx)
+	})
+
+	reloadCtx, cancelReload := context.WithTimeout(context.Background(), time.Second)
+	defer cancelReload()
+
+	if err := manager.Reload(reloadCtx, next); err != nil {
+		t.Fatalf("Reload add LMTP: %v", err)
+	}
+
+	lmtpAddress, ok := manager.BoundAddress(testLMTPListener)
+	if !ok {
+		t.Fatal("LMTP listener did not bind after reload")
+	}
+
+	conn, err := net.Dial(networkTCP, lmtpAddress)
+	if err != nil {
+		t.Fatalf("dial reloaded LMTP listener: %v", err)
+	}
+
+	_ = conn.Close()
+
+	if err := manager.Reload(reloadCtx, current); err != nil {
+		t.Fatalf("Reload remove LMTP: %v", err)
+	}
+
+	if _, ok := manager.BoundAddress(testLMTPListener); ok {
+		t.Fatal("removed LMTP listener still exposes a bound address")
+	}
+}
+
 // TestIMAPSListenerWrapsAcceptedConnectionsInTLS verifies implicit TLS before IMAP greeting.
 func TestIMAPSListenerWrapsAcceptedConnectionsInTLS(t *testing.T) {
 	certPath, keyPath := writeTestCertificate(t)

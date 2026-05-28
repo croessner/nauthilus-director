@@ -67,13 +67,21 @@ type ServiceOption func(*serviceOptions)
 
 // serviceOptions carries shared runtime service dependencies.
 type serviceOptions struct {
-	recorder observability.Recorder
+	recorder      observability.Recorder
+	reloadApplier SafeReloadApplier
 }
 
 // WithObservabilityRecorder wires a secret-safe runtime event recorder.
 func WithObservabilityRecorder(recorder observability.Recorder) ServiceOption {
 	return func(options *serviceOptions) {
 		options.recorder = observability.NormalizeRecorder(recorder)
+	}
+}
+
+// WithSafeReloadApplier wires the live-object apply step for safe reloads.
+func WithSafeReloadApplier(applier SafeReloadApplier) ServiceOption {
+	return func(options *serviceOptions) {
+		options.reloadApplier = applier
 	}
 }
 

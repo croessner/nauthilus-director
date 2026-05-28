@@ -99,13 +99,14 @@ type Session struct {
 }
 
 type transactionState struct {
-	mailSeen       bool
-	mailFrom       string
-	smtpUTF8       bool
-	recipientCount int
-	recipients     []RecipientPlacement
-	body           MessageBody
-	backend        *backendTransaction
+	mailSeen               bool
+	mailFrom               string
+	smtpUTF8               bool
+	recipientCount         int
+	recipients             []RecipientPlacement
+	body                   MessageBody
+	backend                *backendTransaction
+	backendAccountedHoldID string
 }
 
 type commandOutcome struct {
@@ -459,6 +460,7 @@ func (t *transactionState) reset() {
 	t.recipients = nil
 	t.body = nil
 	t.backend = nil
+	t.backendAccountedHoldID = ""
 }
 
 // acceptsBackend reports whether a recipient can join the current transaction.

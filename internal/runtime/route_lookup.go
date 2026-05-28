@@ -31,6 +31,7 @@ import (
 const operationRouteLookup = "route_lookup"
 
 const (
+	routeLookupIdentityActiveAffinity = "active_affinity"
 	routeLookupIdentityCallerSupplied = "caller_supplied"
 	routeLookupIdentityNauthilus      = "nauthilus_lookup"
 	routeLookupIdentityNotApplicable  = "not_applicable"
@@ -390,13 +391,17 @@ func (s *RouteLookupService) resolveLookupIdentity(ctx context.Context, request 
 		return RouteLookupIdentityState{Source: routeLookupIdentityNotApplicable}, newRuntimeError(ErrorKindInvalidRequest, operationRouteLookup, "account key required")
 	}
 
-	if s.identityLookup == nil {
-		return RouteLookupIdentityState{Source: routeLookupIdentityNotApplicable}, newRuntimeError(ErrorKindUnavailable, operationRouteLookup, "identity lookup required")
-	}
-
 	recipient, err := lmtp.ParseRecipientInput(request.Recipient)
 	if err != nil {
 		return RouteLookupIdentityState{Source: routeLookupIdentityNotApplicable}, newRuntimeError(ErrorKindInvalidRequest, operationRouteLookup, "recipient invalid")
+	}
+
+	if identity := s.resolveIdentityFromActiveAffinity(ctx, request, recipient.LookupName); identity.AccountResolved {
+		return identity, nil
+	}
+
+	if s.identityLookup == nil {
+		return RouteLookupIdentityState{Source: routeLookupIdentityNotApplicable}, newRuntimeError(ErrorKindUnavailable, operationRouteLookup, "identity lookup required")
 	}
 
 	result, err := s.identityLookup.LookupRouteIdentity(ctx, RouteLookupIdentityLookupRequest{
@@ -422,6 +427,40 @@ func (s *RouteLookupService) resolveLookupIdentity(ctx context.Context, request 
 		NauthilusUsed:   true,
 		AccountResolved: true,
 	}, nil
+}
+
+// resolveIdentityFromActiveAffinity uses an existing active pin before external lookup.
+func (s *RouteLookupService) resolveIdentityFromActiveAffinity(
+	ctx context.Context,
+	request *RouteLookupRequest,
+	lookupName string,
+) RouteLookupIdentityState {
+	if s.affinityRead == nil {
+		return RouteLookupIdentityState{Source: routeLookupIdentityNotApplicable}
+	}
+
+	accountKey := strings.ToLower(strings.TrimSpace(lookupName))
+	if accountKey == "" {
+		return RouteLookupIdentityState{Source: routeLookupIdentityNotApplicable}
+	}
+
+	record, err := s.affinityRead.LookupAffinity(ctx, state.AffinityKey{
+		Tenant:     request.Tenant,
+		AccountKey: accountKey,
+	})
+	if err != nil || !record.Present || record.ActiveSessionCount <= 0 || strings.TrimSpace(record.ShardTag) == "" {
+		return RouteLookupIdentityState{Source: routeLookupIdentityNotApplicable}
+	}
+
+	request.AccountKey = accountKey
+	request.IncludeAffinity = true
+
+	return RouteLookupIdentityState{
+		Source:          routeLookupIdentityActiveAffinity,
+		Authoritative:   false,
+		NauthilusUsed:   false,
+		AccountResolved: true,
+	}
 }
 
 // applyListenerDefaults merges immutable listener context into the lookup request.
