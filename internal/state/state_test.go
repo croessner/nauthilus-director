@@ -36,11 +36,13 @@ import (
 const (
 	testAttachSessionID  = "attach-session"
 	testBackendIMAP      = "mailstore-a-imap"
+	testBackendLMTP      = "mailstore-a-lmtp"
 	testKickSessionID    = "kick-session"
 	testKillSessionID    = "kill-session"
 	testOperatorClear    = "operator clear"
 	testOperatorActor    = "test-operator"
 	testProtocolIMAP     = "imap"
+	testProtocolLMTP     = "lmtp"
 	testRedisModeCluster = "cluster"
 	testRuntimeSessionID = "runtime-session"
 	testClearStatus      = "cleared"
@@ -488,6 +490,154 @@ func TestRedisRuntimeReadModelListsSessionsAndUsers(t *testing.T) {
 	assertRuntimeSessionList(t, store, key)
 	assertRuntimeSessionLookup(t, store, key)
 	assertRuntimeUserReads(t, store, key)
+}
+
+// TestRedisDeliveryHoldPinsAffinityWithoutSessionListing verifies LMTP holds are not login sessions.
+func TestRedisDeliveryHoldPinsAffinityWithoutSessionListing(t *testing.T) {
+	store, client, builder := redisIntegrationStore(t)
+	key := AffinityKey{Tenant: "blue", AccountKey: "delivery@example.test"}
+	deliveryID := "delivery-hold"
+	imapID := "imap-during-delivery"
+	cleanupAffinity(t, client, builder, key, deliveryID, imapID)
+	cleanupBackend(t, client, builder, testBackendLMTP)
+	cleanupBackend(t, client, builder, testBackendIMAP)
+
+	openDeliveryHoldForTest(t, store, key, deliveryID)
+	assertDeliveryAffinityPin(t, store, key)
+	assertDeliveryHoldNotListed(t, store, deliveryID)
+	assertIMAPReusesDeliveryHold(t, store, key, imapID)
+	closeStateSession(t, store, key, imapID, "IMAP")
+	closeStateSession(t, store, key, deliveryID, "delivery")
+}
+
+// openDeliveryHoldForTest opens and attaches one delivery-scoped lease.
+func openDeliveryHoldForTest(t *testing.T, store *RedisSessionStore, key AffinityKey, deliveryID string) {
+	t.Helper()
+
+	delivery := testSessionRecord(key, deliveryID)
+	delivery.HolderKind = HolderKindDelivery
+	delivery.Protocol = testProtocolLMTP
+	delivery.ServiceName = testProtocolLMTP
+	delivery.ShardTag = testShardA
+
+	if _, err := store.OpenSession(context.Background(), delivery); err != nil {
+		t.Fatalf("OpenSession delivery returned error: %v", err)
+	}
+
+	if _, err := store.AttachSelectedBackend(context.Background(), SessionBackendAttachment{
+		Key:               key,
+		SessionID:         deliveryID,
+		BackendIdentifier: testBackendLMTP,
+		MaxConnections:    10,
+	}); err != nil {
+		t.Fatalf("AttachSelectedBackend delivery returned error: %v", err)
+	}
+
+	if _, err := store.HeartbeatSession(context.Background(), key, deliveryID, time.Second); err != nil {
+		t.Fatalf("HeartbeatSession delivery returned error: %v", err)
+	}
+}
+
+// assertDeliveryAffinityPin verifies a delivery hold is visible to placement.
+func assertDeliveryAffinityPin(t *testing.T, store *RedisSessionStore, key AffinityKey) {
+	t.Helper()
+
+	affinity, err := store.LookupAffinity(context.Background(), key)
+	if err != nil {
+		t.Fatalf("LookupAffinity returned error: %v", err)
+	}
+
+	if !affinity.Present || affinity.ActiveSessionCount != 1 || affinity.ShardTag != testShardA {
+		t.Fatalf("delivery affinity = %#v, want active shard pin", affinity)
+	}
+}
+
+// assertDeliveryHoldNotListed verifies delivery holds are hidden from session reads.
+func assertDeliveryHoldNotListed(t *testing.T, store *RedisSessionStore, deliveryID string) {
+	t.Helper()
+
+	lmtpSessions, err := store.ListRuntimeSessions(context.Background(), testProtocolLMTP)
+	if err != nil {
+		t.Fatalf("ListRuntimeSessions returned error: %v", err)
+	}
+
+	if len(lmtpSessions) != 0 {
+		t.Fatalf("delivery holds appeared as runtime sessions: %#v", lmtpSessions)
+	}
+
+	if _, ok, err := store.GetRuntimeSession(context.Background(), deliveryID); err != nil || ok {
+		t.Fatalf("GetRuntimeSession delivery returned ok=%t err=%v", ok, err)
+	}
+}
+
+// assertIMAPReusesDeliveryHold verifies a new IMAP lease observes the active shard.
+func assertIMAPReusesDeliveryHold(t *testing.T, store *RedisSessionStore, key AffinityKey, imapID string) {
+	t.Helper()
+
+	imap := testSessionRecord(key, imapID)
+	imap.ShardTag = testShardB
+
+	reused, err := store.OpenSession(context.Background(), imap)
+	if err != nil {
+		t.Fatalf("OpenSession IMAP during delivery returned error: %v", err)
+	}
+
+	if reused.ShardTag != testShardA || reused.Status != "reused" {
+		t.Fatalf("IMAP placement during delivery = %#v, want reused delivery shard", reused)
+	}
+}
+
+// closeStateSession closes a Redis session fixture with contextual error text.
+func closeStateSession(t *testing.T, store *RedisSessionStore, key AffinityKey, sessionID string, name string) {
+	t.Helper()
+
+	if _, err := store.CloseSession(context.Background(), key, sessionID); err != nil {
+		t.Fatalf("CloseSession %s returned error: %v", name, err)
+	}
+}
+
+// TestRedisReapRepairsExpiredDeliveryHold verifies expired delivery holds repair backend counts.
+func TestRedisReapRepairsExpiredDeliveryHold(t *testing.T) {
+	store, client, builder := redisIntegrationStore(t)
+	key := AffinityKey{Tenant: "blue", AccountKey: "delivery-reap@example.test"}
+	deliveryID := "delivery-reap"
+	cleanupAffinity(t, client, builder, key, deliveryID)
+	cleanupBackend(t, client, builder, testBackendLMTP)
+
+	delivery := testSessionRecord(key, deliveryID)
+	delivery.HolderKind = HolderKindDelivery
+	delivery.Protocol = testProtocolLMTP
+	delivery.ServiceName = testProtocolLMTP
+	delivery.ShardTag = testShardA
+
+	delivery.LeaseTTL = 25 * time.Millisecond
+	if _, err := store.OpenSession(context.Background(), delivery); err != nil {
+		t.Fatalf("OpenSession delivery returned error: %v", err)
+	}
+
+	if _, err := store.AttachSelectedBackend(context.Background(), SessionBackendAttachment{
+		Key:               key,
+		SessionID:         deliveryID,
+		BackendIdentifier: testBackendLMTP,
+		MaxConnections:    10,
+	}); err != nil {
+		t.Fatalf("AttachSelectedBackend delivery returned error: %v", err)
+	}
+
+	time.Sleep(60 * time.Millisecond)
+
+	reaped, err := store.ReapSessions(context.Background(), ReapRequest{Limit: 100})
+	if err != nil {
+		t.Fatalf("ReapSessions returned error: %v", err)
+	}
+
+	if reaped.ExpiredSessions != 1 || reaped.RepairedBackends != 1 {
+		t.Fatalf("reap result = %#v, want expired delivery hold and backend repair", reaped)
+	}
+
+	if count := redisBackendActiveCount(t, client, builder, testBackendLMTP); count != 0 {
+		t.Fatalf("redis backend active count after reap = %d, want 0", count)
+	}
 }
 
 // assertRuntimeSessionList verifies indexed runtime session listing.

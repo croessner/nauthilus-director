@@ -64,6 +64,7 @@ type SessionOptions struct {
 	Timeouts            config.RuntimeTimeouts
 	Security            config.DirectorSecurityConfig
 	Authenticator       nauthilus.Authenticator
+	IdentityLookuper    nauthilus.IdentityLookuper
 	BearerTokenMaxBytes int
 	DirectorInstanceID  string
 	DefaultTenant       string

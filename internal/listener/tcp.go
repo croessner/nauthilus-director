@@ -93,6 +93,8 @@ func newManagedListener(
 		return nil, fmt.Errorf("listener %s: %w", name, err)
 	}
 
+	identityLookuper, _ := authenticator.(nauthilus.IdentityLookuper)
+
 	authenticator = nauthilus.ObserveAuthenticator(authenticator, nauthilus.ObservationConfig{
 		AuthorityName: entry.Authority,
 		BackendPool:   entry.BackendPool,
@@ -112,6 +114,7 @@ func newManagedListener(
 			Timeouts:            runtime.Timeouts,
 			Security:            security,
 			Authenticator:       authenticator,
+			IdentityLookuper:    identityLookuper,
 			BearerTokenMaxBytes: authority.Mechanisms.Bearer.TokenMaxBytes,
 			DirectorInstanceID:  runtime.InstanceName,
 			DefaultTenant:       defaultTenant,

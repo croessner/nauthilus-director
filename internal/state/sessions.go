@@ -114,6 +114,7 @@ func (s *RedisSessionStore) OpenSession(ctx context.Context, record SessionRecor
 		normalizedStateValue(record.ListenerName),
 		normalizedStateValue(record.ServiceName),
 		normalizedStateValue(record.DirectorInstanceID),
+		normalizedHolderKind(record.HolderKind),
 	)
 	if err != nil {
 		return AffinityRecord{}, err
@@ -308,6 +309,10 @@ func validateSessionRecord(record SessionRecord) error {
 		return newStateError(RedisErrorKindAmbiguousState, scriptOpen, "session id required", nil)
 	}
 
+	if normalizedHolderKind(record.HolderKind) == "" {
+		return newStateError(RedisErrorKindAmbiguousState, scriptOpen, "holder kind required", nil)
+	}
+
 	if normalizedStateValue(record.Protocol) == "" {
 		return newStateError(RedisErrorKindAmbiguousState, scriptOpen, "protocol required", nil)
 	}
@@ -325,6 +330,18 @@ func validateSessionRecord(record SessionRecord) error {
 	}
 
 	return nil
+}
+
+// normalizedHolderKind returns the stable holder kind stored with a lease.
+func normalizedHolderKind(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", HolderKindSession:
+		return HolderKindSession
+	case HolderKindDelivery:
+		return HolderKindDelivery
+	default:
+		return ""
+	}
 }
 
 // validateSessionBackendAttachment checks fields needed for backend count registration.

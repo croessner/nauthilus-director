@@ -224,6 +224,10 @@ func (s *RedisSessionStore) readRuntimeSession(ctx context.Context, sessionID st
 		return RuntimeSessionRecord{}, false, err
 	}
 
+	if strings.EqualFold(strings.TrimSpace(fields["holder_kind"]), HolderKindDelivery) {
+		return RuntimeSessionRecord{}, false, nil
+	}
+
 	return record, true, nil
 }
 

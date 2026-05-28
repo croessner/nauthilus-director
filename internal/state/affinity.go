@@ -35,6 +35,13 @@ const (
 	ControlActionMoveGenerationChanged ControlAction = "move_generation_changed"
 )
 
+const (
+	// HolderKindSession marks a mailbox login session exposed by runtime session APIs.
+	HolderKindSession = "session"
+	// HolderKindDelivery marks a delivery-scoped affinity hold hidden from session APIs.
+	HolderKindDelivery = "delivery"
+)
+
 // AffinityKey identifies a user affinity record without requiring raw usernames in keys.
 type AffinityKey struct {
 	Tenant     string
@@ -61,6 +68,7 @@ type AffinityRecord struct {
 type SessionRecord struct {
 	ID                 string
 	Key                AffinityKey
+	HolderKind         string
 	Protocol           string
 	ListenerName       string
 	ServiceName        string

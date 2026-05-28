@@ -33,7 +33,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/croessner/nauthilus-director/internal/backend"
 	"github.com/croessner/nauthilus-director/internal/nauthilus"
+	"github.com/croessner/nauthilus-director/internal/routing"
+	"github.com/croessner/nauthilus-director/internal/state"
 )
 
 const (
@@ -42,6 +45,19 @@ const (
 	testMTLSPeerIdentity  = "technical-peer"
 	testPeerPassword      = "submitter-secret"
 	testPeerToken         = "submitter-token"
+	testPlacementAccount  = "canonical@example.test"
+	testPlacementListener = "inbound-lmtp"
+	testPlacementPool     = "lmtp-default"
+	testPlacementService  = "delivery"
+	testPlacementShardA   = "mailstore-a"
+	testPlacementShardB   = "mailstore-b"
+	testPlacementTenant   = "blue"
+	testRecipientFirst    = "first@example.test"
+	testRecipientLookup   = "Local@example.com"
+	testRecipientSecond   = "second@example.test"
+	testRecipientSingle   = "recipient@example.test"
+	testRoutingShardAttr  = "mailShard"
+	testTenantAttribute   = "tenant"
 	testSubmitterIdentity = "technical-submit@example.test"
 )
 
@@ -388,6 +404,166 @@ func TestDATATerminatorStreamsIncrementally(t *testing.T) {
 	}
 }
 
+// TestRecipientPlacementUsesIdentityRoutingAndPreservesWirePath verifies recipient placement facts.
+func TestRecipientPlacementUsesIdentityRoutingAndPreservesWirePath(t *testing.T) {
+	identity := &recordingIdentityLookuper{results: map[string]nauthilus.AuthResult{
+		testRecipientLookup: {
+			Decision: nauthilus.DecisionAuthenticated,
+			Account:  "Canonical@EXAMPLE.TEST",
+			Attributes: map[string][]string{
+				testRoutingShardAttr: {testPlacementShardA},
+				testTenantAttribute:  {testPlacementTenant},
+			},
+		},
+	}}
+	resolver := &recordingRoutingResolver{}
+	store := &recordingDeliveryStore{}
+	selector := &recordingBackendSelector{}
+	sink := &recordingMessageSink{}
+	config := placementSessionConfig(identity, resolver, store, selector)
+	config.MessageSink = sink
+
+	harness := startLMTPHarness(t, config)
+	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+	harness.write(t, "LHLO submitter.example\r\n")
+	harness.drainLHLO(t)
+	harness.write(t, "MAIL FROM:<sender@example.test>\r\n")
+	harness.expectLine(t, "250 2.0.0 Sender accepted\r\n")
+	harness.write(t, "RCPT TO:<Local@EXAMPLE.com>\r\n")
+	harness.expectLine(t, "250 2.0.0 Recipient accepted\r\n")
+	harness.write(t, "DATA\r\n")
+	harness.expectLine(t, "354 2.0.0 End data with <CR><LF>.<CR><LF>\r\n")
+	harness.write(t, "line-one\r\n.\r\n")
+	harness.expectLine(t, "250 2.0.0 Message accepted\r\n")
+
+	assertRecipientLookupContext(t, identity.singleLookup(t))
+
+	assertRecipientRoutingRequest(t, resolver.singleRequest(t))
+	assertRecipientHoldOpen(t, store.singleOpen(t))
+	assertRecipientSelection(t, selector.firstRequest(t))
+	assertSingleWireRecipient(t, sink.singleSnapshot(t))
+
+	store.assertClosed(t, 1)
+}
+
+// TestRecipientPlacementDifferentBackendTempfailsBeforeData verifies same-backend-only acceptance.
+func TestRecipientPlacementDifferentBackendTempfailsBeforeData(t *testing.T) {
+	identity := &recordingIdentityLookuper{results: map[string]nauthilus.AuthResult{
+		testRecipientFirst: {
+			Decision:   nauthilus.DecisionAuthenticated,
+			Account:    testRecipientFirst,
+			Attributes: map[string][]string{testRoutingShardAttr: {testPlacementShardA}, testTenantAttribute: {testPlacementTenant}},
+		},
+		testRecipientSecond: {
+			Decision:   nauthilus.DecisionAuthenticated,
+			Account:    testRecipientSecond,
+			Attributes: map[string][]string{testRoutingShardAttr: {testPlacementShardB}, testTenantAttribute: {testPlacementTenant}},
+		},
+	}}
+	resolver := &recordingRoutingResolver{}
+	store := &recordingDeliveryStore{}
+	selector := &recordingBackendSelector{backendForShard: map[string]string{testPlacementShardB: "mailstore-b-lmtp"}}
+	config := placementSessionConfig(identity, resolver, store, selector)
+
+	harness := startLMTPHarness(t, config)
+	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+	harness.write(t, "LHLO submitter.example\r\n")
+	harness.drainLHLO(t)
+	harness.write(t, "MAIL FROM:<sender@example.test>\r\n")
+	harness.expectLine(t, "250 2.0.0 Sender accepted\r\n")
+	harness.write(t, "RCPT TO:<first@example.test>\r\n")
+	harness.expectLine(t, "250 2.0.0 Recipient accepted\r\n")
+	harness.write(t, "RCPT TO:<second@example.test>\r\n")
+	harness.expectLine(t, "451 4.3.2 Recipient must be retried separately\r\n")
+	harness.write(t, "DATA\r\n")
+	harness.expectLine(t, "354 2.0.0 End data with <CR><LF>.<CR><LF>\r\n")
+	harness.write(t, "line-one\r\n.\r\n")
+	harness.expectLine(t, "250 2.0.0 Message accepted\r\n")
+
+	store.assertOpened(t, 2)
+	store.assertClosed(t, 2)
+}
+
+// TestRecipientDeliveryHoldHeartbeatsAndClosesOnReset verifies hold lifecycle boundaries.
+func TestRecipientDeliveryHoldHeartbeatsAndClosesOnReset(t *testing.T) {
+	identity := &recordingIdentityLookuper{results: map[string]nauthilus.AuthResult{
+		testRecipientSingle: {
+			Decision:   nauthilus.DecisionAuthenticated,
+			Account:    testRecipientSingle,
+			Attributes: map[string][]string{testRoutingShardAttr: {testPlacementShardA}, testTenantAttribute: {testPlacementTenant}},
+		},
+	}}
+	resolver := &recordingRoutingResolver{}
+	store := &recordingDeliveryStore{}
+	selector := &recordingBackendSelector{}
+	config := placementSessionConfig(identity, resolver, store, selector)
+	config.SessionLeaseTTL = 20 * time.Millisecond
+
+	harness := startLMTPHarness(t, config)
+	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+	harness.write(t, "LHLO submitter.example\r\n")
+	harness.drainLHLO(t)
+	harness.write(t, "MAIL FROM:<sender@example.test>\r\n")
+	harness.expectLine(t, "250 2.0.0 Sender accepted\r\n")
+	harness.write(t, "RCPT TO:<recipient@example.test>\r\n")
+	harness.expectLine(t, "250 2.0.0 Recipient accepted\r\n")
+
+	store.waitForHeartbeat(t)
+
+	harness.write(t, "RSET\r\n")
+	harness.expectLine(t, "250 2.0.0 Transaction reset\r\n")
+	store.assertClosed(t, 1)
+}
+
+// assertRecipientLookupContext verifies recipient lookup uses the normalized envelope value.
+func assertRecipientLookupContext(t *testing.T, lookup nauthilus.IdentityLookupRequest) {
+	t.Helper()
+
+	if lookup.Context.Username != testRecipientLookup || lookup.Context.Protocol != protocolLMTP || lookup.Context.Method != recipientLookupMethod {
+		t.Fatalf("lookup context = %#v, want normalized recipient lookup", lookup.Context)
+	}
+}
+
+// assertRecipientRoutingRequest verifies routing receives canonical account facts.
+func assertRecipientRoutingRequest(t *testing.T, route routing.RoutingRequest) {
+	t.Helper()
+
+	if route.Protocol != protocolLMTP || route.ListenerName != testPlacementListener || route.ServiceName != testPlacementService || route.BackendPool != testPlacementPool {
+		t.Fatalf("routing request = %#v, want LMTP listener context", route)
+	}
+
+	if route.NormalizedAccount != testPlacementAccount || route.LoginName != testRecipientLookup {
+		t.Fatalf("routing request = %#v, want canonical account and lookup identity split", route)
+	}
+}
+
+// assertRecipientHoldOpen verifies the delivery hold is keyed by canonical identity.
+func assertRecipientHoldOpen(t *testing.T, open state.SessionRecord) {
+	t.Helper()
+
+	if open.HolderKind != state.HolderKindDelivery || open.Protocol != protocolLMTP || open.Key.AccountKey != testPlacementAccount || open.Key.Tenant != testPlacementTenant {
+		t.Fatalf("opened hold = %#v, want delivery hold for canonical account", open)
+	}
+}
+
+// assertRecipientSelection verifies backend selection uses canonical account input.
+func assertRecipientSelection(t *testing.T, selection backend.SelectionRequest) {
+	t.Helper()
+
+	if selection.Protocol != protocolLMTP || selection.BackendPool != testPlacementPool || selection.AccountKey != testPlacementAccount {
+		t.Fatalf("selection request = %#v, want LMTP canonical account", selection)
+	}
+}
+
+// assertSingleWireRecipient verifies backend-facing state keeps the original path.
+func assertSingleWireRecipient(t *testing.T, snapshot TransactionSnapshot) {
+	t.Helper()
+
+	if len(snapshot.Recipients) != 1 || snapshot.Recipients[0].WirePath != "<Local@EXAMPLE.com>" {
+		t.Fatalf("message snapshot = %#v, want original wire recipient", snapshot)
+	}
+}
+
 // testSessionConfig returns a minimal LMTP session configuration.
 func testSessionConfig() SessionConfig {
 	return SessionConfig{
@@ -396,7 +572,7 @@ func testSessionConfig() SessionConfig {
 		AuthorityTransport:  "http",
 		ServiceName:         protocolLMTP,
 		Network:             "tcp",
-		BackendPool:         "lmtp-default",
+		BackendPool:         testPlacementPool,
 		TLSMode:             TLSModeStartTLS,
 		Capabilities:        []string{"SMTPUTF8", "STARTTLS", testAllAuthCapability},
 		PreauthTimeout:      time.Second,
@@ -427,6 +603,33 @@ func testMTLSConfig(satisfiesRequired bool) SessionConfig {
 		SatisfiesRequired: satisfiesRequired,
 		IdentitySource:    identitySourceSubjectCommonName,
 	}
+
+	return config
+}
+
+// placementSessionConfig returns an LMTP config with production placement collaborators.
+func placementSessionConfig(
+	identity nauthilus.IdentityLookuper,
+	resolver routing.RoutingResolver,
+	store state.SessionStore,
+	selector backend.Selector,
+) SessionConfig {
+	config := testSessionConfig()
+	config.TLSMode = TLSModeImplicit
+	config.Capabilities = []string{"SMTPUTF8"}
+	config.ListenerName = testPlacementListener
+	config.ServiceName = testPlacementService
+	config.BackendPool = testPlacementPool
+	config.DirectorInstanceID = "director-test"
+	config.DefaultTenant = "default"
+	config.DefaultShard = "mailstore-a"
+	config.SessionLeaseTTL = time.Second
+	config.SessionIdleGrace = time.Second
+	config.RecipientLookupRequired = true
+	config.IdentityLookuper = identity
+	config.RoutingResolver = resolver
+	config.SessionStore = store
+	config.BackendSelector = selector
 
 	return config
 }
@@ -565,6 +768,265 @@ func verifiedTLSState(commonName string) tls.ConnectionState {
 	}
 }
 
+type recordingIdentityLookuper struct {
+	mu       sync.Mutex
+	requests []nauthilus.IdentityLookupRequest
+	results  map[string]nauthilus.AuthResult
+	err      error
+}
+
+// LookupIdentity records recipient identity lookup input and returns a configured result.
+func (l *recordingIdentityLookuper) LookupIdentity(_ context.Context, request nauthilus.IdentityLookupRequest) (nauthilus.AuthResult, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	l.requests = append(l.requests, request)
+	if l.err != nil {
+		return nauthilus.AuthResult{Decision: nauthilus.DecisionTemporaryFailure}, l.err
+	}
+
+	if result, ok := l.results[request.Context.Username]; ok {
+		return result, nil
+	}
+
+	return nauthilus.AuthResult{Decision: nauthilus.DecisionAuthenticated, Account: request.Context.Username}, nil
+}
+
+// singleLookup returns the only recorded identity lookup request.
+func (l *recordingIdentityLookuper) singleLookup(t *testing.T) nauthilus.IdentityLookupRequest {
+	t.Helper()
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if len(l.requests) != 1 {
+		t.Fatalf("lookup requests = %d, want 1", len(l.requests))
+	}
+
+	return l.requests[0]
+}
+
+type recordingRoutingResolver struct {
+	mu       sync.Mutex
+	requests []routing.RoutingRequest
+}
+
+// Resolve records routing input and returns identity-derived logical facts.
+func (r *recordingRoutingResolver) Resolve(_ context.Context, request routing.RoutingRequest) (routing.RoutingResult, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.requests = append(r.requests, request)
+
+	tenant := firstAttribute(request.AuthAttributes, testTenantAttribute)
+	if tenant == "" {
+		tenant = request.Tenant
+	}
+
+	shard := firstAttribute(request.AuthAttributes, testRoutingShardAttr)
+	if shard == "" {
+		shard = testPlacementShardA
+	}
+
+	return routing.RoutingResult{
+		AccountKey:    normalizedAccount(request.NormalizedAccount),
+		Tenant:        tenant,
+		ShardTag:      shard,
+		RoutingSource: routing.SourceAuthAttribute,
+		Sticky:        true,
+		Attributes:    cloneStringSlices(request.AuthAttributes),
+	}, nil
+}
+
+// singleRequest returns the only recorded routing request.
+func (r *recordingRoutingResolver) singleRequest(t *testing.T) routing.RoutingRequest {
+	t.Helper()
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if len(r.requests) != 1 {
+		t.Fatalf("routing requests = %d, want 1", len(r.requests))
+	}
+
+	return r.requests[0]
+}
+
+type recordingDeliveryStore struct {
+	mu          sync.Mutex
+	opens       []state.SessionRecord
+	attachments []state.SessionBackendAttachment
+	heartbeats  int
+	closes      []string
+}
+
+// OpenSession records a delivery hold and returns an active affinity record.
+func (s *recordingDeliveryStore) OpenSession(_ context.Context, record state.SessionRecord) (state.AffinityRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.opens = append(s.opens, record)
+
+	return state.AffinityRecord{
+		Key:                record.Key,
+		ShardTag:           record.ShardTag,
+		Status:             deliveryStatusCreated,
+		Present:            true,
+		ActiveSessionCount: 1,
+	}, nil
+}
+
+// AttachSelectedBackend records selected backend attachment.
+func (s *recordingDeliveryStore) AttachSelectedBackend(_ context.Context, attachment state.SessionBackendAttachment) (state.SessionBackendRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.attachments = append(s.attachments, attachment)
+
+	return state.SessionBackendRecord{
+		Status:             "attached",
+		BackendIdentifier:  attachment.BackendIdentifier,
+		BackendActiveCount: 1,
+	}, nil
+}
+
+// HeartbeatSession records delivery lease refreshes.
+func (s *recordingDeliveryStore) HeartbeatSession(_ context.Context, _ state.AffinityKey, _ string, _ time.Duration) (state.AffinityRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.heartbeats++
+
+	return state.AffinityRecord{Present: true, Status: "heartbeat"}, nil
+}
+
+// CloseSession records delivery hold release.
+func (s *recordingDeliveryStore) CloseSession(_ context.Context, _ state.AffinityKey, sessionID string) (state.AffinityRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.closes = append(s.closes, sessionID)
+
+	return state.AffinityRecord{Present: true, Status: "closed"}, nil
+}
+
+// singleOpen returns the only recorded session-open call.
+func (s *recordingDeliveryStore) singleOpen(t *testing.T) state.SessionRecord {
+	t.Helper()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if len(s.opens) != 1 {
+		t.Fatalf("open calls = %d, want 1", len(s.opens))
+	}
+
+	return s.opens[0]
+}
+
+// assertOpened verifies the number of opened delivery holds.
+func (s *recordingDeliveryStore) assertOpened(t *testing.T, want int) {
+	t.Helper()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if len(s.opens) != want {
+		t.Fatalf("open calls = %d, want %d", len(s.opens), want)
+	}
+}
+
+// assertClosed verifies the number of closed delivery holds.
+func (s *recordingDeliveryStore) assertClosed(t *testing.T, want int) {
+	t.Helper()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if len(s.closes) != want {
+		t.Fatalf("close calls = %d, want %d", len(s.closes), want)
+	}
+}
+
+// waitForHeartbeat waits until the delivery hold heartbeat loop refreshes once.
+func (s *recordingDeliveryStore) waitForHeartbeat(t *testing.T) {
+	t.Helper()
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		s.mu.Lock()
+		heartbeats := s.heartbeats
+		s.mu.Unlock()
+
+		if heartbeats > 0 {
+			return
+		}
+
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	t.Fatal("delivery hold heartbeat did not run")
+}
+
+type recordingBackendSelector struct {
+	mu              sync.Mutex
+	requests        []backend.SelectionRequest
+	backendForShard map[string]string
+}
+
+// Select records backend selection and returns a deterministic LMTP backend.
+func (s *recordingBackendSelector) Select(_ context.Context, request backend.SelectionRequest) (backend.SelectionResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.requests = append(s.requests, request)
+
+	identifier := "mailstore-a-lmtp"
+	if request.PinnedBackendIdentifier != "" {
+		identifier = request.PinnedBackendIdentifier
+	} else if s.backendForShard != nil && s.backendForShard[request.ShardTag] != "" {
+		identifier = s.backendForShard[request.ShardTag]
+	}
+
+	selected := backend.Backend{
+		Identifier:     identifier,
+		Protocol:       request.Protocol,
+		BackendPool:    request.BackendPool,
+		ShardTag:       request.ShardTag,
+		MaxConnections: 100,
+	}
+
+	return backend.SelectionResult{
+		Backend: selected,
+		EffectiveBackend: backend.EffectiveBackendState{
+			Backend:           selected,
+			Identifier:        identifier,
+			Protocol:          request.Protocol,
+			BackendPool:       request.BackendPool,
+			EffectiveShardTag: request.ShardTag,
+			MaxConnections:    100,
+			AllowsNewSessions: true,
+			AllowsActivePins:  true,
+		},
+		Reason:         "test",
+		ActiveAffinity: request.ActiveAffinity,
+	}, nil
+}
+
+// firstRequest returns the first selector request.
+func (s *recordingBackendSelector) firstRequest(t *testing.T) backend.SelectionRequest {
+	t.Helper()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if len(s.requests) == 0 {
+		t.Fatal("selector was not called")
+	}
+
+	return s.requests[0]
+}
+
 type recordingAuthenticator struct {
 	mu       sync.Mutex
 	requests []nauthilus.AuthRequest
@@ -604,14 +1066,20 @@ func (a *recordingAuthenticator) singleRequest(t *testing.T) nauthilus.AuthReque
 }
 
 type recordingMessageSink struct {
-	mu     sync.Mutex
-	body   strings.Builder
-	max    int
-	finish int
+	mu        sync.Mutex
+	body      strings.Builder
+	max       int
+	finish    int
+	snapshots []TransactionSnapshot
 }
 
 // OpenMessage returns the sink itself as the streaming body.
-func (s *recordingMessageSink) OpenMessage(context.Context, TransactionSnapshot) (MessageBody, error) {
+func (s *recordingMessageSink) OpenMessage(_ context.Context, snapshot TransactionSnapshot) (MessageBody, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.snapshots = append(s.snapshots, snapshot)
+
 	return s, nil
 }
 
@@ -666,6 +1134,29 @@ func (s *recordingMessageSink) finishCount() int {
 	defer s.mu.Unlock()
 
 	return s.finish
+}
+
+// singleSnapshot returns the only recorded transaction snapshot.
+func (s *recordingMessageSink) singleSnapshot(t *testing.T) TransactionSnapshot {
+	t.Helper()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if len(s.snapshots) != 1 {
+		t.Fatalf("snapshots = %d, want 1", len(s.snapshots))
+	}
+
+	return s.snapshots[0]
+}
+
+// firstAttribute returns the first configured attribute value.
+func firstAttribute(attributes map[string][]string, name string) string {
+	if len(attributes[name]) == 0 {
+		return ""
+	}
+
+	return strings.TrimSpace(attributes[name][0])
 }
 
 // plainPayload builds a base64 SASL PLAIN initial response.

@@ -18,7 +18,6 @@ package backend
 
 import (
 	"context"
-	"strings"
 	"time"
 )
 
@@ -114,7 +113,7 @@ func (s *RuntimeSelector) explanationCandidates(
 		return nil, 0, newBackendError(ErrorKindAmbiguous, "runtime_selector", "listener pool protocol mismatch", nil)
 	}
 
-	if strings.TrimSpace(pool.Selector) != selectorRendezvousHash {
+	if !selectorSupportedForProtocol(pool.Selector, request.Protocol) {
 		return nil, 0, newBackendError(ErrorKindConfig, "runtime_selector", "unsupported selector", nil)
 	}
 

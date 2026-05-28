@@ -27,6 +27,7 @@ import (
 	"github.com/croessner/nauthilus-director/internal/backend"
 	"github.com/croessner/nauthilus-director/internal/config"
 	"github.com/croessner/nauthilus-director/internal/listener"
+	"github.com/croessner/nauthilus-director/internal/nauthilus"
 	"github.com/croessner/nauthilus-director/internal/observability"
 	"github.com/croessner/nauthilus-director/internal/protocol/imap"
 	"github.com/croessner/nauthilus-director/internal/protocol/lmtp"
@@ -462,7 +463,7 @@ func sessionHandlerFactory(
 		case protocolIMAP:
 			return imapSessionHandler(options, resolver, store, selector, recorder)
 		case protocolLMTP:
-			return lmtpSessionHandler(options)
+			return lmtpSessionHandler(options, resolver, store, selector)
 		default:
 			return unsupportedProtocolHandler{protocol: options.Config.Protocol}
 		}
@@ -524,7 +525,12 @@ func imapSessionHandler(
 }
 
 // lmtpSessionHandler builds the LMTP frontend protocol boundary.
-func lmtpSessionHandler(options listener.SessionOptions) listener.SessionHandler {
+func lmtpSessionHandler(
+	options listener.SessionOptions,
+	resolver routing.RoutingResolver,
+	store state.SessionStore,
+	selector backend.Selector,
+) listener.SessionHandler {
 	var (
 		capabilities []string
 		peerAuth     config.LMTPClientAuthConfig
@@ -536,24 +542,34 @@ func lmtpSessionHandler(options listener.SessionOptions) listener.SessionHandler
 	}
 
 	return lmtp.NewHandler(lmtp.SessionConfig{
-		ListenerName:           options.ListenerName,
-		AuthorityName:          options.Config.Authority,
-		AuthorityTransport:     options.AuthorityTransport,
-		ServiceName:            options.Config.ServiceName,
-		Network:                options.Config.Network,
-		BackendPool:            options.Config.BackendPool,
-		TLSMode:                options.Config.TLS.Mode,
-		Capabilities:           capabilities,
-		PreauthTimeout:         options.Timeouts.Preauth.Std(),
-		AuthTimeout:            options.Timeouts.Auth.Std(),
-		MaxLineBytes:           options.Security.MaxPreauthLineBytes,
-		MaxBearerTokenBytes:    options.BearerTokenMaxBytes,
-		RequirePeerAuth:        peerAuth.Required,
-		RequireTLSClientCert:   options.Config.TLS.RequireClientCert,
-		PeerAuthMechanisms:     peerAuth.Mechanisms,
-		FrontendTLSConfig:      options.FrontendTLSConfig,
-		Authenticator:          options.Authenticator,
-		BackendChunkingAllowed: false,
+		ListenerName:            options.ListenerName,
+		AuthorityName:           options.Config.Authority,
+		AuthorityTransport:      options.AuthorityTransport,
+		ServiceName:             options.Config.ServiceName,
+		Network:                 options.Config.Network,
+		BackendPool:             options.Config.BackendPool,
+		DirectorInstanceID:      options.DirectorInstanceID,
+		DefaultTenant:           options.DefaultTenant,
+		DefaultShard:            options.DefaultShard,
+		TLSMode:                 options.Config.TLS.Mode,
+		Capabilities:            capabilities,
+		PreauthTimeout:          options.Timeouts.Preauth.Std(),
+		AuthTimeout:             options.Timeouts.Auth.Std(),
+		SessionLeaseTTL:         options.SessionLeaseTTL,
+		SessionIdleGrace:        options.SessionIdleGrace,
+		MaxLineBytes:            options.Security.MaxPreauthLineBytes,
+		MaxBearerTokenBytes:     options.BearerTokenMaxBytes,
+		RequirePeerAuth:         peerAuth.Required,
+		RequireTLSClientCert:    options.Config.TLS.RequireClientCert,
+		PeerAuthMechanisms:      peerAuth.Mechanisms,
+		FrontendTLSConfig:       options.FrontendTLSConfig,
+		Authenticator:           options.Authenticator,
+		IdentityLookuper:        options.IdentityLookuper,
+		RoutingResolver:         resolver,
+		SessionStore:            store,
+		BackendSelector:         selector,
+		BackendChunkingAllowed:  false,
+		RecipientLookupRequired: true,
 		MTLSPeerAuth: lmtp.MTLSPeerAuthConfig{
 			SatisfiesRequired: peerAuth.MTLS.SatisfiesRequired,
 			IdentitySource:    peerAuth.MTLS.IdentitySource,
@@ -589,12 +605,72 @@ func routeLookupService(
 		Selector:         selector,
 		BackendRead:      reader,
 		AffinityRead:     store,
+		IdentityLookup:   routeLookupIdentityLookuper(cfg),
 		ListenerContexts: routeLookupListenerContexts(cfg),
 		DefaultPool:      defaultBackendPool(cfg),
 		DefaultShard:     cfg.Director.Routing.EffectiveDefaultShard(),
 		DefaultTenant:    "default",
 		Observability:    recorder,
 	})
+}
+
+// routeLookupIdentityLookuper returns the default authority lookup client when it is locally constructible.
+func routeLookupIdentityLookuper(cfg config.Config) runtimectl.RouteLookupIdentityLookuper {
+	listenerNames := make([]string, 0, len(cfg.Director.Listeners))
+	for listenerName := range cfg.Director.Listeners {
+		listenerNames = append(listenerNames, listenerName)
+	}
+
+	for _, listenerName := range sortedStrings(listenerNames) {
+		listener := cfg.Director.Listeners[listenerName]
+		if !strings.EqualFold(listener.Protocol, protocolLMTP) {
+			continue
+		}
+
+		authority, ok := cfg.Auth.Authorities[listener.Authority]
+		if !ok {
+			continue
+		}
+
+		client, err := nauthilus.NewClient(authority, nauthilus.ClientOptions{})
+		if err == nil {
+			return nauthilusRouteLookupIdentity{lookuper: client}
+		}
+	}
+
+	return nil
+}
+
+type nauthilusRouteLookupIdentity struct {
+	lookuper nauthilus.IdentityLookuper
+}
+
+// LookupRouteIdentity adapts runtime recipient diagnostics to the Nauthilus no-auth lookup boundary.
+func (l nauthilusRouteLookupIdentity) LookupRouteIdentity(
+	ctx context.Context,
+	request runtimectl.RouteLookupIdentityLookupRequest,
+) (runtimectl.RouteLookupIdentityLookupResult, error) {
+	if l.lookuper == nil {
+		return runtimectl.RouteLookupIdentityLookupResult{}, errors.New("identity lookup unavailable")
+	}
+
+	result, err := l.lookuper.LookupIdentity(ctx, nauthilus.IdentityLookupRequest{
+		Context: nauthilus.RequestContext{
+			Username: request.Username,
+			ClientIP: request.ClientIP,
+			Protocol: request.Protocol,
+			Method:   request.Method,
+		},
+	})
+	if err != nil {
+		return runtimectl.RouteLookupIdentityLookupResult{}, err
+	}
+
+	return runtimectl.RouteLookupIdentityLookupResult{
+		Authenticated: result.Decision == nauthilus.DecisionAuthenticated,
+		Account:       result.Account,
+		Attributes:    result.Attributes,
+	}, nil
 }
 
 // routingResolver builds the shared account-to-shard resolver chain.
@@ -627,10 +703,6 @@ func shardTags(cfg config.Config, registry backend.Registry) []string {
 	if registry != nil {
 		if backends, err := registry.AllBackends(context.Background()); err == nil {
 			for _, entry := range backends {
-				if entry.Protocol != protocolIMAP {
-					continue
-				}
-
 				if shard := strings.TrimSpace(entry.ShardTag); shard != "" {
 					shards[shard] = struct{}{}
 				}

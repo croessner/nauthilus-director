@@ -26,6 +26,7 @@ local account_key = ARGV[9]
 local listener_name = ARGV[10]
 local service_name = ARGV[11]
 local director_instance_id = ARGV[12]
+local holder_kind = ARGV[13]
 
 local function ambiguous(message)
 	error("NDAMBIGUOUS " .. message)
@@ -69,6 +70,14 @@ require_value(schema_version, "schema_version_required")
 require_value(affinity_hash, "affinity_hash_required")
 require_value(tenant, "tenant_required")
 require_value(account_key, "account_key_required")
+
+if holder_kind == false or holder_kind == nil or holder_kind == "" then
+	holder_kind = "session"
+end
+
+if holder_kind ~= "session" and holder_kind ~= "delivery" then
+	return ambiguous("holder_kind_invalid")
+end
 
 if lease_ms == nil or lease_ms <= 0 then
 	return ambiguous("lease_required")
@@ -160,6 +169,7 @@ redis.call("HSET", session_key,
 	"affinity_hash", affinity_hash,
 	"tenant", tenant,
 	"account_key", account_key,
+	"holder_kind", holder_kind,
 	"protocol", protocol,
 	"listener_name", listener_name,
 	"service_name", service_name,

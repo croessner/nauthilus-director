@@ -792,12 +792,14 @@ components:
       additionalProperties: false
       required:
         - protocol
-        - user_key
       properties:
         protocol:
           type: string
           minLength: 1
         user_key:
+          type: string
+          minLength: 1
+        recipient:
           type: string
           minLength: 1
         tenant:
@@ -855,6 +857,25 @@ components:
         affected_by:
           $ref: "#/components/schemas/RouteLookupEffects"
         fail_closed:
+          type: boolean
+        identity_resolution:
+          $ref: "#/components/schemas/RouteLookupIdentityResolution"
+    RouteLookupIdentityResolution:
+      type: object
+      additionalProperties: false
+      required:
+        - source
+        - authoritative
+        - nauthilus_used
+        - account_resolved
+      properties:
+        source:
+          type: string
+        authoritative:
+          type: boolean
+        nauthilus_used:
+          type: boolean
+        account_resolved:
           type: boolean
     RouteLookupRouting:
       type: object

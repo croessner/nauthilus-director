@@ -297,6 +297,14 @@ type RouteLookupEffects struct {
 	RuntimeOverride bool `json:"runtime_override"`
 }
 
+// RouteLookupIdentityResolution defines model for RouteLookupIdentityResolution.
+type RouteLookupIdentityResolution struct {
+	AccountResolved bool   `json:"account_resolved"`
+	Authoritative   bool   `json:"authoritative"`
+	NauthilusUsed   bool   `json:"nauthilus_used"`
+	Source          string `json:"source"`
+}
+
 // RouteLookupRequest defines model for RouteLookupRequest.
 type RouteLookupRequest struct {
 	Attributes      *map[string][]string `json:"attributes,omitempty"`
@@ -305,24 +313,26 @@ type RouteLookupRequest struct {
 	IncludeAffinity *bool                `json:"include_affinity,omitempty"`
 	Listener        *string              `json:"listener,omitempty"`
 	Protocol        string               `json:"protocol"`
+	Recipient       *string              `json:"recipient,omitempty"`
 	ServiceName     *string              `json:"service_name,omitempty"`
 	Tenant          *string              `json:"tenant,omitempty"`
-	UserKey         string               `json:"user_key"`
+	UserKey         *string              `json:"user_key,omitempty"`
 }
 
 // RouteLookupResponse defines model for RouteLookupResponse.
 type RouteLookupResponse struct {
-	AffectedBy        RouteLookupEffects          `json:"affected_by"`
-	Affinity          *RouteLookupAffinity        `json:"affinity,omitempty"`
-	Backends          []RouteLookupBackendSummary `json:"backends"`
-	FailClosed        bool                        `json:"fail_closed"`
-	Healthy           bool                        `json:"healthy"`
-	Maintenance       bool                        `json:"maintenance"`
-	Reason            string                      `json:"reason"`
-	Routing           RouteLookupRouting          `json:"routing"`
-	RoutingGeneration *string                     `json:"routing_generation,omitempty"`
-	SelectedBackend   string                      `json:"selected_backend"`
-	ShardTag          string                      `json:"shard_tag"`
+	AffectedBy         RouteLookupEffects             `json:"affected_by"`
+	Affinity           *RouteLookupAffinity           `json:"affinity,omitempty"`
+	Backends           []RouteLookupBackendSummary    `json:"backends"`
+	FailClosed         bool                           `json:"fail_closed"`
+	Healthy            bool                           `json:"healthy"`
+	IdentityResolution *RouteLookupIdentityResolution `json:"identity_resolution,omitempty"`
+	Maintenance        bool                           `json:"maintenance"`
+	Reason             string                         `json:"reason"`
+	Routing            RouteLookupRouting             `json:"routing"`
+	RoutingGeneration  *string                        `json:"routing_generation,omitempty"`
+	SelectedBackend    string                         `json:"selected_backend"`
+	ShardTag           string                         `json:"shard_tag"`
 }
 
 // RouteLookupRouting defines model for RouteLookupRouting.

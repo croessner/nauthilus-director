@@ -26,7 +26,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/croessner/nauthilus-director/internal/backend"
 	"github.com/croessner/nauthilus-director/internal/nauthilus"
+	"github.com/croessner/nauthilus-director/internal/routing"
+	"github.com/croessner/nauthilus-director/internal/state"
 )
 
 const (
@@ -49,6 +52,7 @@ type Session struct {
 	writer *bufio.Writer
 
 	authenticator     nauthilus.Authenticator
+	identityLookuper  nauthilus.IdentityLookuper
 	messageSink       MessageSink
 	frontendTLSConfig *tls.Config
 
@@ -58,18 +62,27 @@ type Session struct {
 	serviceName            string
 	network                string
 	backendPool            string
+	directorInstanceID     string
+	defaultTenant          string
+	defaultShard           string
 	tlsMode                string
 	configuredCapabilities []string
 	peerAuthMechanisms     []string
 	mtlsPeerAuth           MTLSPeerAuthConfig
 
-	preauthTimeout         time.Duration
-	authTimeout            time.Duration
-	maxLineBytes           int
-	maxBearerTokenBytes    int
-	requirePeerAuth        bool
-	requireTLSClientCert   bool
-	backendChunkingAllowed bool
+	preauthTimeout             time.Duration
+	authTimeout                time.Duration
+	sessionLeaseTTL            time.Duration
+	sessionIdleGrace           time.Duration
+	maxLineBytes               int
+	maxBearerTokenBytes        int
+	requirePeerAuth            bool
+	requireTLSClientCert       bool
+	backendChunkingAllowed     bool
+	recipientPlacementRequired bool
+	routingResolver            routing.RoutingResolver
+	sessionStore               state.SessionStore
+	backendSelector            backend.Selector
 
 	tlsActive             bool
 	tlsClientVerified     bool
@@ -86,6 +99,7 @@ type Session struct {
 type transactionState struct {
 	mailSeen       bool
 	recipientCount int
+	recipients     []RecipientPlacement
 	body           MessageBody
 }
 
@@ -108,30 +122,40 @@ func NewSession(config SessionConfig, conn net.Conn) (*Session, error) {
 	}
 
 	return &Session{
-		conn:                   conn,
-		reader:                 bufio.NewReaderSize(conn, maxLineBytes+1),
-		writer:                 bufio.NewWriter(conn),
-		authenticator:          config.Authenticator,
-		messageSink:            messageSink,
-		frontendTLSConfig:      cloneTLSConfig(config.FrontendTLSConfig),
-		listenerName:           config.ListenerName,
-		authorityName:          config.AuthorityName,
-		authorityTransport:     config.AuthorityTransport,
-		serviceName:            config.ServiceName,
-		network:                config.Network,
-		backendPool:            config.BackendPool,
-		tlsMode:                config.TLSMode,
-		configuredCapabilities: append([]string(nil), config.Capabilities...),
-		peerAuthMechanisms:     append([]string(nil), config.PeerAuthMechanisms...),
-		mtlsPeerAuth:           config.MTLSPeerAuth,
-		preauthTimeout:         config.PreauthTimeout,
-		authTimeout:            config.AuthTimeout,
-		maxLineBytes:           maxLineBytes,
-		maxBearerTokenBytes:    config.MaxBearerTokenBytes,
-		requirePeerAuth:        config.RequirePeerAuth,
-		requireTLSClientCert:   config.RequireTLSClientCert,
-		backendChunkingAllowed: config.BackendChunkingAllowed,
-		tlsActive:              config.TLSMode == TLSModeImplicit,
+		conn:                       conn,
+		reader:                     bufio.NewReaderSize(conn, maxLineBytes+1),
+		writer:                     bufio.NewWriter(conn),
+		authenticator:              config.Authenticator,
+		identityLookuper:           config.IdentityLookuper,
+		messageSink:                messageSink,
+		frontendTLSConfig:          cloneTLSConfig(config.FrontendTLSConfig),
+		listenerName:               config.ListenerName,
+		authorityName:              config.AuthorityName,
+		authorityTransport:         config.AuthorityTransport,
+		serviceName:                config.ServiceName,
+		network:                    config.Network,
+		backendPool:                config.BackendPool,
+		directorInstanceID:         config.DirectorInstanceID,
+		defaultTenant:              defaultLookupTenant(config.DefaultTenant),
+		defaultShard:               defaultLookupShard(config.DefaultShard),
+		tlsMode:                    config.TLSMode,
+		configuredCapabilities:     append([]string(nil), config.Capabilities...),
+		peerAuthMechanisms:         append([]string(nil), config.PeerAuthMechanisms...),
+		mtlsPeerAuth:               config.MTLSPeerAuth,
+		preauthTimeout:             config.PreauthTimeout,
+		authTimeout:                config.AuthTimeout,
+		sessionLeaseTTL:            defaultDeliveryLease(config.SessionLeaseTTL),
+		sessionIdleGrace:           defaultDeliveryGrace(config.SessionIdleGrace, config.SessionLeaseTTL),
+		maxLineBytes:               maxLineBytes,
+		maxBearerTokenBytes:        config.MaxBearerTokenBytes,
+		requirePeerAuth:            config.RequirePeerAuth,
+		requireTLSClientCert:       config.RequireTLSClientCert,
+		backendChunkingAllowed:     config.BackendChunkingAllowed,
+		recipientPlacementRequired: config.RecipientLookupRequired,
+		routingResolver:            config.RoutingResolver,
+		sessionStore:               config.SessionStore,
+		backendSelector:            config.BackendSelector,
+		tlsActive:                  config.TLSMode == TLSModeImplicit,
 	}, nil
 }
 
@@ -180,6 +204,8 @@ func (s *Session) serveNextCommand(ctx context.Context) (bool, error) {
 	if err != nil {
 		if err == io.EOF {
 			_ = s.abortActiveBody(ctx, "eof")
+			s.closeTransactionHolds(ctx)
+			s.transaction.reset()
 
 			return true, nil
 		}
@@ -190,6 +216,8 @@ func (s *Session) serveNextCommand(ctx context.Context) (bool, error) {
 	closeSession, err := s.processLine(ctx, line)
 	if err != nil {
 		_ = s.abortActiveBody(ctx, "command_error")
+		s.closeTransactionHolds(ctx)
+		s.transaction.reset()
 
 		return false, err
 	}
@@ -202,6 +230,8 @@ func (s *Session) contextError(ctx context.Context) error {
 	select {
 	case <-ctx.Done():
 		_ = s.abortActiveBody(ctx, "context")
+		s.closeTransactionHolds(ctx)
+		s.transaction.reset()
 
 		return ctx.Err()
 	default:
@@ -217,6 +247,8 @@ func (s *Session) handleReadError(ctx context.Context, err error) error {
 	}
 
 	_ = s.abortActiveBody(ctx, "read_error")
+	s.closeTransactionHolds(ctx)
+	s.transaction.reset()
 
 	return err
 }
@@ -400,19 +432,50 @@ func boundedSafeIdentity(value string) string {
 
 // active reports whether any transaction state is currently present.
 func (t *transactionState) active() bool {
-	return t.mailSeen || t.recipientCount > 0 || t.body != nil
+	return t.mailSeen || t.recipientCount > 0 || len(t.recipients) > 0 || t.body != nil
 }
 
 // snapshot returns bounded transaction facts for streaming sinks.
 func (t *transactionState) snapshot() TransactionSnapshot {
-	return TransactionSnapshot{RecipientCount: t.recipientCount}
+	recipients := make([]RecipientSnapshot, 0, len(t.recipients))
+	for _, recipient := range t.recipients {
+		recipients = append(recipients, RecipientSnapshot{
+			WirePath:          recipient.Recipient.WirePath,
+			AccountKey:        recipient.AccountKey,
+			Tenant:            recipient.Tenant,
+			ShardTag:          recipient.SelectedShardTag,
+			BackendIdentifier: recipient.Backend.Backend.Identifier,
+		})
+	}
+
+	return TransactionSnapshot{RecipientCount: t.recipientCount, Recipients: recipients}
 }
 
 // reset clears command sequencing state without touching protocol auth state.
 func (t *transactionState) reset() {
 	t.mailSeen = false
 	t.recipientCount = 0
+	t.recipients = nil
 	t.body = nil
+}
+
+// acceptsBackend reports whether a recipient can join the current transaction.
+func (t *transactionState) acceptsBackend(identifier string) bool {
+	identifier = strings.TrimSpace(identifier)
+	if identifier == "" {
+		return false
+	}
+
+	for _, recipient := range t.recipients {
+		existing := strings.TrimSpace(recipient.Backend.Backend.Identifier)
+		if existing == "" {
+			continue
+		}
+
+		return existing == identifier
+	}
+
+	return true
 }
 
 // abortActiveBody aborts any open DATA or BDAT sink.

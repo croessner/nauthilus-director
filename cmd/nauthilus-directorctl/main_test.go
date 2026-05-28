@@ -218,7 +218,7 @@ func TestRouteLookupAttributes(t *testing.T) {
 	}
 
 	request := fake.routeRequest
-	if request.Protocol != "imap" || request.UserKey != "user-a" || request.Listener == nil || *request.Listener != "imap" {
+	if request.Protocol != "imap" || request.UserKey == nil || *request.UserKey != "user-a" || request.Listener == nil || *request.Listener != "imap" {
 		t.Fatalf("route request = %#v, want protocol/user/listener", request)
 	}
 	if request.Tenant == nil || *request.Tenant != "blue" || request.ServiceName == nil || *request.ServiceName != "imap" {
@@ -235,6 +235,28 @@ func TestRouteLookupAttributes(t *testing.T) {
 	}
 	if got := (*request.Attributes)["tier"]; !reflect.DeepEqual(got, []string{"gold", "silver"}) {
 		t.Fatalf("tier attributes = %#v, want two values", got)
+	}
+}
+
+// TestRouteLookupRecipient verifies LMTP recipient diagnostics use the generated DTO field.
+func TestRouteLookupRecipient(t *testing.T) {
+	fake := newFakeControlClient()
+	_, stderr, code := runWithFakeClient([]string{
+		"route", "lookup",
+		"--protocol", "lmtp",
+		"--recipient", "user@example.test",
+	}, fake)
+	if code != 0 {
+		t.Fatalf("run returned exit code %d, want 0; stderr=%q", code, stderr)
+	}
+
+	request := fake.routeRequest
+	if request.Recipient == nil || *request.Recipient != "user@example.test" {
+		t.Fatalf("route request = %#v, want recipient", request)
+	}
+
+	if request.UserKey != nil {
+		t.Fatalf("route request = %#v, want no caller-supplied user key", request)
 	}
 }
 

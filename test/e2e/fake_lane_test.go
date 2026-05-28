@@ -1662,7 +1662,7 @@ func lookupRoute(t *testing.T, baseURL string, userKey string, includeAffinity b
 		IncludeAffinity: &includeAffinity,
 		Listener:        &listenerName,
 		Protocol:        e2eProtocol,
-		UserKey:         userKey,
+		UserKey:         &userKey,
 	}
 
 	var response generated.RouteLookupResponse

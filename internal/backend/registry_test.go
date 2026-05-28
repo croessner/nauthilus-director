@@ -135,15 +135,19 @@ func TestStaticSelectorEnforcesListenerBackendPool(t *testing.T) {
 		t.Fatalf("Select error = %v, want ambiguous", err)
 	}
 
-	_, err = selector.Select(context.Background(), SelectionRequest{
+	result, err := selector.Select(context.Background(), SelectionRequest{
 		AccountKey:  testAccountKey,
 		Tenant:      testTenant,
 		ShardTag:    testShardTag,
 		Protocol:    testProtocolLMTP,
 		BackendPool: testPoolLMTP,
 	})
-	if !IsErrorKind(err, ErrorKindInvalidRequest) {
-		t.Fatalf("Select error = %v, want invalid_request", err)
+	if err != nil {
+		t.Fatalf("LMTP Select returned error: %v", err)
+	}
+
+	if result.Backend.Identifier != testBackendIDLMTP {
+		t.Fatalf("LMTP selected backend = %q, want %q", result.Backend.Identifier, testBackendIDLMTP)
 	}
 }
 

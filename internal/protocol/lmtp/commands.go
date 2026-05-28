@@ -18,6 +18,7 @@ package lmtp
 
 import (
 	"context"
+	"errors"
 	"io"
 	"strings"
 )
@@ -25,6 +26,9 @@ import (
 // handleCommand dispatches one parsed LMTP command in wire order.
 func (s *Session) handleCommand(ctx context.Context, command frontendCommand) (commandOutcome, error) {
 	if command.name == commandQUIT {
+		s.closeTransactionHolds(ctx)
+		s.transaction.reset()
+
 		return commandOutcome{closeSession: true}, s.handleQUIT(command)
 	}
 
@@ -73,7 +77,7 @@ func (s *Session) handleTransactionCommand(ctx context.Context, command frontend
 	case commandMAIL:
 		return commandOutcome{}, s.handleMAIL(command)
 	case commandRCPT:
-		return commandOutcome{}, s.handleRCPT(command)
+		return commandOutcome{}, s.handleRCPT(ctx, command)
 	case commandDATA:
 		return commandOutcome{}, s.handleDATA(ctx, command)
 	case commandBDAT:
@@ -119,8 +123,8 @@ func (s *Session) handleMAIL(command frontendCommand) error {
 	return s.writeEnhanced(responseStatusOK, enhancedOK, "Sender accepted")
 }
 
-// handleRCPT validates RCPT TO sequencing without retaining raw recipient values.
-func (s *Session) handleRCPT(command frontendCommand) error {
+// handleRCPT resolves and places RCPT TO before accepting the recipient.
+func (s *Session) handleRCPT(ctx context.Context, command frontendCommand) error {
 	if err := s.requirePeerAuthSatisfied(); err != nil {
 		return err
 	}
@@ -129,11 +133,22 @@ func (s *Session) handleRCPT(command frontendCommand) error {
 		return s.writeEnhanced(responseStatusBadSequence, enhancedBadSequence, badSequenceMailText)
 	}
 
-	if err := parsePathCommand(command, "TO:"); err != nil {
+	recipient, err := ParseRecipientCommand(command)
+	if err != nil {
 		return s.writeEnhanced(responseStatusParameter, enhancedParameter, malformedRcptText)
 	}
 
+	placement, err := s.handleRecipientPlacement(ctx, recipient)
+	if err != nil {
+		if errors.Is(err, errDifferentBackendRecipient) {
+			return s.writeEnhanced(responseStatusTemporary, enhancedDifferentBackend, differentBackendText)
+		}
+
+		return s.writeEnhanced(responseStatusTemporary, enhancedTemporary, recipientLookupText)
+	}
+
 	s.transaction.recipientCount++
+	s.transaction.recipients = append(s.transaction.recipients, placement)
 
 	return s.writeEnhanced(responseStatusOK, enhancedOK, "Recipient accepted")
 }
@@ -169,11 +184,13 @@ func (s *Session) handleDATA(ctx context.Context, command frontendCommand) error
 
 	result, err := body.Finish(ctx)
 	if err != nil {
+		s.closeTransactionHolds(ctx)
 		s.transaction.reset()
 
 		return s.writeEnhanced(responseStatusTemporary, enhancedTemporary, "Message delivery temporarily failed")
 	}
 
+	s.closeTransactionHolds(ctx)
 	s.transaction.reset()
 
 	return s.writeMessageResult(result)
@@ -214,11 +231,13 @@ func (s *Session) handleBDAT(ctx context.Context, command frontendCommand) error
 
 	result, err := body.Finish(ctx)
 	if err != nil {
+		s.closeTransactionHolds(ctx)
 		s.transaction.reset()
 
 		return s.writeEnhanced(responseStatusTemporary, enhancedTemporary, "Message delivery temporarily failed")
 	}
 
+	s.closeTransactionHolds(ctx)
 	s.transaction.reset()
 
 	return s.writeMessageResult(result)
@@ -231,6 +250,7 @@ func (s *Session) handleRSET(ctx context.Context, command frontendCommand) error
 	}
 
 	_ = s.abortActiveBody(ctx, "rset")
+	s.closeTransactionHolds(ctx)
 	s.transaction.reset()
 
 	return s.writeEnhanced(responseStatusOK, enhancedOK, rsetText)

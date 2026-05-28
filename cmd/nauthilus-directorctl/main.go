@@ -1233,6 +1233,7 @@ func (app application) runRouteLookup(args []string) int {
 	line, err := parseCommandLine(args, []commandFlag{
 		valueFlag("protocol"),
 		valueFlag("user"),
+		valueFlag("recipient"),
 		valueFlag("tenant"),
 		valueFlag("listener"),
 		valueFlag("service-name"),
@@ -1252,9 +1253,10 @@ func (app application) runRouteLookup(args []string) int {
 	if !ok {
 		return app.usageError("route lookup requires --protocol")
 	}
-	userKey, ok := requiredValue(line, "user")
-	if !ok {
-		return app.usageError("route lookup requires --user")
+	userKey := line.value("user")
+	recipient := line.value("recipient")
+	if userKey == "" && recipient == "" {
+		return app.usageError("route lookup requires --user or --recipient")
 	}
 
 	attributes, err := parseRouteAttributes(line.all("attribute"))
@@ -1265,7 +1267,12 @@ func (app application) runRouteLookup(args []string) int {
 	body := generated.LookupRouteJSONRequestBody{
 		Attributes: attributes,
 		Protocol:   protocol,
-		UserKey:    userKey,
+	}
+	if userKey != "" {
+		body.UserKey = &userKey
+	}
+	if recipient != "" {
+		body.Recipient = &recipient
 	}
 	if tenant := line.value("tenant"); tenant != "" {
 		body.Tenant = &tenant
@@ -1839,6 +1846,16 @@ func writeRouteLine(writer io.Writer, route generated.RouteLookupResponse) {
 		fieldValue(route.Reason),
 		fieldValue(generation),
 	)
+	if route.IdentityResolution != nil {
+		_, _ = fmt.Fprintf(
+			writer,
+			" identity_source=%s identity_authoritative=%t identity_nauthilus=%t identity_account_resolved=%t",
+			fieldValue(route.IdentityResolution.Source),
+			route.IdentityResolution.Authoritative,
+			route.IdentityResolution.NauthilusUsed,
+			route.IdentityResolution.AccountResolved,
+		)
+	}
 	if route.Affinity != nil {
 		shardTag := ""
 		if route.Affinity.ShardTag != nil {

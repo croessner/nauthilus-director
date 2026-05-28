@@ -24,7 +24,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/croessner/nauthilus-director/internal/backend"
 	"github.com/croessner/nauthilus-director/internal/nauthilus"
+	"github.com/croessner/nauthilus-director/internal/routing"
+	"github.com/croessner/nauthilus-director/internal/state"
 )
 
 const (
@@ -41,26 +44,36 @@ var errNilSessionConnection = errors.New("lmtp: session connection is nil")
 
 // SessionConfig contains listener-owned values needed by the LMTP protocol boundary.
 type SessionConfig struct {
-	ListenerName           string
-	AuthorityName          string
-	AuthorityTransport     string
-	ServiceName            string
-	Network                string
-	BackendPool            string
-	TLSMode                string
-	Capabilities           []string
-	PreauthTimeout         time.Duration
-	AuthTimeout            time.Duration
-	MaxLineBytes           int
-	MaxBearerTokenBytes    int
-	RequirePeerAuth        bool
-	RequireTLSClientCert   bool
-	PeerAuthMechanisms     []string
-	MTLSPeerAuth           MTLSPeerAuthConfig
-	BackendChunkingAllowed bool
-	FrontendTLSConfig      *tls.Config
-	Authenticator          nauthilus.Authenticator
-	MessageSink            MessageSink
+	ListenerName            string
+	AuthorityName           string
+	AuthorityTransport      string
+	ServiceName             string
+	Network                 string
+	BackendPool             string
+	DirectorInstanceID      string
+	DefaultTenant           string
+	DefaultShard            string
+	TLSMode                 string
+	Capabilities            []string
+	PreauthTimeout          time.Duration
+	AuthTimeout             time.Duration
+	SessionLeaseTTL         time.Duration
+	SessionIdleGrace        time.Duration
+	MaxLineBytes            int
+	MaxBearerTokenBytes     int
+	RequirePeerAuth         bool
+	RequireTLSClientCert    bool
+	PeerAuthMechanisms      []string
+	MTLSPeerAuth            MTLSPeerAuthConfig
+	BackendChunkingAllowed  bool
+	RecipientLookupRequired bool
+	FrontendTLSConfig       *tls.Config
+	Authenticator           nauthilus.Authenticator
+	IdentityLookuper        nauthilus.IdentityLookuper
+	RoutingResolver         routing.RoutingResolver
+	SessionStore            state.SessionStore
+	BackendSelector         backend.Selector
+	MessageSink             MessageSink
 }
 
 // MTLSPeerAuthConfig describes when verified client certificates may satisfy peer auth.
@@ -84,6 +97,16 @@ type MessageBody interface {
 // TransactionSnapshot exposes bounded transaction facts to backend message handling.
 type TransactionSnapshot struct {
 	RecipientCount int
+	Recipients     []RecipientSnapshot
+}
+
+// RecipientSnapshot exposes backend-safe recipient routing facts to the message sink.
+type RecipientSnapshot struct {
+	WirePath          string
+	AccountKey        string
+	Tenant            string
+	ShardTag          string
+	BackendIdentifier string
 }
 
 // MessageResult describes the final status returned after DATA or BDAT LAST.

@@ -27,7 +27,9 @@ import (
 
 const (
 	protocolIMAP           = "imap"
+	protocolLMTP           = "lmtp"
 	selectorDefaultShard   = "default"
+	selectorRecipientHash  = "recipient_hash"
 	selectorRendezvousHash = "rendezvous_hash"
 )
 
@@ -95,7 +97,7 @@ func NewStaticSelector(registry Registry, policy SelectionPolicy) (*StaticSelect
 	return &StaticSelector{registry: registry, policy: policy.Normalize()}, nil
 }
 
-// Select maps a final shard tag to one concrete IMAP backend.
+// Select maps a final shard tag to one concrete protocol backend.
 func (s *StaticSelector) Select(ctx context.Context, request SelectionRequest) (SelectionResult, error) {
 	if s == nil || s.registry == nil {
 		return SelectionResult{}, newBackendError(ErrorKindConfig, "selector", "selector unavailable", nil)
@@ -115,7 +117,7 @@ func (s *StaticSelector) Select(ctx context.Context, request SelectionRequest) (
 		return SelectionResult{}, newBackendError(ErrorKindAmbiguous, "selector", "listener pool protocol mismatch", nil)
 	}
 
-	if strings.TrimSpace(pool.Selector) != selectorRendezvousHash {
+	if !selectorSupportedForProtocol(pool.Selector, request.Protocol) {
 		return SelectionResult{}, newBackendError(ErrorKindConfig, "selector", "unsupported selector", nil)
 	}
 
@@ -203,7 +205,7 @@ func normalizeSelectionRequestWithDefault(request SelectionRequest, defaultShard
 	return request
 }
 
-// validateSelectionRequest rejects incomplete or non-IMAP selection input.
+// validateSelectionRequest rejects incomplete or unsupported selection input.
 func validateSelectionRequest(request SelectionRequest) error {
 	if request.AccountKey == "" {
 		return newBackendError(ErrorKindInvalidRequest, "selector", "account key required", nil)
@@ -217,8 +219,8 @@ func validateSelectionRequest(request SelectionRequest) error {
 		return newBackendError(ErrorKindInvalidRequest, "selector", "shard tag required", nil)
 	}
 
-	if request.Protocol != protocolIMAP {
-		return newBackendError(ErrorKindInvalidRequest, "selector", "imap protocol required", nil)
+	if !selectionProtocolSupported(request.Protocol) {
+		return newBackendError(ErrorKindInvalidRequest, "selector", "supported protocol required", nil)
 	}
 
 	if request.BackendPool == "" {
@@ -226,6 +228,28 @@ func validateSelectionRequest(request SelectionRequest) error {
 	}
 
 	return nil
+}
+
+// selectorSupportedForProtocol reports whether a configured selector is valid for the protocol.
+func selectorSupportedForProtocol(selector string, protocol string) bool {
+	switch strings.TrimSpace(selector) {
+	case selectorRendezvousHash:
+		return protocol == protocolIMAP || protocol == protocolLMTP
+	case selectorRecipientHash:
+		return protocol == protocolLMTP
+	default:
+		return false
+	}
+}
+
+// selectionProtocolSupported reports whether the selector knows the protocol.
+func selectionProtocolSupported(protocol string) bool {
+	switch protocol {
+	case protocolIMAP, protocolLMTP:
+		return true
+	default:
+		return false
+	}
 }
 
 // selectRendezvousBackend chooses the highest weighted rendezvous score.

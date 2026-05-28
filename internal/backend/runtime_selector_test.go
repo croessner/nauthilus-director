@@ -60,6 +60,54 @@ func TestRuntimeSelectorExcludesRuntimeOutAndDrain(t *testing.T) {
 	}
 }
 
+// TestRuntimeSelectorSupportsLMTPRecipientHash verifies LMTP uses shared runtime selection.
+func TestRuntimeSelectorSupportsLMTPRecipientHash(t *testing.T) {
+	selector := mustRuntimeSelector(t, config.DefaultConfig(), nil, runtimeSelectionPolicy(true))
+
+	result, err := selector.Select(context.Background(), lmtpSelectionRequest(testAccountKey))
+	if err != nil {
+		t.Fatalf("Select returned error: %v", err)
+	}
+
+	if result.Backend.Identifier != testBackendIDLMTP {
+		t.Fatalf("selected backend = %q, want %q", result.Backend.Identifier, testBackendIDLMTP)
+	}
+
+	if result.Backend.Protocol != testProtocolLMTP {
+		t.Fatalf("selected protocol = %q, want lmtp", result.Backend.Protocol)
+	}
+}
+
+// TestRuntimeSelectorAppliesRuntimeConstraintsToLMTP verifies recipient_hash keeps shared constraints.
+func TestRuntimeSelectorAppliesRuntimeConstraintsToLMTP(t *testing.T) {
+	for _, testCase := range []struct {
+		name     string
+		snapshot RuntimeSnapshot
+	}{
+		{
+			name: "runtime out",
+			snapshot: RuntimeSnapshot{RuntimeOverride: RuntimeOverride{
+				InService: new(false),
+			}},
+		},
+		{
+			name:     "max connections",
+			snapshot: RuntimeSnapshot{ActiveSessions: 1000},
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			selector := mustRuntimeSelector(t, config.DefaultConfig(), fakeSnapshots{
+				testBackendIDLMTP: testCase.snapshot,
+			}, runtimeSelectionPolicy(true))
+
+			_, err := selector.Select(context.Background(), lmtpSelectionRequest(testAccountKey))
+			if !IsErrorKind(err, ErrorKindNoBackend) {
+				t.Fatalf("Select error = %v, want no_backend", err)
+			}
+		})
+	}
+}
+
 // TestRuntimeWeightOverrideChangesDeterministicPlacement verifies weight overlays affect hashing.
 func TestRuntimeWeightOverrideChangesDeterministicPlacement(t *testing.T) {
 	cfg := sameShardBackendsConfig()
@@ -357,6 +405,17 @@ func defaultSelectionRequest(account string) SelectionRequest {
 		ShardTag:    testShardTag,
 		Protocol:    protocolIMAP,
 		BackendPool: testPoolIMAP,
+	}
+}
+
+// lmtpSelectionRequest returns a complete LMTP selection request fixture.
+func lmtpSelectionRequest(account string) SelectionRequest {
+	return SelectionRequest{
+		AccountKey:  account,
+		Tenant:      testTenant,
+		ShardTag:    testShardTag,
+		Protocol:    testProtocolLMTP,
+		BackendPool: testPoolLMTP,
 	}
 }
 

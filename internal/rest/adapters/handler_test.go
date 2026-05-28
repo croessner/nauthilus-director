@@ -38,9 +38,10 @@ func TestLookupRouteUsesInjectedSideEffectFreeDomainService(t *testing.T) {
 	lookup := &recordingRouteLookup{}
 	handler := NewHandler(HandlerOptions{Version: testHandlerVersion, RouteLookup: lookup})
 
+	userKey := "alice-hash"
 	body := generated.LookupRouteJSONRequestBody{
 		Protocol: "imap",
-		UserKey:  "alice-hash",
+		UserKey:  &userKey,
 	}
 
 	response, err := handler.LookupRoute(context.Background(), generated.LookupRouteRequestObject{Body: &body})
