@@ -184,33 +184,47 @@ func (c *peerCredentials) GoString() string {
 // handleAUTH parses and verifies one SMTP-style AUTH command.
 func (s *Session) handleAUTH(ctx context.Context, command frontendCommand) error {
 	if s.peerAuthenticated {
+		s.recordPeerAuth(ctx, lmtpObservationResultFailure, lmtpReasonProtocol, "")
+
 		return s.writeEnhanced(responseStatusBadSequence, enhancedBadSequence, "Already authenticated")
 	}
 
 	if s.transaction.active() {
+		s.recordPeerAuth(ctx, lmtpObservationResultFailure, lmtpReasonProtocol, "")
+
 		return s.writeEnhanced(responseStatusBadSequence, enhancedBadSequence, "AUTH not allowed during transaction")
 	}
 
 	if !s.tlsActive {
+		s.recordPeerAuth(ctx, lmtpObservationResultFailure, lmtpReasonAuth, "")
+
 		return s.writeEnhanced(responseStatusAuthRequired, enhancedAuthRequired, noTLSAuthText)
 	}
 
 	if !s.authAdvertised() {
+		s.recordPeerAuth(ctx, lmtpObservationResultFailure, lmtpReasonUnsupported, "")
+
 		return s.writeEnhanced(responseStatusUnavailable, enhancedUnavailable, "AUTH is not available")
 	}
 
 	fields := strings.Fields(command.args)
 	if len(fields) < 1 || len(fields) > 2 {
+		s.recordPeerAuth(ctx, lmtpObservationResultFailure, lmtpReasonParser, "")
+
 		return s.writeEnhanced(responseStatusParameter, enhancedParameter, malformedAuthText)
 	}
 
 	mechanism, err := newMechanismIdentity(fields[0])
 	if err != nil || !s.authMechanismAdvertised(mechanism.WireName()) {
+		s.recordPeerAuth(ctx, lmtpObservationResultFailure, lmtpReasonUnsupported, fields[0])
+
 		return s.writeEnhanced(responseStatusAuthRejected, enhancedAuthRejected, "Unsupported authentication mechanism")
 	}
 
 	credentials, err := s.credentialsForMechanism(mechanism, fields)
 	if err != nil {
+		s.recordPeerAuth(ctx, lmtpObservationResultFailure, lmtpReasonCredentialInput, mechanism.Normalized())
+
 		return s.writeEnhanced(responseStatusParameter, enhancedParameter, malformedAuthText)
 	}
 	defer credentials.Clear()
@@ -609,6 +623,8 @@ func (s *Session) authenticatePeer(ctx context.Context, credentials *peerCredent
 
 	result, err := s.authenticator.Authenticate(authCtx, request)
 	if err != nil {
+		s.recordPeerAuth(ctx, lmtpObservationResultFailure, lmtpReasonTemporaryFailure, credentials.mechanism.Normalized())
+
 		return s.writeEnhanced(responseStatusAuthUnavailable, enhancedAuthUnavailable, authUnavailableText)
 	}
 
@@ -617,11 +633,16 @@ func (s *Session) authenticatePeer(ctx context.Context, credentials *peerCredent
 		s.peerAuthenticated = true
 		s.peerAuthMethod = credentials.mechanism.Normalized()
 		s.peerIdentity = boundedSafeIdentity(credentials.username)
+		s.recordPeerAuth(ctx, lmtpObservationResultOK, lmtpReasonOK, credentials.mechanism.Normalized())
 
 		return s.writeEnhanced(responseStatusAuthSuccess, enhancedAuthOK, authSuccessText)
 	case nauthilus.DecisionRejected:
+		s.recordPeerAuth(ctx, lmtpObservationResultRejected, lmtpReasonRejected, credentials.mechanism.Normalized())
+
 		return s.writeEnhanced(responseStatusAuthRejected, enhancedAuthRejected, authRejectedText)
 	default:
+		s.recordPeerAuth(ctx, lmtpObservationResultFailure, lmtpReasonTemporaryFailure, credentials.mechanism.Normalized())
+
 		return s.writeEnhanced(responseStatusAuthUnavailable, enhancedAuthUnavailable, authUnavailableText)
 	}
 }

@@ -155,6 +155,8 @@ and
 Terminate active sessions for one user.
 .TP
 .BI "route lookup --protocol imap --user " user-key
+.br
+.BI "route lookup --protocol lmtp --recipient " address
 Run a side-effect-free route lookup diagnostic.
 Optional flags are
 .BI "--listener " name
@@ -165,9 +167,22 @@ Optional flags are
 ,
 .BI "--backend-pool " pool
 ,
+.BI "--client-ip " address
+,
 .B --include-affinity
 and repeated
 .BI "--attribute " k=v .
+Use
+.B --user
+when the routing identity is already known.
+Use
+.B --recipient
+for LMTP recipient diagnostics.
+LMTP recipient diagnostics may resolve the supplied recipient through the
+configured Nauthilus no-auth identity lookup path before explaining the dry-run
+route.
+Route lookup does not authenticate credentials, create sessions, refresh
+leases, connect to backends or mutate runtime state.
 Credential-bearing attributes are rejected before the request is sent.
 .TP
 .B reload

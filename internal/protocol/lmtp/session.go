@@ -28,6 +28,7 @@ import (
 
 	"github.com/croessner/nauthilus-director/internal/backend"
 	"github.com/croessner/nauthilus-director/internal/nauthilus"
+	"github.com/croessner/nauthilus-director/internal/observability"
 	"github.com/croessner/nauthilus-director/internal/routing"
 	"github.com/croessner/nauthilus-director/internal/state"
 )
@@ -85,6 +86,7 @@ type Session struct {
 	routingResolver            routing.RoutingResolver
 	sessionStore               state.SessionStore
 	backendSelector            backend.Selector
+	observability              observability.Recorder
 
 	tlsActive             bool
 	tlsClientVerified     bool
@@ -107,6 +109,10 @@ type transactionState struct {
 	body                   MessageBody
 	backend                *backendTransaction
 	backendAccountedHoldID string
+	observed               bool
+	observationContext     context.Context
+	observationSpan        observability.TraceSpan
+	observationStarted     time.Time
 }
 
 type commandOutcome struct {
@@ -163,12 +169,21 @@ func NewSession(config SessionConfig, conn net.Conn) (*Session, error) {
 		routingResolver:            config.RoutingResolver,
 		sessionStore:               config.SessionStore,
 		backendSelector:            config.BackendSelector,
+		observability:              observability.NormalizeRecorder(config.Observability),
 		tlsActive:                  config.TLSMode == TLSModeImplicit,
 	}, nil
 }
 
 // Serve writes the greeting and processes LMTP commands in wire order.
-func (s *Session) Serve(ctx context.Context) error {
+func (s *Session) Serve(ctx context.Context) (err error) {
+	ctx, sessionSpan := s.startObservationSpan(ctx, observability.TraceBoundarySession, lmtpObservationOperationSession, lmtpObservationResultStart, "", nil)
+
+	s.recordSessionStart(ctx)
+	defer func() {
+		s.recordSessionEnd(ctx, err)
+		sessionSpan.End(lmtpResultLabel(err), lmtpReasonClass(err))
+	}()
+
 	if err := s.startSession(); err != nil {
 		return err
 	}
@@ -281,6 +296,7 @@ func (s *Session) applyPreauthDeadline() error {
 func (s *Session) processLine(ctx context.Context, line []byte) (bool, error) {
 	command, err := parseFrontendCommand(line, s.maxLineBytes)
 	if err != nil {
+		s.recordCommand(ctx, lmtpReasonParser, lmtpObservationResultFailure, lmtpReasonParser, nil)
 		if writeErr := s.writeEnhanced(responseStatusSyntax, enhancedSyntax, commandSyntaxText); writeErr != nil {
 			return false, writeErr
 		}
@@ -461,6 +477,10 @@ func (t *transactionState) reset() {
 	t.body = nil
 	t.backend = nil
 	t.backendAccountedHoldID = ""
+	t.observed = false
+	t.observationContext = nil
+	t.observationSpan = nil
+	t.observationStarted = time.Time{}
 }
 
 // acceptsBackend reports whether a recipient can join the current transaction.
@@ -496,9 +516,14 @@ func (s *Session) abortActiveBody(ctx context.Context, reasonClass string) error
 
 // resetTransaction releases all transaction-owned frontend, backend and lease state.
 func (s *Session) resetTransaction(ctx context.Context, reasonClass string) {
+	shouldRecord := s.transaction.active() || s.transaction.observed
 	_ = s.abortActiveBody(ctx, reasonClass)
 	s.closeBackendTransaction(reasonClass)
 	s.closeTransactionHolds(ctx)
+
+	if shouldRecord {
+		s.recordTransactionReset(ctx, reasonClass)
+	}
 	s.transaction.reset()
 }
 

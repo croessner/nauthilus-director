@@ -16,7 +16,10 @@
 
 package lmtp
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 type dataLineWriter interface {
 	WriteDATALine(line []byte) (int, error)
@@ -24,11 +27,16 @@ type dataLineWriter interface {
 
 // handleBackendDATA streams a dot-terminated DATA body to the pinned backend.
 func (s *Session) handleBackendDATA(ctx context.Context) error {
+	started := time.Now()
+
 	if s.transaction.backend == nil {
+		s.recordDATAStream(ctx, lmtpObservationResultFailure, lmtpReasonBackendConnect, lmtpStatusClassUnknown, time.Since(started))
+
 		return s.writeDeliveryStatus(unknownDeliveryStatus())
 	}
 
 	if err := s.transaction.backend.beginDATA(); err != nil {
+		s.recordDATAStream(ctx, lmtpObservationResultFailure, lmtpReasonDATA, statusClass(responseStatusTemporary), time.Since(started))
 		s.resetTransaction(ctx, "data_rejected")
 
 		return s.writeDeliveryStatus(unknownDeliveryStatus())
@@ -41,31 +49,50 @@ func (s *Session) handleBackendDATA(ctx context.Context) error {
 	}
 
 	if err := s.writer.Flush(); err != nil {
+		s.recordDATAStream(ctx, lmtpObservationResultFailure, lmtpReasonDATA, lmtpStatusClassUnknown, time.Since(started))
+
 		return err
 	}
 
 	writeFailed, err := s.streamDATA(ctx, body)
 	if err != nil {
+		s.recordDATAStream(ctx, lmtpObservationResultFailure, lmtpReasonDATA, lmtpStatusClassUnknown, time.Since(started))
 		s.resetTransaction(ctx, "data_stream")
 
 		return err
 	}
 
 	if writeFailed {
+		s.recordDATAStream(ctx, lmtpObservationResultFailure, lmtpReasonDATA, statusClass(responseStatusTemporary), time.Since(started))
+
 		return s.finishUnknownDelivery(ctx)
 	}
 
-	return s.finishKnownDelivery(ctx, s.transaction.backend.finishDATA(s.transaction.recipientCount))
+	result := s.transaction.backend.finishDATA(s.transaction.recipientCount)
+	s.recordDATAStream(ctx, deliveryResultLabel(result), deliveryReasonClass(result), deliveryResultStatusClass(result), time.Since(started))
+
+	return s.finishKnownDelivery(ctx, result)
 }
 
 // handleBackendBDAT streams one byte-counted BDAT chunk to the pinned backend.
 func (s *Session) handleBackendBDAT(ctx context.Context, chunk bdatCommand) error {
+	started := time.Now()
+	operation := lmtpObservationOperationBDATChunk
+
+	if chunk.last {
+		operation = lmtpObservationOperationBDATComplete
+	}
+
 	if s.transaction.backend == nil {
+		s.recordBDATStream(ctx, operation, lmtpObservationResultFailure, lmtpReasonBackendConnect, lmtpStatusClassUnknown, time.Since(started))
+
 		return s.writeDeliveryStatus(unknownDeliveryStatus())
 	}
 
 	result, err := s.transaction.backend.sendBDATChunk(s.reader, chunk, s.transaction.recipientCount)
 	if err != nil {
+		s.recordBDATStream(ctx, operation, lmtpObservationResultFailure, lmtpReasonBDAT, lmtpStatusClassUnknown, time.Since(started))
+
 		if chunk.last {
 			return s.finishUnknownDelivery(ctx)
 		}
@@ -86,6 +113,9 @@ func (s *Session) handleBackendBDAT(ctx context.Context, chunk bdatCommand) erro
 			s.resetTransaction(ctx, "bdat_rejected")
 		}
 
+		resultLabel, reasonClass := deliveryStatusObservation(status)
+		s.recordBDATStream(ctx, operation, resultLabel, reasonClass, statusClass(status.Status), time.Since(started))
+
 		if err := s.writeDeliveryStatus(status); err != nil {
 			return err
 		}
@@ -93,14 +123,18 @@ func (s *Session) handleBackendBDAT(ctx context.Context, chunk bdatCommand) erro
 		return nil
 	}
 
+	s.recordBDATStream(ctx, operation, deliveryResultLabel(result), deliveryReasonClass(result), deliveryResultStatusClass(result), time.Since(started))
+
 	return s.finishKnownDelivery(ctx, result)
 }
 
 // finishKnownDelivery writes final statuses and clears transaction state.
 func (s *Session) finishKnownDelivery(ctx context.Context, result MessageResult) error {
+	s.recordDeliveryStatuses(ctx, result)
 	err := s.writeMessageResult(result)
 	s.closeBackendTransaction(backendCloseDeliveryComplete)
 	s.closeTransactionHolds(ctx)
+	s.finishTransactionObservation(ctx, deliveryResultLabel(result), deliveryReasonClass(result))
 	s.transaction.reset()
 
 	return err
@@ -108,7 +142,9 @@ func (s *Session) finishKnownDelivery(ctx context.Context, result MessageResult)
 
 // finishUnknownDelivery writes director temporary failures and clears transaction state.
 func (s *Session) finishUnknownDelivery(ctx context.Context) error {
-	err := s.writeMessageResult(MessageResult{Statuses: unknownDeliveryStatuses(s.transaction.recipientCount)})
+	result := MessageResult{Statuses: unknownDeliveryStatuses(s.transaction.recipientCount)}
+	s.recordDeliveryStatuses(ctx, result)
+	err := s.writeMessageResult(result)
 	s.resetTransaction(ctx, "unknown_delivery")
 
 	return err

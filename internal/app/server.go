@@ -597,6 +597,7 @@ func lmtpSessionHandler(
 		BackendConnector:        lmtp.NewTCPBackendConnector(nil),
 		BackendChunkingAllowed:  lmtpBackendChunkingAllowed(capabilityReader, options.Config.BackendPool),
 		RecipientLookupRequired: true,
+		Observability:           options.Observability,
 		MTLSPeerAuth: lmtp.MTLSPeerAuthConfig{
 			SatisfiesRequired: peerAuth.MTLS.SatisfiesRequired,
 			IdentitySource:    peerAuth.MTLS.IdentitySource,

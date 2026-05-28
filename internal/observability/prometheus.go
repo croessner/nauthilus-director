@@ -51,6 +51,16 @@ const (
 	metricNameEventsTotal             = "nauthilus_director_observability_events_total"
 	metricNameFailuresTotal           = "nauthilus_director_observability_sink_failures_total"
 	metricNameListenerLifecycle       = "nauthilus_director_listener_lifecycle_total"
+	metricNameLMTPBackendStatus       = "nauthilus_director_lmtp_backend_status_total"
+	metricNameLMTPBDATStreams         = "nauthilus_director_lmtp_bdat_streams_total"
+	metricNameLMTPBDATSeconds         = "nauthilus_director_lmtp_bdat_stream_duration_seconds"
+	metricNameLMTPDataStreams         = "nauthilus_director_lmtp_data_streams_total"
+	metricNameLMTPDataSeconds         = "nauthilus_director_lmtp_data_stream_duration_seconds"
+	metricNameLMTPRecipientRoutes     = "nauthilus_director_lmtp_recipient_routes_total"
+	metricNameLMTPRecipientStatuses   = "nauthilus_director_lmtp_recipient_status_total"
+	metricNameLMTPSameBackendFailure  = "nauthilus_director_lmtp_same_backend_policy_failures_total"
+	metricNameLMTPTransactions        = "nauthilus_director_lmtp_transactions_total"
+	metricNameLMTPTransactionSeconds  = "nauthilus_director_lmtp_transaction_duration_seconds"
 	metricNameMetricsEnabled          = "nauthilus_director_metrics_enabled"
 	metricNameNauthilusAuth           = "nauthilus_director_nauthilus_auth_total"
 	metricNameNauthilusAuthSeconds    = "nauthilus_director_nauthilus_auth_duration_seconds"
@@ -83,6 +93,46 @@ var (
 		metricLabelTLSMode,
 	}
 	listenerLifecycleLabels = []string{
+		metricLabelProtocol,
+		metricLabelService,
+		metricLabelListener,
+		metricLabelBackendPool,
+		metricLabelTLSMode,
+		metricLabelOperation,
+		metricLabelResult,
+		metricLabelReasonClass,
+	}
+	lmtpBackendStatusLabels = []string{
+		metricLabelProtocol,
+		metricLabelBackendPool,
+		metricLabelShardTag,
+		metricLabelOperation,
+		metricLabelStatusClass,
+		metricLabelResult,
+		metricLabelReasonClass,
+	}
+	lmtpRecipientLabels = []string{
+		metricLabelProtocol,
+		metricLabelService,
+		metricLabelListener,
+		metricLabelBackendPool,
+		metricLabelShardTag,
+		metricLabelOperation,
+		metricLabelResult,
+		metricLabelReasonClass,
+	}
+	lmtpStatusLabels = []string{
+		metricLabelProtocol,
+		metricLabelService,
+		metricLabelListener,
+		metricLabelBackendPool,
+		metricLabelShardTag,
+		metricLabelOperation,
+		metricLabelStatusClass,
+		metricLabelResult,
+		metricLabelReasonClass,
+	}
+	lmtpTransactionLabels = []string{
 		metricLabelProtocol,
 		metricLabelService,
 		metricLabelListener,
@@ -172,6 +222,16 @@ type prometheusInstruments struct {
 	backendRuntime           *prometheus.CounterVec
 	events                   *prometheus.CounterVec
 	listenerLifecycle        *prometheus.CounterVec
+	lmtpBackendStatus        *prometheus.CounterVec
+	lmtpBDATSeconds          *prometheus.HistogramVec
+	lmtpBDATStreams          *prometheus.CounterVec
+	lmtpDataSeconds          *prometheus.HistogramVec
+	lmtpDataStreams          *prometheus.CounterVec
+	lmtpRecipientRoutes      *prometheus.CounterVec
+	lmtpRecipientStatuses    *prometheus.CounterVec
+	lmtpSameBackendFailures  *prometheus.CounterVec
+	lmtpTransactionSeconds   *prometheus.HistogramVec
+	lmtpTransactions         *prometheus.CounterVec
 	metricsEnabled           prometheus.Gauge
 	nauthilusAuth            *prometheus.CounterVec
 	nauthilusAuthSeconds     *prometheus.HistogramVec
@@ -312,6 +372,10 @@ func (m *prometheusRuntime) recordTypedEvent(event Event) {
 		return
 	}
 
+	if m.recordLMTPMetric(event) {
+		return
+	}
+
 	m.recordRuntimeMetric(event)
 }
 
@@ -387,6 +451,33 @@ func (m *prometheusRuntime) recordRuntimeMetric(event Event) {
 	case EventSessionReap, EventSessionKill, EventUserMove, EventUserKick, EventSelectorExclusion, EventSessionAttach:
 		m.recordRuntimeOperation(event)
 	}
+}
+
+// recordLMTPMetric handles LMTP transaction, recipient, DATA and BDAT observations.
+func (m *prometheusRuntime) recordLMTPMetric(event Event) bool {
+	switch event.Name {
+	case EventLMTPTransaction:
+		m.instrument.lmtpTransactions.WithLabelValues(metricValues(event, lmtpTransactionLabels)...).Inc()
+		observeDuration(m.instrument.lmtpTransactionSeconds, event, lmtpTransactionLabels)
+	case EventLMTPRecipientRoute:
+		m.instrument.lmtpRecipientRoutes.WithLabelValues(metricValues(event, lmtpRecipientLabels)...).Inc()
+	case EventLMTPRecipientStatus:
+		m.instrument.lmtpRecipientStatuses.WithLabelValues(metricValues(event, lmtpStatusLabels)...).Inc()
+	case EventLMTPSameBackendPolicy:
+		m.instrument.lmtpSameBackendFailures.WithLabelValues(metricValues(event, lmtpRecipientLabels)...).Inc()
+	case EventLMTPDataStream:
+		m.instrument.lmtpDataStreams.WithLabelValues(metricValues(event, lmtpStatusLabels)...).Inc()
+		observeDuration(m.instrument.lmtpDataSeconds, event, lmtpStatusLabels)
+	case EventLMTPBDATStream:
+		m.instrument.lmtpBDATStreams.WithLabelValues(metricValues(event, lmtpStatusLabels)...).Inc()
+		observeDuration(m.instrument.lmtpBDATSeconds, event, lmtpStatusLabels)
+	case EventLMTPBackendStatus:
+		m.instrument.lmtpBackendStatus.WithLabelValues(metricValues(event, lmtpBackendStatusLabels)...).Inc()
+	default:
+		return false
+	}
+
+	return true
 }
 
 // recordListenerLifecycle counts frontend listener starts and stops.
@@ -536,6 +627,16 @@ func newPrometheusInstruments() (prometheusInstruments, error) {
 		backendRuntime:           builders.counterVec(metricNameBackendRuntime, "Total backend runtime override operations.", operationResultReasonLabels...),
 		events:                   builders.counterVec(metricNameEventsTotal, "Total normalized observability events recorded by the director.", metricLabelOperation, metricLabelResult),
 		listenerLifecycle:        builders.counterVec(metricNameListenerLifecycle, "Total listener lifecycle outcomes.", listenerLifecycleLabels...),
+		lmtpBackendStatus:        builders.counterVec(metricNameLMTPBackendStatus, "Total LMTP backend status classes by bounded backend dimensions.", lmtpBackendStatusLabels...),
+		lmtpBDATSeconds:          builders.histogramVec(metricNameLMTPBDATSeconds, "LMTP BDAT forwarding duration in seconds.", mailSessionBuckets(), lmtpStatusLabels...),
+		lmtpBDATStreams:          builders.counterVec(metricNameLMTPBDATStreams, "Total LMTP BDAT forwarding outcomes.", lmtpStatusLabels...),
+		lmtpDataSeconds:          builders.histogramVec(metricNameLMTPDataSeconds, "LMTP DATA forwarding duration in seconds.", mailSessionBuckets(), lmtpStatusLabels...),
+		lmtpDataStreams:          builders.counterVec(metricNameLMTPDataStreams, "Total LMTP DATA forwarding outcomes.", lmtpStatusLabels...),
+		lmtpRecipientRoutes:      builders.counterVec(metricNameLMTPRecipientRoutes, "Total LMTP recipient routing outcomes.", lmtpRecipientLabels...),
+		lmtpRecipientStatuses:    builders.counterVec(metricNameLMTPRecipientStatuses, "Total LMTP per-recipient frontend status classes.", lmtpStatusLabels...),
+		lmtpSameBackendFailures:  builders.counterVec(metricNameLMTPSameBackendFailure, "Total LMTP same-backend policy failures.", lmtpRecipientLabels...),
+		lmtpTransactionSeconds:   builders.histogramVec(metricNameLMTPTransactionSeconds, "LMTP transaction duration in seconds.", mailSessionBuckets(), lmtpTransactionLabels...),
+		lmtpTransactions:         builders.counterVec(metricNameLMTPTransactions, "Total LMTP transaction lifecycle outcomes.", lmtpTransactionLabels...),
 		metricsEnabled:           builders.gauge(metricNameMetricsEnabled, "Metrics exporter enabled state for this director process."),
 		nauthilusAuth:            builders.counterVec(metricNameNauthilusAuth, "Total Nauthilus authentication outcomes.", serviceProtocolLabels...),
 		nauthilusAuthSeconds:     builders.histogramVec(metricNameNauthilusAuthSeconds, "Nauthilus authentication duration in seconds.", restBuckets(), serviceProtocolLabels...),
@@ -574,6 +675,16 @@ func (i prometheusInstruments) collectors() []prometheus.Collector {
 		i.backendRuntime,
 		i.events,
 		i.listenerLifecycle,
+		i.lmtpBackendStatus,
+		i.lmtpBDATSeconds,
+		i.lmtpBDATStreams,
+		i.lmtpDataSeconds,
+		i.lmtpDataStreams,
+		i.lmtpRecipientRoutes,
+		i.lmtpRecipientStatuses,
+		i.lmtpSameBackendFailures,
+		i.lmtpTransactionSeconds,
+		i.lmtpTransactions,
 		i.metricsEnabled,
 		i.nauthilusAuth,
 		i.nauthilusAuthSeconds,

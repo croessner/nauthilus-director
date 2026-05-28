@@ -29,6 +29,7 @@ import (
 
 	"github.com/croessner/nauthilus-director/internal/backend"
 	"github.com/croessner/nauthilus-director/internal/nauthilus"
+	"github.com/croessner/nauthilus-director/internal/observability"
 	"github.com/croessner/nauthilus-director/internal/routing"
 	"github.com/croessner/nauthilus-director/internal/state"
 )
@@ -67,6 +68,8 @@ type deliveryHold struct {
 
 // handleRecipientPlacement resolves, routes and holds one recipient before acceptance.
 func (s *Session) handleRecipientPlacement(ctx context.Context, recipient RecipientPath) (RecipientPlacement, error) {
+	ctx = s.transactionContext(ctx)
+
 	if !s.recipientPlacementRequired {
 		return RecipientPlacement{Recipient: recipient}, nil
 	}
@@ -75,43 +78,94 @@ func (s *Session) handleRecipientPlacement(ctx context.Context, recipient Recipi
 		return RecipientPlacement{}, err
 	}
 
-	identity, err := s.lookupRecipientIdentity(ctx, recipient.LookupName)
+	lookupCtx, lookupSpan := s.startObservationSpan(ctx, observability.TraceBoundaryNauthilusAuth, recipientLookupMethod, lmtpObservationResultStart, "", map[string]string{
+		lmtpObsFieldMechanism: recipientLookupMethod,
+		lmtpObsFieldTransport: strings.ToLower(strings.TrimSpace(s.authorityTransport)),
+	})
+	lookupStarted := time.Now()
+	identity, err := s.lookupRecipientIdentity(lookupCtx, recipient.LookupName)
+
+	lookupDuration := time.Since(lookupStarted)
 	if err != nil {
+		s.recordAuthorityLookup(lookupCtx, lmtpObservationResultFailure, lmtpReasonAuth, lookupDuration)
+		lookupSpan.End(lmtpObservationResultFailure, lmtpReasonAuth)
+
 		return RecipientPlacement{}, err
 	}
 
-	routingResult, err := s.resolveRecipientRoute(ctx, recipient, identity)
+	s.recordAuthorityLookup(lookupCtx, lmtpObservationResultOK, lmtpReasonOK, lookupDuration)
+	lookupSpan.End(lmtpObservationResultOK, lmtpReasonOK)
+
+	routeCtx, routeSpan := s.startObservationSpan(ctx, observability.TraceBoundaryRoutingResolve, lmtpObservationOperationRouting, lmtpObservationResultStart, "", nil)
+	routeStarted := time.Now()
+	routingResult, err := s.resolveRecipientRoute(routeCtx, recipient, identity)
+
+	routeDuration := time.Since(routeStarted)
 	if err != nil {
+		s.recordRoutingResolve(routeCtx, lmtpObservationResultFailure, lmtpReasonRouting, "", routeDuration)
+		routeSpan.End(lmtpObservationResultFailure, lmtpReasonRouting)
+
 		return RecipientPlacement{}, err
 	}
 
-	initial, err := s.selectRecipientBackend(ctx, routingResult, state.AffinityRecord{})
+	routeSpan.SetAttributes(map[string]string{
+		lmtpObsFieldShardTag: routingResult.ShardTag,
+	})
+	s.recordRoutingResolve(routeCtx, lmtpObservationResultOK, lmtpReasonOK, routingResult.ShardTag, routeDuration)
+	routeSpan.End(lmtpObservationResultOK, lmtpReasonOK)
+
+	selectCtx, selectSpan := s.startObservationSpan(ctx, observability.TraceBoundaryBackendSelect, lmtpObservationOperationBackendSelect, lmtpObservationResultStart, "", map[string]string{
+		lmtpObsFieldShardTag: routingResult.ShardTag,
+	})
+	selectStarted := time.Now()
+	initial, err := s.selectRecipientBackend(selectCtx, routingResult, state.AffinityRecord{})
+
+	selectDuration := time.Since(selectStarted)
 	if err != nil {
+		s.recordBackendSelect(selectCtx, lmtpObservationResultFailure, lmtpReasonClass(err), routingResult.ShardTag, selectDuration)
+		selectSpan.End(lmtpObservationResultFailure, lmtpReasonClass(err))
+
 		return RecipientPlacement{}, err
 	}
 
 	placement, err := s.openRecipientHold(ctx, recipient, routingResult, initial)
 	if err != nil {
+		s.recordBackendSelect(selectCtx, lmtpObservationResultFailure, lmtpReasonClass(err), routingResult.ShardTag, time.Since(selectStarted))
+		selectSpan.End(lmtpObservationResultFailure, lmtpReasonClass(err))
+
 		return RecipientPlacement{}, err
 	}
 
 	if !s.transaction.acceptsBackend(placement.Backend.Backend.Identifier) {
 		_ = s.closeRecipientPlacement(ctx, &placement)
+		s.recordBackendSelect(selectCtx, lmtpObservationResultTempfail, lmtpReasonSameBackend, placement.SelectedShardTag, time.Since(selectStarted))
+		selectSpan.End(lmtpObservationResultTempfail, lmtpReasonSameBackend)
 
 		return RecipientPlacement{}, errDifferentBackendRecipient
 	}
 
 	if err := s.accountRecipientBackend(ctx, &placement); err != nil {
 		_ = s.closeRecipientPlacement(ctx, &placement)
+		s.recordBackendSelect(selectCtx, lmtpObservationResultFailure, lmtpReasonClass(err), placement.SelectedShardTag, time.Since(selectStarted))
+		selectSpan.End(lmtpObservationResultFailure, lmtpReasonClass(err))
 
 		return RecipientPlacement{}, err
 	}
 
 	if !s.transaction.acceptsBackend(placement.Backend.Backend.Identifier) {
 		_ = s.closeRecipientPlacement(ctx, &placement)
+		s.recordBackendSelect(selectCtx, lmtpObservationResultTempfail, lmtpReasonSameBackend, placement.SelectedShardTag, time.Since(selectStarted))
+		selectSpan.End(lmtpObservationResultTempfail, lmtpReasonSameBackend)
 
 		return RecipientPlacement{}, errDifferentBackendRecipient
 	}
+
+	selectSpan.SetAttributes(map[string]string{
+		lmtpObsFieldBackendIdentifier: placement.Backend.Backend.Identifier,
+		lmtpObsFieldShardTag:          placement.SelectedShardTag,
+	})
+	s.recordBackendSelect(selectCtx, lmtpObservationResultOK, lmtpReasonOK, placement.SelectedShardTag, time.Since(selectStarted))
+	selectSpan.End(lmtpObservationResultOK, lmtpReasonOK)
 
 	return placement, nil
 }

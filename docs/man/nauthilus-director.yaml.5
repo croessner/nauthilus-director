@@ -59,6 +59,63 @@ Backend pool protocol, selector and backend membership.
 .B director.backends
 Backend protocol, shard, address, weight, max connections, maintenance baseline,
 transport security, authentication and health checks.
+.SH LMTP LISTENERS AND BACKENDS
+LMTP listener entries use
+.B director.listeners.<name>.protocol: lmtp
+and bind to an LMTP backend pool with
+.BR backend_pool .
+Plain LMTP listeners normally use
+.B tls.mode: starttls
+when STARTTLS is offered.
+LMTPS-style listeners use
+.B tls.mode: implicit
+and still use
+.B protocol: lmtp
+with an operator-facing service name such as
+.BR lmtps .
+.PP
+Supported listener-specific LMTP settings live under
+.BR director.listeners.<name>.lmtp .
+The implemented surface includes SMTPUTF8 enablement, configured
+.B capabilities
+for the
+.B LHLO
+reply and peer authentication through
+.BR client_auth .
+Peer authentication verifies the submitting LMTP peer; it is separate from
+recipient routing and does not authenticate the mailbox recipient.
+.PP
+LMTP backend entries use
+.B director.backends.<name>.protocol: lmtp
+and should share
+.B shard_tag
+values with other protocol backends that represent the same mail shard.
+Backend TLS, SASL, OAuth bearer, credential replay, master-user and health-check
+settings use the shared backend config paths.
+BDAT forwarding is available only when the configured frontend capability and
+backend capability boundary allow CHUNKING.
+.PP
+LMTP route lookup through
+.BR nauthilus-directorctl (1)
+accepts
+.B --recipient
+for recipient diagnostics.
+It is a read-only route explanation; it may use the configured no-auth
+Nauthilus identity lookup path, but it does not authenticate credentials, create
+sessions, open backend connections or mutate Redis state.
+.SH OBSERVABILITY SAFETY
+LMTP logs, traces and Prometheus metrics expose operation, result, bounded
+reason class, backend pool, shard tag, mechanism, transport, TLS mode and status
+class where applicable.
+Metric labels remain low-cardinality and do not include usernames, recipients,
+client addresses, session IDs, backend identifiers, raw errors or secrets.
+.PP
+Observable LMTP output must not contain raw recipients, envelope senders,
+message IDs, subjects, DATA or BDAT content, peer passwords, bearer tokens,
+SASL blobs, private keys or raw authorization headers.
+Operators should use status classes and reason classes to distinguish routing,
+same-backend policy, backend, DATA and BDAT failures without exposing message
+content.
 .SH INCLUDES AND PATCHES
 Loader-only keys
 .BR includes ,

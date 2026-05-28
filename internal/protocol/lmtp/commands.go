@@ -21,6 +21,7 @@ import (
 	"errors"
 	"io"
 	"strings"
+	"time"
 )
 
 // handleCommand dispatches one parsed LMTP command in wire order.
@@ -56,9 +57,9 @@ func commandSessionScoped(name string) bool {
 func (s *Session) handleSessionCommand(ctx context.Context, command frontendCommand) (commandOutcome, error) {
 	switch command.name {
 	case commandLHLO:
-		return commandOutcome{}, s.handleLHLO(command)
+		return commandOutcome{}, s.handleLHLO(ctx, command)
 	case commandSTARTTLS:
-		return s.handleSTARTTLS(command)
+		return s.handleSTARTTLS(ctx, command)
 	case commandAuth:
 		return commandOutcome{}, s.handleAUTH(ctx, command)
 	case commandRSET:
@@ -74,7 +75,7 @@ func (s *Session) handleSessionCommand(ctx context.Context, command frontendComm
 func (s *Session) handleTransactionCommand(ctx context.Context, command frontendCommand) (commandOutcome, error) {
 	switch command.name {
 	case commandMAIL:
-		return commandOutcome{}, s.handleMAIL(command)
+		return commandOutcome{}, s.handleMAIL(ctx, command)
 	case commandRCPT:
 		return commandOutcome{}, s.handleRCPT(ctx, command)
 	case commandDATA:
@@ -87,72 +88,102 @@ func (s *Session) handleTransactionCommand(ctx context.Context, command frontend
 }
 
 // handleLHLO records the client greeting and advertises effective capabilities.
-func (s *Session) handleLHLO(command frontendCommand) error {
+func (s *Session) handleLHLO(ctx context.Context, command frontendCommand) error {
 	if strings.TrimSpace(command.args) == "" {
+		s.recordCommand(ctx, lmtpObservationOperationLHLO, lmtpObservationResultFailure, lmtpReasonParser, nil)
+
 		return s.writeEnhanced(responseStatusParameter, enhancedParameter, "Invalid LHLO command")
 	}
 
 	if s.transaction.active() {
+		s.recordCommand(ctx, lmtpObservationOperationLHLO, lmtpObservationResultFailure, lmtpReasonProtocol, nil)
+
 		return s.writeEnhanced(responseStatusBadSequence, enhancedBadSequence, "LHLO not allowed during transaction")
 	}
 
 	s.effectiveCapabilities = s.effectiveCapabilitySet()
 	s.chunkingAdvertised = containsCapability(s.effectiveCapabilities, capabilityCHUNKING)
 	s.lhloSeen = true
+	s.recordCommand(ctx, lmtpObservationOperationLHLO, lmtpObservationResultOK, lmtpReasonOK, nil)
 
 	return s.writeLHLO(s.effectiveCapabilities)
 }
 
 // handleMAIL validates MAIL FROM sequencing without retaining the raw envelope sender.
-func (s *Session) handleMAIL(command frontendCommand) error {
+func (s *Session) handleMAIL(ctx context.Context, command frontendCommand) error {
 	if err := s.requirePeerAuthSatisfied(); err != nil {
+		s.recordCommand(ctx, lmtpObservationOperationMAIL, lmtpObservationResultFailure, lmtpReasonAuth, nil)
+
 		return err
 	}
 
 	mail, err := parseMailCommand(command)
 	if err != nil {
+		s.recordCommand(ctx, lmtpObservationOperationMAIL, lmtpObservationResultFailure, lmtpReasonParser, nil)
+
 		return s.writeEnhanced(responseStatusParameter, enhancedParameter, malformedMailText)
 	}
 
 	if err := s.requireMAILSMTPUTF8(mail); err != nil {
+		s.recordCommand(ctx, lmtpObservationOperationMAIL, lmtpObservationResultFailure, lmtpReasonParser, nil)
+
 		return err
 	}
 
 	if s.transaction.active() {
+		s.recordCommand(ctx, lmtpObservationOperationMAIL, lmtpObservationResultFailure, lmtpReasonProtocol, nil)
+
 		return s.writeEnhanced(responseStatusBadSequence, enhancedBadSequence, "Transaction already active")
 	}
 
 	s.transaction.mailSeen = true
 	s.transaction.mailFrom = mail.wirePath
 	s.transaction.smtpUTF8 = mail.smtpUTF8
+	ctx = s.beginTransactionObservation(ctx)
+	s.recordCommand(ctx, lmtpObservationOperationMAIL, lmtpObservationResultOK, lmtpReasonOK, nil)
 
 	return s.writeEnhanced(responseStatusOK, enhancedOK, "Sender accepted")
 }
 
 // handleRCPT resolves and places RCPT TO before accepting the recipient.
 func (s *Session) handleRCPT(ctx context.Context, command frontendCommand) error {
+	ctx = s.transactionContext(ctx)
+
 	if err := s.requirePeerAuthSatisfied(); err != nil {
+		s.recordRecipientRoute(ctx, lmtpObservationResultFailure, lmtpReasonAuth, "")
+
 		return err
 	}
 
 	if !s.transaction.mailSeen {
+		s.recordRecipientRoute(ctx, lmtpObservationResultFailure, lmtpReasonProtocol, "")
+
 		return s.writeEnhanced(responseStatusBadSequence, enhancedBadSequence, badSequenceMailText)
 	}
 
 	recipient, err := ParseRecipientCommand(command)
 	if err != nil {
+		s.recordRecipientRoute(ctx, lmtpObservationResultFailure, lmtpReasonParser, "")
+
 		return s.writeEnhanced(responseStatusParameter, enhancedParameter, malformedRcptText)
 	}
 
 	if err := s.requireRecipientSMTPUTF8(recipient); err != nil {
+		s.recordRecipientRoute(ctx, lmtpObservationResultFailure, lmtpReasonParser, "")
+
 		return err
 	}
 
 	placement, err := s.handleRecipientPlacement(ctx, recipient)
 	if err != nil {
 		if errors.Is(err, errDifferentBackendRecipient) {
+			s.recordSameBackendPolicy(ctx, "")
+			s.recordRecipientRoute(ctx, lmtpObservationResultTempfail, lmtpReasonSameBackend, "")
+
 			return s.writeEnhanced(responseStatusTemporary, enhancedDifferentBackend, differentBackendText)
 		}
+
+		s.recordRecipientRoute(ctx, lmtpObservationResultTempfail, lmtpReasonRouting, "")
 
 		return s.writeEnhanced(responseStatusTemporary, enhancedTemporary, recipientLookupText)
 	}
@@ -161,6 +192,8 @@ func (s *Session) handleRCPT(ctx context.Context, command frontendCommand) error
 		status, accepted := s.forwardRecipientToBackend(ctx, placement)
 		if !accepted {
 			_ = s.closeRecipientPlacement(ctx, &placement)
+			s.recordRecipientRoute(ctx, lmtpObservationResultTempfail, lmtpReasonBackendStatus, placement.SelectedShardTag)
+			s.recordDeliveryStatuses(ctx, MessageResult{Statuses: []DeliveryStatus{status}})
 
 			return s.writeDeliveryStatus(status)
 		}
@@ -168,15 +201,23 @@ func (s *Session) handleRCPT(ctx context.Context, command frontendCommand) error
 
 	s.transaction.recipientCount++
 	s.transaction.recipients = append(s.transaction.recipients, placement)
+	s.recordRecipientRoute(ctx, lmtpObservationResultAccepted, lmtpReasonOK, placement.SelectedShardTag)
 
 	return s.writeEnhanced(responseStatusOK, enhancedOK, "Recipient accepted")
 }
 
 // handleDATA streams DATA lines until the dot terminator without buffering the whole body.
 func (s *Session) handleDATA(ctx context.Context, command frontendCommand) error {
+	ctx = s.transactionContext(ctx)
+	started := time.Now()
+
 	if err := s.requireMessageBodyAllowed(command); err != nil {
+		s.recordDATAStream(ctx, lmtpObservationResultFailure, lmtpReasonProtocol, lmtpStatusClassUnknown, time.Since(started))
+
 		return err
 	}
+
+	s.recordCommand(ctx, lmtpObservationOperationDATA, lmtpObservationResultStart, lmtpReasonOK, nil)
 
 	if s.backendForwardingEnabled() {
 		return s.handleBackendDATA(ctx)
@@ -184,6 +225,8 @@ func (s *Session) handleDATA(ctx context.Context, command frontendCommand) error
 
 	body, err := s.messageSink.OpenMessage(ctx, s.transaction.snapshot())
 	if err != nil {
+		s.recordDATAStream(ctx, lmtpObservationResultFailure, lmtpReasonDATA, statusClass(responseStatusTemporary), time.Since(started))
+
 		return s.writeEnhanced(responseStatusTemporary, enhancedTemporary, "Message sink unavailable")
 	}
 
@@ -195,6 +238,7 @@ func (s *Session) handleDATA(ctx context.Context, command frontendCommand) error
 
 	if err := s.writer.Flush(); err != nil {
 		_ = body.Abort(ctx, "flush_error")
+		s.recordDATAStream(ctx, lmtpObservationResultFailure, lmtpReasonDATA, lmtpStatusClassUnknown, time.Since(started))
 
 		return err
 	}
@@ -202,32 +246,45 @@ func (s *Session) handleDATA(ctx context.Context, command frontendCommand) error
 	writeFailed, err := s.streamDATA(ctx, body)
 	if err != nil {
 		_ = body.Abort(ctx, "data_stream")
+		s.recordDATAStream(ctx, lmtpObservationResultFailure, lmtpReasonDATA, lmtpStatusClassUnknown, time.Since(started))
 
 		return err
 	}
 
 	if writeFailed {
 		_ = body.Abort(ctx, "data_stream")
+		s.recordDATAStream(ctx, lmtpObservationResultFailure, lmtpReasonDATA, statusClass(responseStatusTemporary), time.Since(started))
 
 		return s.finishUnknownDelivery(ctx)
 	}
 
 	result, err := body.Finish(ctx)
 	if err != nil {
+		s.recordDATAStream(ctx, lmtpObservationResultFailure, lmtpReasonDATA, statusClass(responseStatusTemporary), time.Since(started))
+
 		return s.finishUnknownDelivery(ctx)
 	}
+
+	s.recordDATAStream(ctx, deliveryResultLabel(result), deliveryReasonClass(result), deliveryResultStatusClass(result), time.Since(started))
 
 	return s.finishKnownDelivery(ctx, result)
 }
 
 // handleBDAT streams an exact byte-counted chunk and honors LAST as completion.
 func (s *Session) handleBDAT(ctx context.Context, command frontendCommand) error {
+	ctx = s.transactionContext(ctx)
+	started := time.Now()
+
 	if err := s.requireBDATAllowed(command); err != nil {
+		s.recordBDATStream(ctx, lmtpObservationOperationBDATChunk, lmtpObservationResultFailure, lmtpReasonProtocol, lmtpStatusClassUnknown, time.Since(started))
+
 		return err
 	}
 
 	bdat, err := parseBDATCommand(command)
 	if err != nil {
+		s.recordBDATStream(ctx, lmtpObservationOperationBDATChunk, lmtpObservationResultFailure, lmtpReasonParser, lmtpStatusClassUnknown, time.Since(started))
+
 		return s.writeEnhanced(responseStatusParameter, enhancedParameter, malformedBDATText)
 	}
 
@@ -238,6 +295,8 @@ func (s *Session) handleBDAT(ctx context.Context, command frontendCommand) error
 	if s.transaction.body == nil {
 		body, err := s.messageSink.OpenMessage(ctx, s.transaction.snapshot())
 		if err != nil {
+			s.recordBDATStream(ctx, lmtpObservationOperationBDATChunk, lmtpObservationResultFailure, lmtpReasonBDAT, statusClass(responseStatusTemporary), time.Since(started))
+
 			return s.writeEnhanced(responseStatusTemporary, enhancedTemporary, "Message sink unavailable")
 		}
 
@@ -246,11 +305,14 @@ func (s *Session) handleBDAT(ctx context.Context, command frontendCommand) error
 
 	if err := s.copyBDATChunk(s.transaction.body, bdat.size); err != nil {
 		_ = s.abortActiveBody(ctx, "bdat_stream")
+		s.recordBDATStream(ctx, lmtpObservationOperationBDATChunk, lmtpObservationResultFailure, lmtpReasonBDAT, lmtpStatusClassUnknown, time.Since(started))
 
 		return err
 	}
 
 	if !bdat.last {
+		s.recordBDATStream(ctx, lmtpObservationOperationBDATChunk, lmtpObservationResultOK, lmtpReasonOK, statusClass(responseStatusOK), time.Since(started))
+
 		return s.writeEnhanced(responseStatusOK, enhancedOK, bdatChunkAcceptedText)
 	}
 
@@ -259,8 +321,12 @@ func (s *Session) handleBDAT(ctx context.Context, command frontendCommand) error
 
 	result, err := body.Finish(ctx)
 	if err != nil {
+		s.recordBDATStream(ctx, lmtpObservationOperationBDATComplete, lmtpObservationResultFailure, lmtpReasonBDAT, statusClass(responseStatusTemporary), time.Since(started))
+
 		return s.finishUnknownDelivery(ctx)
 	}
+
+	s.recordBDATStream(ctx, lmtpObservationOperationBDATComplete, deliveryResultLabel(result), deliveryReasonClass(result), deliveryResultStatusClass(result), time.Since(started))
 
 	return s.finishKnownDelivery(ctx, result)
 }
@@ -272,6 +338,7 @@ func (s *Session) handleRSET(ctx context.Context, command frontendCommand) error
 	}
 
 	s.resetTransaction(ctx, "rset")
+	s.recordCommand(ctx, lmtpObservationOperationRSET, lmtpObservationResultOK, lmtpReasonOK, nil)
 
 	return s.writeEnhanced(responseStatusOK, enhancedOK, rsetText)
 }

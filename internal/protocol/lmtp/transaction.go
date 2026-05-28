@@ -21,8 +21,10 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/croessner/nauthilus-director/internal/backend"
+	"github.com/croessner/nauthilus-director/internal/observability"
 )
 
 const (
@@ -70,16 +72,34 @@ func (s *Session) ensureBackendTransaction(ctx context.Context, target backend.B
 		return nil
 	}
 
-	connection, err := s.backendConnector.Connect(ctx, target, s.backendConnectTimeout)
+	connectCtx, connectSpan := s.startObservationSpan(s.transactionContext(ctx), observability.TraceBoundaryBackendConnect, lmtpObservationOperationBackendConnect, lmtpObservationResultStart, "", map[string]string{
+		lmtpObsFieldBackendIdentifier: target.Identifier,
+		lmtpObsFieldShardTag:          target.ShardTag,
+	})
+	connectStarted := time.Now()
+	connection, err := s.backendConnector.Connect(connectCtx, target, s.backendConnectTimeout)
+
+	connectDuration := time.Since(connectStarted)
 	if err != nil {
+		s.recordBackendConnect(connectCtx, lmtpObservationResultFailure, lmtpReasonBackendConnect, target.Identifier, target.ShardTag, connectDuration)
+		connectSpan.End(lmtpObservationResultFailure, lmtpReasonBackendConnect)
+
 		return err
 	}
 
 	if err := AuthenticateBackend(connection, target); err != nil {
 		_ = connection.Conn().Close()
 
+		s.recordBackendConnect(connectCtx, lmtpObservationResultOK, lmtpReasonOK, target.Identifier, target.ShardTag, connectDuration)
+		s.recordBackendAuth(connectCtx, lmtpObservationResultFailure, lmtpReasonBackendAuth, backendAuthObservationMechanism(target), target.Identifier, target.ShardTag)
+		connectSpan.End(lmtpObservationResultFailure, lmtpReasonBackendAuth)
+
 		return err
 	}
+
+	s.recordBackendConnect(connectCtx, lmtpObservationResultOK, lmtpReasonOK, target.Identifier, target.ShardTag, connectDuration)
+	s.recordBackendAuth(connectCtx, lmtpObservationResultOK, lmtpReasonOK, backendAuthObservationMechanism(target), target.Identifier, target.ShardTag)
+	connectSpan.End(lmtpObservationResultOK, lmtpReasonOK)
 
 	transaction := &backendTransaction{
 		connection: connection,
@@ -95,6 +115,27 @@ func (s *Session) ensureBackendTransaction(ctx context.Context, target backend.B
 	s.transaction.backend = transaction
 
 	return nil
+}
+
+// backendAuthObservationMechanism returns a bounded backend-auth mechanism label.
+func backendAuthObservationMechanism(target backend.Backend) string {
+	switch strings.ToLower(strings.TrimSpace(target.Auth.Mode)) {
+	case backendAuthModeSASL:
+		mechanism := strings.ToLower(strings.TrimSpace(target.Auth.SASL.Mechanism))
+		if mechanism == "" {
+			return mechanismPlain
+		}
+
+		return mechanism
+	case backendAuthModeOAuthBearer:
+		return mechanismOAuthBearer
+	case backendAuthModeMTLS:
+		return backendAuthModeMTLS
+	case backendAuthModeNone, "":
+		return backendAuthModeNone
+	default:
+		return "unknown"
+	}
 }
 
 // closeBackendTransaction deterministically releases any open backend stream.

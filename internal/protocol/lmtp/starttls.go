@@ -18,16 +18,21 @@ package lmtp
 
 import (
 	"bufio"
+	"context"
 	"crypto/tls"
 )
 
 // handleSTARTTLS validates STARTTLS sequencing and updates the logical TLS state.
-func (s *Session) handleSTARTTLS(command frontendCommand) (commandOutcome, error) {
+func (s *Session) handleSTARTTLS(ctx context.Context, command frontendCommand) (commandOutcome, error) {
 	if err := validateNoArguments(command); err != nil {
+		s.recordCommand(ctx, lmtpObservationOperationSTARTTLS, lmtpObservationResultFailure, lmtpReasonParser, nil)
+
 		return commandOutcome{}, s.writeEnhanced(responseStatusParameter, enhancedParameter, "Invalid STARTTLS command")
 	}
 
 	if !s.startTLSAvailable() {
+		s.recordCommand(ctx, lmtpObservationOperationSTARTTLS, lmtpObservationResultFailure, lmtpReasonProtocol, nil)
+
 		return commandOutcome{}, s.writeEnhanced(responseStatusBadSequence, enhancedBadSequence, startTLSUnavailableText)
 	}
 
@@ -42,6 +47,8 @@ func (s *Session) handleSTARTTLS(command frontendCommand) (commandOutcome, error
 	if s.frontendTLSConfig != nil {
 		tlsConn := tls.Server(s.conn, s.frontendTLSConfig.Clone())
 		if err := tlsConn.Handshake(); err != nil {
+			s.recordCommand(ctx, lmtpObservationOperationSTARTTLS, lmtpObservationResultFailure, lmtpReasonAuth, nil)
+
 			return commandOutcome{flushed: true}, err
 		}
 
@@ -53,6 +60,7 @@ func (s *Session) handleSTARTTLS(command frontendCommand) (commandOutcome, error
 	s.tlsActive = true
 	s.resetAfterSTARTTLS()
 	s.refreshMTLSPeerAuth()
+	s.recordCommand(ctx, lmtpObservationOperationSTARTTLS, lmtpObservationResultOK, lmtpReasonOK, nil)
 
 	return commandOutcome{flushed: true}, nil
 }

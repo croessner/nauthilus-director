@@ -26,6 +26,7 @@ import (
 
 	"github.com/croessner/nauthilus-director/internal/backend"
 	"github.com/croessner/nauthilus-director/internal/nauthilus"
+	"github.com/croessner/nauthilus-director/internal/observability"
 	"github.com/croessner/nauthilus-director/internal/routing"
 	"github.com/croessner/nauthilus-director/internal/state"
 )
@@ -76,6 +77,7 @@ type SessionConfig struct {
 	BackendSelector         backend.Selector
 	BackendConnector        BackendConnector
 	MessageSink             MessageSink
+	Observability           observability.Recorder
 }
 
 // MTLSPeerAuthConfig describes when verified client certificates may satisfy peer auth.

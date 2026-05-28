@@ -42,37 +42,55 @@ const (
 	metricLabelTLSMode         = "tls_mode"
 	metricLabelTransport       = "transport"
 
-	fieldBackendIdentifier = "backend_identifier"
-	fieldBearer            = "bearer"
-	fieldClientIP          = "client_ip"
-	fieldCredential        = "credential"
-	fieldError             = "error"
-	fieldOAuth             = "oauth"
-	fieldPasswd            = "passwd"
-	fieldPassword          = "password"
-	fieldPrivateKey        = "private_key"
-	fieldProtected         = "protected"
-	fieldRawError          = "raw_error"
-	fieldRecipient         = "recipient"
-	fieldRemoteAddr        = "remote_addr"
-	fieldRequestID         = "request_id"
-	fieldRedisKey          = "redis_key"
-	fieldSASL              = "sasl"
-	fieldSASLBlob          = "sasl_blob"
-	fieldSaltFile          = "salt_file"
-	fieldSecret            = "secret"
-	fieldSessionID         = "session_id"
-	fieldSpanID            = "span_id"
-	fieldToken             = "token"
-	fieldTraceID           = "trace_id"
-	fieldUserHash          = "user_hash"
-	fieldUserKey           = "user_key"
-	fieldUsername          = "username"
+	fieldAuthorization       = "authorization"
+	fieldAuthorizationHeader = "authorization_header"
+	fieldBackendIdentifier   = "backend_identifier"
+	fieldBearer              = "bearer"
+	fieldBDATContent         = "bdat_content"
+	fieldBody                = "body"
+	fieldClientIP            = "client_ip"
+	fieldCredential          = "credential"
+	fieldDATAContent         = "data_content"
+	fieldEnvelopeSender      = "envelope_sender"
+	fieldError               = "error"
+	fieldMailFrom            = "mail_from"
+	fieldMessageBody         = "message_body"
+	fieldMessageContent      = "message_content"
+	fieldMessageID           = "message_id"
+	fieldOAuth               = "oauth"
+	fieldPasswd              = "passwd"
+	fieldPassword            = "password"
+	fieldPrivateKey          = "private_key"
+	fieldProtected           = "protected"
+	fieldRawError            = "raw_error"
+	fieldRecipient           = "recipient"
+	fieldRemoteAddr          = "remote_addr"
+	fieldRequestID           = "request_id"
+	fieldRedisKey            = "redis_key"
+	fieldSASL                = "sasl"
+	fieldSASLBlob            = "sasl_blob"
+	fieldSaltFile            = "salt_file"
+	fieldSecret              = "secret"
+	fieldSessionID           = "session_id"
+	fieldSpanID              = "span_id"
+	fieldSubject             = "subject"
+	fieldToken               = "token"
+	fieldTraceID             = "trace_id"
+	fieldUserHash            = "user_hash"
+	fieldUserKey             = "user_key"
+	fieldUsername            = "username"
 
 	reasonClassOK                     = "ok"
+	reasonClassAuth                   = "auth"
+	reasonClassBackendStatus          = "backend_status"
+	reasonClassBDAT                   = "bdat"
+	reasonClassData                   = "data"
 	reasonClassOther                  = "other"
+	reasonClassParser                 = "parser"
+	reasonClassRouting                = "routing"
 	reasonClassRuntimeHardMaintenance = "runtime_hard_maintenance"
 	reasonClassRuntimeOut             = "runtime_out"
+	reasonClassSameBackend            = "same_backend"
 	reasonClassStaticHardMaintenance  = "static_hard_maintenance"
 	reasonClassStaticSoftMaintenance  = "static_soft_maintenance"
 	reasonClassTemporaryFailure       = "temporary_failure"
@@ -117,18 +135,29 @@ var forbiddenMetricLabels = map[string]struct{}{
 }
 
 var collapsedLogFields = map[string]struct{}{
-	fieldClientIP:   {},
-	fieldError:      {},
-	fieldRawError:   {},
-	fieldRecipient:  {},
-	fieldRemoteAddr: {},
-	fieldRequestID:  {},
-	fieldRedisKey:   {},
-	fieldSASLBlob:   {},
-	fieldSessionID:  {},
-	fieldUserHash:   {},
-	fieldUserKey:    {},
-	fieldUsername:   {},
+	fieldAuthorization:       {},
+	fieldAuthorizationHeader: {},
+	fieldBDATContent:         {},
+	fieldBody:                {},
+	fieldClientIP:            {},
+	fieldDATAContent:         {},
+	fieldEnvelopeSender:      {},
+	fieldError:               {},
+	fieldMailFrom:            {},
+	fieldMessageBody:         {},
+	fieldMessageContent:      {},
+	fieldMessageID:           {},
+	fieldRawError:            {},
+	fieldRecipient:           {},
+	fieldRemoteAddr:          {},
+	fieldRequestID:           {},
+	fieldRedisKey:            {},
+	fieldSASLBlob:            {},
+	fieldSessionID:           {},
+	fieldSubject:             {},
+	fieldUserHash:            {},
+	fieldUserKey:             {},
+	fieldUsername:            {},
 }
 
 var diagnosticLogFields = map[string]struct{}{
@@ -154,10 +183,13 @@ var secretFieldFragments = []string{
 var allowedReasonClasses = map[string]struct{}{
 	"active_affinity":                 {},
 	"ambiguous_state":                 {},
+	reasonClassAuth:                   {},
 	"attach_retry":                    {},
-	"backend_connect":                 {},
 	"backend_auth_failed":             {},
 	"backend_closed":                  {},
+	"backend_connect":                 {},
+	reasonClassBackendStatus:          {},
+	reasonClassBDAT:                   {},
 	"bind_failed":                     {},
 	"canceled":                        {},
 	"backend_runtime":                 {},
@@ -168,6 +200,7 @@ var allowedReasonClasses = map[string]struct{}{
 	"conflict":                        {},
 	"control_action":                  {},
 	"credential_input":                {},
+	reasonClassData:                   {},
 	"denied":                          {},
 	"drain":                           {},
 	"health":                          {},
@@ -187,12 +220,14 @@ var allowedReasonClasses = map[string]struct{}{
 	"not_found":                       {},
 	reasonClassOK:                     {},
 	reasonClassOther:                  {},
+	reasonClassParser:                 {},
 	"protocol":                        {},
 	"protected_config":                {},
 	"reap":                            {},
 	"rejected":                        {},
 	"reload_safe":                     {},
 	"reload_unsafe":                   {},
+	reasonClassRouting:                {},
 	"runtime_drain":                   {},
 	reasonClassRuntimeHardMaintenance: {},
 	reasonClassRuntimeOut:             {},
@@ -201,6 +236,7 @@ var allowedReasonClasses = map[string]struct{}{
 	"session_kill":                    {},
 	"shutdown":                        {},
 	"shutdown_timeout":                {},
+	reasonClassSameBackend:            {},
 	"script_missing":                  {},
 	"soft_maintenance":                {},
 	"state_failed":                    {},

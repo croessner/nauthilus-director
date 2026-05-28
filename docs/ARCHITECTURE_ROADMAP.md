@@ -926,9 +926,10 @@ sasl_blob
 raw_error
 ```
 
-Prometheus metrics should include sessions, auth totals/durations, routing resolver totals/durations, backend selection totals, backend health, backend maintenance, proxy bytes/durations, LMTP recipient totals, REST requests and Redis operation health.
+Prometheus metrics should include sessions, auth totals/durations, routing resolver totals/durations, backend selection totals, backend health, backend maintenance, proxy bytes/durations, LMTP transaction totals/durations, LMTP recipient route/status totals, LMTP same-backend policy failures, LMTP DATA/BDAT stream totals/durations, LMTP backend status classes, REST requests and Redis operation health.
 
 `backend_pool` and `shard_tag` are acceptable labels; raw backend identifiers are not metrics labels. Per-backend details belong in REST, logs and traces.
+LMTP observability must also keep raw recipients, envelope senders, message identifiers, subjects and DATA/BDAT content out of logs, traces and metric labels.
 
 ## 18. Health checks and maintenance
 
