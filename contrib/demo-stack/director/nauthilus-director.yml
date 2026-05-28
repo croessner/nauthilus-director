@@ -1,0 +1,631 @@
+# Copyright (C) 2026 Christian Rößner
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
+# Nauthilus Director demo configuration
+# =====================================
+#
+# This file is intentionally verbose. It is meant to be read by operators and
+# developers who want to understand how the demo stack is wired, not only by the
+# binary. The same file is mounted into both Director containers. Docker Compose
+# only changes DIRECTOR_INSTANCE_NAME so both instances can share the same
+# routing and backend configuration while still reporting distinct identities.
+#
+# Important safety note:
+# This is a demo profile. It uses demo credentials, self-signed frontend
+# certificates, and unauthenticated local control listeners. It is suitable for
+# a local lab or an isolated remote test host, but it should not be exposed as a
+# production configuration.
+
+
+# Loader patch operations
+# -----------------------
+#
+# The Director loader starts from the built-in default configuration, overlays
+# this YAML file, and then applies loader-only patch operations before typed
+# validation. Patch operations are useful when the defaults contain a map or
+# list entry that is easier to remove surgically than to duplicate the whole
+# surrounding tree.
+#
+# Supported operations are:
+# - add: append to a list, shallow-merge into a map, or create a new list.
+# - replace: replace the value at the dot-path.
+# - remove: remove a matching list item or named map key.
+#
+# In this demo the built-in defaults include a plain LMTP listener named
+# "lmtp". The stack intentionally publishes only TLS-wrapped LMTPS through
+# HAProxy/Postfix, so the inherited cleartext LMTP listener is removed here.
+# The remaining LMTPS listener is defined explicitly below.
+patch:
+  - op: remove
+    path: director.listeners
+    value:
+      - lmtp
+
+
+# Runtime process and control API
+# -------------------------------
+#
+# runtime.instance_name is expanded from the environment. Compose sets a
+# different value for director-a and director-b so logs, metrics and Redis
+# runtime state can distinguish the two processes.
+runtime:
+  instance_name: "${DIRECTOR_INSTANCE_NAME}"
+
+  process:
+    # Give active protocol sessions a short, predictable window to close during
+    # container shutdown. The demo favors fast iteration over long draining.
+    shutdown_timeout: 10s
+
+  servers:
+    control:
+      # The control API is enabled so the demo can exercise readiness, status
+      # and future runtime operations through nauthilus-directorctl.
+      enabled: true
+      address: "0.0.0.0:9090"
+
+      # The demo keeps the control API unauthenticated because the ports are
+      # expected to be bound only to a trusted workstation or accessed through
+      # SSH forwarding. Do not copy this part into an exposed deployment.
+      auth:
+        bearer:
+          enabled: false
+        oidc:
+          enabled: false
+        mtls:
+          enabled: false
+
+      tls:
+        enabled: false
+
+  timeouts:
+    # Time allowed for frontend protocol negotiation before authentication.
+    preauth: 10s
+
+    # Time allowed for the full authority authentication call.
+    auth: 10s
+
+    # Time allowed for individual Director-to-Nauthilus authority requests.
+    nauthilus: 5s
+
+    # Time allowed to establish a connection to a selected Dovecot backend.
+    backend_connect: 5s
+
+    # Idle timeout for proxied sessions after frontend/backend piping starts.
+    proxy_idle: 30m
+
+    # Global shutdown timeout used by runtime components.
+    shutdown: 10s
+
+
+# Observability
+# -------------
+#
+# The stack writes structured JSON logs to stdout because Docker Compose can
+# collect them directly. Metrics are enabled in each Director process; HAProxy
+# also exposes its own stats endpoint separately.
+observability:
+  log:
+    level: info
+    json: true
+    add_source: false
+    redact_secrets: true
+
+    # This is a demo-only salt used to keep username-related log fields stable
+    # without logging raw account names where hashed values are used.
+    username_hash_salt_file: demo-director-salt
+
+  metrics:
+    enabled: true
+    path: /metrics
+    runtime_metrics: true
+
+  tracing:
+    # Tracing stays disabled so the stack has no external collector dependency.
+    enabled: false
+    service_name: nauthilus-director-demo
+    exporter: noop
+    endpoint: ""
+    sample_ratio: 0.0
+
+
+# Shared runtime state
+# --------------------
+#
+# Redis/Valkey is the production coordination point for session affinity,
+# active sessions and runtime state. The demo uses the Valkey container from
+# docker-compose.yml and keeps authentication/TLS off inside the private
+# Compose network.
+storage:
+  redis:
+    protocol: 2
+    key_prefix: "nauthilus-director-demo:"
+
+    standalone:
+      address: "valkey:6379"
+
+    auth:
+      username: ""
+      password_file: ""
+
+    tls:
+      enabled: false
+
+
+# Nauthilus authority transport
+# -----------------------------
+#
+# Nauthilus is the authentication authority only. It validates credentials and
+# returns released identity/routing attributes, such as "mailShard". The
+# Director owns backend selection, health handling, affinity and proxying.
+auth:
+  authorities:
+    default:
+      # The demo uses the real gRPC AuthService path. The HTTP block below is
+      # kept populated as an easy comparison point and fallback example, but it
+      # is not used while transport is "grpc".
+      transport: grpc
+      timeout: 5s
+
+      mechanisms:
+        password:
+          enabled: true
+          names:
+            - plain
+            - login
+        bearer:
+          enabled: false
+
+      oidc:
+        enabled: false
+
+      http:
+        endpoint: "http://nauthilus:8080/api/v1/auth/json"
+        content_type: application/json
+        basic_auth:
+          username: director
+          password_file: director-api-secret
+        tls:
+          enabled: false
+
+      grpc:
+        # This is the Nauthilus gRPC authority listener inside the Compose
+        # network. The listener itself is enabled in nauthilus/nauthilus.yml.
+        address: "nauthilus:50051"
+
+        # The authority value is used as the gRPC :authority override. Keeping
+        # it aligned with the service DNS name also matches the demo TLS
+        # certificate subjectAltName.
+        authority: nauthilus
+
+        caller_auth:
+          # Nauthilus requires backchannel caller authentication for the gRPC
+          # authority server. Basic auth is enough for this isolated demo and
+          # matches auth.backchannel.basic_auth in the Nauthilus config.
+          basic:
+            enabled: true
+            username: director
+            password_file: director-api-secret
+
+          # Bearer caller auth is disabled here. In a stronger split
+          # deployment this would usually be backed by short-lived OIDC tokens.
+          bearer:
+            enabled: false
+            token_file: ""
+
+        tls:
+          # Nauthilus deliberately rejects plaintext gRPC on non-loopback
+          # addresses. The grpc-tls helper service generates a short-lived demo
+          # CA and server certificate into the grpc-tls Docker volume.
+          enabled: true
+          ca_file: /run/nauthilus-demo/grpc-tls/ca.crt
+          server_name: nauthilus
+          insecure_skip_verify: false
+
+
+# Director protocol surface
+# -------------------------
+#
+# The Director exposes IMAP, IMAPS and LMTPS listeners to HAProxy. HAProxy adds
+# PROXY protocol headers so the Director sees the original frontend source
+# address instead of only the HAProxy container address.
+director:
+  security:
+    # Ambiguous authentication, routing or backend state must fail closed.
+    fail_closed: true
+
+    # Bounds for unauthenticated frontend input. These are intentionally modest
+    # because the demo only needs normal client commands and small literals.
+    max_preauth_line_bytes: 8192
+    max_preauth_literal_bytes: 65536
+
+  listeners:
+    imap:
+      # Cleartext IMAP with STARTTLS support, published by HAProxy on host port
+      # 8143. It is useful for testing STARTTLS and plaintext pre-auth behavior.
+      protocol: imap
+      service_name: imap
+      network: tcp
+      address: "0.0.0.0:10143"
+      authority: default
+      backend_pool: imap-default
+
+      proxy_protocol:
+        enabled: true
+        trusted_cidrs:
+          - 172.30.0.0/24
+
+      tls:
+        mode: starttls
+        cert: /run/nauthilus-director/tls/server.crt
+        key: /run/nauthilus-director/tls/server.key
+        client_ca: ""
+        require_client_cert: false
+        min_tls_version: TLS1.2
+
+      imap:
+        capabilities:
+          - IMAP4rev1
+          - ID
+          - SASL-IR
+          - STARTTLS
+          - AUTH=PLAIN
+        auth_mechanisms:
+          - plain
+        require_id_before_auth: false
+
+    imaps:
+      # Implicit TLS IMAP, published by HAProxy on host port 8993. The smoke
+      # fetch script uses this listener.
+      protocol: imap
+      service_name: imaps
+      network: tcp
+      address: "0.0.0.0:10993"
+      authority: default
+      backend_pool: imap-default
+
+      proxy_protocol:
+        enabled: true
+        trusted_cidrs:
+          - 172.30.0.0/24
+
+      tls:
+        mode: implicit
+        cert: /run/nauthilus-director/tls/server.crt
+        key: /run/nauthilus-director/tls/server.key
+        client_ca: ""
+        require_client_cert: false
+        min_tls_version: TLS1.2
+
+      imap:
+        capabilities:
+          - IMAP4rev1
+          - ID
+          - SASL-IR
+          - AUTH=PLAIN
+        auth_mechanisms:
+          - plain
+        require_id_before_auth: false
+
+    lmtps:
+      # Implicit TLS LMTP, used by Postfix after SMTP submission. The current
+      # production Director does not expose SMTP, so the demo path is:
+      # HAProxy SMTP -> Postfix -> HAProxy LMTPS -> Director -> Dovecot LMTP.
+      protocol: lmtp
+      service_name: lmtps
+      network: tcp
+      address: "0.0.0.0:11024"
+      authority: default
+      backend_pool: lmtp-default
+
+      proxy_protocol:
+        enabled: true
+        trusted_cidrs:
+          - 172.30.0.0/24
+
+      tls:
+        mode: implicit
+        cert: /run/nauthilus-director/tls/server.crt
+        key: /run/nauthilus-director/tls/server.key
+        client_ca: ""
+        require_client_cert: false
+        min_tls_version: TLS1.2
+
+      lmtp:
+        smtputf8: true
+
+        # LMTP recipient lookup uses the default Nauthilus authority, but the
+        # SMTP-to-LMTP demo relay itself does not require frontend SASL or mTLS.
+        client_auth:
+          required: false
+          authority: default
+          mechanisms: []
+          mtls:
+            satisfies_required: false
+            identity_source: ""
+
+        capabilities:
+          - SMTPUTF8
+          - CHUNKING
+
+
+  # Routing policy
+  # --------------
+  #
+  # Nauthilus releases the logical shard tag as an attribute. The Director maps
+  # that shard tag onto a concrete healthy backend in the requested pool. If the
+  # attribute is absent, the configured hash keys provide deterministic fallback
+  # placement for the protocol.
+  routing:
+    default_selector: rendezvous_hash
+    default_shard: mailstore-a
+    hash_key: username
+    lmtp_hash_key: recipient
+    failover:
+      enabled: true
+      strategy: same_shard_then_any_healthy
+
+
+  # Backend pools
+  # -------------
+  #
+  # Pools are protocol-specific. IMAP sessions and LMTP deliveries select from
+  # different backend endpoints even when they belong to the same logical shard.
+  backend_pools:
+    imap-default:
+      protocol: imap
+      selector: rendezvous_hash
+      backends:
+        - mailstore-a-imap
+        - mailstore-b-imap
+        - mailstore-c-imap
+
+    lmtp-default:
+      protocol: lmtp
+      selector: recipient_hash
+      backends:
+        - mailstore-a-lmtp
+        - mailstore-b-lmtp
+        - mailstore-c-lmtp
+
+
+  # Backend definitions
+  # -------------------
+  #
+  # Each Dovecot container exposes one IMAP endpoint and one LMTP endpoint.
+  # shard_tag is the stable logical shard name returned by Nauthilus. The
+  # concrete backend identifiers remain Director-owned implementation details.
+  backends:
+    mailstore-a-imap:
+      protocol: imap
+      shard_tag: mailstore-a
+      address: "mailstore-a:31143"
+      weight: 100
+      max_connections: 1000
+      maintenance: disabled
+
+      tls:
+        mode: starttls
+        ca_file: ""
+        cert: ""
+        key: ""
+        server_name: ""
+        min_tls_version: TLS1.2
+
+        # Dovecot demo certificates are self-signed. The demo therefore skips
+        # backend verification while still exercising TLS on the wire.
+        insecure_skip_verify: true
+
+      auth:
+        # The Director authenticates the user with Nauthilus and then replays
+        # the accepted credential to Dovecot. This keeps Dovecot simple while
+        # preserving the Director as the proxy lifecycle owner.
+        mode: credential_replay
+        credential_replay:
+          require_backend_tls: false
+          preserve_mechanism: false
+          allowed_mechanisms:
+            - plain
+            - login
+
+      health_check:
+        enabled: true
+        deep_check: true
+        username: healthcheck@example.test
+        password_file: demo-secret
+
+    mailstore-b-imap:
+      protocol: imap
+      shard_tag: mailstore-b
+      address: "mailstore-b:31143"
+      weight: 100
+      max_connections: 1000
+      maintenance: disabled
+
+      tls:
+        mode: starttls
+        ca_file: ""
+        cert: ""
+        key: ""
+        server_name: ""
+        min_tls_version: TLS1.2
+        insecure_skip_verify: true
+
+      auth:
+        mode: credential_replay
+        credential_replay:
+          require_backend_tls: false
+          preserve_mechanism: false
+          allowed_mechanisms:
+            - plain
+            - login
+
+      health_check:
+        enabled: true
+        deep_check: true
+        username: healthcheck@example.test
+        password_file: demo-secret
+
+    mailstore-c-imap:
+      protocol: imap
+      shard_tag: mailstore-c
+      address: "mailstore-c:31143"
+      weight: 100
+      max_connections: 1000
+      maintenance: disabled
+
+      haproxy:
+        enabled: false
+
+      tls:
+        mode: starttls
+        ca_file: ""
+        cert: ""
+        key: ""
+        server_name: ""
+        min_tls_version: TLS1.2
+        insecure_skip_verify: true
+
+      auth:
+        mode: credential_replay
+
+        # These optional auth blocks are present to show the full backend-auth
+        # shape in one backend entry. They are inactive while mode is
+        # credential_replay.
+        master_user:
+          username: ""
+          password_file: ""
+          user_format: "{user}*{master_user}"
+          mechanism: plain
+
+        credential_replay:
+          require_backend_tls: false
+          preserve_mechanism: false
+          allowed_mechanisms:
+            - plain
+            - login
+
+        sasl:
+          mechanism: plain
+          username: ""
+          password_file: ""
+          require_tls: false
+
+        oauthbearer:
+          token_file: ""
+          require_tls: false
+
+      health_check:
+        enabled: true
+        deep_check: true
+        username: healthcheck@example.test
+        password_file: demo-secret
+
+    mailstore-a-lmtp:
+      protocol: lmtp
+      shard_tag: mailstore-a
+      address: "mailstore-a:31024"
+      weight: 100
+      max_connections: 1000
+      maintenance: disabled
+
+      tls:
+        mode: implicit
+        ca_file: ""
+        cert: ""
+        key: ""
+        server_name: ""
+        min_tls_version: TLS1.2
+        insecure_skip_verify: true
+
+      auth:
+        # The demo LMTP backend accepts the relayed delivery path without
+        # backend SASL. Recipient-to-shard authorization already happened via
+        # Nauthilus lookup before the delivery transaction was proxied.
+        mode: none
+
+      health_check:
+        enabled: true
+        deep_check: true
+        username: healthcheck@example.test
+        password_file: demo-secret
+
+    mailstore-b-lmtp:
+      protocol: lmtp
+      shard_tag: mailstore-b
+      address: "mailstore-b:31024"
+      weight: 100
+      max_connections: 1000
+      maintenance: disabled
+
+      tls:
+        mode: implicit
+        ca_file: ""
+        cert: ""
+        key: ""
+        server_name: ""
+        min_tls_version: TLS1.2
+        insecure_skip_verify: true
+
+      auth:
+        mode: none
+
+      health_check:
+        enabled: true
+        deep_check: true
+        username: healthcheck@example.test
+        password_file: demo-secret
+
+    mailstore-c-lmtp:
+      protocol: lmtp
+      shard_tag: mailstore-c
+      address: "mailstore-c:31024"
+      weight: 100
+      max_connections: 1000
+      maintenance: disabled
+
+      haproxy:
+        enabled: false
+
+      tls:
+        mode: implicit
+        ca_file: ""
+        cert: ""
+        key: ""
+        server_name: ""
+        min_tls_version: TLS1.2
+        insecure_skip_verify: true
+
+      auth:
+        mode: none
+
+        # As with mailstore-c-imap, the inactive auth blocks document the
+        # available backend-auth shape without changing demo behavior.
+        master_user:
+          username: ""
+          password_file: ""
+          user_format: "{user}*{master_user}"
+          mechanism: plain
+
+        credential_replay:
+          require_backend_tls: false
+          preserve_mechanism: false
+          allowed_mechanisms:
+            - plain
+            - login
+
+        sasl:
+          mechanism: plain
+          username: ""
+          password_file: ""
+          require_tls: false
+
+        oauthbearer:
+          token_file: ""
+          require_tls: false
+
+      health_check:
+        enabled: true
+        deep_check: true
+        username: healthcheck@example.test
+        password_file: demo-secret

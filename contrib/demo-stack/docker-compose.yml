@@ -1,0 +1,248 @@
+# Copyright (C) 2026 Christian Rößner
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
+name: ${COMPOSE_PROJECT_NAME:-nauthilus-director-demo}
+
+services:
+  valkey:
+    image: ${VALKEY_IMAGE:-valkey/valkey:9.1.0-alpine}
+    command: ["valkey-server", "--save", "", "--appendonly", "no"]
+    networks:
+      demo:
+        aliases:
+          - valkey
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  grpc-tls:
+    build:
+      context: ../..
+      dockerfile: contrib/demo-stack/Dockerfile.director
+    user: "0:0"
+    network_mode: none
+    entrypoint: ["/usr/local/bin/generate-grpc-tls.sh"]
+    volumes:
+      - grpc-tls:/run/nauthilus-demo/grpc-tls
+
+  openldap:
+    image: ${OPENLDAP_IMAGE:-chrroessner/openldap:2.6.13}
+    environment:
+      LDAP_DOMAIN: demo.local
+      LDAP_BASE_DN: dc=demo,dc=local
+      LDAP_ORGANISATION: Nauthilus Director Demo
+      LDAP_ADMIN_PASSWORD: admin
+      LDAP_PASSWORD_HASH_SCHEME: "{SSHA}"
+      LDAP_ALLOW_ANON_BIND: "false"
+    volumes:
+      - ./ldap/bootstrap:/docker-entrypoint-initdb.d:ro
+      - ./ldap/schema:/etc/openldap/custom-schema:ro
+      - openldap-data:/var/lib/openldap/openldap-data
+      - openldap-accesslog:/var/lib/openldap/accesslog
+    networks:
+      demo:
+        aliases:
+          - openldap
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/docker-healthcheck.sh"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  nauthilus:
+    image: ${NAUTHILUS_IMAGE:-ghcr.io/croessner/nauthilus:v3.0.0-rc.4}
+    depends_on:
+      grpc-tls:
+        condition: service_completed_successfully
+      valkey:
+        condition: service_healthy
+      openldap:
+        condition: service_healthy
+    volumes:
+      - ./nauthilus/nauthilus.yml:/etc/nauthilus/nauthilus.yml:ro
+      - ./nauthilus/lua:/etc/nauthilus/lua:ro
+      - grpc-tls:/run/nauthilus-demo/grpc-tls:ro
+    networks:
+      demo:
+        aliases:
+          - nauthilus
+    healthcheck:
+      test: ["CMD", "/usr/app/healthcheck", "--url", "http://127.0.0.1:8080/healthz"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  mailstore-a:
+    image: ${DOVECOT_IMAGE:-dovecot/dovecot:2.4.4}
+    hostname: mailstore-a
+    environment:
+      USER_PASSWORD: ${DEMO_PASSWORD:-demo-secret}
+    networks:
+      demo:
+        aliases:
+          - mailstore-a
+    healthcheck:
+      test: ["CMD-SHELL", "doveadm who >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  mailstore-b:
+    image: ${DOVECOT_IMAGE:-dovecot/dovecot:2.4.4}
+    hostname: mailstore-b
+    environment:
+      USER_PASSWORD: ${DEMO_PASSWORD:-demo-secret}
+    networks:
+      demo:
+        aliases:
+          - mailstore-b
+    healthcheck:
+      test: ["CMD-SHELL", "doveadm who >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  mailstore-c:
+    image: ${DOVECOT_IMAGE:-dovecot/dovecot:2.4.4}
+    hostname: mailstore-c
+    environment:
+      USER_PASSWORD: ${DEMO_PASSWORD:-demo-secret}
+    networks:
+      demo:
+        aliases:
+          - mailstore-c
+    healthcheck:
+      test: ["CMD-SHELL", "doveadm who >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  director-a:
+    build:
+      context: ../..
+      dockerfile: contrib/demo-stack/Dockerfile.director
+    environment:
+      DIRECTOR_INSTANCE_NAME: demo-director-a
+    depends_on:
+      valkey:
+        condition: service_healthy
+      nauthilus:
+        condition: service_healthy
+      mailstore-a:
+        condition: service_healthy
+      mailstore-b:
+        condition: service_healthy
+      mailstore-c:
+        condition: service_healthy
+    volumes:
+      - ./director/nauthilus-director.yml:/etc/nauthilus-director/nauthilus-director.yml:ro
+      - grpc-tls:/run/nauthilus-demo/grpc-tls:ro
+    ports:
+      - "${DIRECTOR_A_CONTROL_PORT:-9090}:9090"
+    networks:
+      demo:
+        aliases:
+          - director-a
+    healthcheck:
+      test: ["CMD", "nauthilus-directorctl", "--address", "http://127.0.0.1:9090", "status"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  director-b:
+    build:
+      context: ../..
+      dockerfile: contrib/demo-stack/Dockerfile.director
+    environment:
+      DIRECTOR_INSTANCE_NAME: demo-director-b
+    depends_on:
+      valkey:
+        condition: service_healthy
+      nauthilus:
+        condition: service_healthy
+      mailstore-a:
+        condition: service_healthy
+      mailstore-b:
+        condition: service_healthy
+      mailstore-c:
+        condition: service_healthy
+    volumes:
+      - ./director/nauthilus-director.yml:/etc/nauthilus-director/nauthilus-director.yml:ro
+      - grpc-tls:/run/nauthilus-demo/grpc-tls:ro
+    ports:
+      - "${DIRECTOR_B_CONTROL_PORT:-9091}:9090"
+    networks:
+      demo:
+        aliases:
+          - director-b
+    healthcheck:
+      test: ["CMD", "nauthilus-directorctl", "--address", "http://127.0.0.1:9090", "status"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  postfix:
+    image: ${POSTFIX_IMAGE:-chrroessner/postfix:3.11.3}
+    depends_on:
+      director-a:
+        condition: service_healthy
+      director-b:
+        condition: service_healthy
+    environment:
+      POSTFIX_RUNTIME_HOSTNAME: postfix.demo.local
+      POSTFIX_RUNTIME_DOMAIN: demo.local
+      POSTFIX_RUNTIME_MYNETWORKS: 0.0.0.0/0
+      DIRECTOR_LMTPS_RELAY: haproxy:2465
+    volumes:
+      - ./postfix/init:/docker-entrypoint-init.d:ro
+    networks:
+      demo:
+        aliases:
+          - postfix
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/docker-healthcheck.sh"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  haproxy:
+    image: ${HAPROXY_IMAGE:-haproxy:3.2-alpine}
+    depends_on:
+      postfix:
+        condition: service_healthy
+      director-a:
+        condition: service_healthy
+      director-b:
+        condition: service_healthy
+    ports:
+      - "${SMTP_PORT:-2525}:25"
+      - "${IMAP_PORT:-8143}:143"
+      - "${IMAPS_PORT:-8993}:993"
+      - "${LMTPS_PORT:-8024}:2465"
+      - "${HAPROXY_STATS_PORT:-8404}:8404"
+    volumes:
+      - ./haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    networks:
+      demo:
+        aliases:
+          - haproxy
+    healthcheck:
+      test: ["CMD", "haproxy", "-c", "-f", "/usr/local/etc/haproxy/haproxy.cfg"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+networks:
+  demo:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
+
+volumes:
+  openldap-data:
+  openldap-accesslog:
+  grpc-tls:
