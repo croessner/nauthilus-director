@@ -47,11 +47,14 @@ const (
 	testGRPCAuthority    = "grpc-authority"
 	testIMAPListener     = "imap"
 	testIMAPSListener    = "imaps"
+	testLMTPListener     = "lmtp"
+	testLMTPSListener    = "lmtps"
+	testLoopbackAny      = "127.0.0.1:0"
 	trustedLocalhostCIDR = "127.0.0.1/32"
 )
 
-// TestManagerSelectsOnlyIMAPListeners verifies that the manager starts only protocol=imap entries.
-func TestManagerSelectsOnlyIMAPListeners(t *testing.T) {
+// TestManagerSelectsSupportedProtocolListeners verifies that startup plans include IMAP and LMTP listeners.
+func TestManagerSelectsSupportedProtocolListeners(t *testing.T) {
 	cfg := config.DefaultConfig()
 
 	manager, err := NewManagerWithConfig(cfg)
@@ -60,10 +63,27 @@ func TestManagerSelectsOnlyIMAPListeners(t *testing.T) {
 	}
 
 	got := manager.ListenerNames()
-	want := []string{testIMAPListener, testIMAPSListener}
+	want := []string{testIMAPListener, testIMAPSListener, testLMTPListener, testLMTPSListener}
 
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("listener names = %v, want %v", got, want)
+	}
+}
+
+// TestManagerRejectsUnsupportedProtocolBeforeBind verifies unknown protocols fail during planning.
+func TestManagerRejectsUnsupportedProtocolBeforeBind(t *testing.T) {
+	cfg := singleListenerConfig(testIMAPListener, tlsModeStartTLS)
+	entry := cfg.Director.Listeners[testIMAPListener]
+	entry.Protocol = "pop3"
+	cfg.Director.Listeners[testIMAPListener] = entry
+
+	_, err := NewManagerWithConfig(cfg)
+	if err == nil {
+		t.Fatal("NewManagerWithConfig accepted an unsupported protocol")
+	}
+
+	if !strings.Contains(err.Error(), "unsupported protocol pop3") {
+		t.Fatalf("error = %q, want unsupported protocol rejection", err.Error())
 	}
 }
 
@@ -152,8 +172,9 @@ func TestManagerSelectsConfiguredListenerAuthorityTransport(t *testing.T) {
 // TestStartTLSListenerStartsWithoutImplicitTLS verifies cleartext IMAP listener setup.
 func TestStartTLSListenerStartsWithoutImplicitTLS(t *testing.T) {
 	cfg := singleListenerConfig(testIMAPListener, tlsModeStartTLS)
+	handler := newRecordingHandler()
 
-	manager, address := startManager(t, cfg, testIMAPListener)
+	manager, address := startManager(t, cfg, testIMAPListener, WithSessionHandlerFactory(handler.factory))
 
 	snapshots := manager.Snapshots()
 	if len(snapshots) != 1 {
@@ -176,6 +197,69 @@ func TestStartTLSListenerStartsWithoutImplicitTLS(t *testing.T) {
 	}
 }
 
+// TestIMAPAndLMTPListenersStartThroughProtocolFactory verifies shared transport startup is protocol-generic.
+func TestIMAPAndLMTPListenersStartThroughProtocolFactory(t *testing.T) {
+	cfg := config.DefaultConfig()
+
+	imapEntry := cfg.Director.Listeners[testIMAPListener]
+	imapEntry.Address = testLoopbackAny
+	cfg.Director.Listeners[testIMAPListener] = imapEntry
+
+	lmtpEntry := cfg.Director.Listeners[testLMTPListener]
+	lmtpEntry.Address = testLoopbackAny
+	lmtpEntry.TLS.Mode = tlsModeStartTLS
+	cfg.Director.Listeners[testLMTPListener] = lmtpEntry
+
+	cfg.Director.Listeners = map[string]config.ListenerConfig{
+		testIMAPListener: imapEntry,
+		testLMTPListener: lmtpEntry,
+	}
+
+	protocols := make(chan string, 2)
+
+	manager, err := NewManagerWithConfig(
+		cfg,
+		WithSessionHandlerFactory(func(options SessionOptions) SessionHandler {
+			protocols <- options.Config.Protocol
+
+			return newRecordingHandler()
+		}),
+	)
+	if err != nil {
+		t.Fatalf("NewManagerWithConfig: %v", err)
+	}
+
+	startCtx, cancelStart := context.WithTimeout(context.Background(), time.Second)
+	defer cancelStart()
+
+	if err := manager.Start(startCtx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	t.Cleanup(func() {
+		stopCtx, cancelStop := context.WithTimeout(context.Background(), time.Second)
+		defer cancelStop()
+
+		_ = manager.Stop(stopCtx)
+	})
+
+	if _, ok := manager.BoundAddress(testIMAPListener); !ok {
+		t.Fatal("IMAP listener did not bind")
+	}
+
+	if _, ok := manager.BoundAddress(testLMTPListener); !ok {
+		t.Fatal("LMTP listener did not bind")
+	}
+
+	if got := manager.ListenerNames(); !reflect.DeepEqual(got, []string{testIMAPListener, testLMTPListener}) {
+		t.Fatalf("listener names = %v, want IMAP and LMTP", got)
+	}
+
+	if len(protocols) != 2 {
+		t.Fatalf("handler factory calls = %d, want 2", len(protocols))
+	}
+}
+
 // TestIMAPSListenerWrapsAcceptedConnectionsInTLS verifies implicit TLS before IMAP greeting.
 func TestIMAPSListenerWrapsAcceptedConnectionsInTLS(t *testing.T) {
 	certPath, keyPath := writeTestCertificate(t)
@@ -184,8 +268,9 @@ func TestIMAPSListenerWrapsAcceptedConnectionsInTLS(t *testing.T) {
 	entry.TLS.Cert = certPath
 	entry.TLS.Key = config.Secret(keyPath)
 	cfg.Director.Listeners[testIMAPSListener] = entry
+	handler := newRecordingHandler()
 
-	_, address := startManager(t, cfg, testIMAPSListener)
+	_, address := startManager(t, cfg, testIMAPSListener, WithSessionHandlerFactory(handler.factory))
 
 	dialer := &net.Dialer{Timeout: time.Second}
 	tlsConfig := &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12}
@@ -207,8 +292,9 @@ func TestIMAPSListenerWrapsAcceptedConnectionsInTLS(t *testing.T) {
 func TestGracefulListenerShutdownClosesActiveSessions(t *testing.T) {
 	cfg := singleListenerConfig(testIMAPListener, tlsModeStartTLS)
 	cfg.Runtime.Process.ShutdownTimeout = config.NewDuration(20 * time.Millisecond)
+	handler := newRecordingHandler()
 
-	manager, address := startManager(t, cfg, testIMAPListener)
+	manager, address := startManager(t, cfg, testIMAPListener, WithSessionHandlerFactory(handler.factory))
 
 	conn, err := net.Dial(networkTCP, address)
 	if err != nil {
@@ -612,7 +698,7 @@ func expectProxyRejection(t *testing.T, cfg config.Config, writeInput func(*test
 	recorder.expectNoSession(t)
 }
 
-// singleListenerConfig returns a default config narrowed to one IMAP-family listener.
+// singleListenerConfig returns a default config narrowed to one listener.
 func singleListenerConfig(name string, tlsMode string) config.Config {
 	cfg := config.DefaultConfig()
 	entry := cfg.Director.Listeners[name]

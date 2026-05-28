@@ -19,6 +19,7 @@ package app
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -28,6 +29,7 @@ import (
 	"github.com/croessner/nauthilus-director/internal/listener"
 	"github.com/croessner/nauthilus-director/internal/observability"
 	"github.com/croessner/nauthilus-director/internal/protocol/imap"
+	"github.com/croessner/nauthilus-director/internal/protocol/lmtp"
 	"github.com/croessner/nauthilus-director/internal/proxy"
 	"github.com/croessner/nauthilus-director/internal/rest"
 	"github.com/croessner/nauthilus-director/internal/rest/adapters"
@@ -41,6 +43,8 @@ import (
 const (
 	defaultReapInterval = 5 * time.Second
 	defaultReapLimit    = 100
+	protocolIMAP        = "imap"
+	protocolLMTP        = "lmtp"
 )
 
 // Options configures one production server process instance.
@@ -446,7 +450,7 @@ func reaper(
 	return reaper, nil
 }
 
-// sessionHandlerFactory injects runtime routing state into listener-owned IMAP sessions.
+// sessionHandlerFactory dispatches configured listener protocols to protocol-owned handlers.
 func sessionHandlerFactory(
 	resolver routing.RoutingResolver,
 	store state.SessionStore,
@@ -454,42 +458,98 @@ func sessionHandlerFactory(
 	recorder observability.Recorder,
 ) listener.SessionHandlerFactory {
 	return func(options listener.SessionOptions) listener.SessionHandler {
-		capabilities, mechanisms, requireID := imapListenerOptions(options.Config)
-
-		return imap.NewHandler(imap.SessionConfig{
-			ListenerName:           options.ListenerName,
-			AuthorityName:          options.Config.Authority,
-			AuthorityTransport:     options.AuthorityTransport,
-			ServiceName:            options.Config.ServiceName,
-			Network:                options.Config.Network,
-			BackendPool:            options.Config.BackendPool,
-			DirectorInstanceID:     options.DirectorInstanceID,
-			DefaultTenant:          options.DefaultTenant,
-			DefaultShard:           options.DefaultShard,
-			TLSMode:                options.Config.TLS.Mode,
-			Capabilities:           capabilities,
-			AuthMechanisms:         mechanisms,
-			MaxBearerTokenBytes:    options.BearerTokenMaxBytes,
-			RequireIDBeforeAuth:    requireID,
-			SessionLeaseTTL:        options.SessionLeaseTTL,
-			SessionIdleGrace:       options.SessionIdleGrace,
-			PreauthTimeout:         options.Timeouts.Preauth.Std(),
-			AuthTimeout:            options.Timeouts.Auth.Std(),
-			BackendConnectTimeout:  options.Timeouts.BackendConnect.Std(),
-			ProxyIdleTimeout:       options.Timeouts.ProxyIdle.Std(),
-			MaxPreauthLineBytes:    options.Security.MaxPreauthLineBytes,
-			MaxPreauthLiteralBytes: options.Security.MaxPreauthLiteralBytes,
-			FrontendTLSConfig:      options.FrontendTLSConfig,
-			Authenticator:          options.Authenticator,
-			RoutingResolver:        resolver,
-			SessionStore:           store,
-			BackendSelector:        selector,
-			BackendConnector:       imap.NewTCPBackendConnector(nil),
-			ProxyRunner:            proxy.NewPipe(),
-			LocalSessions:          options.LocalSessions,
-			Observability:          recorder,
-		})
+		switch strings.ToLower(strings.TrimSpace(options.Config.Protocol)) {
+		case protocolIMAP:
+			return imapSessionHandler(options, resolver, store, selector, recorder)
+		case protocolLMTP:
+			return lmtpSessionHandler(options)
+		default:
+			return unsupportedProtocolHandler{protocol: options.Config.Protocol}
+		}
 	}
+}
+
+type unsupportedProtocolHandler struct {
+	protocol string
+}
+
+// Serve rejects streams for protocols that passed neither config validation nor dispatch.
+func (h unsupportedProtocolHandler) Serve(context.Context, net.Conn) error {
+	return errors.New("unsupported listener protocol " + h.protocol)
+}
+
+// imapSessionHandler builds the production IMAP pre-auth and proxy pipeline.
+func imapSessionHandler(
+	options listener.SessionOptions,
+	resolver routing.RoutingResolver,
+	store state.SessionStore,
+	selector backend.Selector,
+	recorder observability.Recorder,
+) listener.SessionHandler {
+	capabilities, mechanisms, requireID := imapListenerOptions(options.Config)
+
+	return imap.NewHandler(imap.SessionConfig{
+		ListenerName:           options.ListenerName,
+		AuthorityName:          options.Config.Authority,
+		AuthorityTransport:     options.AuthorityTransport,
+		ServiceName:            options.Config.ServiceName,
+		Network:                options.Config.Network,
+		BackendPool:            options.Config.BackendPool,
+		DirectorInstanceID:     options.DirectorInstanceID,
+		DefaultTenant:          options.DefaultTenant,
+		DefaultShard:           options.DefaultShard,
+		TLSMode:                options.Config.TLS.Mode,
+		Capabilities:           capabilities,
+		AuthMechanisms:         mechanisms,
+		MaxBearerTokenBytes:    options.BearerTokenMaxBytes,
+		RequireIDBeforeAuth:    requireID,
+		SessionLeaseTTL:        options.SessionLeaseTTL,
+		SessionIdleGrace:       options.SessionIdleGrace,
+		PreauthTimeout:         options.Timeouts.Preauth.Std(),
+		AuthTimeout:            options.Timeouts.Auth.Std(),
+		BackendConnectTimeout:  options.Timeouts.BackendConnect.Std(),
+		ProxyIdleTimeout:       options.Timeouts.ProxyIdle.Std(),
+		MaxPreauthLineBytes:    options.Security.MaxPreauthLineBytes,
+		MaxPreauthLiteralBytes: options.Security.MaxPreauthLiteralBytes,
+		FrontendTLSConfig:      options.FrontendTLSConfig,
+		Authenticator:          options.Authenticator,
+		RoutingResolver:        resolver,
+		SessionStore:           store,
+		BackendSelector:        selector,
+		BackendConnector:       imap.NewTCPBackendConnector(nil),
+		ProxyRunner:            proxy.NewPipe(),
+		LocalSessions:          options.LocalSessions,
+		Observability:          recorder,
+	})
+}
+
+// lmtpSessionHandler builds the LMTP frontend protocol boundary.
+func lmtpSessionHandler(options listener.SessionOptions) listener.SessionHandler {
+	var (
+		capabilities []string
+		peerAuth     config.LMTPClientAuthConfig
+	)
+
+	if options.Config.LMTP != nil {
+		capabilities = options.Config.LMTP.Capabilities
+		peerAuth = options.Config.LMTP.ClientAuth
+	}
+
+	return lmtp.NewHandler(lmtp.SessionConfig{
+		ListenerName:       options.ListenerName,
+		ServiceName:        options.Config.ServiceName,
+		BackendPool:        options.Config.BackendPool,
+		TLSMode:            options.Config.TLS.Mode,
+		Capabilities:       capabilities,
+		PreauthTimeout:     options.Timeouts.Preauth.Std(),
+		MaxLineBytes:       options.Security.MaxPreauthLineBytes,
+		RequirePeerAuth:    peerAuth.Required,
+		PeerAuthMechanisms: peerAuth.Mechanisms,
+		MTLSPeerAuth: lmtp.MTLSPeerAuthConfig{
+			SatisfiesRequired: peerAuth.MTLS.SatisfiesRequired,
+			IdentitySource:    peerAuth.MTLS.IdentitySource,
+		},
+	})
 }
 
 // imapListenerOptions extracts IMAP-specific values from a listener config.
@@ -558,7 +618,7 @@ func shardTags(cfg config.Config, registry backend.Registry) []string {
 	if registry != nil {
 		if backends, err := registry.AllBackends(context.Background()); err == nil {
 			for _, entry := range backends {
-				if entry.Protocol != "imap" {
+				if entry.Protocol != protocolIMAP {
 					continue
 				}
 
@@ -599,7 +659,7 @@ func routeLookupListenerContexts(cfg config.Config) []runtimectl.RouteLookupList
 // defaultBackendPool returns the first configured IMAP backend pool.
 func defaultBackendPool(cfg config.Config) string {
 	for _, configured := range cfg.Director.Listeners {
-		if strings.EqualFold(configured.Protocol, "imap") && strings.TrimSpace(configured.BackendPool) != "" {
+		if strings.EqualFold(configured.Protocol, protocolIMAP) && strings.TrimSpace(configured.BackendPool) != "" {
 			return configured.BackendPool
 		}
 	}

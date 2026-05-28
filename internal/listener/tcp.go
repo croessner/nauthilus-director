@@ -190,7 +190,7 @@ func (l *managedListener) stop(ctx context.Context) error {
 	return ctx.Err()
 }
 
-// snapshot returns secret-safe listener state for tests and future diagnostics.
+// snapshot returns secret-safe listener state for tests and manager diagnostics.
 func (l *managedListener) snapshot() Snapshot {
 	return Snapshot{
 		Name:          l.name,
@@ -240,7 +240,7 @@ func (l *managedListener) acceptLoop(ln net.Listener) {
 	}
 }
 
-// serveConnection prepares transport boundaries before handing a stream to IMAP.
+// serveConnection prepares transport boundaries before handing a stream to the protocol handler.
 func (l *managedListener) serveConnection(conn net.Conn) {
 	defer l.sessionWG.Done()
 
@@ -319,7 +319,7 @@ func validateNetwork(network string) error {
 	}
 }
 
-// validateTLSMode accepts the frontend TLS modes supported by IMAP listeners.
+// validateTLSMode accepts the frontend TLS modes supported by mail protocol listeners.
 func validateTLSMode(mode string) error {
 	switch mode {
 	case tlsModeStartTLS, tlsModeImplicit:

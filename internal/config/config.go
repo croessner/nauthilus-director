@@ -45,6 +45,7 @@ const (
 	backendAuthModeMasterUser       = "master_user"
 	backendAuthModeCredentialReplay = "credential_replay"
 	backendAuthModeSASL             = "sasl"
+	backendAuthModeOAuthBearer      = "oauthbearer"
 	backendAuthModeNone             = "none"
 	backendAuthModeMTLS             = "mtls"
 )
@@ -343,9 +344,15 @@ type LMTPListenerConfig struct {
 }
 
 type LMTPClientAuthConfig struct {
-	Required   bool     `mapstructure:"required" yaml:"required"`
-	Authority  string   `mapstructure:"authority" yaml:"authority"`
-	Mechanisms []string `mapstructure:"mechanisms" yaml:"mechanisms"`
+	Required   bool                     `mapstructure:"required" yaml:"required"`
+	Authority  string                   `mapstructure:"authority" yaml:"authority"`
+	Mechanisms []string                 `mapstructure:"mechanisms" yaml:"mechanisms"`
+	MTLS       LMTPClientMTLSAuthConfig `mapstructure:"mtls" yaml:"mtls" validate:"required"`
+}
+
+type LMTPClientMTLSAuthConfig struct {
+	SatisfiesRequired bool   `mapstructure:"satisfies_required" yaml:"satisfies_required"`
+	IdentitySource    string `mapstructure:"identity_source" yaml:"identity_source"`
 }
 
 type RoutingConfig struct {
