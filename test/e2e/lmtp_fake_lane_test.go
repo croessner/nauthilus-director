@@ -787,7 +787,7 @@ func (a *lmtpAuthority) handle(writer http.ResponseWriter, request *http.Request
 	writer.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(writer).Encode(map[string]any{
 		"ok":            true,
-		"account_field": identity.Account,
+		"account_field": "account",
 		"attributes": map[string][]string{
 			"account":   {identity.Account},
 			"tenant":    {identity.Tenant},

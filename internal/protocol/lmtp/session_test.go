@@ -321,7 +321,7 @@ func TestHTTPSASLPeerAuthDoesNotUseNoAuth(t *testing.T) {
 		seenUsername, _ = body["username"].(string)
 
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"ok":true,"account_field":"` + testSubmitterIdentity + `"}`))
+		_, _ = w.Write([]byte(`{"ok":true,"account_field":"uid","attributes":{"uid":["` + testSubmitterIdentity + `"]}}`))
 	}))
 	defer authority.Close()
 

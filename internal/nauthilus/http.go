@@ -357,14 +357,14 @@ func mapHTTPAuthResponse(operation authOperation, response httpAuthResponse) (Au
 		return resultWithDecision(DecisionRejected, "", "", statusMessage, nil), nil
 	}
 
-	if strings.TrimSpace(response.AccountField) == "" {
-		return resultWithDecision(DecisionTemporaryFailure, "", "", "", nil),
-			malformedResponseError(operation, "missing account field", nil)
+	account, err := responseAccount(operation, response.AccountField, response.Attributes)
+	if err != nil {
+		return resultWithDecision(DecisionTemporaryFailure, "", "", "", nil), err
 	}
 
 	return resultWithDecision(
 		DecisionAuthenticated,
-		response.AccountField,
+		account,
 		"",
 		statusMessage,
 		response.Attributes,

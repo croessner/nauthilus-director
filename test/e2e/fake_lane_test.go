@@ -2165,7 +2165,7 @@ func (f *fakeHTTPAuthority) handle(writer http.ResponseWriter, request *http.Req
 	writer.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(writer).Encode(map[string]any{
 		"ok":            true,
-		"account_field": e2eAccount,
+		"account_field": "account",
 		"attributes":    f.attributes,
 	})
 }
@@ -2201,7 +2201,7 @@ func (s *fakeGRPCService) Authenticate(_ context.Context, request *nauthilus.GRP
 	return &nauthilus.GRPCAuthResponse{
 		OK:           true,
 		Decision:     nauthilus.GRPCDecisionOK,
-		AccountField: request.Username,
+		AccountField: "account",
 		Attributes: map[string][]string{
 			"account":   {request.Username},
 			"tenant":    {e2eTenant},
@@ -2228,7 +2228,7 @@ func (s *fakeGRPCService) LookupIdentity(_ context.Context, request *nauthilus.G
 	return &nauthilus.GRPCAuthResponse{
 		OK:           true,
 		Decision:     nauthilus.GRPCDecisionOK,
-		AccountField: identity.Account,
+		AccountField: "account",
 		Attributes: map[string][]string{
 			"account":   {identity.Account},
 			"tenant":    {identity.Tenant},

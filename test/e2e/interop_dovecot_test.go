@@ -603,7 +603,7 @@ func (f *clusterHTTPAuthority) handle(writer http.ResponseWriter, request *http.
 	writer.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(writer).Encode(map[string]any{
 		"ok":            true,
-		"account_field": username,
+		"account_field": "account",
 		"attributes":    interopAttributesForUser(username),
 	})
 }

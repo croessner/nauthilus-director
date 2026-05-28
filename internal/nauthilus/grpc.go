@@ -221,14 +221,14 @@ func mapGRPCAuthSuccess(
 	response *GRPCAuthResponse,
 	statusMessage string,
 ) (AuthResult, error) {
-	if strings.TrimSpace(response.AccountField) == "" {
-		return resultWithDecision(DecisionTemporaryFailure, "", "", "", nil),
-			malformedResponseError(operation, "missing account field", nil)
+	account, err := responseAccount(operation, response.AccountField, response.Attributes)
+	if err != nil {
+		return resultWithDecision(DecisionTemporaryFailure, "", "", "", nil), err
 	}
 
 	return resultWithDecision(
 		DecisionAuthenticated,
-		response.AccountField,
+		account,
 		response.Session,
 		statusMessage,
 		response.Attributes,
