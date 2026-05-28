@@ -23,6 +23,14 @@ const (
 	EventListenerStart = "listener.start"
 	// EventListenerStop records a frontend listener shutdown.
 	EventListenerStop = "listener.stop"
+	// EventListenerInventory records a listener runtime inventory read.
+	EventListenerInventory = "listener.inventory"
+	// EventListenerDrain records a listener runtime drain request.
+	EventListenerDrain = "listener.drain"
+	// EventListenerResume records a listener runtime resume request.
+	EventListenerResume = "listener.resume"
+	// EventListenerOperationFailure records classified listener runtime failures.
+	EventListenerOperationFailure = "listener.operation.failure"
 	// EventSessionStart records an accepted frontend protocol session.
 	EventSessionStart = "session.start"
 	// EventSessionEnd records the terminal frontend protocol session outcome.
@@ -150,6 +158,10 @@ func RuntimeEventNames() []string {
 		EventBackendRuntimeOperation,
 		EventBackendMaintenanceOperation,
 		EventBackendDrain,
+		EventListenerInventory,
+		EventListenerDrain,
+		EventListenerResume,
+		EventListenerOperationFailure,
 		EventSelectorExclusion,
 		EventSessionAttach,
 		EventSessionClose,

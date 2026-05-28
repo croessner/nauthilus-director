@@ -293,6 +293,14 @@ func provideRouteLookupService(
 	return routeLookupService(cfg, registry, selector, reader, store, recorder)
 }
 
+// provideListenerRuntimeService creates the process-local listener runtime coordinator.
+func provideListenerRuntimeService(
+	manager *listener.Manager,
+	recorder observability.Recorder,
+) *runtimectl.ListenerService {
+	return runtimectl.NewListenerService(manager, runtimectl.WithObservabilityRecorder(recorder))
+}
+
 // provideControlHandle creates the optional in-process REST control listener.
 func provideControlHandle(
 	cfg config.Config,
@@ -349,6 +357,9 @@ func registerObservabilityLifecycle(lifecycle fx.Lifecycle, runtime *observabili
 		OnStop:  runtime.Shutdown,
 	})
 }
+
+// registerListenerRuntimeService ensures Fx constructs listener runtime control.
+func registerListenerRuntimeService(*runtimectl.ListenerService) {}
 
 // provideHealthRunnerHandle creates the optional backend health worker.
 func provideHealthRunnerHandle(

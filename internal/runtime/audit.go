@@ -14,7 +14,7 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-// Package runtime owns runtime control use-case domain objects.
+// Package runtime owns runtime control request and audit objects.
 package runtime
 
 import (
@@ -91,6 +91,10 @@ const (
 	AuditOperationBackendRuntimeClear AuditOperation = "backend_runtime_clear"
 	// AuditOperationBackendRuntimeSet records a backend runtime state mutation.
 	AuditOperationBackendRuntimeSet AuditOperation = "backend_runtime_set"
+	// AuditOperationListenerDrain records a listener drain mutation.
+	AuditOperationListenerDrain AuditOperation = "listener_drain"
+	// AuditOperationListenerResume records a listener resume mutation.
+	AuditOperationListenerResume AuditOperation = "listener_resume"
 	// AuditOperationSessionKill records a session kill mutation.
 	AuditOperationSessionKill AuditOperation = "session_kill"
 	// AuditOperationSessionReap records an expired-session repair pass.
@@ -108,6 +112,9 @@ const (
 	auditFieldAllowActiveClear   = "allow_active_clear"
 	auditFieldControlAction      = "control_action"
 	auditFieldExpiredSessions    = "expired_sessions"
+	auditFieldListenerDrainMode  = "listener_drain_mode"
+	auditFieldListenerGrace      = "listener_grace_seconds"
+	auditFieldListenerName       = "listener"
 	auditFieldMarkedSessionCount = "marked_session_count"
 	auditFieldRepairedBackends   = "repaired_backends"
 	auditFieldScannedSessions    = "scanned_sessions"

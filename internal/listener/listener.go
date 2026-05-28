@@ -49,33 +49,33 @@ const (
 
 var (
 	// ErrListenerNotFound reports a runtime operation for an unknown configured listener.
-	ErrListenerNotFound = errors.New("listener not found")
+	ErrListenerNotFound = runtimectl.ErrListenerNotFound
 	// ErrListenerManagerStopped reports a runtime operation while the manager is not running.
-	ErrListenerManagerStopped = errors.New("listener manager stopped")
+	ErrListenerManagerStopped = runtimectl.ErrListenerManagerUnavailable
 )
 
 // State describes one listener's process-local runtime state.
-type State string
+type State = runtimectl.ListenerState
 
 const (
 	// StateAccepting means the listener socket is bound and accepting sockets.
-	StateAccepting State = "accepting"
+	StateAccepting = runtimectl.ListenerStateAccepting
 	// StateDraining means accepts are stopped while active local sessions remain.
-	StateDraining State = "draining"
+	StateDraining = runtimectl.ListenerStateDraining
 	// StateDrained means accepts are stopped and no local sessions remain.
-	StateDrained State = "drained"
+	StateDrained = runtimectl.ListenerStateDrained
 	// StateStopped means startup or resume failed and the listener is not bound.
-	StateStopped State = "stopped"
+	StateStopped = runtimectl.ListenerStateStopped
 )
 
 // DrainMode describes how listener runtime drain handles active local sessions.
-type DrainMode string
+type DrainMode = runtimectl.ListenerDrainMode
 
 const (
 	// DrainModeSoft closes only the accept socket and keeps active streams running.
-	DrainModeSoft DrainMode = "soft"
+	DrainModeSoft = runtimectl.ListenerDrainModeSoft
 	// DrainModeHard closes the accept socket and then closes active streams after grace.
-	DrainModeHard DrainMode = "hard"
+	DrainModeHard = runtimectl.ListenerDrainModeHard
 )
 
 // SessionHandler owns one accepted frontend stream.
@@ -122,27 +122,10 @@ func (h unavailableSessionHandler) Serve(context.Context, net.Conn) error {
 type ManagerOption func(*managerOptions)
 
 // Snapshot is a secret-safe summary of configured listener lifecycle state.
-type Snapshot struct {
-	Name                string
-	Protocol            string
-	ServiceName         string
-	Network             string
-	Address             string
-	TLSMode             string
-	ImplicitTLS         bool
-	ProxyProtocol       bool
-	BoundAddress        string
-	State               State
-	ActiveLocalSessions int
-	DrainMode           DrainMode
-}
+type Snapshot = runtimectl.ListenerDetail
 
 // DrainRequest asks the manager to runtime-drain one configured listener.
-type DrainRequest struct {
-	Name  string
-	Mode  DrainMode
-	Grace *time.Duration
-}
+type DrainRequest = runtimectl.ListenerManagerDrainRequest
 
 // Manager starts, stops and tracks configured frontend protocol listeners.
 type Manager struct {
@@ -376,7 +359,7 @@ func (m *Manager) Reload(ctx context.Context, cfg config.Config) error {
 
 // Drain stops accepts for one configured listener without editing configuration.
 func (m *Manager) Drain(ctx context.Context, request DrainRequest) (Snapshot, error) {
-	request, err := request.normalize()
+	request, err := request.Normalize()
 	if err != nil {
 		return Snapshot{}, err
 	}
@@ -493,37 +476,6 @@ func (m *Manager) listenerByName(name string) *managedListener {
 	}
 
 	return nil
-}
-
-// normalize validates listener drain input before socket state changes happen.
-func (r DrainRequest) normalize() (DrainRequest, error) {
-	r.Name = strings.TrimSpace(r.Name)
-	r.Mode = DrainMode(strings.ToLower(strings.TrimSpace(string(r.Mode))))
-
-	if r.Name == "" {
-		return DrainRequest{}, errors.New("listener name required")
-	}
-
-	switch r.Mode {
-	case DrainModeSoft:
-		if r.Grace != nil && *r.Grace < 0 {
-			return DrainRequest{}, errors.New("listener drain grace must not be negative")
-		}
-
-		return r, nil
-	case DrainModeHard:
-		if r.Grace == nil {
-			return DrainRequest{}, errors.New("hard listener drain requires explicit grace")
-		}
-
-		if *r.Grace < 0 {
-			return DrainRequest{}, errors.New("listener drain grace must not be negative")
-		}
-
-		return r, nil
-	default:
-		return DrainRequest{}, errors.New("unsupported listener drain mode")
-	}
 }
 
 // rejectChangedListeners rejects in-place listener changes that need a restart.
