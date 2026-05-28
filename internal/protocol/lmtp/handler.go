@@ -57,6 +57,7 @@ type SessionConfig struct {
 	Capabilities            []string
 	PreauthTimeout          time.Duration
 	AuthTimeout             time.Duration
+	BackendConnectTimeout   time.Duration
 	SessionLeaseTTL         time.Duration
 	SessionIdleGrace        time.Duration
 	MaxLineBytes            int
@@ -73,6 +74,7 @@ type SessionConfig struct {
 	RoutingResolver         routing.RoutingResolver
 	SessionStore            state.SessionStore
 	BackendSelector         backend.Selector
+	BackendConnector        BackendConnector
 	MessageSink             MessageSink
 }
 
@@ -111,8 +113,9 @@ type RecipientSnapshot struct {
 
 // MessageResult describes the final status returned after DATA or BDAT LAST.
 type MessageResult struct {
-	Status string
-	Text   string
+	Status   string
+	Text     string
+	Statuses []DeliveryStatus
 }
 
 // Handler owns one accepted LMTP frontend stream.

@@ -26,8 +26,7 @@ import (
 // handleCommand dispatches one parsed LMTP command in wire order.
 func (s *Session) handleCommand(ctx context.Context, command frontendCommand) (commandOutcome, error) {
 	if command.name == commandQUIT {
-		s.closeTransactionHolds(ctx)
-		s.transaction.reset()
+		s.resetTransaction(ctx, "quit")
 
 		return commandOutcome{closeSession: true}, s.handleQUIT(command)
 	}
@@ -124,6 +123,7 @@ func (s *Session) handleMAIL(command frontendCommand) error {
 	}
 
 	s.transaction.mailSeen = true
+	s.transaction.mailFrom = mail.wirePath
 	s.transaction.smtpUTF8 = mail.smtpUTF8
 
 	return s.writeEnhanced(responseStatusOK, enhancedOK, "Sender accepted")
@@ -157,6 +157,15 @@ func (s *Session) handleRCPT(ctx context.Context, command frontendCommand) error
 		return s.writeEnhanced(responseStatusTemporary, enhancedTemporary, recipientLookupText)
 	}
 
+	if s.backendForwardingEnabled() {
+		status, accepted := s.forwardRecipientToBackend(ctx, placement)
+		if !accepted {
+			_ = s.closeRecipientPlacement(ctx, &placement)
+
+			return s.writeDeliveryStatus(status)
+		}
+	}
+
 	s.transaction.recipientCount++
 	s.transaction.recipients = append(s.transaction.recipients, placement)
 
@@ -167,6 +176,10 @@ func (s *Session) handleRCPT(ctx context.Context, command frontendCommand) error
 func (s *Session) handleDATA(ctx context.Context, command frontendCommand) error {
 	if err := s.requireMessageBodyAllowed(command); err != nil {
 		return err
+	}
+
+	if s.backendForwardingEnabled() {
+		return s.handleBackendDATA(ctx)
 	}
 
 	body, err := s.messageSink.OpenMessage(ctx, s.transaction.snapshot())
@@ -186,24 +199,25 @@ func (s *Session) handleDATA(ctx context.Context, command frontendCommand) error
 		return err
 	}
 
-	if err := s.streamDATA(ctx, body); err != nil {
+	writeFailed, err := s.streamDATA(ctx, body)
+	if err != nil {
 		_ = body.Abort(ctx, "data_stream")
 
 		return err
 	}
 
-	result, err := body.Finish(ctx)
-	if err != nil {
-		s.closeTransactionHolds(ctx)
-		s.transaction.reset()
+	if writeFailed {
+		_ = body.Abort(ctx, "data_stream")
 
-		return s.writeEnhanced(responseStatusTemporary, enhancedTemporary, "Message delivery temporarily failed")
+		return s.finishUnknownDelivery(ctx)
 	}
 
-	s.closeTransactionHolds(ctx)
-	s.transaction.reset()
+	result, err := body.Finish(ctx)
+	if err != nil {
+		return s.finishUnknownDelivery(ctx)
+	}
 
-	return s.writeMessageResult(result)
+	return s.finishKnownDelivery(ctx, result)
 }
 
 // handleBDAT streams an exact byte-counted chunk and honors LAST as completion.
@@ -215,6 +229,10 @@ func (s *Session) handleBDAT(ctx context.Context, command frontendCommand) error
 	bdat, err := parseBDATCommand(command)
 	if err != nil {
 		return s.writeEnhanced(responseStatusParameter, enhancedParameter, malformedBDATText)
+	}
+
+	if s.backendForwardingEnabled() {
+		return s.handleBackendBDAT(ctx, bdat)
 	}
 
 	if s.transaction.body == nil {
@@ -241,16 +259,10 @@ func (s *Session) handleBDAT(ctx context.Context, command frontendCommand) error
 
 	result, err := body.Finish(ctx)
 	if err != nil {
-		s.closeTransactionHolds(ctx)
-		s.transaction.reset()
-
-		return s.writeEnhanced(responseStatusTemporary, enhancedTemporary, "Message delivery temporarily failed")
+		return s.finishUnknownDelivery(ctx)
 	}
 
-	s.closeTransactionHolds(ctx)
-	s.transaction.reset()
-
-	return s.writeMessageResult(result)
+	return s.finishKnownDelivery(ctx, result)
 }
 
 // handleRSET clears the active transaction and aborts any open streaming body.
@@ -259,9 +271,7 @@ func (s *Session) handleRSET(ctx context.Context, command frontendCommand) error
 		return s.writeEnhanced(responseStatusParameter, enhancedParameter, "Invalid RSET command")
 	}
 
-	_ = s.abortActiveBody(ctx, "rset")
-	s.closeTransactionHolds(ctx)
-	s.transaction.reset()
+	s.resetTransaction(ctx, "rset")
 
 	return s.writeEnhanced(responseStatusOK, enhancedOK, rsetText)
 }
@@ -363,26 +373,31 @@ func (s *Session) requireBDATAllowed(command frontendCommand) error {
 }
 
 // streamDATA copies dot-terminated DATA lines to the body sink incrementally.
-func (s *Session) streamDATA(ctx context.Context, body MessageBody) error {
+func (s *Session) streamDATA(ctx context.Context, body MessageBody) (bool, error) {
+	writeFailed := false
+
 	for {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return false, ctx.Err()
 		default:
 		}
 
 		line, err := s.readLine()
 		if err != nil {
-			return err
+			return false, err
 		}
 
 		if isDataTerminator(line) {
-			return nil
+			return writeFailed, nil
 		}
 
-		payload := unescapeDataLine(line)
-		if _, err := body.Write(payload); err != nil {
-			return err
+		if writeFailed {
+			continue
+		}
+
+		if _, err := writeDATALine(body, line); err != nil {
+			writeFailed = true
 		}
 	}
 }
@@ -407,21 +422,51 @@ func (s *Session) copyBDATChunk(body MessageBody, size int64) error {
 
 // writeMessageResult maps a sink completion result to a bounded LMTP status.
 func (s *Session) writeMessageResult(result MessageResult) error {
+	if len(result.Statuses) > 0 {
+		for _, status := range result.Statuses {
+			if err := s.writeDeliveryStatus(status); err != nil {
+				return err
+			}
+		}
+
+		return nil
+	}
+
 	status := strings.TrimSpace(result.Status)
 	if status == "" {
 		status = responseStatusOK
 	}
 
+	text := strings.TrimSpace(result.Text)
 	if status != responseStatusOK {
-		return s.writeEnhanced(responseStatusTemporary, enhancedTemporary, "Message delivery temporarily failed")
+		if text == "" {
+			text = backendDeliveryTemporaryText
+		}
+
+		return s.writeRepeatedDeliveryStatus(DeliveryStatus{Status: responseStatusTemporary, Enhanced: enhancedTemporary, Text: text})
 	}
 
-	text := strings.TrimSpace(result.Text)
 	if text == "" {
 		text = dataQueuedText
 	}
 
-	return s.writeEnhanced(responseStatusOK, enhancedOK, text)
+	return s.writeRepeatedDeliveryStatus(DeliveryStatus{Status: responseStatusOK, Enhanced: enhancedOK, Text: text})
+}
+
+// writeRepeatedDeliveryStatus writes a single sink result once per accepted recipient.
+func (s *Session) writeRepeatedDeliveryStatus(status DeliveryStatus) error {
+	repeat := s.transaction.recipientCount
+	if repeat <= 0 {
+		repeat = 1
+	}
+
+	for range repeat {
+		if err := s.writeDeliveryStatus(status); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 // isDataTerminator reports whether a line is the DATA completion boundary.

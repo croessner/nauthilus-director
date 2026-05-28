@@ -54,6 +54,7 @@ type Session struct {
 	authenticator     nauthilus.Authenticator
 	identityLookuper  nauthilus.IdentityLookuper
 	messageSink       MessageSink
+	backendConnector  BackendConnector
 	frontendTLSConfig *tls.Config
 
 	listenerName           string
@@ -72,6 +73,7 @@ type Session struct {
 
 	preauthTimeout             time.Duration
 	authTimeout                time.Duration
+	backendConnectTimeout      time.Duration
 	sessionLeaseTTL            time.Duration
 	sessionIdleGrace           time.Duration
 	maxLineBytes               int
@@ -98,10 +100,12 @@ type Session struct {
 
 type transactionState struct {
 	mailSeen       bool
+	mailFrom       string
 	smtpUTF8       bool
 	recipientCount int
 	recipients     []RecipientPlacement
 	body           MessageBody
+	backend        *backendTransaction
 }
 
 type commandOutcome struct {
@@ -118,7 +122,7 @@ func NewSession(config SessionConfig, conn net.Conn) (*Session, error) {
 	maxLineBytes := effectiveMaxLineBytes(config.MaxLineBytes)
 
 	messageSink := config.MessageSink
-	if messageSink == nil {
+	if messageSink == nil && config.BackendConnector == nil {
 		messageSink = discardMessageSink{}
 	}
 
@@ -129,6 +133,7 @@ func NewSession(config SessionConfig, conn net.Conn) (*Session, error) {
 		authenticator:              config.Authenticator,
 		identityLookuper:           config.IdentityLookuper,
 		messageSink:                messageSink,
+		backendConnector:           config.BackendConnector,
 		frontendTLSConfig:          cloneTLSConfig(config.FrontendTLSConfig),
 		listenerName:               config.ListenerName,
 		authorityName:              config.AuthorityName,
@@ -145,6 +150,7 @@ func NewSession(config SessionConfig, conn net.Conn) (*Session, error) {
 		mtlsPeerAuth:               config.MTLSPeerAuth,
 		preauthTimeout:             config.PreauthTimeout,
 		authTimeout:                config.AuthTimeout,
+		backendConnectTimeout:      config.BackendConnectTimeout,
 		sessionLeaseTTL:            defaultDeliveryLease(config.SessionLeaseTTL),
 		sessionIdleGrace:           defaultDeliveryGrace(config.SessionIdleGrace, config.SessionLeaseTTL),
 		maxLineBytes:               maxLineBytes,
@@ -204,9 +210,7 @@ func (s *Session) serveNextCommand(ctx context.Context) (bool, error) {
 	line, err := s.readLine()
 	if err != nil {
 		if err == io.EOF {
-			_ = s.abortActiveBody(ctx, "eof")
-			s.closeTransactionHolds(ctx)
-			s.transaction.reset()
+			s.resetTransaction(ctx, "eof")
 
 			return true, nil
 		}
@@ -216,9 +220,7 @@ func (s *Session) serveNextCommand(ctx context.Context) (bool, error) {
 
 	closeSession, err := s.processLine(ctx, line)
 	if err != nil {
-		_ = s.abortActiveBody(ctx, "command_error")
-		s.closeTransactionHolds(ctx)
-		s.transaction.reset()
+		s.resetTransaction(ctx, "command_error")
 
 		return false, err
 	}
@@ -230,9 +232,7 @@ func (s *Session) serveNextCommand(ctx context.Context) (bool, error) {
 func (s *Session) contextError(ctx context.Context) error {
 	select {
 	case <-ctx.Done():
-		_ = s.abortActiveBody(ctx, "context")
-		s.closeTransactionHolds(ctx)
-		s.transaction.reset()
+		s.resetTransaction(ctx, "context")
 
 		return ctx.Err()
 	default:
@@ -247,9 +247,7 @@ func (s *Session) handleReadError(ctx context.Context, err error) error {
 		_ = s.writer.Flush()
 	}
 
-	_ = s.abortActiveBody(ctx, "read_error")
-	s.closeTransactionHolds(ctx)
-	s.transaction.reset()
+	s.resetTransaction(ctx, "read_error")
 
 	return err
 }
@@ -455,10 +453,12 @@ func (t *transactionState) snapshot() TransactionSnapshot {
 // reset clears command sequencing state without touching protocol auth state.
 func (t *transactionState) reset() {
 	t.mailSeen = false
+	t.mailFrom = ""
 	t.smtpUTF8 = false
 	t.recipientCount = 0
 	t.recipients = nil
 	t.body = nil
+	t.backend = nil
 }
 
 // acceptsBackend reports whether a recipient can join the current transaction.
@@ -490,6 +490,14 @@ func (s *Session) abortActiveBody(ctx context.Context, reasonClass string) error
 	s.transaction.body = nil
 
 	return body.Abort(ctx, reasonClass)
+}
+
+// resetTransaction releases all transaction-owned frontend, backend and lease state.
+func (s *Session) resetTransaction(ctx context.Context, reasonClass string) {
+	_ = s.abortActiveBody(ctx, reasonClass)
+	s.closeBackendTransaction(reasonClass)
+	s.closeTransactionHolds(ctx)
+	s.transaction.reset()
 }
 
 type discardMessageSink struct{}

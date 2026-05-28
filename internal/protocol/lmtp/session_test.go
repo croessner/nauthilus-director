@@ -25,6 +25,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -57,8 +58,10 @@ const (
 	testRecipientLookup     = "Local@example.com"
 	testRecipientSecond     = "second@example.test"
 	testRecipientSingle     = "recipient@example.test"
+	testRecipientThird      = "third@example.test"
 	testRoutingShardAttr    = "mailShard"
 	testTenantAttribute     = "tenant"
+	testTemporaryDelivery   = "451 4.3.0 Message delivery temporarily failed\r\n"
 	testSubmitterIdentity   = "technical-submit@example.test"
 	testUnicodeRecipient    = "M\xc3\xbcller@example.test"
 	testUnicodeSender       = "sender-\xc3\xbc@example.test"
@@ -636,6 +639,327 @@ func TestRecipientDeliveryHoldHeartbeatsAndClosesOnReset(t *testing.T) {
 	store.assertClosed(t, 1)
 }
 
+// TestBackendTransactionForwardsEnvelopeAndDATAStatuses verifies DATA forwarding and ordered final replies.
+func TestBackendTransactionForwardsEnvelopeAndDATAStatuses(t *testing.T) {
+	identity := identityLookuperForRecipients(map[string]string{
+		testRecipientFirst:  testPlacementShardA,
+		testRecipientSecond: testPlacementShardA,
+		testRecipientThird:  testPlacementShardA,
+	})
+	resolver := &recordingRoutingResolver{}
+	store := &recordingDeliveryStore{}
+	selector := &recordingBackendSelector{}
+	dialer := scriptedLMTPBackendDialer(t, func(t *testing.T, conn net.Conn) {
+		reader := greetTransactionBackend(t, conn)
+		expectLMTPBackendLine(t, reader, "MAIL FROM:<sender@example.test>")
+		writeLMTPBackendLine(t, conn, "250 2.1.0 sender ok")
+		expectLMTPBackendLine(t, reader, "RCPT TO:<first@example.test>")
+		writeLMTPBackendLine(t, conn, "250 2.1.5 first ok")
+		expectLMTPBackendLine(t, reader, "RCPT TO:<second@example.test>")
+		writeLMTPBackendLine(t, conn, "250 2.1.5 second ok")
+		expectLMTPBackendLine(t, reader, "RCPT TO:<"+testRecipientThird+">")
+		writeLMTPBackendLine(t, conn, "250 2.1.5 third ok")
+		expectLMTPBackendLine(t, reader, "DATA")
+		writeLMTPBackendLine(t, conn, "354 2.0.0 send data")
+		expectLMTPBackendLine(t, reader, "line-one")
+		expectLMTPBackendLine(t, reader, "..line-two")
+		expectLMTPBackendLine(t, reader, ".")
+		writeLMTPBackendLine(t, conn, "250 2.1.5 delivered")
+		writeLMTPBackendLine(t, conn, "451 4.2.0 temporary policy detail first@example.test")
+		writeLMTPBackendLine(t, conn, "552 5.2.2 quota detail second@example.test")
+	})
+	config := backendForwardingSessionConfig(identity, resolver, store, selector, dialer)
+
+	harness := startLMTPHarness(t, config)
+	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+	harness.write(t, "LHLO submitter.example\r\n")
+	harness.drainLHLO(t)
+	harness.write(t, "MAIL FROM:<sender@example.test>\r\n")
+	harness.expectLine(t, "250 2.0.0 Sender accepted\r\n")
+	harness.write(t, "RCPT TO:<first@example.test>\r\n")
+	harness.expectLine(t, "250 2.0.0 Recipient accepted\r\n")
+	harness.write(t, "RCPT TO:<second@example.test>\r\n")
+	harness.expectLine(t, "250 2.0.0 Recipient accepted\r\n")
+	harness.write(t, "RCPT TO:<"+testRecipientThird+">\r\n")
+	harness.expectLine(t, "250 2.0.0 Recipient accepted\r\n")
+	harness.write(t, "DATA\r\n")
+	harness.expectLine(t, "354 2.0.0 End data with <CR><LF>.<CR><LF>\r\n")
+	harness.write(t, "line-one\r\n..line-two\r\n.\r\n")
+	harness.expectLine(t, "250 2.1.5 Message accepted\r\n")
+	harness.expectLine(t, "451 4.2.0 Message delivery temporarily failed\r\n")
+	harness.expectLine(t, "552 5.2.2 Message delivery permanently failed\r\n")
+
+	store.assertClosed(t, 3)
+	dialer.Wait(t)
+}
+
+// TestBackendRCPTRejectionIsNotTrackedForFinalStatuses verifies rejected RCPTs do not receive DATA replies.
+func TestBackendRCPTRejectionIsNotTrackedForFinalStatuses(t *testing.T) {
+	identity := identityLookuperForRecipients(map[string]string{
+		testRecipientFirst:  testPlacementShardA,
+		testRecipientSecond: testPlacementShardA,
+	})
+	resolver := &recordingRoutingResolver{}
+	store := &recordingDeliveryStore{}
+	selector := &recordingBackendSelector{}
+	dialer := scriptedLMTPBackendDialer(t, func(t *testing.T, conn net.Conn) {
+		reader := greetTransactionBackend(t, conn)
+		expectLMTPBackendLine(t, reader, "MAIL FROM:<sender@example.test>")
+		writeLMTPBackendLine(t, conn, "250 2.1.0 sender ok")
+		expectLMTPBackendLine(t, reader, "RCPT TO:<first@example.test>")
+		writeLMTPBackendLine(t, conn, "250 2.1.5 first ok")
+		expectLMTPBackendLine(t, reader, "RCPT TO:<second@example.test>")
+		writeLMTPBackendLine(t, conn, "550 5.1.1 rejected second@example.test")
+		expectLMTPBackendLine(t, reader, "DATA")
+		writeLMTPBackendLine(t, conn, "354 2.0.0 send data")
+		expectLMTPBackendLine(t, reader, "body")
+		expectLMTPBackendLine(t, reader, ".")
+		writeLMTPBackendLine(t, conn, "250 2.1.5 delivered")
+	})
+	config := backendForwardingSessionConfig(identity, resolver, store, selector, dialer)
+
+	harness := startLMTPHarness(t, config)
+	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+	harness.write(t, "LHLO submitter.example\r\n")
+	harness.drainLHLO(t)
+	harness.write(t, "MAIL FROM:<sender@example.test>\r\n")
+	harness.expectLine(t, "250 2.0.0 Sender accepted\r\n")
+	harness.write(t, "RCPT TO:<first@example.test>\r\n")
+	harness.expectLine(t, "250 2.0.0 Recipient accepted\r\n")
+	harness.write(t, "RCPT TO:<second@example.test>\r\n")
+	harness.expectLine(t, "550 5.1.1 Recipient rejected by backend\r\n")
+	harness.write(t, "DATA\r\n")
+	harness.expectLine(t, "354 2.0.0 End data with <CR><LF>.<CR><LF>\r\n")
+	harness.write(t, "body\r\n.\r\n")
+	harness.expectLine(t, "250 2.1.5 Message accepted\r\n")
+	harness.write(t, "NOOP\r\n")
+	harness.expectLine(t, "250 2.0.0 OK\r\n")
+
+	store.assertClosed(t, 2)
+	dialer.Wait(t)
+}
+
+// TestDifferentBackendRecipientIsNotForwardedBeforeBDAT verifies same-backend-only enforcement for BDAT.
+func TestDifferentBackendRecipientIsNotForwardedBeforeBDAT(t *testing.T) {
+	identity := identityLookuperForRecipients(map[string]string{
+		testRecipientFirst:  testPlacementShardA,
+		testRecipientSecond: testPlacementShardB,
+	})
+	resolver := &recordingRoutingResolver{}
+	store := &recordingDeliveryStore{}
+	selector := &recordingBackendSelector{backendForShard: map[string]string{testPlacementShardB: "mailstore-b-lmtp"}}
+	dialer := scriptedLMTPBackendDialer(t, func(t *testing.T, conn net.Conn) {
+		reader := greetTransactionBackend(t, conn)
+		expectLMTPBackendLine(t, reader, "MAIL FROM:<sender@example.test>")
+		writeLMTPBackendLine(t, conn, "250 2.1.0 sender ok")
+		expectLMTPBackendLine(t, reader, "RCPT TO:<first@example.test>")
+		writeLMTPBackendLine(t, conn, "250 2.1.5 first ok")
+		expectLMTPBackendLine(t, reader, "BDAT 0 LAST")
+		writeLMTPBackendLine(t, conn, "250 2.1.5 delivered")
+	})
+	config := backendForwardingSessionConfig(identity, resolver, store, selector, dialer)
+	config.Capabilities = []string{capabilityCHUNKING}
+	config.BackendChunkingAllowed = true
+
+	harness := startLMTPHarness(t, config)
+	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+	harness.write(t, "LHLO submitter.example\r\n")
+	harness.expectLine(t, "250-nauthilus-director\r\n")
+	harness.expectLine(t, "250 CHUNKING\r\n")
+	harness.write(t, "MAIL FROM:<sender@example.test>\r\n")
+	harness.expectLine(t, "250 2.0.0 Sender accepted\r\n")
+	harness.write(t, "RCPT TO:<first@example.test>\r\n")
+	harness.expectLine(t, "250 2.0.0 Recipient accepted\r\n")
+	harness.write(t, "RCPT TO:<second@example.test>\r\n")
+	harness.expectLine(t, "451 4.3.2 Recipient must be retried separately\r\n")
+	harness.write(t, "BDAT 0 LAST\r\n")
+	harness.expectLine(t, "250 2.1.5 Message accepted\r\n")
+
+	store.assertClosed(t, 2)
+	dialer.Wait(t)
+}
+
+// TestBackendBDATFinalRepliesMatchRecipientOrder verifies BDAT chunks and mixed final replies.
+func TestBackendBDATFinalRepliesMatchRecipientOrder(t *testing.T) {
+	identity := identityLookuperForRecipients(map[string]string{
+		testRecipientFirst:  testPlacementShardA,
+		testRecipientSecond: testPlacementShardA,
+		testRecipientThird:  testPlacementShardA,
+	})
+	resolver := &recordingRoutingResolver{}
+	store := &recordingDeliveryStore{}
+	selector := &recordingBackendSelector{}
+	dialer := scriptedLMTPBackendDialer(t, func(t *testing.T, conn net.Conn) {
+		reader := greetTransactionBackend(t, conn)
+		expectLMTPBackendLine(t, reader, "MAIL FROM:<sender@example.test>")
+		writeLMTPBackendLine(t, conn, "250 2.1.0 sender ok")
+		expectLMTPBackendLine(t, reader, "RCPT TO:<first@example.test>")
+		writeLMTPBackendLine(t, conn, "250 2.1.5 first ok")
+		expectLMTPBackendLine(t, reader, "RCPT TO:<second@example.test>")
+		writeLMTPBackendLine(t, conn, "250 2.1.5 second ok")
+		expectLMTPBackendLine(t, reader, "RCPT TO:<"+testRecipientThird+">")
+		writeLMTPBackendLine(t, conn, "250 2.1.5 third ok")
+		expectLMTPBackendLine(t, reader, "BDAT 5")
+		expectLMTPBackendBytes(t, reader, "hello")
+		writeLMTPBackendLine(t, conn, "250 2.0.0 chunk ok")
+		expectLMTPBackendLine(t, reader, "BDAT 0 LAST")
+		writeLMTPBackendLine(t, conn, "250 2.1.5 delivered")
+		writeLMTPBackendLine(t, conn, "451 4.2.0 temporary policy detail")
+		writeLMTPBackendLine(t, conn, "552 5.2.2 quota detail")
+	})
+	config := backendForwardingSessionConfig(identity, resolver, store, selector, dialer)
+	config.Capabilities = []string{capabilityCHUNKING}
+	config.BackendChunkingAllowed = true
+
+	harness := startLMTPHarness(t, config)
+	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+	harness.write(t, "LHLO submitter.example\r\n")
+	harness.expectLine(t, "250-nauthilus-director\r\n")
+	harness.expectLine(t, "250 CHUNKING\r\n")
+	harness.write(t, "MAIL FROM:<sender@example.test>\r\n")
+	harness.expectLine(t, "250 2.0.0 Sender accepted\r\n")
+	harness.write(t, "RCPT TO:<first@example.test>\r\n")
+	harness.expectLine(t, "250 2.0.0 Recipient accepted\r\n")
+	harness.write(t, "RCPT TO:<second@example.test>\r\n")
+	harness.expectLine(t, "250 2.0.0 Recipient accepted\r\n")
+	harness.write(t, "RCPT TO:<"+testRecipientThird+">\r\n")
+	harness.expectLine(t, "250 2.0.0 Recipient accepted\r\n")
+	harness.write(t, "BDAT 5\r\nhello")
+	harness.expectLine(t, "250 2.0.0 Message accepted\r\n")
+	harness.write(t, "BDAT 0 LAST\r\n")
+	harness.expectLine(t, "250 2.1.5 Message accepted\r\n")
+	harness.expectLine(t, "451 4.2.0 Message delivery temporarily failed\r\n")
+	harness.expectLine(t, "552 5.2.2 Message delivery permanently failed\r\n")
+
+	store.assertClosed(t, 3)
+	dialer.Wait(t)
+}
+
+// TestMidDATAFailureMapsUnknownRecipientsToTemporaryFailure verifies opaque stream failure handling.
+func TestMidDATAFailureMapsUnknownRecipientsToTemporaryFailure(t *testing.T) {
+	secretBody := "opaque-secret-body"
+	identity := identityLookuperForRecipients(map[string]string{
+		testRecipientFirst:  testPlacementShardA,
+		testRecipientSecond: testPlacementShardA,
+	})
+	resolver := &recordingRoutingResolver{}
+	store := &recordingDeliveryStore{}
+	selector := &recordingBackendSelector{}
+	dialer := scriptedLMTPBackendDialer(t, func(t *testing.T, conn net.Conn) {
+		reader := greetTransactionBackend(t, conn)
+		expectLMTPBackendLine(t, reader, "MAIL FROM:<sender@example.test>")
+		writeLMTPBackendLine(t, conn, "250 2.1.0 sender ok")
+		expectLMTPBackendLine(t, reader, "RCPT TO:<first@example.test>")
+		writeLMTPBackendLine(t, conn, "250 2.1.5 first ok")
+		expectLMTPBackendLine(t, reader, "RCPT TO:<second@example.test>")
+		writeLMTPBackendLine(t, conn, "250 2.1.5 second ok")
+		expectLMTPBackendLine(t, reader, "DATA")
+		writeLMTPBackendLine(t, conn, "354 2.0.0 send data")
+		expectLMTPBackendLine(t, reader, secretBody)
+		expectLMTPBackendLine(t, reader, ".")
+	})
+	config := backendForwardingSessionConfig(identity, resolver, store, selector, dialer)
+
+	harness := startLMTPHarness(t, config)
+	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+	harness.write(t, "LHLO submitter.example\r\n")
+	harness.drainLHLO(t)
+	harness.write(t, "MAIL FROM:<sender@example.test>\r\n")
+	harness.expectLine(t, "250 2.0.0 Sender accepted\r\n")
+	harness.write(t, "RCPT TO:<first@example.test>\r\n")
+	harness.expectLine(t, "250 2.0.0 Recipient accepted\r\n")
+	harness.write(t, "RCPT TO:<second@example.test>\r\n")
+	harness.expectLine(t, "250 2.0.0 Recipient accepted\r\n")
+	harness.write(t, "DATA\r\n")
+	harness.expectLine(t, "354 2.0.0 End data with <CR><LF>.<CR><LF>\r\n")
+	harness.write(t, secretBody+"\r\n.\r\n")
+	first := harness.readLine(t)
+	second := harness.readLine(t)
+	assertNoSecretLeak(t, first+second, secretBody)
+
+	if first != testTemporaryDelivery || second != testTemporaryDelivery {
+		t.Fatalf("failure statuses = %q %q, want two temporary failures", first, second)
+	}
+
+	store.assertClosed(t, 2)
+	dialer.Wait(t)
+}
+
+// TestMidBDATFailureMapsUnknownRecipientsToTemporaryFailure verifies unknown BDAT LAST outcomes tempfail.
+func TestMidBDATFailureMapsUnknownRecipientsToTemporaryFailure(t *testing.T) {
+	identity := identityLookuperForRecipients(map[string]string{
+		testRecipientFirst:  testPlacementShardA,
+		testRecipientSecond: testPlacementShardA,
+	})
+	resolver := &recordingRoutingResolver{}
+	store := &recordingDeliveryStore{}
+	selector := &recordingBackendSelector{}
+	dialer := scriptedLMTPBackendDialer(t, func(t *testing.T, conn net.Conn) {
+		reader := greetTransactionBackend(t, conn)
+		expectLMTPBackendLine(t, reader, "MAIL FROM:<sender@example.test>")
+		writeLMTPBackendLine(t, conn, "250 2.1.0 sender ok")
+		expectLMTPBackendLine(t, reader, "RCPT TO:<first@example.test>")
+		writeLMTPBackendLine(t, conn, "250 2.1.5 first ok")
+		expectLMTPBackendLine(t, reader, "RCPT TO:<second@example.test>")
+		writeLMTPBackendLine(t, conn, "250 2.1.5 second ok")
+		expectLMTPBackendLine(t, reader, "BDAT 6 LAST")
+		expectLMTPBackendBytes(t, reader, "secret")
+	})
+	config := backendForwardingSessionConfig(identity, resolver, store, selector, dialer)
+	config.Capabilities = []string{capabilityCHUNKING}
+	config.BackendChunkingAllowed = true
+
+	harness := startLMTPHarness(t, config)
+	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+	harness.write(t, "LHLO submitter.example\r\n")
+	harness.expectLine(t, "250-nauthilus-director\r\n")
+	harness.expectLine(t, "250 CHUNKING\r\n")
+	harness.write(t, "MAIL FROM:<sender@example.test>\r\n")
+	harness.expectLine(t, "250 2.0.0 Sender accepted\r\n")
+	harness.write(t, "RCPT TO:<first@example.test>\r\n")
+	harness.expectLine(t, "250 2.0.0 Recipient accepted\r\n")
+	harness.write(t, "RCPT TO:<second@example.test>\r\n")
+	harness.expectLine(t, "250 2.0.0 Recipient accepted\r\n")
+	harness.write(t, "BDAT 6 LAST\r\nsecret")
+	harness.expectLine(t, testTemporaryDelivery)
+	harness.expectLine(t, testTemporaryDelivery)
+
+	store.assertClosed(t, 2)
+	dialer.Wait(t)
+}
+
+// TestRSETClearsBackendTransactionState verifies frontend reset propagates to backend envelope state.
+func TestRSETClearsBackendTransactionState(t *testing.T) {
+	identity := identityLookuperForRecipients(map[string]string{testRecipientSingle: testPlacementShardA})
+	resolver := &recordingRoutingResolver{}
+	store := &recordingDeliveryStore{}
+	selector := &recordingBackendSelector{}
+	dialer := scriptedLMTPBackendDialer(t, func(t *testing.T, conn net.Conn) {
+		reader := greetTransactionBackend(t, conn)
+		expectLMTPBackendLine(t, reader, "MAIL FROM:<sender@example.test>")
+		writeLMTPBackendLine(t, conn, "250 2.1.0 sender ok")
+		expectLMTPBackendLine(t, reader, "RCPT TO:<recipient@example.test>")
+		writeLMTPBackendLine(t, conn, "250 2.1.5 recipient ok")
+		expectLMTPBackendLine(t, reader, "RSET")
+		writeLMTPBackendLine(t, conn, "250 2.0.0 reset")
+	})
+	config := backendForwardingSessionConfig(identity, resolver, store, selector, dialer)
+
+	harness := startLMTPHarness(t, config)
+	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+	harness.write(t, "LHLO submitter.example\r\n")
+	harness.drainLHLO(t)
+	harness.write(t, "MAIL FROM:<sender@example.test>\r\n")
+	harness.expectLine(t, "250 2.0.0 Sender accepted\r\n")
+	harness.write(t, "RCPT TO:<recipient@example.test>\r\n")
+	harness.expectLine(t, "250 2.0.0 Recipient accepted\r\n")
+	harness.write(t, "RSET\r\n")
+	harness.expectLine(t, "250 2.0.0 Transaction reset\r\n")
+
+	store.assertClosed(t, 1)
+	dialer.Wait(t)
+}
+
 // assertRecipientLookupContext verifies recipient lookup uses the normalized envelope value.
 func assertRecipientLookupContext(t *testing.T, lookup nauthilus.IdentityLookupRequest) {
 	t.Helper()
@@ -755,6 +1079,64 @@ func placementSessionConfig(
 	return config
 }
 
+// backendForwardingSessionConfig returns placement config with a real backend connector seam.
+func backendForwardingSessionConfig(
+	identity nauthilus.IdentityLookuper,
+	resolver routing.RoutingResolver,
+	store state.SessionStore,
+	selector backend.Selector,
+	dialer BackendDialer,
+) SessionConfig {
+	config := placementSessionConfig(identity, resolver, store, selector)
+	config.BackendConnector = NewTCPBackendConnector(dialer)
+	config.BackendConnectTimeout = time.Second
+
+	return config
+}
+
+// identityLookuperForRecipients creates deterministic successful recipient identity results.
+func identityLookuperForRecipients(shards map[string]string) *recordingIdentityLookuper {
+	results := make(map[string]nauthilus.AuthResult, len(shards))
+	for recipient, shard := range shards {
+		results[recipient] = nauthilus.AuthResult{
+			Decision: nauthilus.DecisionAuthenticated,
+			Account:  recipient,
+			Attributes: map[string][]string{
+				testRoutingShardAttr: {shard},
+				testTenantAttribute:  {testPlacementTenant},
+			},
+		}
+	}
+
+	return &recordingIdentityLookuper{results: results}
+}
+
+// greetTransactionBackend runs the common backend greeting and LHLO handshake.
+func greetTransactionBackend(t *testing.T, conn net.Conn) *bufio.Reader {
+	t.Helper()
+
+	reader := bufio.NewReader(conn)
+	writeLMTPBackendLine(t, conn, "220 backend ready")
+	expectLMTPBackendLine(t, reader, "LHLO "+backendLHLOName)
+	writeLMTPBackendLine(t, conn, "250 mailstore")
+
+	return reader
+}
+
+// expectLMTPBackendBytes reads exact opaque backend payload bytes.
+func expectLMTPBackendBytes(t *testing.T, reader *bufio.Reader, want string) {
+	t.Helper()
+
+	payload := make([]byte, len(want))
+	if _, err := io.ReadFull(reader, payload); err != nil {
+		t.Fatalf("read backend payload: %v", err)
+	}
+
+	if string(payload) != want {
+		t.Fatalf("backend payload = %q, want %q", string(payload), want)
+	}
+}
+
 type lmtpHarness struct {
 	session *Session
 	client  net.Conn
@@ -841,14 +1223,23 @@ func (h *lmtpHarness) write(t *testing.T, value string) {
 func (h *lmtpHarness) expectLine(t *testing.T, expected string) {
 	t.Helper()
 
+	line := h.readLine(t)
+
+	if line != expected {
+		t.Fatalf("line = %q, want %q", line, expected)
+	}
+}
+
+// readLine reads one response line from the frontend side.
+func (h *lmtpHarness) readLine(t *testing.T) string {
+	t.Helper()
+
 	line, err := h.reader.ReadString('\n')
 	if err != nil {
 		t.Fatalf("read response: %v", err)
 	}
 
-	if line != expected {
-		t.Fatalf("line = %q, want %q", line, expected)
-	}
+	return line
 }
 
 // drainLHLO reads a complete LHLO response with one or more lines.
@@ -1114,6 +1505,9 @@ func (s *recordingBackendSelector) Select(_ context.Context, request backend.Sel
 		Protocol:       request.Protocol,
 		BackendPool:    request.BackendPool,
 		ShardTag:       request.ShardTag,
+		Address:        testBackendTLSHostTarget,
+		TLS:            backend.TLSConfig{Mode: backendTLSPlaintext, MinTLSVersion: backendTLSMinDefault},
+		Auth:           backend.AuthConfig{Mode: backendAuthModeNone},
 		MaxConnections: 100,
 	}
 

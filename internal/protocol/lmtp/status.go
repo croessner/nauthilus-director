@@ -30,6 +30,17 @@ const (
 	backendResponseMoreSeparator  = '-'
 )
 
+const (
+	backendDeliveryAcceptedText  = "Message accepted"
+	backendDeliveryPermanentText = "Message delivery permanently failed"
+	backendDeliveryTemporaryText = "Message delivery temporarily failed"
+	backendRecipientRejectText   = "Recipient rejected by backend"
+	backendRecipientTempfailText = "Recipient temporarily rejected by backend"
+	backendReplyContextBDAT      = "bdat"
+	backendReplyContextFinal     = "final"
+	backendReplyContextRecipient = "rcpt"
+)
+
 type backendStatusLine struct {
 	code      string
 	separator byte
@@ -39,6 +50,13 @@ type backendStatusLine struct {
 type backendStatusResponse struct {
 	code  string
 	lines []string
+}
+
+// DeliveryStatus is a sanitized frontend reply for one accepted recipient.
+type DeliveryStatus struct {
+	Status   string
+	Enhanced string
+	Text     string
 }
 
 // readBackendStatusResponse reads one bounded SMTP-style multiline response.
@@ -109,6 +127,106 @@ func parseBackendStatusLine(line string) (backendStatusLine, error) {
 // statusOK reports whether a response has the exact expected status.
 func (r backendStatusResponse) statusOK(status string) bool {
 	return r.code == status
+}
+
+// deliveryStatusFromBackend maps a known backend reply to a safe frontend status.
+func deliveryStatusFromBackend(response backendStatusResponse, replyContext string) DeliveryStatus {
+	code := strings.TrimSpace(response.code)
+	if len(code) != 3 {
+		return unknownDeliveryStatus()
+	}
+
+	switch code[0] {
+	case '2':
+		return DeliveryStatus{
+			Status:   responseStatusOK,
+			Enhanced: backendEnhancedStatus(response, enhancedOK, '2'),
+			Text:     backendDeliveryAcceptedText,
+		}
+	case '4':
+		return DeliveryStatus{
+			Status:   code,
+			Enhanced: backendEnhancedStatus(response, enhancedTemporary, '4'),
+			Text:     backendTemporaryText(replyContext),
+		}
+	case '5':
+		return DeliveryStatus{
+			Status:   code,
+			Enhanced: backendEnhancedStatus(response, enhancedMailboxReject, '5'),
+			Text:     backendPermanentText(replyContext),
+		}
+	default:
+		return unknownDeliveryStatus()
+	}
+}
+
+// unknownDeliveryStatus returns the director-owned result for unknown final outcomes.
+func unknownDeliveryStatus() DeliveryStatus {
+	return DeliveryStatus{
+		Status:   responseStatusTemporary,
+		Enhanced: enhancedTemporary,
+		Text:     backendDeliveryTemporaryText,
+	}
+}
+
+// backendTemporaryText selects safe text for backend temporary replies.
+func backendTemporaryText(replyContext string) string {
+	if replyContext == backendReplyContextRecipient {
+		return backendRecipientTempfailText
+	}
+
+	return backendDeliveryTemporaryText
+}
+
+// backendPermanentText selects safe text for backend permanent replies.
+func backendPermanentText(replyContext string) string {
+	if replyContext == backendReplyContextRecipient {
+		return backendRecipientRejectText
+	}
+
+	return backendDeliveryPermanentText
+}
+
+// backendEnhancedStatus preserves a safe enhanced status code when present.
+func backendEnhancedStatus(response backendStatusResponse, fallback string, class byte) string {
+	for _, line := range response.lines {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+
+		if validEnhancedStatus(fields[0], class) {
+			return fields[0]
+		}
+	}
+
+	return fallback
+}
+
+// validEnhancedStatus recognizes bounded RFC-style enhanced status codes.
+func validEnhancedStatus(value string, class byte) bool {
+	if len(value) < 5 || value[0] != class || value[1] != '.' {
+		return false
+	}
+
+	parts := strings.Split(value, ".")
+	if len(parts) != 3 {
+		return false
+	}
+
+	for _, part := range parts {
+		if part == "" || len(part) > 3 {
+			return false
+		}
+
+		for index := 0; index < len(part); index++ {
+			if part[index] < '0' || part[index] > '9' {
+				return false
+			}
+		}
+	}
+
+	return true
 }
 
 // lmtpCapabilitiesFromLHLO extracts extension keywords from a backend LHLO response.

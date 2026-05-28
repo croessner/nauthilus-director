@@ -578,6 +578,7 @@ func lmtpSessionHandler(
 		Capabilities:            listenerCapabilities,
 		PreauthTimeout:          options.Timeouts.Preauth.Std(),
 		AuthTimeout:             options.Timeouts.Auth.Std(),
+		BackendConnectTimeout:   options.Timeouts.BackendConnect.Std(),
 		SessionLeaseTTL:         options.SessionLeaseTTL,
 		SessionIdleGrace:        options.SessionIdleGrace,
 		MaxLineBytes:            options.Security.MaxPreauthLineBytes,
@@ -591,6 +592,7 @@ func lmtpSessionHandler(
 		RoutingResolver:         resolver,
 		SessionStore:            store,
 		BackendSelector:         selector,
+		BackendConnector:        lmtp.NewTCPBackendConnector(nil),
 		BackendChunkingAllowed:  lmtpBackendChunkingAllowed(capabilityReader, options.Config.BackendPool),
 		RecipientLookupRequired: true,
 		MTLSPeerAuth: lmtp.MTLSPeerAuthConfig{

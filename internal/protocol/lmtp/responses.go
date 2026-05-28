@@ -93,6 +93,19 @@ func (s *Session) writeEnhanced(status string, enhanced string, text string) err
 	return err
 }
 
+// writeDeliveryStatus writes one already-classified per-recipient delivery status.
+func (s *Session) writeDeliveryStatus(status DeliveryStatus) error {
+	if strings.TrimSpace(status.Status) == "" {
+		status.Status = responseStatusTemporary
+	}
+
+	if strings.TrimSpace(status.Enhanced) == "" {
+		status.Enhanced = enhancedTemporary
+	}
+
+	return s.writeEnhanced(status.Status, status.Enhanced, status.Text)
+}
+
 // writePlain writes one LMTP response line without an enhanced status code.
 func (s *Session) writePlain(status string, text string) error {
 	if strings.TrimSpace(text) == "" {
