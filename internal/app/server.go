@@ -731,10 +731,9 @@ func (l nauthilusRouteLookupIdentity) LookupRouteIdentity(
 // routingResolver builds the shared account-to-shard resolver chain.
 func routingResolver(cfg config.Config, registry backend.Registry) (routing.RoutingResolver, error) {
 	authResolver, err := routing.NewAuthAttributeResolver(routing.AuthAttributeResolverConfig{
-		AccountKeyAttribute: "account",
-		TenantAttribute:     "tenant",
-		ShardTagAttribute:   "mailShard",
-		Sticky:              true,
+		TenantAttribute:   cfg.Director.Routing.AuthAttributes.Tenant,
+		ShardTagAttribute: cfg.Director.Routing.AuthAttributes.ShardTag,
+		Sticky:            true,
 	})
 	if err != nil {
 		return nil, err

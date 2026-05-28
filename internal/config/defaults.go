@@ -261,6 +261,10 @@ func defaultDirector() DirectorConfig {
 			DefaultShard:    "default",
 			HashKey:         "username",
 			LMTPHashKey:     "recipient",
+			AuthAttributes: RoutingAuthAttributesConfig{
+				Tenant:   defaultRoutingTenantAttribute,
+				ShardTag: defaultRoutingShardTagAttribute,
+			},
 			Failover: FailoverConfig{
 				Enabled:  true,
 				Strategy: "same_shard_then_any_healthy",

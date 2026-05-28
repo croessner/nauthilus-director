@@ -60,6 +60,25 @@ func TestTargetConfigDecodesAndValidates(t *testing.T) {
 	if _, ok := snapshot.Config.Director.Listeners["imap"]; !ok {
 		t.Fatal("target config did not decode director.listeners.imap")
 	}
+	if snapshot.Config.Director.Routing.AuthAttributes.Tenant != "tenant" {
+		t.Fatalf("routing auth tenant attribute = %q, want tenant", snapshot.Config.Director.Routing.AuthAttributes.Tenant)
+	}
+	if snapshot.Config.Director.Routing.AuthAttributes.ShardTag != "mailShard" {
+		t.Fatalf("routing auth shard attribute = %q, want mailShard", snapshot.Config.Director.Routing.AuthAttributes.ShardTag)
+	}
+}
+
+// TestRoutingAuthAttributeDefaults verifies tenant and shard attribute names have stable defaults.
+func TestRoutingAuthAttributeDefaults(t *testing.T) {
+	cfg := DefaultConfig()
+
+	if cfg.Director.Routing.AuthAttributes.Tenant != "tenant" {
+		t.Fatalf("default tenant attribute = %q, want tenant", cfg.Director.Routing.AuthAttributes.Tenant)
+	}
+
+	if cfg.Director.Routing.AuthAttributes.ShardTag != "mailShard" {
+		t.Fatalf("default shard tag attribute = %q, want mailShard", cfg.Director.Routing.AuthAttributes.ShardTag)
+	}
 }
 
 // TestObservabilityValidationRejectsUnknownTracingExporter keeps startup fail-closed.

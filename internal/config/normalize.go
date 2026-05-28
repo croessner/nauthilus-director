@@ -19,8 +19,10 @@ package config
 import "strings"
 
 const (
-	fallbackDefaultShard = "default"
-	lmtpCapabilityAuth   = "AUTH"
+	fallbackDefaultShard            = "default"
+	defaultRoutingTenantAttribute   = "tenant"
+	defaultRoutingShardTagAttribute = "mailShard"
+	lmtpCapabilityAuth              = "AUTH"
 )
 
 // Normalize returns a config snapshot with derived runtime defaults applied.
@@ -33,6 +35,7 @@ func (c Config) Normalize() Config {
 // Normalize returns director config with non-empty effective backend shard tags.
 func (d DirectorConfig) Normalize() DirectorConfig {
 	d.Routing.DefaultShard = d.Routing.EffectiveDefaultShard()
+	d.Routing.AuthAttributes = d.Routing.AuthAttributes.Normalize()
 
 	if d.Listeners != nil {
 		listeners := make(map[string]ListenerConfig, len(d.Listeners))
@@ -72,6 +75,21 @@ func (d DirectorConfig) Normalize() DirectorConfig {
 	d.Backends = backends
 
 	return d
+}
+
+// Normalize returns routing auth-attribute names with stable defaults applied.
+func (r RoutingAuthAttributesConfig) Normalize() RoutingAuthAttributesConfig {
+	r.Tenant = strings.TrimSpace(r.Tenant)
+	if r.Tenant == "" {
+		r.Tenant = defaultRoutingTenantAttribute
+	}
+
+	r.ShardTag = strings.TrimSpace(r.ShardTag)
+	if r.ShardTag == "" {
+		r.ShardTag = defaultRoutingShardTagAttribute
+	}
+
+	return r
 }
 
 // normalizeLMTPCapabilities converts configured LMTP capability strings into stable wire forms.

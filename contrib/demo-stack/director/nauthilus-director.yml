@@ -361,6 +361,12 @@ director:
     default_shard: mailstore-a
     hash_key: username
     lmtp_hash_key: recipient
+    auth_attributes:
+      # Nauthilus must still return account_field. These names only tell the
+      # Director where tenant and logical shard facts live in the released
+      # attribute map.
+      tenant: tenant
+      shard_tag: mailShard
     failover:
       enabled: true
       strategy: same_shard_then_any_healthy

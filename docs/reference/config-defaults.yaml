@@ -402,6 +402,9 @@ director:
         hard_kill_grace: 30s
         soft_allows_active_pins: true
     routing:
+        auth_attributes:
+            shard_tag: mailShard
+            tenant: tenant
         default_selector: rendezvous_hash
         default_shard: default
         failover:

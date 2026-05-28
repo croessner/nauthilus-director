@@ -356,11 +356,18 @@ type LMTPClientMTLSAuthConfig struct {
 }
 
 type RoutingConfig struct {
-	DefaultSelector string         `mapstructure:"default_selector" yaml:"default_selector" validate:"required"`
-	DefaultShard    string         `mapstructure:"default_shard" yaml:"default_shard"`
-	HashKey         string         `mapstructure:"hash_key" yaml:"hash_key" validate:"required"`
-	LMTPHashKey     string         `mapstructure:"lmtp_hash_key" yaml:"lmtp_hash_key"`
-	Failover        FailoverConfig `mapstructure:"failover" yaml:"failover" validate:"required"`
+	DefaultSelector string                      `mapstructure:"default_selector" yaml:"default_selector" validate:"required"`
+	DefaultShard    string                      `mapstructure:"default_shard" yaml:"default_shard"`
+	HashKey         string                      `mapstructure:"hash_key" yaml:"hash_key" validate:"required"`
+	LMTPHashKey     string                      `mapstructure:"lmtp_hash_key" yaml:"lmtp_hash_key"`
+	AuthAttributes  RoutingAuthAttributesConfig `mapstructure:"auth_attributes" yaml:"auth_attributes" validate:"required"`
+	Failover        FailoverConfig              `mapstructure:"failover" yaml:"failover" validate:"required"`
+}
+
+// RoutingAuthAttributesConfig names Nauthilus attributes that release routing facts.
+type RoutingAuthAttributesConfig struct {
+	Tenant   string `mapstructure:"tenant" yaml:"tenant"`
+	ShardTag string `mapstructure:"shard_tag" yaml:"shard_tag"`
 }
 
 type FailoverConfig struct {
