@@ -56,6 +56,7 @@ const (
 // TestManagerSelectsSupportedProtocolListeners verifies that startup plans include IMAP and LMTP listeners.
 func TestManagerSelectsSupportedProtocolListeners(t *testing.T) {
 	cfg := config.DefaultConfig()
+	cfg = withTestListenerCertificates(t, cfg)
 
 	manager, err := NewManagerWithConfig(cfg)
 	if err != nil {
@@ -72,7 +73,7 @@ func TestManagerSelectsSupportedProtocolListeners(t *testing.T) {
 
 // TestManagerRejectsUnsupportedProtocolBeforeBind verifies unknown protocols fail during planning.
 func TestManagerRejectsUnsupportedProtocolBeforeBind(t *testing.T) {
-	cfg := singleListenerConfig(testIMAPListener, tlsModeStartTLS)
+	cfg := singleListenerConfig(t, testIMAPListener, tlsModeStartTLS)
 	entry := cfg.Director.Listeners[testIMAPListener]
 	entry.Protocol = "pop3"
 	cfg.Director.Listeners[testIMAPListener] = entry
@@ -89,7 +90,7 @@ func TestManagerRejectsUnsupportedProtocolBeforeBind(t *testing.T) {
 
 // TestSessionOptionsIncludeAuthorityBearerTokenLimit verifies IMAP sessions inherit authority bearer limits.
 func TestSessionOptionsIncludeAuthorityBearerTokenLimit(t *testing.T) {
-	cfg := singleListenerConfig(testIMAPListener, tlsModeStartTLS)
+	cfg := singleListenerConfig(t, testIMAPListener, tlsModeStartTLS)
 	authority := cfg.Auth.Authorities["default"]
 	authority.Mechanisms.Bearer.TokenMaxBytes = 42
 	cfg.Auth.Authorities["default"] = authority
@@ -117,7 +118,7 @@ func TestSessionOptionsIncludeAuthorityBearerTokenLimit(t *testing.T) {
 
 // TestManagerSelectsConfiguredListenerAuthorityTransport verifies listener authority selection.
 func TestManagerSelectsConfiguredListenerAuthorityTransport(t *testing.T) {
-	cfg := singleListenerConfig(testIMAPListener, tlsModeStartTLS)
+	cfg := singleListenerConfig(t, testIMAPListener, tlsModeStartTLS)
 	authority := cfg.Auth.Authorities["default"]
 	authority.Transport = testGRPCTransport
 	cfg.Auth.Authorities[testGRPCAuthority] = authority
@@ -171,7 +172,7 @@ func TestManagerSelectsConfiguredListenerAuthorityTransport(t *testing.T) {
 
 // TestStartTLSListenerStartsWithoutImplicitTLS verifies cleartext IMAP listener setup.
 func TestStartTLSListenerStartsWithoutImplicitTLS(t *testing.T) {
-	cfg := singleListenerConfig(testIMAPListener, tlsModeStartTLS)
+	cfg := singleListenerConfig(t, testIMAPListener, tlsModeStartTLS)
 	handler := newRecordingHandler()
 
 	manager, address := startManager(t, cfg, testIMAPListener, WithSessionHandlerFactory(handler.factory))
@@ -200,6 +201,7 @@ func TestStartTLSListenerStartsWithoutImplicitTLS(t *testing.T) {
 // TestIMAPAndLMTPListenersStartThroughProtocolFactory verifies shared transport startup is protocol-generic.
 func TestIMAPAndLMTPListenersStartThroughProtocolFactory(t *testing.T) {
 	cfg := config.DefaultConfig()
+	cfg = withTestListenerCertificates(t, cfg)
 
 	imapEntry := cfg.Director.Listeners[testIMAPListener]
 	imapEntry.Address = testLoopbackAny
@@ -262,12 +264,17 @@ func TestIMAPAndLMTPListenersStartThroughProtocolFactory(t *testing.T) {
 
 // TestReloadAddsLMTPAndDrainsRemovedListener verifies live listener add/remove behavior.
 func TestReloadAddsLMTPAndDrainsRemovedListener(t *testing.T) {
-	current := singleListenerConfig(testIMAPListener, tlsModeStartTLS)
+	current := singleListenerConfig(t, testIMAPListener, tlsModeStartTLS)
 	next := current
 	imapEntry := current.Director.Listeners[testIMAPListener]
 	lmtpEntry := config.DefaultConfig().Director.Listeners[testLMTPListener]
+	lmtpCertPath, lmtpKeyPath := writeTestCertificate(t)
 	lmtpEntry.Address = testLoopbackAny
 	lmtpEntry.TLS.Mode = tlsModeStartTLS
+	lmtpEntry.TLS.Cert = lmtpCertPath
+	lmtpEntry.TLS.Key = config.Secret(lmtpKeyPath)
+	lmtpEntry.TLS.ClientCA = ""
+	lmtpEntry.TLS.RequireClientCert = false
 	lmtpEntry.ProxyProtocol.Enabled = false
 	next.Director.Listeners = map[string]config.ListenerConfig{
 		testIMAPListener: imapEntry,
@@ -326,7 +333,7 @@ func TestReloadAddsLMTPAndDrainsRemovedListener(t *testing.T) {
 // TestIMAPSListenerWrapsAcceptedConnectionsInTLS verifies implicit TLS before IMAP greeting.
 func TestIMAPSListenerWrapsAcceptedConnectionsInTLS(t *testing.T) {
 	certPath, keyPath := writeTestCertificate(t)
-	cfg := singleListenerConfig(testIMAPSListener, tlsModeImplicit)
+	cfg := singleListenerConfig(t, testIMAPSListener, tlsModeImplicit)
 	entry := cfg.Director.Listeners[testIMAPSListener]
 	entry.TLS.Cert = certPath
 	entry.TLS.Key = config.Secret(keyPath)
@@ -353,7 +360,7 @@ func TestIMAPSListenerWrapsAcceptedConnectionsInTLS(t *testing.T) {
 
 // TestGracefulListenerShutdownClosesActiveSessions verifies deadline-enforced shutdown.
 func TestGracefulListenerShutdownClosesActiveSessions(t *testing.T) {
-	cfg := singleListenerConfig(testIMAPListener, tlsModeStartTLS)
+	cfg := singleListenerConfig(t, testIMAPListener, tlsModeStartTLS)
 	cfg.Runtime.Process.ShutdownTimeout = config.NewDuration(20 * time.Millisecond)
 	handler := newRecordingHandler()
 
@@ -384,7 +391,7 @@ func TestGracefulListenerShutdownClosesActiveSessions(t *testing.T) {
 
 // TestListenerObservabilityClassifiesLifecycleEvents verifies listener reasons stay bounded.
 func TestListenerObservabilityClassifiesLifecycleEvents(t *testing.T) {
-	cfg := singleListenerConfig(testIMAPListener, tlsModeStartTLS)
+	cfg := singleListenerConfig(t, testIMAPListener, tlsModeStartTLS)
 	entry := cfg.Director.Listeners[testIMAPListener]
 	entry.Address = "127.0.0.1:not-a-port"
 	cfg.Director.Listeners[testIMAPListener] = entry
@@ -412,7 +419,7 @@ func TestListenerObservabilityClassifiesLifecycleEvents(t *testing.T) {
 
 // TestListenerObservabilityRecordsAcceptLoopStop verifies accept-loop exit is explicit.
 func TestListenerObservabilityRecordsAcceptLoopStop(t *testing.T) {
-	cfg := singleListenerConfig(testIMAPListener, tlsModeStartTLS)
+	cfg := singleListenerConfig(t, testIMAPListener, tlsModeStartTLS)
 	recorder := &recordingListenerObservability{}
 	manager, _ := startManager(t, cfg, testIMAPListener, WithObservabilityRecorder(recorder))
 
@@ -437,7 +444,7 @@ func TestListenerObservabilityRecordsAcceptLoopStop(t *testing.T) {
 func TestProxyProtocolObservabilityClassifiesAcceptAndReject(t *testing.T) {
 	recorder := &recordingListenerObservability{}
 	handler := newRecordingHandler()
-	cfg := proxyListenerConfig([]string{trustedLocalhostCIDR})
+	cfg := proxyListenerConfig(t, []string{trustedLocalhostCIDR})
 	_, address := startManager(
 		t,
 		cfg,
@@ -490,7 +497,7 @@ func TestProxyProtocolObservabilityClassifiesAcceptAndReject(t *testing.T) {
 
 // TestProxyProtocolRejectsEmptyTrustedCIDRs verifies fail-closed proxy config validation.
 func TestProxyProtocolRejectsEmptyTrustedCIDRs(t *testing.T) {
-	cfg := singleListenerConfig(testIMAPListener, tlsModeStartTLS)
+	cfg := singleListenerConfig(t, testIMAPListener, tlsModeStartTLS)
 	entry := cfg.Director.Listeners[testIMAPListener]
 	entry.ProxyProtocol.Enabled = true
 	entry.ProxyProtocol.TrustedCIDRs = nil
@@ -508,7 +515,7 @@ func TestProxyProtocolRejectsEmptyTrustedCIDRs(t *testing.T) {
 // TestProxyProtocolV1AcceptedFromTrustedPeer verifies trusted v1 headers become session context.
 func TestProxyProtocolV1AcceptedFromTrustedPeer(t *testing.T) {
 	recorder := newRecordingHandler()
-	cfg := proxyListenerConfig([]string{trustedLocalhostCIDR})
+	cfg := proxyListenerConfig(t, []string{trustedLocalhostCIDR})
 	_, address := startManager(t, cfg, testIMAPListener, WithSessionHandlerFactory(recorder.factory))
 
 	conn, err := net.Dial(networkTCP, address)
@@ -531,7 +538,7 @@ func TestProxyProtocolV1AcceptedFromTrustedPeer(t *testing.T) {
 // TestProxyProtocolV2AcceptedFromTrustedPeer verifies trusted v2 headers become session context.
 func TestProxyProtocolV2AcceptedFromTrustedPeer(t *testing.T) {
 	recorder := newRecordingHandler()
-	cfg := proxyListenerConfig([]string{trustedLocalhostCIDR})
+	cfg := proxyListenerConfig(t, []string{trustedLocalhostCIDR})
 	_, address := startManager(t, cfg, testIMAPListener, WithSessionHandlerFactory(recorder.factory))
 
 	conn, err := net.Dial(networkTCP, address)
@@ -558,7 +565,7 @@ func TestProxyProtocolV2AcceptedFromTrustedPeer(t *testing.T) {
 
 // TestProxyProtocolRejectsUntrustedPeer verifies direct clients cannot supply source addresses.
 func TestProxyProtocolRejectsUntrustedPeer(t *testing.T) {
-	cfg := proxyListenerConfig([]string{"192.0.2.0/24"})
+	cfg := proxyListenerConfig(t, []string{"192.0.2.0/24"})
 
 	expectProxyRejection(t, cfg, func(t *testing.T, conn net.Conn) {
 		t.Helper()
@@ -569,7 +576,7 @@ func TestProxyProtocolRejectsUntrustedPeer(t *testing.T) {
 
 // TestProxyProtocolRejectsMissingHeader verifies enabled listeners require a PROXY preface.
 func TestProxyProtocolRejectsMissingHeader(t *testing.T) {
-	cfg := proxyListenerConfig([]string{trustedLocalhostCIDR})
+	cfg := proxyListenerConfig(t, []string{trustedLocalhostCIDR})
 
 	expectProxyRejection(t, cfg, func(t *testing.T, conn net.Conn) {
 		t.Helper()
@@ -580,7 +587,7 @@ func TestProxyProtocolRejectsMissingHeader(t *testing.T) {
 
 // TestProxyProtocolRejectsMalformedHeader verifies malformed PROXY input fails closed.
 func TestProxyProtocolRejectsMalformedHeader(t *testing.T) {
-	cfg := proxyListenerConfig([]string{trustedLocalhostCIDR})
+	cfg := proxyListenerConfig(t, []string{trustedLocalhostCIDR})
 
 	expectProxyRejection(t, cfg, func(t *testing.T, conn net.Conn) {
 		t.Helper()
@@ -591,7 +598,7 @@ func TestProxyProtocolRejectsMalformedHeader(t *testing.T) {
 
 // TestProxyProtocolRejectsUnsupportedFamily verifies only stream TCP families are accepted.
 func TestProxyProtocolRejectsUnsupportedFamily(t *testing.T) {
-	cfg := proxyListenerConfig([]string{trustedLocalhostCIDR})
+	cfg := proxyListenerConfig(t, []string{trustedLocalhostCIDR})
 
 	header := &proxyproto.Header{
 		Version:           2,
@@ -612,7 +619,7 @@ func TestProxyProtocolRejectsUnsupportedFamily(t *testing.T) {
 
 // TestProxyProtocolRejectsLocalCommand verifies v2 LOCAL commands never reach IMAP.
 func TestProxyProtocolRejectsLocalCommand(t *testing.T) {
-	cfg := proxyListenerConfig([]string{trustedLocalhostCIDR})
+	cfg := proxyListenerConfig(t, []string{trustedLocalhostCIDR})
 
 	expectProxyRejection(t, cfg, func(t *testing.T, conn net.Conn) {
 		t.Helper()
@@ -762,11 +769,14 @@ func expectProxyRejection(t *testing.T, cfg config.Config, writeInput func(*test
 }
 
 // singleListenerConfig returns a default config narrowed to one listener.
-func singleListenerConfig(name string, tlsMode string) config.Config {
+func singleListenerConfig(t *testing.T, name string, tlsMode string) config.Config {
+	t.Helper()
+
 	cfg := config.DefaultConfig()
 	entry := cfg.Director.Listeners[name]
 	entry.Address = "127.0.0.1:0"
 	entry.TLS.Mode = tlsMode
+	entry = withTestListenerCertificate(t, entry)
 	entry.ProxyProtocol.Enabled = false
 	entry.ProxyProtocol.TrustedCIDRs = nil
 	cfg.Director.Listeners = map[string]config.ListenerConfig{name: entry}
@@ -774,9 +784,39 @@ func singleListenerConfig(name string, tlsMode string) config.Config {
 	return cfg
 }
 
+// withTestListenerCertificates assigns temporary certificates to every configured listener.
+func withTestListenerCertificates(t *testing.T, cfg config.Config) config.Config {
+	t.Helper()
+
+	for name, entry := range cfg.Director.Listeners {
+		cfg.Director.Listeners[name] = withTestListenerCertificate(t, entry)
+	}
+
+	return cfg
+}
+
+// withTestListenerCertificate assigns a temporary certificate when the listener can negotiate TLS.
+func withTestListenerCertificate(t *testing.T, entry config.ListenerConfig) config.ListenerConfig {
+	t.Helper()
+
+	if entry.TLS.Mode != tlsModeStartTLS && entry.TLS.Mode != tlsModeImplicit {
+		return entry
+	}
+
+	certPath, keyPath := writeTestCertificate(t)
+	entry.TLS.Cert = certPath
+	entry.TLS.Key = config.Secret(keyPath)
+	entry.TLS.ClientCA = ""
+	entry.TLS.RequireClientCert = false
+
+	return entry
+}
+
 // proxyListenerConfig returns one STARTTLS listener that requires trusted PROXY headers.
-func proxyListenerConfig(trustedCIDRs []string) config.Config {
-	cfg := singleListenerConfig(testIMAPListener, tlsModeStartTLS)
+func proxyListenerConfig(t *testing.T, trustedCIDRs []string) config.Config {
+	t.Helper()
+
+	cfg := singleListenerConfig(t, testIMAPListener, tlsModeStartTLS)
 	cfg.Runtime.Timeouts.Preauth = config.NewDuration(200 * time.Millisecond)
 	entry := cfg.Director.Listeners[testIMAPListener]
 	entry.ProxyProtocol.Enabled = true

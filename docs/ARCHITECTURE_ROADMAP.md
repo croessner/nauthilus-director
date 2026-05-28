@@ -1178,6 +1178,14 @@ completion evidence lives in
 
 ### M5: LMTP Production
 
+Status: completed. The production LMTP/LMTPS listener path, LMTP transaction
+state machine, DATA/BDAT backend forwarding, peer authentication, recipient
+identity lookup, runtime-aware same-backend placement, delivery-scoped
+affinity, route lookup integration, observability coverage, deterministic
+fake-service E2E proof and real Postfix-to-Director-to-Dovecot interop lane are
+in place. The detailed completion evidence lives in
+`docs/specs/implementation/M5_LMTP_PRODUCTION_SPEC.md`.
+
 - production-ready LMTP and LMTPS entrypoints within the M5 scope
 - LMTP state machine with DATA and BDAT handling
 - LMTP STARTTLS, implicit TLS and client-auth handling

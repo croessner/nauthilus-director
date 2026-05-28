@@ -82,6 +82,11 @@ func newManagedListener(
 		return nil, fmt.Errorf("listener %s: %w", name, err)
 	}
 
+	tlsConfig, err := buildListenerTLSConfig(entry)
+	if err != nil {
+		return nil, fmt.Errorf("listener %s: %w", name, err)
+	}
+
 	configured := configListener{
 		listener: entry,
 		timeouts: runtime.Timeouts,
@@ -121,9 +126,11 @@ func newManagedListener(
 			DefaultShard:        defaultShard,
 			SessionLeaseTTL:     runtime.Timeouts.ProxyIdle.Std(),
 			SessionIdleGrace:    sessionIdleGrace,
+			FrontendTLSConfig:   tlsConfig,
 			LocalSessions:       options.localSessions,
 			Observability:       options.observability,
 		}),
+		tlsConfig:     tlsConfig,
 		proxyProtocol: proxyPolicy,
 		listenConfig:  options.listenConfig,
 		observability: observability.NormalizeRecorder(options.observability),
@@ -133,15 +140,6 @@ func newManagedListener(
 
 // start binds the configured address and starts the accept loop.
 func (l *managedListener) start(ctx context.Context) error {
-	if l.config.listener.TLS.Mode == tlsModeImplicit {
-		tlsConfig, err := buildListenerTLSConfig(l.config.listener)
-		if err != nil {
-			return fmt.Errorf("listener %s: %w", l.name, err)
-		}
-
-		l.tlsConfig = tlsConfig
-	}
-
 	ln, err := l.listenConfig.Listen(ctx, l.config.listener.Network, l.config.listener.Address)
 	if err != nil {
 		l.recordListenerEvent(ctx, observability.EventListenerStart, "failure", "bind_failed")
@@ -275,7 +273,12 @@ func (l *managedListener) prepareConnection(conn net.Conn) (net.Conn, error) {
 	}
 
 	if l.config.listener.TLS.Mode == tlsModeImplicit {
-		prepared = tls.Server(prepared, l.tlsConfig.Clone())
+		tlsConn := tls.Server(prepared, l.tlsConfig.Clone())
+		if err := tlsConn.Handshake(); err != nil {
+			return nil, err
+		}
+
+		prepared = tlsConn
 	}
 
 	return prepared, nil

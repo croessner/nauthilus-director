@@ -1,8 +1,12 @@
 # M5 LMTP Production Specification
 
-Status: implementation-ready M5 specification. Recorded decisions and remaining
-blocking open questions are listed at the end. The open questions must be
-resolved before broad implementation starts.
+Status: completed. The LMTP and LMTPS production implementation, deterministic
+fake-service E2E coverage, real Postfix-to-Director-to-Dovecot LMTP
+interoperability and final review pass are in place. `make guardrails` and
+`make e2e-interop` passed on 2026-05-28; the real-server interoperability lane
+used pinned `dovecot/dovecot:2.4.3-dev`, pinned
+`chrroessner/postfix:3.11.1` and a pinned `debian:trixie-slim` tool container
+for `swaks` submission plus `curl --url imap...` delivery proof.
 
 This document defines the LMTP milestone for `nauthilus-director`. M5 delivers a
 production-ready LMTP delivery-path protocol entrypoint within the explicit
@@ -1381,69 +1385,105 @@ Real-server interoperability lane:
 
 M5 is complete only when all items below are true:
 
-- [ ] `lmtp` and `lmtps` listeners start from typed config through the production
+- [x] `lmtp` and `lmtps` listeners start from typed config through the production
       server binary.
-- [ ] Listener dispatch supports IMAP and LMTP without duplicating transport
+- [x] Listener dispatch supports IMAP and LMTP without duplicating transport
       lifecycle behavior.
-- [ ] LMTP capability advertisement matches implemented behavior.
-- [ ] LMTP capabilities remain configurable, but runtime `LHLO` advertises only
+- [x] LMTP capability advertisement matches implemented behavior.
+- [x] LMTP capabilities remain configurable, but runtime `LHLO` advertises only
       the effective safe capability set.
-- [ ] Configured `CHUNKING` is backed by production-ready `BDAT` parsing,
+- [x] Configured `CHUNKING` is backed by production-ready `BDAT` parsing,
       streaming, backend forwarding, status mapping, tests and interop proof.
-- [ ] STARTTLS and implicit TLS behavior are implemented and tested.
-- [ ] Peer auth is optional or required exactly as configured.
-- [ ] Peer auth authenticates the submitting LMTP peer only, not mailbox users.
-- [ ] SASL peer auth is verified by Nauthilus as a technical submitter account,
+- [x] STARTTLS and implicit TLS behavior are implemented and tested.
+- [x] Peer auth is optional or required exactly as configured.
+- [x] Peer auth authenticates the submitting LMTP peer only, not mailbox users.
+- [x] SASL peer auth is verified by Nauthilus as a technical submitter account,
       not as a recipient mailbox account.
-- [ ] mTLS satisfies required peer auth only when an explicit listener policy
+- [x] mTLS satisfies required peer auth only when an explicit listener policy
       requires verified client certificates and safe identity mapping succeeds.
-- [ ] LMTP recipient routing uses the shared director routing model.
-- [ ] LMTP preserves the wire recipient for backend commands while using only
+- [x] LMTP recipient routing uses the shared director routing model.
+- [x] LMTP preserves the wire recipient for backend commands while using only
       conservative lookup normalization before Nauthilus identity lookup.
-- [ ] The runtime selector supports LMTP and `recipient_hash`.
-- [ ] LMTP placement consumes health, maintenance, runtime out, drain, weight and
+- [x] The runtime selector supports LMTP and `recipient_hash`.
+- [x] LMTP placement consumes health, maintenance, runtime out, drain, weight and
       max-connection state.
-- [ ] Accepted LMTP deliveries open and maintain delivery-scoped active-affinity
+- [x] Accepted LMTP deliveries open and maintain delivery-scoped active-affinity
       holds for resolved account keys.
-- [ ] Concurrent IMAP placement for the same resolved account observes the LMTP
+- [x] Concurrent IMAP placement for the same resolved account observes the LMTP
       delivery hold and selects the same active shard.
-- [ ] Delivery holds are not exposed as mailbox login sessions through the v1
+- [x] Delivery holds are not exposed as mailbox login sessions through the v1
       session APIs.
-- [ ] The first accepted recipient establishes exactly one backend target.
-- [ ] Additional recipients are accepted only when they select the same backend
+- [x] The first accepted recipient establishes exactly one backend target.
+- [x] Additional recipients are accepted only when they select the same backend
       target.
-- [ ] Different-backend recipients are rejected or temporary-failed before DATA
+- [x] Different-backend recipients are rejected or temporary-failed before DATA
       or BDAT.
-- [ ] Different-backend recipients use a stable 4xx temporary failure, stable
+- [x] Different-backend recipients use a stable 4xx temporary failure, stable
       enhanced status code and stable reason class, never a permanent 5xx.
-- [ ] Backend LMTP connect, TLS, capability discovery and configured backend auth
+- [x] Backend LMTP connect, TLS, capability discovery and configured backend auth
       are implemented.
-- [ ] DATA and BDAT are streamed to one selected backend without message-body
+- [x] DATA and BDAT are streamed to one selected backend without message-body
       logging or cross-backend replay.
-- [ ] Per-recipient final statuses are relayed for accepted recipients in order.
-- [ ] Known mixed per-recipient backend outcomes are preserved; same-backend
+- [x] Per-recipient final statuses are relayed for accepted recipients in order.
+- [x] Known mixed per-recipient backend outcomes are preserved; same-backend
       partial success is not converted to all-or-nothing failure.
-- [ ] Unknown delivery outcomes temporary-fail rather than silently succeeding.
-- [ ] LMTP health checks are protocol-aware and Redis-coordinated.
-- [ ] LMTP deep health proves connect, TLS, greeting, `LHLO`, configured backend
+- [x] Unknown delivery outcomes temporary-fail rather than silently succeeding.
+- [x] LMTP health checks are protocol-aware and Redis-coordinated.
+- [x] LMTP deep health proves connect, TLS, greeting, `LHLO`, configured backend
       auth, optional `NOOP`/`RSET` and `QUIT` without envelope or message
       commands.
-- [ ] Route lookup supports LMTP recipient diagnostics through optional
+- [x] Route lookup supports LMTP recipient diagnostics through optional
       Nauthilus identity lookup without credential authentication or Redis
       mutations.
-- [ ] LMTP metrics use only the approved low-cardinality labels.
-- [ ] Logs and traces do not contain raw recipients, message content, credentials,
+- [x] LMTP metrics use only the approved low-cardinality labels.
+- [x] Logs and traces do not contain raw recipients, message content, credentials,
       SASL blobs, bearer tokens, private keys or raw authorization headers.
-- [ ] `make e2e` proves LMTP through public sockets, the production binary and
+- [x] `make e2e` proves LMTP through public sockets, the production binary and
       the delivery-hold-to-IMAP shard-consistency invariant.
-- [ ] `make e2e-interop` proves real Postfix-to-Director-to-Dovecot LMTP delivery
+- [x] `make e2e-interop` proves real Postfix-to-Director-to-Dovecot LMTP delivery
       on a Docker-capable environment, including the same shard-consistency
       invariant or an equivalent real-binary proof.
-- [ ] Existing IMAP interop coverage remains present.
-- [ ] Config docs, generated references, OpenAPI artifacts and manpages are
+- [x] Existing IMAP interop coverage remains present.
+- [x] Config docs, generated references, OpenAPI artifacts and manpages are
       updated when behavior changes.
-- [ ] `make guardrails` is the final local gate before any commit or pull request
+- [x] `make guardrails` is the final local gate before any commit or pull request
       that contains M5 implementation work.
+
+### Completion Evidence
+
+M5 closeout completed on 2026-05-28 after the required final review pass. The
+implementation includes typed LMTP/LMTPS listener startup through the production
+server binary, frontend LMTP transaction handling for `LHLO`, `STARTTLS`,
+peer `AUTH`, `MAIL FROM`, `RCPT TO`, `DATA`, `BDAT`, `RSET`, `NOOP` and
+`QUIT`, truthfully mediated capability advertisement, peer authentication
+through Nauthilus or explicit mTLS policy, recipient identity lookup through
+HTTP `mode=no-auth` or gRPC `LookupIdentity`, runtime-aware `recipient_hash`
+placement, delivery-scoped active-affinity holds, same-backend-only
+multi-recipient transactions, backend LMTP connect/TLS/auth handling,
+DATA/BDAT streaming and per-recipient status relay.
+
+The deterministic fake-service E2E lane proves LMTP and LMTPS through public
+sockets, fake Nauthilus HTTP/gRPC authority sockets, fake IMAP and LMTP
+backends, generated REST endpoints, real `nauthilus-directorctl` commands and
+the production `nauthilus-director` binary. It covers STARTTLS, implicit TLS,
+SASL peer auth, mTLS peer auth, HTTP and gRPC recipient lookup, same-backend
+multi-recipient success, different-backend stable `4xx` before message body,
+DATA forwarding, BDAT forwarding, suppressed `CHUNKING` when backend capability
+mediation forbids it, mixed same-backend per-recipient outcomes, route lookup
+dry-run behavior, runtime out/hard maintenance/soft maintenance effects,
+delivery-hold-to-IMAP shard consistency and secret-safe logs, metrics, traces
+and test output.
+
+The real-server interoperability lane passed on a Docker-capable environment.
+It preserves the existing Dovecot IMAP interop coverage, starts real Dovecot
+IMAP and LMTP backends, uses the production Director binary with shared
+Redis-compatible state, starts real Postfix as the submitting peer and verifies
+end-to-end delivery into Dovecot. The LMTP interop proof includes
+`CHUNKING`/`BDAT` when advertised, same-backend multi-recipient behavior,
+different-backend recipient temporary failure before message body, concurrent
+LMTP delivery and IMAP placement on the same shard, `swaks` injection into
+Postfix from a tool container and `curl --url imap...` verification of a unique
+delivered message marker in the real Dovecot mailbox.
 
 ## Required M5 Review Pass
 

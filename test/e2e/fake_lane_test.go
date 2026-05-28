@@ -757,6 +757,7 @@ func writeProcessConfig(t *testing.T, options processConfigOptions) string {
 	if controlAddress == "" {
 		controlAddress = "127.0.0.1:0"
 	}
+	listenerCertPath, listenerKeyPath, _ := writeTestCertificate(t)
 
 	content := fmt.Sprintf(`patch:
   - op: remove
@@ -806,6 +807,8 @@ director:
       address: %q
       tls:
         mode: starttls
+        cert: %q
+        key: %q
       imap:
         capabilities: [IMAP4rev1, ID, SASL-IR, STARTTLS, AUTH=PLAIN]
         auth_mechanisms: [plain]
@@ -842,6 +845,8 @@ director:
 		options.RedisAddress,
 		options.AuthorityURL,
 		options.DirectorAddress,
+		listenerCertPath,
+		listenerKeyPath,
 		options.BackendAddress,
 		e2eShardTag,
 		backendTLS.Mode,
@@ -2073,8 +2078,10 @@ func newHTTPAuthenticator(t *testing.T, endpoint string) nauthilus.Authenticator
 }
 
 type fakeGRPCService struct {
-	mu    sync.Mutex
-	calls int
+	mu               sync.Mutex
+	calls            int
+	lookupCalls      []nauthilus.GRPCLookupIdentityRequest
+	lookupIdentities map[string]lmtpAuthorityIdentity
 }
 
 // Authenticate records one scaffolded gRPC auth request.
@@ -2095,9 +2102,31 @@ func (s *fakeGRPCService) Authenticate(_ context.Context, request *nauthilus.GRP
 	}, nil
 }
 
-// LookupIdentity returns a temporary failure because route lookup must not call it.
-func (s *fakeGRPCService) LookupIdentity(context.Context, *nauthilus.GRPCLookupIdentityRequest) (*nauthilus.GRPCAuthResponse, error) {
-	return &nauthilus.GRPCAuthResponse{Decision: nauthilus.GRPCDecisionTempFail}, nil
+// LookupIdentity records a scaffolded recipient lookup and returns configured identity facts.
+func (s *fakeGRPCService) LookupIdentity(_ context.Context, request *nauthilus.GRPCLookupIdentityRequest) (*nauthilus.GRPCAuthResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.lookupCalls = append(s.lookupCalls, *request)
+	if s.lookupIdentities == nil {
+		return &nauthilus.GRPCAuthResponse{Decision: nauthilus.GRPCDecisionTempFail}, nil
+	}
+
+	identity, ok := s.lookupIdentities[request.Username]
+	if !ok {
+		return &nauthilus.GRPCAuthResponse{Decision: nauthilus.GRPCDecisionTempFail}, nil
+	}
+
+	return &nauthilus.GRPCAuthResponse{
+		OK:           true,
+		Decision:     nauthilus.GRPCDecisionOK,
+		AccountField: identity.Account,
+		Attributes: map[string][]string{
+			"account":   {identity.Account},
+			"tenant":    {identity.Tenant},
+			"mailShard": {identity.Shard},
+		},
+	}, nil
 }
 
 // ListAccounts returns an empty account list for unused gRPC surface.
@@ -2111,6 +2140,20 @@ func (s *fakeGRPCService) AuthCalls() int {
 	defer s.mu.Unlock()
 
 	return s.calls
+}
+
+// SingleLookup returns the only recorded gRPC identity lookup.
+func (s *fakeGRPCService) SingleLookup(t *testing.T) nauthilus.GRPCLookupIdentityRequest {
+	t.Helper()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if len(s.lookupCalls) != 1 {
+		t.Fatalf("gRPC lookup calls = %d, want 1", len(s.lookupCalls))
+	}
+
+	return s.lookupCalls[0]
 }
 
 type fakeBackendOptions struct {
