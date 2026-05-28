@@ -1230,7 +1230,7 @@ func TestRedisHealthOwnershipAndFencing(t *testing.T) {
 	assertStaleHealthPublishRejected(t, store, instanceA, backendID, ownerA.FencingToken)
 
 	published := publishTestHealthState(t, store, instanceB, backendID, ownerB.FencingToken)
-	if published.Status != backend.HealthStatusHealthy || published.Generation == "" {
+	if published.Status != backend.HealthStatusHealthy || published.Generation == "" || !published.Capabilities.Has("CHUNKING") {
 		t.Fatalf("published health = %#v", published)
 	}
 }
@@ -1285,8 +1285,12 @@ func assertStaleHealthPublishRejected(t *testing.T, store *RedisSessionStore, in
 		InstanceID:        instanceID,
 		BackendIdentifier: backendID,
 		FencingToken:      token,
-		State:             backend.HealthState{Enabled: true, Status: backend.HealthStatusHealthy},
-		TTL:               time.Second,
+		State: backend.HealthState{
+			Enabled:      true,
+			Status:       backend.HealthStatusHealthy,
+			Capabilities: backend.NewCapabilitySet("CHUNKING"),
+		},
+		TTL: time.Second,
 	})
 	if !IsRedisErrorKind(err, RedisErrorKindAmbiguousState) {
 		t.Fatalf("stale PublishHealthState error = %v, want ambiguous_state", err)
@@ -1301,8 +1305,12 @@ func publishTestHealthState(t *testing.T, store *RedisSessionStore, instanceID s
 		InstanceID:        instanceID,
 		BackendIdentifier: backendID,
 		FencingToken:      token,
-		State:             backend.HealthState{Enabled: true, Status: backend.HealthStatusHealthy},
-		TTL:               time.Second,
+		State: backend.HealthState{
+			Enabled:      true,
+			Status:       backend.HealthStatusHealthy,
+			Capabilities: backend.NewCapabilitySet("CHUNKING"),
+		},
+		TTL: time.Second,
 	})
 	if err != nil {
 		t.Fatalf("PublishHealthState %s returned error: %v", instanceID, err)

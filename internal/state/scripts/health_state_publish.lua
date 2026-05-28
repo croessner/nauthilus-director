@@ -14,6 +14,7 @@ local fencing_token = tonumber(ARGV[3])
 local status = ARGV[4]
 local reason_class = ARGV[5]
 local state_ttl_ms = tonumber(ARGV[6])
+local capabilities = ARGV[7] or ""
 
 local function ambiguous(message)
 	error("NDAMBIGUOUS " .. message)
@@ -66,6 +67,7 @@ redis.call("HSET", state_key,
 	"backend_id", backend_id,
 	"status", status,
 	"reason_class", reason_class or "",
+	"capabilities", capabilities,
 	"owner_instance_id", instance_id,
 	"fencing_token", tostring(fencing_token),
 	"generation", tostring(generation),
@@ -79,6 +81,7 @@ return {
 	"fencing_token", tostring(fencing_token),
 	"generation", tostring(generation),
 	"reason_class", reason_class or "",
+	"capabilities", capabilities,
 	"checked_at_ms", tostring(now),
 	"expires_at_ms", tostring(now + state_ttl_ms),
 	"server_time_ms", tostring(now)

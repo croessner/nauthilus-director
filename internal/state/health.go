@@ -127,6 +127,7 @@ func (s *RedisSessionStore) PublishHealthState(ctx context.Context, request Heal
 		string(request.State.Status),
 		normalizedStateValue(request.State.ReasonClass),
 		durationMilliseconds(request.TTL),
+		request.State.Capabilities.String(),
 	)
 	if err != nil {
 		return backend.HealthState{}, err
@@ -341,12 +342,13 @@ func parseHealthStateFields(fields map[string]string) (backend.HealthState, erro
 	}
 
 	state := backend.HealthState{
-		Enabled:     true,
-		Status:      backend.HealthStatus(fields["status"]),
-		ReasonClass: fields["reason_class"],
-		Generation:  fields["generation"],
-		CheckedAt:   checkedAt,
-		ExpiresAt:   expiresAt,
+		Enabled:      true,
+		Status:       backend.HealthStatus(fields["status"]),
+		ReasonClass:  fields["reason_class"],
+		Capabilities: backend.CapabilitySetFromString(fields["capabilities"]),
+		Generation:   fields["generation"],
+		CheckedAt:    checkedAt,
+		ExpiresAt:    expiresAt,
 	}
 
 	return state.Normalize(time.Now().UTC())

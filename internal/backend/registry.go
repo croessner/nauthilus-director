@@ -60,6 +60,8 @@ type AuthConfig struct {
 	Mode             string
 	MasterUser       MasterUserConfig
 	CredentialReplay CredentialReplayConfig
+	SASL             SASLConfig
+	OAuthBearer      OAuthBearerConfig
 }
 
 // MasterUserConfig contains the configured administrative IMAP login identity.
@@ -75,6 +77,20 @@ type CredentialReplayConfig struct {
 	RequireBackendTLS bool
 	PreserveMechanism bool
 	AllowedMechanisms []string
+}
+
+// SASLConfig contains LMTP director-to-backend service credentials.
+type SASLConfig struct {
+	Mechanism  string
+	Username   string
+	Password   config.SecretString
+	RequireTLS bool
+}
+
+// OAuthBearerConfig contains LMTP director-to-backend bearer token material.
+type OAuthBearerConfig struct {
+	Token      config.SecretString
+	RequireTLS bool
 }
 
 // HealthConfig describes the credentialed backend health-check policy.
@@ -532,6 +548,16 @@ func newBackendAuthConfig(auth config.BackendAuthConfig) AuthConfig {
 			RequireBackendTLS: auth.CredentialReplay.RequireBackendTLS,
 			PreserveMechanism: auth.CredentialReplay.PreserveMechanism,
 			AllowedMechanisms: normalizeMechanisms(auth.CredentialReplay.AllowedMechanisms),
+		},
+		SASL: SASLConfig{
+			Mechanism:  strings.ToLower(strings.TrimSpace(auth.SASL.Mechanism)),
+			Username:   strings.TrimSpace(auth.SASL.Username),
+			Password:   auth.SASL.PasswordFile,
+			RequireTLS: auth.SASL.RequireTLS,
+		},
+		OAuthBearer: OAuthBearerConfig{
+			Token:      auth.OAuthBearer.TokenFile,
+			RequireTLS: auth.OAuthBearer.RequireTLS,
 		},
 	}
 }

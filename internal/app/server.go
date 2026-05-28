@@ -83,6 +83,27 @@ type reaperHandle struct {
 	reaper *runtimectl.Reaper
 }
 
+type protocolHealthChecker struct {
+	imap backend.HealthChecker
+	lmtp backend.HealthChecker
+}
+
+type backendCapabilityReader interface {
+	PoolSupportsCapability(ctx context.Context, backendPool string, capability string) (bool, error)
+}
+
+// CheckBackend dispatches health checks to the matching protocol implementation.
+func (c protocolHealthChecker) CheckBackend(ctx context.Context, target backend.Backend, request backend.HealthCheckRequest) backend.HealthCheckResult {
+	switch strings.ToLower(strings.TrimSpace(target.Protocol)) {
+	case protocolIMAP:
+		return c.imap.CheckBackend(ctx, target, request)
+	case protocolLMTP:
+		return c.lmtp.CheckBackend(ctx, target, request)
+	default:
+		return backend.HealthCheckResult{ReasonClass: "protocol"}
+	}
+}
+
 // Run starts the production Fx application and blocks until the context is cancelled.
 func Run(ctx context.Context, options Options) error {
 	if ctx == nil {
@@ -246,7 +267,7 @@ func provideListenerManager(
 		cfg,
 		listener.WithLocalSessionRegistry(localSessions),
 		listener.WithObservabilityRecorder(recorder),
-		listener.WithSessionHandlerFactory(sessionHandlerFactory(resolver, store, selector, recorder)),
+		listener.WithSessionHandlerFactory(sessionHandlerFactory(resolver, store, selector, selector, recorder)),
 	)
 }
 
@@ -456,6 +477,7 @@ func sessionHandlerFactory(
 	resolver routing.RoutingResolver,
 	store state.SessionStore,
 	selector backend.Selector,
+	capabilities backendCapabilityReader,
 	recorder observability.Recorder,
 ) listener.SessionHandlerFactory {
 	return func(options listener.SessionOptions) listener.SessionHandler {
@@ -463,7 +485,7 @@ func sessionHandlerFactory(
 		case protocolIMAP:
 			return imapSessionHandler(options, resolver, store, selector, recorder)
 		case protocolLMTP:
-			return lmtpSessionHandler(options, resolver, store, selector)
+			return lmtpSessionHandler(options, resolver, store, selector, capabilities)
 		default:
 			return unsupportedProtocolHandler{protocol: options.Config.Protocol}
 		}
@@ -530,14 +552,15 @@ func lmtpSessionHandler(
 	resolver routing.RoutingResolver,
 	store state.SessionStore,
 	selector backend.Selector,
+	capabilityReader backendCapabilityReader,
 ) listener.SessionHandler {
 	var (
-		capabilities []string
-		peerAuth     config.LMTPClientAuthConfig
+		listenerCapabilities []string
+		peerAuth             config.LMTPClientAuthConfig
 	)
 
 	if options.Config.LMTP != nil {
-		capabilities = options.Config.LMTP.Capabilities
+		listenerCapabilities = options.Config.LMTP.Capabilities
 		peerAuth = options.Config.LMTP.ClientAuth
 	}
 
@@ -552,7 +575,7 @@ func lmtpSessionHandler(
 		DefaultTenant:           options.DefaultTenant,
 		DefaultShard:            options.DefaultShard,
 		TLSMode:                 options.Config.TLS.Mode,
-		Capabilities:            capabilities,
+		Capabilities:            listenerCapabilities,
 		PreauthTimeout:          options.Timeouts.Preauth.Std(),
 		AuthTimeout:             options.Timeouts.Auth.Std(),
 		SessionLeaseTTL:         options.SessionLeaseTTL,
@@ -568,13 +591,27 @@ func lmtpSessionHandler(
 		RoutingResolver:         resolver,
 		SessionStore:            store,
 		BackendSelector:         selector,
-		BackendChunkingAllowed:  false,
+		BackendChunkingAllowed:  lmtpBackendChunkingAllowed(capabilityReader, options.Config.BackendPool),
 		RecipientLookupRequired: true,
 		MTLSPeerAuth: lmtp.MTLSPeerAuthConfig{
 			SatisfiesRequired: peerAuth.MTLS.SatisfiesRequired,
 			IdentitySource:    peerAuth.MTLS.IdentitySource,
 		},
 	})
+}
+
+// lmtpBackendChunkingAllowed checks fresh backend-pool proof before advertising BDAT.
+func lmtpBackendChunkingAllowed(capabilities backendCapabilityReader, backendPool string) bool {
+	if capabilities == nil {
+		return false
+	}
+
+	allowed, err := capabilities.PoolSupportsCapability(context.Background(), backendPool, "CHUNKING")
+	if err != nil {
+		return false
+	}
+
+	return allowed
 }
 
 // imapListenerOptions extracts IMAP-specific values from a listener config.
@@ -777,7 +814,10 @@ func healthRunner(
 	return backend.NewHealthRunner(
 		registry,
 		store,
-		imap.NewHealthChecker(imap.NewTCPBackendConnector(nil)),
+		protocolHealthChecker{
+			imap: imap.NewHealthChecker(imap.NewTCPBackendConnector(nil)),
+			lmtp: lmtp.NewHealthChecker(lmtp.NewTCPBackendConnector(nil)),
+		},
 		backend.HealthRunnerConfig{
 			InstanceID: cfg.Runtime.InstanceName,
 			Interval:   cfg.Director.Health.Interval.Std(),

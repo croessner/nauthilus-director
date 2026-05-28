@@ -25,7 +25,7 @@ import (
 	"strings"
 )
 
-const lmtpBDATImplemented = false
+const lmtpBDATImplemented = true
 
 // Validate checks decoded typed config with validator/v10 and domain rules.
 func (l *Loader) Validate(config Config) error {

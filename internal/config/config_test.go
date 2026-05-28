@@ -292,14 +292,16 @@ func TestLMTPValidationRejectsUnsupportedCapabilities(t *testing.T) {
 	expectValidationError(t, cfg, "contains unsupported capability PIPELINING")
 }
 
-// TestLMTPValidationRejectsChunkingBeforeBDATPolicy prevents false BDAT advertisement.
-func TestLMTPValidationRejectsChunkingBeforeBDATPolicy(t *testing.T) {
+// TestLMTPValidationAcceptsConfiguredChunking verifies validation allows mediated BDAT support.
+func TestLMTPValidationAcceptsConfiguredChunking(t *testing.T) {
 	cfg := DefaultConfig()
 	entry := cfg.Director.Listeners["lmtp"]
 	entry.LMTP.Capabilities = append(entry.LMTP.Capabilities, "CHUNKING")
 	cfg.Director.Listeners["lmtp"] = entry
 
-	expectValidationError(t, cfg, "CHUNKING before BDAT support")
+	if err := NewLoader().Validate(cfg); err != nil {
+		t.Fatalf("Validate returned error for configured CHUNKING: %v", err)
+	}
 }
 
 // TestLMTPStartTLSCapabilityMatchesListenerTLSMode rejects implicit TLS STARTTLS advertisement.

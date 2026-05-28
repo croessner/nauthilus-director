@@ -244,6 +244,38 @@ func TestRuntimeSelectorStaleHealthFailsClosedAfterStartupGrace(t *testing.T) {
 	}
 }
 
+// TestPoolCapabilityPolicyFailsClosed verifies backend-mediated capability policy.
+func TestPoolCapabilityPolicyFailsClosed(t *testing.T) {
+	now := time.Date(2026, 5, 28, 12, 0, 0, 0, time.UTC)
+	cfg := config.DefaultConfig()
+	registry := mustStaticRegistry(t, cfg)
+
+	healthyChunking := capabilitySnapshot(now, time.Minute, "CHUNKING")
+	testCases := []struct {
+		name      string
+		snapshots fakeSnapshots
+		want      bool
+	}{
+		{name: "all backends support capability", snapshots: fakeSnapshots{testBackendIDLMTP: healthyChunking, testBackendIDBLMTP: healthyChunking}, want: true},
+		{name: "missing data", snapshots: fakeSnapshots{testBackendIDLMTP: healthyChunking}},
+		{name: "mixed capability", snapshots: fakeSnapshots{testBackendIDLMTP: healthyChunking, testBackendIDBLMTP: capabilitySnapshot(now, time.Minute, "PIPELINING")}},
+		{name: "stale data", snapshots: fakeSnapshots{testBackendIDLMTP: healthyChunking, testBackendIDBLMTP: capabilitySnapshot(now, -time.Second, "CHUNKING")}},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			allowed, err := PoolSupportsCapability(context.Background(), registry, testCase.snapshots, testPoolLMTP, "CHUNKING", now)
+			if err != nil {
+				t.Fatalf("PoolSupportsCapability returned error: %v", err)
+			}
+
+			if allowed != testCase.want {
+				t.Fatalf("PoolSupportsCapability = %v, want %v", allowed, testCase.want)
+			}
+		})
+	}
+}
+
 // TestHealthTransitionThresholdsRequireConsecutiveResults verifies health flapping thresholds.
 func TestHealthTransitionThresholdsRequireConsecutiveResults(t *testing.T) {
 	tracker := NewHealthTransitionTracker(HealthThresholds{UnhealthyAfter: 2, HealthyAfter: 2}, HealthStatusHealthy)
@@ -313,6 +345,17 @@ func TestHealthRunnerOnlyCurrentOwnerPerformsDeepCheck(t *testing.T) {
 }
 
 type fakeSnapshots map[string]RuntimeSnapshot
+
+// capabilitySnapshot creates a healthy test snapshot with bounded capability state.
+func capabilitySnapshot(now time.Time, ttl time.Duration, capabilities ...string) RuntimeSnapshot {
+	return RuntimeSnapshot{Health: HealthState{
+		Enabled:      true,
+		Status:       HealthStatusHealthy,
+		Capabilities: NewCapabilitySet(capabilities...),
+		CheckedAt:    now,
+		ExpiresAt:    now.Add(ttl),
+	}}
+}
 
 // BackendSnapshot returns the configured runtime snapshot fixture.
 func (s fakeSnapshots) BackendSnapshot(_ context.Context, backendIdentifier string) (RuntimeSnapshot, error) {
