@@ -40,25 +40,28 @@ import (
 )
 
 const (
-	testAllAuthCapability = "AUTH PLAIN LOGIN XOAUTH2 OAUTHBEARER"
-	testDataBody          = "line-one\r\n.line-two\r\n"
-	testMTLSPeerIdentity  = "technical-peer"
-	testPeerPassword      = "submitter-secret"
-	testPeerToken         = "submitter-token"
-	testPlacementAccount  = "canonical@example.test"
-	testPlacementListener = "inbound-lmtp"
-	testPlacementPool     = "lmtp-default"
-	testPlacementService  = "delivery"
-	testPlacementShardA   = "mailstore-a"
-	testPlacementShardB   = "mailstore-b"
-	testPlacementTenant   = "blue"
-	testRecipientFirst    = "first@example.test"
-	testRecipientLookup   = "Local@example.com"
-	testRecipientSecond   = "second@example.test"
-	testRecipientSingle   = "recipient@example.test"
-	testRoutingShardAttr  = "mailShard"
-	testTenantAttribute   = "tenant"
-	testSubmitterIdentity = "technical-submit@example.test"
+	testAllAuthCapability   = "AUTH PLAIN LOGIN XOAUTH2 OAUTHBEARER"
+	testDataBody            = "line-one\r\n.line-two\r\n"
+	testMTLSPeerIdentity    = "technical-peer"
+	testPeerPassword        = "submitter-secret"
+	testPeerToken           = "submitter-token"
+	testPlainAuthCapability = "AUTH PLAIN"
+	testPlacementAccount    = "canonical@example.test"
+	testPlacementListener   = "inbound-lmtp"
+	testPlacementPool       = "lmtp-default"
+	testPlacementService    = "delivery"
+	testPlacementShardA     = "mailstore-a"
+	testPlacementShardB     = "mailstore-b"
+	testPlacementTenant     = "blue"
+	testRecipientFirst      = "first@example.test"
+	testRecipientLookup     = "Local@example.com"
+	testRecipientSecond     = "second@example.test"
+	testRecipientSingle     = "recipient@example.test"
+	testRoutingShardAttr    = "mailShard"
+	testTenantAttribute     = "tenant"
+	testSubmitterIdentity   = "technical-submit@example.test"
+	testUnicodeRecipient    = "M\xc3\xbcller@example.test"
+	testUnicodeSender       = "sender-\xc3\xbc@example.test"
 )
 
 // TestGreetingAndLHLOCapabilitiesAreDeterministic verifies safe capability filtering before and after STARTTLS.
@@ -114,6 +117,124 @@ func TestSTARTTLSSequencingAndStateReset(t *testing.T) {
 	harness.expectLine(t, "250 2.0.0 Sender accepted\r\n")
 	harness.write(t, "STARTTLS\r\n")
 	harness.expectLine(t, "503 5.5.1 STARTTLS is not available\r\n")
+}
+
+// TestOmittedSTARTTLSCapabilityDisablesUpgrade verifies transport mode alone does not expose STARTTLS.
+func TestOmittedSTARTTLSCapabilityDisablesUpgrade(t *testing.T) {
+	config := testSessionConfig()
+	config.Capabilities = []string{capabilitySMTPUTF8, testAllAuthCapability}
+
+	harness := startLMTPHarness(t, config)
+	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+	harness.write(t, "LHLO submitter.example\r\n")
+	harness.expectLine(t, "250-nauthilus-director\r\n")
+	harness.expectLine(t, "250 SMTPUTF8\r\n")
+
+	harness.write(t, "STARTTLS\r\n")
+	harness.expectLine(t, "503 5.5.1 STARTTLS is not available\r\n")
+}
+
+// TestOmittedAUTHCapabilityDisablesPeerAuth verifies AUTH is bounded by LHLO output.
+func TestOmittedAUTHCapabilityDisablesPeerAuth(t *testing.T) {
+	config := testSessionConfig()
+	config.TLSMode = TLSModeImplicit
+	config.Capabilities = []string{capabilitySMTPUTF8}
+
+	harness := startLMTPHarness(t, config)
+	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+	harness.write(t, "LHLO submitter.example\r\n")
+	harness.expectLine(t, "250-nauthilus-director\r\n")
+	harness.expectLine(t, "250 SMTPUTF8\r\n")
+
+	harness.write(t, "AUTH PLAIN "+plainPayload(testSubmitterIdentity, testPeerPassword)+"\r\n")
+	harness.expectLine(t, "502 5.5.1 AUTH is not available\r\n")
+}
+
+// TestOmittedAUTHMechanismCapabilityDisablesMechanism verifies individual AUTH mechanisms are not inferred.
+func TestOmittedAUTHMechanismCapabilityDisablesMechanism(t *testing.T) {
+	config := testSessionConfig()
+	config.TLSMode = TLSModeImplicit
+	config.Capabilities = []string{testPlainAuthCapability}
+
+	harness := startLMTPHarness(t, config)
+	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+	harness.write(t, "LHLO submitter.example\r\n")
+	harness.expectLine(t, "250-nauthilus-director\r\n")
+	harness.expectLine(t, "250 AUTH PLAIN\r\n")
+
+	harness.write(t, "AUTH LOGIN\r\n")
+	harness.expectLine(t, "535 5.7.8 Unsupported authentication mechanism\r\n")
+}
+
+// TestSMTPUTF8CapabilityGatesEnvelopeSyntax verifies Unicode paths require explicit transaction opt-in.
+func TestSMTPUTF8CapabilityGatesEnvelopeSyntax(t *testing.T) {
+	t.Run("parameter without capability", testSMTPUTF8ParameterWithoutCapability)
+	t.Run("unsupported mail parameter", testSMTPUTF8UnsupportedMailParameter)
+	t.Run("unicode without mail parameter", testSMTPUTF8UnicodeWithoutMailParameter)
+	t.Run("advertised transaction opt-in", testSMTPUTF8AdvertisedTransactionOptIn)
+}
+
+// testSMTPUTF8ParameterWithoutCapability verifies explicit opt-in needs advertisement.
+func testSMTPUTF8ParameterWithoutCapability(t *testing.T) {
+	config := testSessionConfig()
+	config.TLSMode = TLSModeImplicit
+	config.Capabilities = nil
+
+	harness := startLMTPHarness(t, config)
+	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+	harness.write(t, "LHLO submitter.example\r\n")
+	harness.expectLine(t, "250 nauthilus-director\r\n")
+	harness.write(t, "MAIL FROM:<sender@example.test> SMTPUTF8\r\n")
+	harness.expectLine(t, "501 5.5.4 Invalid MAIL command\r\n")
+}
+
+// testSMTPUTF8UnsupportedMailParameter verifies unsupported MAIL parameters fail closed.
+func testSMTPUTF8UnsupportedMailParameter(t *testing.T) {
+	config := testSessionConfig()
+	config.TLSMode = TLSModeImplicit
+
+	harness := startLMTPHarness(t, config)
+	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+	harness.write(t, "LHLO submitter.example\r\n")
+	harness.drainLHLO(t)
+	harness.write(t, "MAIL FROM:<sender@example.test> BODY=8BITMIME\r\n")
+	harness.expectLine(t, "501 5.5.4 Invalid MAIL command\r\n")
+	harness.write(t, "MAIL FROM:<sender@example.test>SMTPUTF8\r\n")
+	harness.expectLine(t, "501 5.5.4 Invalid MAIL command\r\n")
+}
+
+// testSMTPUTF8UnicodeWithoutMailParameter verifies transaction opt-in gates recipients.
+func testSMTPUTF8UnicodeWithoutMailParameter(t *testing.T) {
+	config := testSessionConfig()
+	config.TLSMode = TLSModeImplicit
+	config.Capabilities = []string{capabilitySMTPUTF8}
+
+	harness := startLMTPHarness(t, config)
+	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+	harness.write(t, "LHLO submitter.example\r\n")
+	harness.expectLine(t, "250-nauthilus-director\r\n")
+	harness.expectLine(t, "250 SMTPUTF8\r\n")
+	harness.write(t, "MAIL FROM:<sender@example.test>\r\n")
+	harness.expectLine(t, "250 2.0.0 Sender accepted\r\n")
+	harness.write(t, "RCPT TO:<"+testUnicodeRecipient+">\r\n")
+	harness.expectLine(t, "501 5.5.4 Invalid RCPT command\r\n")
+}
+
+// testSMTPUTF8AdvertisedTransactionOptIn verifies advertised SMTPUTF8 enables Unicode paths.
+func testSMTPUTF8AdvertisedTransactionOptIn(t *testing.T) {
+	config := testSessionConfig()
+	config.TLSMode = TLSModeImplicit
+	config.Capabilities = []string{capabilitySMTPUTF8}
+
+	harness := startLMTPHarness(t, config)
+	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+	harness.write(t, "LHLO submitter.example\r\n")
+	harness.expectLine(t, "250-nauthilus-director\r\n")
+	harness.expectLine(t, "250 SMTPUTF8\r\n")
+	harness.write(t, "MAIL FROM:<"+testUnicodeSender+"> SMTPUTF8\r\n")
+	harness.expectLine(t, "250 2.0.0 Sender accepted\r\n")
+	harness.write(t, "RCPT TO:<"+testUnicodeRecipient+">\r\n")
+	harness.expectLine(t, "250 2.0.0 Recipient accepted\r\n")
 }
 
 // TestRequiredPeerAuthBlocksTransactionCommands verifies submitter auth gates envelope and body commands.

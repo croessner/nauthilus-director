@@ -34,6 +34,10 @@ const (
 
 // handleID parses RFC-2971-style client metadata and stores only normalized client ID.
 func (s *Session) handleID(command preauthCommand) error {
+	if !s.configuredCapability(capabilityID) {
+		return s.writeTagged(command.tag, responseBad, "ID is not available")
+	}
+
 	clientID, err := parseClientID(command.arguments)
 	if err != nil {
 		return s.writeTagged(command.tag, responseBad, "Invalid ID command")

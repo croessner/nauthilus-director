@@ -196,10 +196,16 @@ the architecture and prevents false capability advertisement. LMTP capabilities
 remain configurable like IMAP capabilities, but the runtime advertisement is not
 blind config echo. The effective capability set is the intersection of
 configured capabilities, implemented protocol behavior, transport state and
-backend-pool capability policy. Because the current target config advertises
-`CHUNKING`, M5 must implement and test `BDAT`/CHUNKING end to end. It must not
-advertise `CHUNKING` while accepting only `DATA` or while the selected backend
-path cannot safely forward `BDAT`.
+backend-pool capability policy. If an operator configures `CHUNKING`, M5 must
+implement and test `BDAT`/CHUNKING end to end. It must not advertise `CHUNKING`
+while accepting only `DATA` or while the selected backend path cannot safely
+forward `BDAT`.
+
+Capability omission is also a protocol boundary. If an operator removes
+`STARTTLS`, `AUTH`, `SMTPUTF8` or `CHUNKING` from the effective frontend
+surface, the session must not accept the associated command, mechanism,
+parameter or SMTPUTF8-only envelope syntax merely because the lower-level
+transport or parser could handle it.
 
 M5 must keep redaction metadata intact for listener TLS keys, backend TLS keys,
 backend SASL password files, backend OAuth bearer token files and all other
@@ -333,6 +339,9 @@ docs/reference/config-paths.md
   advertised set from implemented command support, listener transport state and
   backend-pool capability state. The director must not advertise a capability
   until the state machine, backend forwarding and E2E lane prove the command.
+- Treat missing effective capabilities as deny rules. `STARTTLS`, `AUTH`
+  mechanisms, `BDAT` and SMTPUTF8 envelope forms must be rejected when their
+  corresponding capability was not advertised for the current session.
 
 ### Required Unit Tests
 
@@ -405,8 +414,15 @@ M5 state rules:
 - Send a valid `220` LMTP greeting after transport setup.
 - Require `LHLO` before transaction commands.
 - Advertise only configured and implemented capabilities.
+- Reject extension use that was not advertised in the current `LHLO` response;
+  capability omission disables the feature instead of merely hiding text.
 - Advertise `CHUNKING` only when it is configured, implemented, tested and
   allowed by the backend-pool capability policy.
+- Accept `STARTTLS` and `AUTH` only when those capabilities are effective for
+  the current session.
+- Accept the `SMTPUTF8` `MAIL FROM` parameter and non-ASCII envelope paths only
+  when `SMTPUTF8` is advertised and the current transaction opted in through
+  `MAIL FROM ... SMTPUTF8`.
 - Require STARTTLS before SASL AUTH unless the listener is already implicit TLS.
 - Reset capability and transaction state after STARTTLS.
 - When LMTP client auth is required, reject `MAIL FROM`, `RCPT TO`, `DATA` and
@@ -492,6 +508,8 @@ internal/protocol/lmtp/starttls.go
 
 - Greeting and `LHLO` capability responses are deterministic.
 - `STARTTLS` is accepted only before peer auth and transaction state.
+- Omitted `STARTTLS`, `AUTH` and `SMTPUTF8` capabilities disable the related
+  commands, mechanisms, parameters and SMTPUTF8-only envelope syntax.
 - Commands before `LHLO` fail with correct bad-sequence status.
 - Required peer auth blocks transaction commands.
 - Required peer auth remains blocked by a verified client certificate when
@@ -1528,12 +1546,16 @@ code.
    validation rejects unsupported capability names. Runtime `LHLO` output is the
    effective capability set, not a blind echo of YAML. The session must consider
    configured capabilities, implemented command support, listener TLS/auth state
-   and backend-pool capability policy. Because the target config includes
-   `CHUNKING`, M5 includes production-ready `BDAT` support. The director may
-   advertise `CHUNKING` only when `BDAT` parsing, exact chunk streaming, backend
-   `BDAT` forwarding, status mapping, failure handling, deterministic E2E and
-   real interop are all covered. M5 does not translate frontend `BDAT` to backend
-   `DATA`.
+   and backend-pool capability policy. If `CHUNKING` is configured, M5 includes
+   production-ready `BDAT` support. The director may advertise `CHUNKING` only
+   when `BDAT` parsing, exact chunk streaming, backend `BDAT` forwarding, status
+   mapping, failure handling, deterministic E2E and real interop are all covered.
+   M5 does not translate frontend `BDAT` to backend `DATA`.
+
+   Omitted capabilities are deny rules, not cosmetic omissions. A session that
+   did not advertise `STARTTLS`, `AUTH`, `SMTPUTF8` or `CHUNKING` must reject the
+   related command, mechanism, MAIL parameter, SMTPUTF8 envelope syntax or BDAT
+   body path for that session.
 
 8. Decision: LMTP recipient normalization is conservative.
 

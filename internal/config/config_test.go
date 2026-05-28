@@ -168,6 +168,9 @@ patch:
   - op: remove
     path: director.listeners.imap.imap.auth_mechanisms
     value: oauthbearer
+  - op: remove
+    path: director.listeners.imap.imap.capabilities
+    value: AUTH=OAUTHBEARER
   - op: replace
     path: observability.tracing.endpoint
     value: "literal-$${DIRECTOR_TEST_LITERAL}"
@@ -220,6 +223,27 @@ func TestIMAPValidationRejectsUnsupportedEnableCapability(t *testing.T) {
 	cfg.Director.Listeners["imap"] = entry
 
 	expectValidationError(t, cfg, "must not advertise unsupported ENABLE")
+}
+
+// TestIMAPValidationRejectsFalseCapabilityAdvertisements keeps IMAP capabilities policy-backed.
+func TestIMAPValidationRejectsFalseCapabilityAdvertisements(t *testing.T) {
+	t.Run("starttls on implicit listener", func(t *testing.T) {
+		cfg := DefaultConfig()
+		entry := cfg.Director.Listeners["imaps"]
+		entry.IMAP.Capabilities = append(entry.IMAP.Capabilities, "STARTTLS")
+		cfg.Director.Listeners["imaps"] = entry
+
+		expectValidationError(t, cfg, "STARTTLS for non-starttls listener TLS mode")
+	})
+
+	t.Run("auth mechanism not enabled", func(t *testing.T) {
+		cfg := DefaultConfig()
+		entry := cfg.Director.Listeners["imap"]
+		entry.IMAP.AuthMechanisms = []string{"plain"}
+		cfg.Director.Listeners["imap"] = entry
+
+		expectValidationError(t, cfg, "AUTH mechanism not enabled in auth_mechanisms XOAUTH2")
+	})
 }
 
 // TestLMTPValidationRejectsMissingProtocolConfig keeps LMTP listener config typed and explicit.

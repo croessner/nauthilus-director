@@ -280,6 +280,7 @@ director:
                     - IMAP4rev1
                     - ID
                     - SASL-IR
+                    - STARTTLS
                     - AUTH=PLAIN
                     - AUTH=XOAUTH2
                     - AUTH=OAUTHBEARER

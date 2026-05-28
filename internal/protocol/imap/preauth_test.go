@@ -99,6 +99,52 @@ func TestCapabilityDoesNotAdvertiseEnable(t *testing.T) {
 	harness.expectLine(t, "A001 OK CAPABILITY completed\r\n")
 }
 
+// TestOmittedCapabilitiesDisableAdvertisedExtensions verifies configured capability omissions are enforced.
+func TestOmittedCapabilitiesDisableAdvertisedExtensions(t *testing.T) {
+	t.Run("starttls", func(t *testing.T) {
+		config := testPreauthConfig(TLSModeStartTLS, false)
+		config.Capabilities = []string{capabilityIMAP4Rev1, capabilityID, capabilitySASLIR, "AUTH=PLAIN"}
+
+		harness := startTestSession(t, config)
+		harness.expectLine(t, greetingLine)
+		harness.write(t, "A001 CAPABILITY\r\n")
+		harness.expectLine(t, "* CAPABILITY IMAP4rev1 ID SASL-IR AUTH=PLAIN\r\n")
+		harness.expectLine(t, "A001 OK CAPABILITY completed\r\n")
+		harness.write(t, "A002 STARTTLS\r\n")
+		harness.expectLine(t, "A002 BAD STARTTLS is not available\r\n")
+	})
+
+	t.Run("auth mechanism", func(t *testing.T) {
+		config := testPreauthConfig(TLSModeStartTLS, false)
+		config.Capabilities = []string{capabilityIMAP4Rev1, capabilityID, capabilitySASLIR}
+
+		harness := startTestSession(t, config)
+		harness.expectLine(t, greetingLine)
+		harness.write(t, "A001 AUTHENTICATE PLAIN "+plainPayload("plain-user@example.test", "plain-passphrase")+"\r\n")
+		harness.expectLine(t, "A001 NO Unsupported authentication mechanism\r\n")
+	})
+
+	t.Run("sasl ir", func(t *testing.T) {
+		config := testPreauthConfig(TLSModeStartTLS, false)
+		config.Capabilities = []string{capabilityIMAP4Rev1, capabilityID, "AUTH=PLAIN"}
+
+		harness := startTestSession(t, config)
+		harness.expectLine(t, greetingLine)
+		harness.write(t, "A001 AUTHENTICATE PLAIN "+plainPayload("plain-user@example.test", "plain-passphrase")+"\r\n")
+		harness.expectLine(t, "A001 BAD Invalid AUTHENTICATE initial response\r\n")
+	})
+
+	t.Run("id", func(t *testing.T) {
+		config := testPreauthConfig(TLSModeStartTLS, false)
+		config.Capabilities = []string{capabilityIMAP4Rev1, capabilitySASLIR, "AUTH=PLAIN"}
+
+		harness := startTestSession(t, config)
+		harness.expectLine(t, greetingLine)
+		harness.write(t, "A001 ID NIL\r\n")
+		harness.expectLine(t, "A001 BAD ID is not available\r\n")
+	})
+}
+
 // TestIDNilAndClientIDMapping verifies ID parsing and selection order.
 func TestIDNilAndClientIDMapping(t *testing.T) {
 	harness := startTestSession(t, testPreauthConfig(TLSModeStartTLS, false))
@@ -349,6 +395,7 @@ func testPreauthConfig(tlsMode string, requireID bool) SessionConfig {
 		ServiceName:            testIMAPService,
 		Network:                testNetworkTCP,
 		TLSMode:                tlsMode,
+		Capabilities:           []string{capabilityIMAP4Rev1, capabilityID, capabilitySASLIR, capabilityStartTLS, "AUTH=PLAIN", "AUTH=XOAUTH2", "AUTH=OAUTHBEARER"},
 		AuthMechanisms:         []string{"plain", "xoauth2", "oauthbearer"},
 		MaxBearerTokenBytes:    64,
 		RequireIDBeforeAuth:    requireID,

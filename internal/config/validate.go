@@ -258,7 +258,7 @@ func validateDirector(director DirectorConfig, authorities map[string]AuthorityC
 			addProblem(problems, path+".imap is required for imap listeners")
 		}
 		if listener.Protocol == protocolIMAP && listener.IMAP != nil {
-			validateIMAPListener(path+".imap", *listener.IMAP, problems)
+			validateIMAPListener(path+".imap", listener, *listener.IMAP, problems)
 		}
 		if listener.Protocol == protocolLMTP && listener.LMTP == nil {
 			addProblem(problems, path+".lmtp is required for lmtp listeners")
@@ -361,15 +361,26 @@ func validateBackendProtocol(path string, protocol string, problems *[]string) {
 }
 
 // validateIMAPListener rejects unsupported pre-auth advertisements and mechanisms.
-func validateIMAPListener(path string, imap IMAPListenerConfig, problems *[]string) {
+func validateIMAPListener(path string, listener ListenerConfig, imap IMAPListenerConfig, problems *[]string) {
+	allowedMechanisms := make(map[string]struct{}, len(imap.AuthMechanisms))
+	for _, mechanism := range imap.AuthMechanisms {
+		allowedMechanisms[strings.ToUpper(strings.TrimSpace(mechanism))] = struct{}{}
+	}
+
 	for _, capability := range imap.Capabilities {
 		normalized := strings.ToUpper(strings.TrimSpace(capability))
 		switch {
-		case normalized == "IMAP4REV1", normalized == "ID", normalized == "SASL-IR", normalized == "STARTTLS":
+		case normalized == "IMAP4REV1", normalized == "ID", normalized == "SASL-IR":
+		case normalized == "STARTTLS":
+			if listener.TLS.Mode != "starttls" {
+				addProblem(problems, path+".capabilities advertises STARTTLS for non-starttls listener TLS mode")
+			}
 		case strings.HasPrefix(normalized, "AUTH="):
 			mechanism := strings.TrimPrefix(normalized, "AUTH=")
 			if !validIMAPAuthMechanism(mechanism) {
 				addProblem(problems, path+".capabilities advertises unsupported mechanism "+capability)
+			} else if _, ok := allowedMechanisms[strings.ToUpper(strings.TrimSpace(mechanism))]; !ok {
+				addProblem(problems, path+".capabilities advertises AUTH mechanism not enabled in auth_mechanisms "+mechanism)
 			}
 		case normalized == "ENABLE":
 			addProblem(problems, path+".capabilities must not advertise unsupported ENABLE")

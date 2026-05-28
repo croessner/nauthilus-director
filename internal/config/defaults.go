@@ -360,11 +360,21 @@ func defaultIMAPListener(serviceName string, address string, tlsMode string, cer
 			MinTLSVersion: "TLS1.2",
 		},
 		IMAP: &IMAPListenerConfig{
-			Capabilities:        []string{"IMAP4rev1", "ID", "SASL-IR", "AUTH=PLAIN", "AUTH=XOAUTH2", "AUTH=OAUTHBEARER"},
+			Capabilities:        defaultIMAPCapabilities(tlsMode),
 			AuthMechanisms:      []string{"plain", "xoauth2", "oauthbearer"},
 			RequireIDBeforeAuth: false,
 		},
 	}
+}
+
+// defaultIMAPCapabilities returns the conservative implemented IMAP surface.
+func defaultIMAPCapabilities(tlsMode string) []string {
+	capabilities := []string{"IMAP4rev1", "ID", "SASL-IR"}
+	if tlsMode == "starttls" {
+		capabilities = append(capabilities, "STARTTLS")
+	}
+
+	return append(capabilities, "AUTH=PLAIN", "AUTH=XOAUTH2", "AUTH=OAUTHBEARER")
 }
 
 // defaultLMTPListener builds conservative LMTP listener defaults for typed config decoding.

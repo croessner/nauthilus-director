@@ -58,8 +58,13 @@ func (s *Session) handleStartTLS(command preauthCommand) error {
 	return nil
 }
 
-// startTLSAdvertised reports whether STARTTLS should be exposed in CAPABILITY.
+// startTLSAdvertised reports whether STARTTLS is configured and currently usable.
 func (s *Session) startTLSAdvertised() bool {
+	return s.startTLSPermitted() && s.configuredCapability(capabilityStartTLS)
+}
+
+// startTLSPermitted reports whether listener transport state can still upgrade.
+func (s *Session) startTLSPermitted() bool {
 	return s.context.StartTLSAvailable() && !s.tlsActive
 }
 

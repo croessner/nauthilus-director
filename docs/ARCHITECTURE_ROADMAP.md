@@ -608,12 +608,17 @@ Required frontend commands before proxy mode:
 - LOGIN
 - ID, optional
 
+IMAP `CAPABILITY` output is the effective configured pre-auth extension
+surface, not a blind list of parser code paths. Omitting `ID`, `STARTTLS`,
+`SASL-IR` or an `AUTH=<mechanism>` capability disables the related extension
+behavior for that listener; unsupported capabilities fail validation instead of
+being hidden at runtime. `LOGIN` remains an explicit pre-auth command rather
+than an advertised SASL mechanism.
+
 Optional later:
 
-- SASL-IR
 - AUTHENTICATE LOGIN
 - literal handling for LOGIN/AUTHENTICATE edge cases
-- command pipelining robustness
 
 After successful authentication, the director resolves routing facts, applies active affinity, selects the backend, performs the configured backend authentication step and transitions to transparent proxy mode.
 
@@ -658,6 +663,14 @@ The director uses a same-backend-only recipient routing strategy:
 - The director must not spool one message body for replay to multiple backend groups.
 
 LMTP must return per-recipient status. Multi-recipient routing must be safe, explicit and observable.
+
+LMTP `LHLO` output is the effective configured frontend surface. Omitted
+capabilities disable the related extension behavior for that session:
+`STARTTLS` is not accepted when not advertised, `AUTH` mechanisms are not
+inferred from peer-auth config, `CHUNKING` is required for `BDAT`, and
+`SMTPUTF8` is required before accepting the `MAIL FROM` `SMTPUTF8` parameter or
+SMTPUTF8-only envelope paths. Unsupported or backend-unsafe capabilities fail
+closed before sockets bind or before they are advertised.
 
 ## 13. Sieve / ManageSieve design
 
@@ -1167,6 +1180,8 @@ completion evidence lives in
 - production-ready LMTP and LMTPS entrypoints within the M5 scope
 - LMTP state machine with DATA and BDAT handling
 - LMTP STARTTLS, implicit TLS and client-auth handling
+- truthfully mediated LMTP capability enforcement, including SMTPUTF8 and
+  CHUNKING/BDAT boundaries
 - recipient identity lookup through Nauthilus and routing through the resolver
   model
 - delivery-scoped active-affinity holds for concurrent user-stateful placement

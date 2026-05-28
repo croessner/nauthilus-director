@@ -195,13 +195,17 @@ func (s *Session) handleAUTH(ctx context.Context, command frontendCommand) error
 		return s.writeEnhanced(responseStatusAuthRequired, enhancedAuthRequired, noTLSAuthText)
 	}
 
+	if !s.authAdvertised() {
+		return s.writeEnhanced(responseStatusUnavailable, enhancedUnavailable, "AUTH is not available")
+	}
+
 	fields := strings.Fields(command.args)
 	if len(fields) < 1 || len(fields) > 2 {
 		return s.writeEnhanced(responseStatusParameter, enhancedParameter, malformedAuthText)
 	}
 
 	mechanism, err := newMechanismIdentity(fields[0])
-	if err != nil || !s.supportsAuthMechanism(mechanism.Normalized()) {
+	if err != nil || !s.authMechanismAdvertised(mechanism.WireName()) {
 		return s.writeEnhanced(responseStatusAuthRejected, enhancedAuthRejected, "Unsupported authentication mechanism")
 	}
 
@@ -627,6 +631,36 @@ func (s *Session) supportsAuthMechanism(mechanism string) bool {
 	for _, supported := range s.peerAuthMechanisms {
 		if strings.EqualFold(supported, mechanism) {
 			return true
+		}
+	}
+
+	return false
+}
+
+// authAdvertised reports whether AUTH is currently part of the effective LMTP surface.
+func (s *Session) authAdvertised() bool {
+	for _, capability := range s.effectiveCapabilities {
+		fields := strings.Fields(capability)
+		if len(fields) > 0 && strings.EqualFold(fields[0], capabilityAUTH) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// authMechanismAdvertised reports whether a mechanism is enabled and advertised.
+func (s *Session) authMechanismAdvertised(wireName string) bool {
+	for _, capability := range s.effectiveCapabilities {
+		fields := strings.Fields(capability)
+		if len(fields) < 2 || !strings.EqualFold(fields[0], capabilityAUTH) {
+			continue
+		}
+
+		for _, mechanism := range fields[1:] {
+			if strings.EqualFold(mechanism, wireName) {
+				return true
+			}
 		}
 	}
 

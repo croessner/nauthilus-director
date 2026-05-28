@@ -23,6 +23,7 @@ import (
 	"io"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 const (
@@ -57,6 +58,11 @@ type frontendCommand struct {
 type bdatCommand struct {
 	size int64
 	last bool
+}
+
+type mailCommand struct {
+	wirePath string
+	smtpUTF8 bool
 }
 
 // readLine reads one bounded line from the frontend stream.
@@ -155,26 +161,92 @@ func validateNoArguments(command frontendCommand) error {
 	return nil
 }
 
-// parsePathCommand validates MAIL FROM and RCPT TO command prefixes without keeping raw paths.
-func parsePathCommand(command frontendCommand, prefix string) error {
-	args := strings.TrimSpace(command.args)
+// parseMailCommand validates MAIL FROM and returns supported envelope parameters.
+func parseMailCommand(command frontendCommand) (mailCommand, error) {
+	path, tail, err := splitCommandPath(command.args, "FROM:")
+	if err != nil {
+		return mailCommand{}, err
+	}
+
+	parsed := mailCommand{wirePath: path}
+
+	for parameter := range strings.FieldsSeq(tail) {
+		if !strings.EqualFold(parameter, capabilitySMTPUTF8) {
+			return mailCommand{}, fmt.Errorf("%w: unsupported MAIL parameter", ErrMalformedCommand)
+		}
+
+		if parsed.smtpUTF8 {
+			return mailCommand{}, fmt.Errorf("%w: duplicate SMTPUTF8 parameter", ErrMalformedCommand)
+		}
+
+		parsed.smtpUTF8 = true
+	}
+
+	return parsed, nil
+}
+
+// splitCommandPath extracts one bracketed path and returns trailing parameters.
+func splitCommandPath(args string, prefix string) (string, string, error) {
+	args = strings.TrimSpace(args)
 	if args == "" {
-		return fmt.Errorf("%w: missing path", ErrMalformedCommand)
+		return "", "", fmt.Errorf("%w: missing path", ErrMalformedCommand)
 	}
 
 	upper := strings.ToUpper(args)
 
 	expected := strings.ToUpper(prefix)
 	if !strings.HasPrefix(upper, expected) {
-		return fmt.Errorf("%w: missing path prefix", ErrMalformedCommand)
+		return "", "", fmt.Errorf("%w: missing path prefix", ErrMalformedCommand)
 	}
 
-	path := strings.TrimSpace(args[len(prefix):])
-	if path == "" || !strings.HasPrefix(path, "<") || !strings.Contains(path, ">") {
-		return fmt.Errorf("%w: invalid path", ErrMalformedCommand)
+	remaining := strings.TrimSpace(args[len(prefix):])
+	if remaining == "" || !strings.HasPrefix(remaining, "<") {
+		return "", "", fmt.Errorf("%w: invalid path", ErrMalformedCommand)
+	}
+
+	closeIndex := strings.Index(remaining, ">")
+	if closeIndex < 0 {
+		return "", "", fmt.Errorf("%w: invalid path", ErrMalformedCommand)
+	}
+
+	path := remaining[:closeIndex+1]
+
+	rawTail := remaining[closeIndex+1:]
+	if rawTail != "" && rawTail[0] != ' ' && rawTail[0] != '\t' {
+		return "", "", fmt.Errorf("%w: invalid path parameter separator", ErrMalformedCommand)
+	}
+
+	tail := strings.TrimSpace(rawTail)
+
+	return path, tail, nil
+}
+
+// validateSMTPUTF8Path rejects non-ASCII envelope paths unless SMTPUTF8 is active.
+func validateSMTPUTF8Path(path string, smtpUTF8 bool) error {
+	if isASCII(path) {
+		return nil
+	}
+
+	if !smtpUTF8 {
+		return fmt.Errorf("%w: SMTPUTF8 required", ErrMalformedCommand)
+	}
+
+	if !utf8.ValidString(path) {
+		return fmt.Errorf("%w: invalid UTF-8 path", ErrMalformedCommand)
 	}
 
 	return nil
+}
+
+// isASCII reports whether a wire path avoids SMTPUTF8-only octets.
+func isASCII(value string) bool {
+	for index := 0; index < len(value); index++ {
+		if value[index] > 0x7f {
+			return false
+		}
+	}
+
+	return true
 }
 
 // parseBDATCommand validates the BDAT size and optional LAST marker.

@@ -110,8 +110,13 @@ func (s *Session) handleMAIL(command frontendCommand) error {
 		return err
 	}
 
-	if err := parsePathCommand(command, "FROM:"); err != nil {
+	mail, err := parseMailCommand(command)
+	if err != nil {
 		return s.writeEnhanced(responseStatusParameter, enhancedParameter, malformedMailText)
+	}
+
+	if err := s.requireMAILSMTPUTF8(mail); err != nil {
+		return err
 	}
 
 	if s.transaction.active() {
@@ -119,6 +124,7 @@ func (s *Session) handleMAIL(command frontendCommand) error {
 	}
 
 	s.transaction.mailSeen = true
+	s.transaction.smtpUTF8 = mail.smtpUTF8
 
 	return s.writeEnhanced(responseStatusOK, enhancedOK, "Sender accepted")
 }
@@ -136,6 +142,10 @@ func (s *Session) handleRCPT(ctx context.Context, command frontendCommand) error
 	recipient, err := ParseRecipientCommand(command)
 	if err != nil {
 		return s.writeEnhanced(responseStatusParameter, enhancedParameter, malformedRcptText)
+	}
+
+	if err := s.requireRecipientSMTPUTF8(recipient); err != nil {
+		return err
 	}
 
 	placement, err := s.handleRecipientPlacement(ctx, recipient)
@@ -281,6 +291,29 @@ func (s *Session) requirePeerAuthSatisfied() error {
 	}
 
 	return s.writeEnhanced(responseStatusAuthRequired, enhancedAuthRequired, authRequiredText)
+}
+
+// requireMAILSMTPUTF8 enforces the SMTPUTF8 MAIL parameter and path policy.
+func (s *Session) requireMAILSMTPUTF8(mail mailCommand) error {
+	advertised := containsCapability(s.effectiveCapabilities, capabilitySMTPUTF8)
+	if mail.smtpUTF8 && !advertised {
+		return s.writeEnhanced(responseStatusParameter, enhancedParameter, malformedMailText)
+	}
+
+	if err := validateSMTPUTF8Path(mail.wirePath, advertised && mail.smtpUTF8); err != nil {
+		return s.writeEnhanced(responseStatusParameter, enhancedParameter, malformedMailText)
+	}
+
+	return nil
+}
+
+// requireRecipientSMTPUTF8 enforces transaction-scoped SMTPUTF8 for recipient paths.
+func (s *Session) requireRecipientSMTPUTF8(recipient RecipientPath) error {
+	if err := validateSMTPUTF8Path(recipient.WirePath, s.transaction.smtpUTF8); err != nil {
+		return s.writeEnhanced(responseStatusParameter, enhancedParameter, malformedRcptText)
+	}
+
+	return nil
 }
 
 // requireMessageBodyAllowed validates common DATA and BDAT transaction state.

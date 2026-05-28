@@ -57,8 +57,13 @@ func (s *Session) handleSTARTTLS(command frontendCommand) (commandOutcome, error
 	return commandOutcome{flushed: true}, nil
 }
 
-// startTLSAvailable reports whether STARTTLS can be negotiated in the current state.
+// startTLSAvailable reports whether STARTTLS was advertised and remains usable.
 func (s *Session) startTLSAvailable() bool {
+	return s.startTLSPermitted() && containsCapability(s.effectiveCapabilities, capabilitySTARTTLS)
+}
+
+// startTLSPermitted reports whether listener transport state can still upgrade.
+func (s *Session) startTLSPermitted() bool {
 	return s.tlsMode == TLSModeStartTLS &&
 		!s.tlsActive &&
 		!s.peerAuthenticated &&

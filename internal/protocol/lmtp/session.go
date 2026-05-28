@@ -98,6 +98,7 @@ type Session struct {
 
 type transactionState struct {
 	mailSeen       bool
+	smtpUTF8       bool
 	recipientCount int
 	recipients     []RecipientPlacement
 	body           MessageBody
@@ -335,7 +336,7 @@ func (s *Session) effectiveCapability(configured string) string {
 	case capabilitySMTPUTF8:
 		return capabilitySMTPUTF8
 	case capabilitySTARTTLS:
-		if s.startTLSAvailable() {
+		if s.startTLSPermitted() {
 			return capabilitySTARTTLS
 		}
 
@@ -454,6 +455,7 @@ func (t *transactionState) snapshot() TransactionSnapshot {
 // reset clears command sequencing state without touching protocol auth state.
 func (t *transactionState) reset() {
 	t.mailSeen = false
+	t.smtpUTF8 = false
 	t.recipientCount = 0
 	t.recipients = nil
 	t.body = nil
