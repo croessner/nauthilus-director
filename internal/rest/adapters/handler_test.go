@@ -26,7 +26,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/croessner/nauthilus-director/internal/backend"
+	"github.com/croessner/nauthilus-director/internal/config"
 	"github.com/croessner/nauthilus-director/internal/rest/generated"
+	"github.com/croessner/nauthilus-director/internal/routing"
 	"github.com/croessner/nauthilus-director/internal/runtime"
 )
 
@@ -61,6 +64,54 @@ func TestLookupRouteUsesInjectedSideEffectFreeDomainService(t *testing.T) {
 
 	if _, ok := response.(generated.LookupRoute200JSONResponse); !ok {
 		t.Fatalf("LookupRoute response = %T, want 200 response", response)
+	}
+}
+
+// TestRouteLookupResolverUsesConfiguredAuthAttributeNames verifies diagnostic routing uses config too.
+func TestRouteLookupResolverUsesConfiguredAuthAttributeNames(t *testing.T) {
+	const (
+		configuredTenantAttribute = "organization"
+		configuredShardAttribute  = "mailboxShard"
+		expectedTenant            = "blue"
+		expectedShardTag          = "mailstore-a"
+		expectedAccountKey        = "user@example.test"
+	)
+
+	cfg := config.DefaultConfig()
+	cfg.Director.Routing.AuthAttributes = config.RoutingAuthAttributesConfig{
+		Tenant:   configuredTenantAttribute,
+		ShardTag: configuredShardAttribute,
+	}
+
+	registry, err := backend.NewStaticRegistry(cfg.Director)
+	if err != nil {
+		t.Fatalf("NewStaticRegistry returned error: %v", err)
+	}
+
+	resolver, err := routeLookupResolver(cfg.Normalize(), registry)
+	if err != nil {
+		t.Fatalf("routeLookupResolver returned error: %v", err)
+	}
+
+	result, err := resolver.Resolve(context.Background(), routing.RoutingRequest{
+		Tenant:            defaultTenant,
+		Protocol:          protocolIMAP,
+		ListenerName:      protocolIMAP,
+		ServiceName:       protocolIMAP,
+		BackendPool:       "imap-default",
+		NormalizedAccount: expectedAccountKey,
+		AuthAttributes: map[string][]string{
+			configuredTenantAttribute: {expectedTenant},
+			configuredShardAttribute:  {expectedShardTag},
+			"mailShard":               {"mailstore-b"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Resolve returned error: %v", err)
+	}
+
+	if result.Tenant != expectedTenant || result.ShardTag != expectedShardTag || result.AccountKey != expectedAccountKey {
+		t.Fatalf("routing result = %#v, want configured tenant/shard attributes and account_field-derived account", result)
 	}
 }
 

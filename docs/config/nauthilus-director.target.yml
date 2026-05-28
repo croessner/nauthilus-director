@@ -382,6 +382,9 @@ director:
     default_shard: default
     hash_key: username
     lmtp_hash_key: recipient
+    auth_attributes:
+      tenant: tenant
+      shard_tag: mailShard
     failover:
       enabled: true
       strategy: same_shard_then_any_healthy

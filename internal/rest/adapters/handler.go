@@ -1076,10 +1076,9 @@ func selectionPolicy(cfg config.Config) backend.SelectionPolicy {
 // routeLookupResolver builds the shared routing chain used by diagnostics.
 func routeLookupResolver(cfg config.Config, registry backend.Registry) (routing.RoutingResolver, error) {
 	authResolver, err := routing.NewAuthAttributeResolver(routing.AuthAttributeResolverConfig{
-		AccountKeyAttribute: "account",
-		TenantAttribute:     "tenant",
-		ShardTagAttribute:   "mailShard",
-		Sticky:              true,
+		TenantAttribute:   cfg.Director.Routing.AuthAttributes.Tenant,
+		ShardTagAttribute: cfg.Director.Routing.AuthAttributes.ShardTag,
+		Sticky:            true,
 	})
 	if err != nil {
 		return nil, err

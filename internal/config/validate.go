@@ -243,6 +243,12 @@ func validateDirector(director DirectorConfig, authorities map[string]AuthorityC
 	if director.RuntimeOverrides.Backends.MaxWeight < director.RuntimeOverrides.Backends.MinWeight {
 		addProblem(problems, "director.runtime_overrides.backends.max_weight must not be lower than min_weight")
 	}
+	if strings.TrimSpace(director.Routing.AuthAttributes.Tenant) == "" {
+		addProblem(problems, "director.routing.auth_attributes.tenant is required")
+	}
+	if strings.TrimSpace(director.Routing.AuthAttributes.ShardTag) == "" {
+		addProblem(problems, "director.routing.auth_attributes.shard_tag is required")
+	}
 	validateMaintenanceMode("director.maintenance.default_mode", director.Maintenance.DefaultMode, "disabled", problems)
 
 	for name, listener := range director.Listeners {
