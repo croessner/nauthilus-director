@@ -18,32 +18,78 @@ package lmtp
 
 import (
 	"context"
-	"io"
+	"crypto/tls"
+	"errors"
 	"net"
 	"strings"
 	"time"
+
+	"github.com/croessner/nauthilus-director/internal/nauthilus"
 )
 
-const serviceUnavailableReply = "421 4.3.2 LMTP protocol state machine unavailable\r\n"
+const (
+	// TLSModeImplicit marks LMTPS-style listeners where TLS is active before greeting.
+	TLSModeImplicit = "implicit"
+	// TLSModeStartTLS marks cleartext LMTP listeners where STARTTLS may be advertised.
+	TLSModeStartTLS = "starttls"
+
+	protocolLMTP       = "lmtp"
+	defaultMaxLineSize = 8192
+)
+
+var errNilSessionConnection = errors.New("lmtp: session connection is nil")
 
 // SessionConfig contains listener-owned values needed by the LMTP protocol boundary.
 type SessionConfig struct {
-	ListenerName       string
-	ServiceName        string
-	BackendPool        string
-	TLSMode            string
-	Capabilities       []string
-	PreauthTimeout     time.Duration
-	MaxLineBytes       int
-	RequirePeerAuth    bool
-	PeerAuthMechanisms []string
-	MTLSPeerAuth       MTLSPeerAuthConfig
+	ListenerName           string
+	AuthorityName          string
+	AuthorityTransport     string
+	ServiceName            string
+	Network                string
+	BackendPool            string
+	TLSMode                string
+	Capabilities           []string
+	PreauthTimeout         time.Duration
+	AuthTimeout            time.Duration
+	MaxLineBytes           int
+	MaxBearerTokenBytes    int
+	RequirePeerAuth        bool
+	RequireTLSClientCert   bool
+	PeerAuthMechanisms     []string
+	MTLSPeerAuth           MTLSPeerAuthConfig
+	BackendChunkingAllowed bool
+	FrontendTLSConfig      *tls.Config
+	Authenticator          nauthilus.Authenticator
+	MessageSink            MessageSink
 }
 
 // MTLSPeerAuthConfig describes when verified client certificates may satisfy peer auth.
 type MTLSPeerAuthConfig struct {
 	SatisfiesRequired bool
 	IdentitySource    string
+}
+
+// MessageSink opens a streaming destination for one frontend LMTP message body.
+type MessageSink interface {
+	OpenMessage(ctx context.Context, transaction TransactionSnapshot) (MessageBody, error)
+}
+
+// MessageBody accepts opaque DATA or BDAT payload bytes without retaining the full message.
+type MessageBody interface {
+	Write(payload []byte) (int, error)
+	Finish(ctx context.Context) (MessageResult, error)
+	Abort(ctx context.Context, reasonClass string) error
+}
+
+// TransactionSnapshot exposes bounded transaction facts to backend message handling.
+type TransactionSnapshot struct {
+	RecipientCount int
+}
+
+// MessageResult describes the final status returned after DATA or BDAT LAST.
+type MessageResult struct {
+	Status string
+	Text   string
 }
 
 // Handler owns one accepted LMTP frontend stream.
@@ -54,7 +100,10 @@ type Handler struct {
 // NewHandler creates an LMTP protocol handler from typed listener config.
 func NewHandler(config SessionConfig) *Handler {
 	config.ListenerName = strings.TrimSpace(config.ListenerName)
+	config.AuthorityName = strings.TrimSpace(config.AuthorityName)
+	config.AuthorityTransport = strings.TrimSpace(config.AuthorityTransport)
 	config.ServiceName = strings.TrimSpace(config.ServiceName)
+	config.Network = strings.TrimSpace(config.Network)
 	config.BackendPool = strings.TrimSpace(config.BackendPool)
 	config.TLSMode = strings.TrimSpace(config.TLSMode)
 	config.MTLSPeerAuth.IdentitySource = strings.TrimSpace(config.MTLSPeerAuth.IdentitySource)
@@ -62,21 +111,39 @@ func NewHandler(config SessionConfig) *Handler {
 	return &Handler{config: config}
 }
 
-// Serve fails accepted LMTP streams closed until the command state machine is available.
+// Serve accepts one frontend connection and runs the bounded LMTP session.
 func (h *Handler) Serve(ctx context.Context, conn net.Conn) error {
-	if conn == nil {
+	session, err := NewSession(h.config, conn)
+	if err != nil {
+		return err
+	}
+
+	return session.Serve(ctx)
+}
+
+// effectiveMaxLineBytes returns the configured protocol line bound or a conservative default.
+func effectiveMaxLineBytes(configured int) int {
+	if configured > 0 {
+		return configured
+	}
+
+	return defaultMaxLineSize
+}
+
+// cloneTLSConfig detaches mutable frontend TLS config from session callers.
+func cloneTLSConfig(config *tls.Config) *tls.Config {
+	if config == nil {
 		return nil
 	}
 
-	if deadline, ok := ctx.Deadline(); ok {
-		_ = conn.SetDeadline(deadline)
+	return config.Clone()
+}
+
+// defaultAuthTimeout returns the timeout used around credential authority calls.
+func defaultAuthTimeout(configured time.Duration) time.Duration {
+	if configured > 0 {
+		return configured
 	}
 
-	if h != nil && h.config.PreauthTimeout > 0 {
-		_ = conn.SetWriteDeadline(time.Now().Add(h.config.PreauthTimeout))
-	}
-
-	_, err := io.WriteString(conn, serviceUnavailableReply)
-
-	return err
+	return time.Second
 }
