@@ -694,6 +694,11 @@ Existing demo or development runtime state may be cleared, expired or recreated
 as part of this change. That reset must be documented for operators and test
 stacks, but it is not a production migration requirement.
 
+Stop note: if a future rollout claims that existing production deployments must
+preserve old v1 Redis runtime keys, implementation must stop here and record a
+separate compatibility decision before adding schema-version bumps, dual-read
+logic or active-key migration behavior.
+
 ### In Scope
 
 - Keep the default Redis runtime schema at v1 for this development-stage

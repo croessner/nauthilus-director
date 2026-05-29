@@ -78,6 +78,27 @@ runtime:
       tls:
         enabled: false
 
+  state:
+    # These are the production runtime-state knobs exposed by the normal
+    # config-doc pipeline. The demo keeps the defaults so it remains a small
+    # interoperability playground, not a million-session load environment.
+    reaper:
+      interval: 5s
+      batch_size: 100
+      max_pass_duration: 2s
+      jitter: 500ms
+
+    indexes:
+      session_shards: 64
+      user_shards: 32
+      backend_shards: 32
+      page_default: 100
+      page_max: 1000
+
+    backend_reservations:
+      ttl: 30m
+      repair_interval: 5s
+
   timeouts:
     # Time allowed for frontend protocol negotiation before authentication.
     preauth: 10s

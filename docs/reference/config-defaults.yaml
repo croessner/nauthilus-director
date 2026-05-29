@@ -487,6 +487,9 @@ runtime:
                 min_tls_version: TLS1.2
                 require_client_cert: false
     state:
+        backend_reservations:
+            repair_interval: 5s
+            ttl: 30m0s
         indexes:
             backend_shards: 32
             page_default: 100

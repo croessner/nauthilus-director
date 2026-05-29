@@ -112,8 +112,9 @@ type RuntimeServersConfig struct {
 
 // RuntimeStateConfig contains bounded Redis runtime-state scaling controls.
 type RuntimeStateConfig struct {
-	Reaper  RuntimeStateReaperConfig  `mapstructure:"reaper" yaml:"reaper" validate:"required"`
-	Indexes RuntimeStateIndexesConfig `mapstructure:"indexes" yaml:"indexes" validate:"required"`
+	Reaper              RuntimeStateReaperConfig              `mapstructure:"reaper" yaml:"reaper" validate:"required"`
+	Indexes             RuntimeStateIndexesConfig             `mapstructure:"indexes" yaml:"indexes" validate:"required"`
+	BackendReservations RuntimeStateBackendReservationsConfig `mapstructure:"backend_reservations" yaml:"backend_reservations" validate:"required"`
 }
 
 // RuntimeStateReaperConfig configures due-time expired-session repair passes.
@@ -131,6 +132,12 @@ type RuntimeStateIndexesConfig struct {
 	BackendShards int `mapstructure:"backend_shards" yaml:"backend_shards"`
 	PageDefault   int `mapstructure:"page_default" yaml:"page_default"`
 	PageMax       int `mapstructure:"page_max" yaml:"page_max"`
+}
+
+// RuntimeStateBackendReservationsConfig configures backend capacity reservation repair.
+type RuntimeStateBackendReservationsConfig struct {
+	TTL            Duration `mapstructure:"ttl" yaml:"ttl"`
+	RepairInterval Duration `mapstructure:"repair_interval" yaml:"repair_interval"`
 }
 
 type ControlServerConfig struct {

@@ -50,6 +50,30 @@ runtime:
         require_client_cert: false
         min_tls_version: TLS1.2
 
+  state:
+    reaper:
+      # Expired session and reservation repair must stay bounded per pass.
+      interval: 5s
+      batch_size: 100
+      max_pass_duration: 2s
+      jitter: 500ms
+
+    indexes:
+      # Repairable runtime indexes are sharded so control reads and reaper work
+      # do not depend on one deployment-wide Redis object.
+      session_shards: 64
+      user_shards: 32
+      backend_shards: 32
+      page_default: 100
+      page_max: 1000
+
+    backend_reservations:
+      # Reservations fail closed by temporarily consuming capacity if a
+      # Director exits before releasing them; repair lets expired reservations
+      # converge without deleting active production sessions implicitly.
+      ttl: 30m
+      repair_interval: 5s
+
   timeouts:
     preauth: 30s
     auth: 10s

@@ -89,6 +89,10 @@ func DefaultConfig() Config {
 					PageDefault:   100,
 					PageMax:       1000,
 				},
+				BackendReservations: RuntimeStateBackendReservationsConfig{
+					TTL:            NewDuration(30 * time.Minute),
+					RepairInterval: NewDuration(5 * time.Second),
+				},
 			},
 			Timeouts: RuntimeTimeouts{
 				Preauth:        NewDuration(30 * time.Second),

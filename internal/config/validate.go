@@ -130,6 +130,12 @@ func validateRuntime(runtime RuntimeConfig, problems *[]string) {
 	if runtime.State.Indexes.PageDefault > runtime.State.Indexes.PageMax {
 		addProblem(problems, "runtime.state.indexes.page_default must not exceed runtime.state.indexes.page_max")
 	}
+	requirePositiveDuration("runtime.state.backend_reservations.ttl", runtime.State.BackendReservations.TTL, problems)
+	requirePositiveDuration(
+		"runtime.state.backend_reservations.repair_interval",
+		runtime.State.BackendReservations.RepairInterval,
+		problems,
+	)
 }
 
 // validateRedis keeps Redis centralized and checks each supported topology.

@@ -56,6 +56,20 @@ Useful host ports:
 The scripts also accept the other demo users. To keep the demo simple, frontend and backend TLS certificates are self-signed and the test fetcher disables certificate verification.
 The stack also generates an internal demo CA for Director-to-Nauthilus gRPC TLS in the `grpc-tls` volume.
 
+## Runtime State Reset
+
+The demo uses Redis schema version `1` with the development-stage runtime key layout. It is not a published production compatibility contract and this stack is not sized or tuned as a million-session load environment.
+
+If an older demo run left incompatible runtime keys behind, stop the Directors and either let the short-lived session and reservation leases expire, or clear the isolated demo Valkey database explicitly:
+
+```bash
+docker compose stop director-a director-b
+docker compose exec valkey valkey-cli FLUSHDB
+docker compose up -d director-a director-b
+```
+
+`docker compose down -v` also recreates demo-only state when you want a completely clean lab. Do not use these reset commands against a Redis database that carries active production sessions.
+
 If you change the LDAP schema or bootstrap data after the first run, recreate the demo volumes with `docker compose down -v` before starting the stack again.
 
 ## Inspect

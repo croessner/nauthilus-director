@@ -23,6 +23,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestNewLoaderCreatesIsolatedLoader protects the loader boundary from shared global state.
@@ -65,6 +66,179 @@ func TestTargetConfigDecodesAndValidates(t *testing.T) {
 	}
 	if snapshot.Config.Director.Routing.AuthAttributes.ShardTag != "mailShard" {
 		t.Fatalf("routing auth shard attribute = %q, want mailShard", snapshot.Config.Director.Routing.AuthAttributes.ShardTag)
+	}
+}
+
+// TestDemoStackConfigDecodesAndValidates keeps the public demo aligned with typed config.
+func TestDemoStackConfigDecodesAndValidates(t *testing.T) {
+	t.Setenv("DIRECTOR_INSTANCE_NAME", "demo-director-test")
+
+	snapshot, err := NewLoader().LoadFile(filepath.Join("..", "..", "contrib", "demo-stack", "director", "nauthilus-director.yml"))
+	if err != nil {
+		t.Fatalf("load demo stack config: %v", err)
+	}
+
+	if snapshot.Config.Runtime.InstanceName != "demo-director-test" {
+		t.Fatalf("runtime.instance_name = %q, want env-expanded demo instance", snapshot.Config.Runtime.InstanceName)
+	}
+
+	if snapshot.Config.Storage.Redis.SchemaVersion != 1 {
+		t.Fatalf("demo redis schema version = %d, want 1", snapshot.Config.Storage.Redis.SchemaVersion)
+	}
+}
+
+// TestDevelopmentRuntimeStateResetGuidanceDocumented keeps dev reset behavior explicit.
+func TestDevelopmentRuntimeStateResetGuidanceDocumented(t *testing.T) {
+	readme := readTextFile(t, filepath.Join("..", "..", "contrib", "demo-stack", "README.md"))
+	manpage := readTextFile(t, filepath.Join("..", "..", "docs", "man", "nauthilus-director.yaml.5"))
+
+	for _, want := range []string{
+		"Redis schema version `1`",
+		"let the short-lived session and reservation leases expire",
+		"docker compose exec valkey valkey-cli FLUSHDB",
+		"Do not use these reset commands against a Redis database that carries active production sessions.",
+	} {
+		if !strings.Contains(readme, want) {
+			t.Fatalf("demo README missing reset guidance %q", want)
+		}
+	}
+
+	for _, want := range []string{
+		"default schema\nversion remains\n.BR 1",
+		"Clearing old runtime keys is an operator action for demo and non-production\nenvironments only.",
+		"Do not silently delete active production sessions",
+	} {
+		if !strings.Contains(manpage, want) {
+			t.Fatalf("yaml manpage missing reset guidance %q", want)
+		}
+	}
+}
+
+// TestRuntimeStateDefaultsValidate verifies scale-related defaults are typed and accepted.
+func TestRuntimeStateDefaultsValidate(t *testing.T) {
+	cfg := DefaultConfig()
+
+	if cfg.Storage.Redis.SchemaVersion != 1 {
+		t.Fatalf("default redis schema version = %d, want 1", cfg.Storage.Redis.SchemaVersion)
+	}
+
+	if cfg.Runtime.State.Indexes.SessionShards != 64 {
+		t.Fatalf("session shards = %d, want 64", cfg.Runtime.State.Indexes.SessionShards)
+	}
+
+	if cfg.Runtime.State.Indexes.PageDefault != 100 || cfg.Runtime.State.Indexes.PageMax != 1000 {
+		t.Fatalf("runtime page bounds = %d/%d, want 100/1000", cfg.Runtime.State.Indexes.PageDefault, cfg.Runtime.State.Indexes.PageMax)
+	}
+
+	if cfg.Runtime.State.BackendReservations.TTL != NewDuration(30*time.Minute) {
+		t.Fatalf("backend reservation ttl = %s, want 30m0s", cfg.Runtime.State.BackendReservations.TTL.String())
+	}
+
+	if err := NewLoader().Validate(cfg); err != nil {
+		t.Fatalf("Validate rejected runtime-state defaults: %v", err)
+	}
+}
+
+// TestRuntimeStateValidationRejectsInvalidShardCounts keeps index fanout bounded.
+func TestRuntimeStateValidationRejectsInvalidShardCounts(t *testing.T) {
+	for name, mutate := range map[string]func(*Config){
+		"session": func(cfg *Config) { cfg.Runtime.State.Indexes.SessionShards = 0 },
+		"user":    func(cfg *Config) { cfg.Runtime.State.Indexes.UserShards = 0 },
+		"backend": func(cfg *Config) { cfg.Runtime.State.Indexes.BackendShards = 0 },
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			mutate(&cfg)
+
+			expectValidationError(t, cfg, "runtime.state.indexes."+name+"_shards")
+		})
+	}
+}
+
+// TestRuntimeStateValidationRejectsInvalidPageBounds keeps control reads bounded.
+func TestRuntimeStateValidationRejectsInvalidPageBounds(t *testing.T) {
+	for name, item := range map[string]struct {
+		mutate func(*Config)
+		want   string
+	}{
+		"default_zero": {
+			mutate: func(cfg *Config) { cfg.Runtime.State.Indexes.PageDefault = 0 },
+			want:   "runtime.state.indexes.page_default",
+		},
+		"max_zero": {
+			mutate: func(cfg *Config) { cfg.Runtime.State.Indexes.PageMax = 0 },
+			want:   "runtime.state.indexes.page_max",
+		},
+		"default_above_max": {
+			mutate: func(cfg *Config) {
+				cfg.Runtime.State.Indexes.PageDefault = 2000
+				cfg.Runtime.State.Indexes.PageMax = 1000
+			},
+			want: "runtime.state.indexes.page_default must not exceed runtime.state.indexes.page_max",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			item.mutate(&cfg)
+
+			expectValidationError(t, cfg, item.want)
+		})
+	}
+}
+
+// TestRuntimeStateValidationRejectsInvalidReaperSettings keeps repair loops finite.
+func TestRuntimeStateValidationRejectsInvalidReaperSettings(t *testing.T) {
+	for name, item := range map[string]struct {
+		mutate func(*Config)
+		want   string
+	}{
+		"interval": {
+			mutate: func(cfg *Config) { cfg.Runtime.State.Reaper.Interval = 0 },
+			want:   "runtime.state.reaper.interval",
+		},
+		"batch_size": {
+			mutate: func(cfg *Config) { cfg.Runtime.State.Reaper.BatchSize = 0 },
+			want:   "runtime.state.reaper.batch_size",
+		},
+		"max_pass_duration": {
+			mutate: func(cfg *Config) { cfg.Runtime.State.Reaper.MaxPassDuration = 0 },
+			want:   "runtime.state.reaper.max_pass_duration",
+		},
+		"jitter": {
+			mutate: func(cfg *Config) { cfg.Runtime.State.Reaper.Jitter = NewDuration(-time.Second) },
+			want:   "runtime.state.reaper.jitter",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			item.mutate(&cfg)
+
+			expectValidationError(t, cfg, item.want)
+		})
+	}
+}
+
+// TestRuntimeStateValidationRejectsInvalidReservationSettings keeps reservation repair explicit.
+func TestRuntimeStateValidationRejectsInvalidReservationSettings(t *testing.T) {
+	for name, item := range map[string]struct {
+		mutate func(*Config)
+		want   string
+	}{
+		"ttl": {
+			mutate: func(cfg *Config) { cfg.Runtime.State.BackendReservations.TTL = 0 },
+			want:   "runtime.state.backend_reservations.ttl",
+		},
+		"repair_interval": {
+			mutate: func(cfg *Config) { cfg.Runtime.State.BackendReservations.RepairInterval = 0 },
+			want:   "runtime.state.backend_reservations.repair_interval",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			item.mutate(&cfg)
+
+			expectValidationError(t, cfg, item.want)
+		})
 	}
 }
 
@@ -723,6 +897,18 @@ func writeConfigFile(t *testing.T, root string, name string, content string) str
 	}
 
 	return path
+}
+
+// readTextFile loads a repository fixture as text for documentation guard tests.
+func readTextFile(t *testing.T, path string) string {
+	t.Helper()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+
+	return string(data)
 }
 
 // expectValidationError verifies typed config validation fails with a useful diagnostic.
