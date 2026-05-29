@@ -420,15 +420,15 @@ func (s *RedisSessionStore) markBackendRuntimeSession(ctx context.Context, backe
 
 // removeStaleBackendSessionIndex removes one stale backend membership entry.
 func (s *RedisSessionStore) removeStaleBackendSessionIndex(ctx context.Context, backendSessionsKey string, sessionID string) {
-	s.runRepairableIndexCommand(ctx, "backend_session_index_stale_remove", func(redisCtx context.Context) error {
-		return s.client.SRem(redisCtx, backendSessionsKey, sessionID).Err()
+	s.runRepairableIndexCountCommand(ctx, "backend_session_index_stale_remove", func(redisCtx context.Context) (int64, error) {
+		return s.client.SRem(redisCtx, backendSessionsKey, sessionID).Result()
 	})
 }
 
 // removeStaleSessionLocator removes one stale session locator entry.
 func (s *RedisSessionStore) removeStaleSessionLocator(ctx context.Context, sessionIndexKey string, sessionID string) {
-	s.runRepairableIndexCommand(ctx, "session_index_stale_remove", func(redisCtx context.Context) error {
-		return s.client.HDel(redisCtx, sessionIndexKey, sessionID).Err()
+	s.runRepairableIndexCountCommand(ctx, "session_index_stale_remove", func(redisCtx context.Context) (int64, error) {
+		return s.client.HDel(redisCtx, sessionIndexKey, sessionID).Result()
 	})
 }
 

@@ -93,6 +93,7 @@ func (s *RedisSessionStore) ListRuntimeSessions(ctx context.Context, protocol st
 //
 //nolint:gocyclo,funlen // The cursor walk keeps shard, stale-index repair and filtering together.
 func (s *RedisSessionStore) ListRuntimeSessionsPage(ctx context.Context, request RuntimeSessionPageRequest) (RuntimeSessionPage, error) {
+	pageStarted := time.Now()
 	cursor, err := s.decodeRuntimeReadCursor(request.Cursor, runtimeReadFamilySessions, s.keys.sessionIndexShards)
 	if err != nil {
 		return RuntimeSessionPage{}, err
@@ -149,21 +150,21 @@ func (s *RedisSessionStore) ListRuntimeSessionsPage(ctx context.Context, request
 		}
 
 		if next != 0 {
-			return RuntimeSessionPage{
+			return s.recordRuntimeSessionPage(ctx, "runtime_sessions_page", RuntimeSessionPage{
 				Records:    records,
 				NextCursor: s.encodeRuntimeReadCursor(runtimeReadFamilySessions, shard, next),
-			}, nil
+			}, limit, pageStarted), nil
 		}
 
 		if len(records) >= limit && shard+1 < s.keys.sessionIndexShards {
-			return RuntimeSessionPage{
+			return s.recordRuntimeSessionPage(ctx, "runtime_sessions_page", RuntimeSessionPage{
 				Records:    records,
 				NextCursor: s.encodeRuntimeReadCursor(runtimeReadFamilySessions, shard+1, 0),
-			}, nil
+			}, limit, pageStarted), nil
 		}
 	}
 
-	return RuntimeSessionPage{Records: records}, nil
+	return s.recordRuntimeSessionPage(ctx, "runtime_sessions_page", RuntimeSessionPage{Records: records}, limit, pageStarted), nil
 }
 
 // RuntimeReadPageLimits returns normalized page limits used by runtime indexes.
@@ -275,6 +276,7 @@ func (s *RedisSessionStore) ListRuntimeUsers(ctx context.Context) ([]RuntimeUser
 //
 //nolint:gocyclo,funlen // The cursor walk keeps user-index repair and page continuation together.
 func (s *RedisSessionStore) ListRuntimeUsersPage(ctx context.Context, request RuntimeUserPageRequest) (RuntimeUserPage, error) {
+	pageStarted := time.Now()
 	cursor, err := s.decodeRuntimeReadCursor(request.Cursor, runtimeReadFamilyUsers, s.keys.userIndexShards)
 	if err != nil {
 		return RuntimeUserPage{}, err
@@ -330,21 +332,21 @@ func (s *RedisSessionStore) ListRuntimeUsersPage(ctx context.Context, request Ru
 		}
 
 		if next != 0 {
-			return RuntimeUserPage{
+			return s.recordRuntimeUserPage(ctx, "runtime_users_page", RuntimeUserPage{
 				Records:    records,
 				NextCursor: s.encodeRuntimeReadCursor(runtimeReadFamilyUsers, shard, next),
-			}, nil
+			}, limit, pageStarted), nil
 		}
 
 		if len(records) >= limit && shard+1 < s.keys.userIndexShards {
-			return RuntimeUserPage{
+			return s.recordRuntimeUserPage(ctx, "runtime_users_page", RuntimeUserPage{
 				Records:    records,
 				NextCursor: s.encodeRuntimeReadCursor(runtimeReadFamilyUsers, shard+1, 0),
-			}, nil
+			}, limit, pageStarted), nil
 		}
 	}
 
-	return RuntimeUserPage{Records: records}, nil
+	return s.recordRuntimeUserPage(ctx, "runtime_users_page", RuntimeUserPage{Records: records}, limit, pageStarted), nil
 }
 
 // GetRuntimeUser reads one affinity record without refreshing session leases.
@@ -413,6 +415,7 @@ func (s *RedisSessionStore) listRuntimeSessionSetPage(
 	family string,
 	request RuntimeSessionPageRequest,
 ) (RuntimeSessionPage, error) {
+	pageStarted := time.Now()
 	cursor, err := s.decodeRuntimeReadCursor(request.Cursor, family, len(indexKeys))
 	if err != nil {
 		return RuntimeSessionPage{}, err
@@ -461,21 +464,21 @@ func (s *RedisSessionStore) listRuntimeSessionSetPage(
 		}
 
 		if next != 0 {
-			return RuntimeSessionPage{
+			return s.recordRuntimeSessionPage(ctx, runtimeSessionSetPageOperation(family), RuntimeSessionPage{
 				Records:    records,
 				NextCursor: s.encodeRuntimeReadCursor(family, shard, next),
-			}, nil
+			}, limit, pageStarted), nil
 		}
 
 		if len(records) >= limit && shard+1 < len(indexKeys) {
-			return RuntimeSessionPage{
+			return s.recordRuntimeSessionPage(ctx, runtimeSessionSetPageOperation(family), RuntimeSessionPage{
 				Records:    records,
 				NextCursor: s.encodeRuntimeReadCursor(family, shard+1, 0),
-			}, nil
+			}, limit, pageStarted), nil
 		}
 	}
 
-	return RuntimeSessionPage{Records: records}, nil
+	return s.recordRuntimeSessionPage(ctx, runtimeSessionSetPageOperation(family), RuntimeSessionPage{Records: records}, limit, pageStarted), nil
 }
 
 // readRuntimeSessionByID resolves a sharded locator and reads one session hash.
@@ -514,16 +517,54 @@ func (s *RedisSessionStore) readRuntimeSessionByID(ctx context.Context, sessionI
 
 // removeStaleSetMember removes one stale secondary membership entry.
 func (s *RedisSessionStore) removeStaleSetMember(ctx context.Context, indexKey string, sessionID string) {
-	s.runRepairableIndexCommand(ctx, "runtime_session_membership_stale_remove", func(redisCtx context.Context) error {
-		return s.client.SRem(redisCtx, indexKey, sessionID).Err()
+	s.runRepairableIndexCountCommand(ctx, "runtime_session_membership_stale_remove", func(redisCtx context.Context) (int64, error) {
+		return s.client.SRem(redisCtx, indexKey, sessionID).Result()
 	})
 }
 
 // removeStaleUserIndex removes one stale user index entry.
 func (s *RedisSessionStore) removeStaleUserIndex(ctx context.Context, indexKey string, affinityHash string) {
-	s.runRepairableIndexCommand(ctx, "runtime_user_index_stale_remove", func(redisCtx context.Context) error {
-		return s.client.HDel(redisCtx, indexKey, affinityHash).Err()
+	s.runRepairableIndexCountCommand(ctx, "runtime_user_index_stale_remove", func(redisCtx context.Context) (int64, error) {
+		return s.client.HDel(redisCtx, indexKey, affinityHash).Result()
 	})
+}
+
+// recordRuntimeSessionPage observes one bounded session page without cursor values.
+func (s *RedisSessionStore) recordRuntimeSessionPage(
+	ctx context.Context,
+	operation string,
+	page RuntimeSessionPage,
+	limit int,
+	started time.Time,
+) RuntimeSessionPage {
+	s.recordRuntimePagination(ctx, operation, len(page.Records), limit, strings.TrimSpace(page.NextCursor) != "", started)
+
+	return page
+}
+
+// recordRuntimeUserPage observes one bounded user page without cursor values.
+func (s *RedisSessionStore) recordRuntimeUserPage(
+	ctx context.Context,
+	operation string,
+	page RuntimeUserPage,
+	limit int,
+	started time.Time,
+) RuntimeUserPage {
+	s.recordRuntimePagination(ctx, operation, len(page.Records), limit, strings.TrimSpace(page.NextCursor) != "", started)
+
+	return page
+}
+
+// runtimeSessionSetPageOperation returns the bounded operation class for membership reads.
+func runtimeSessionSetPageOperation(family string) string {
+	switch family {
+	case runtimeReadFamilyBackend:
+		return "runtime_backend_sessions_page"
+	case runtimeReadFamilyUser:
+		return "runtime_user_sessions_page"
+	default:
+		return "runtime_sessions_page"
+	}
 }
 
 // defaultRuntimeIndexPageLimit returns the default control-read bound.

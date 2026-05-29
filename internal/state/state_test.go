@@ -43,6 +43,7 @@ const (
 	testOperatorActor    = "test-operator"
 	testProtocolIMAP     = "imap"
 	testProtocolLMTP     = "lmtp"
+	testProtocolPOP3     = "pop3"
 	testRedisModeCluster = "cluster"
 	testExpiredReserve   = "expired-reservation"
 	testReservationOne   = "reservation-1"
@@ -734,6 +735,174 @@ func TestRedisSessionLifecycleScripts(t *testing.T) {
 	}
 
 	assertAffinityRecord(t, closedSecond, "idle", testShardA, 0)
+}
+
+// TestRuntimeAggregatesAreIdempotentAndUnderflowSafe verifies repairable counters do not drift on repeats.
+func TestRuntimeAggregatesAreIdempotentAndUnderflowSafe(t *testing.T) {
+	store, _, builder := redisIntegrationStore(t)
+	key := AffinityKey{Tenant: "blue", AccountKey: "aggregate-idempotent@example.test"}
+	sessionID := "aggregate-session"
+
+	if _, err := store.OpenSession(context.Background(), testSessionRecord(key, sessionID)); err != nil {
+		t.Fatalf("OpenSession returned error: %v", err)
+	}
+
+	if _, err := store.OpenSession(context.Background(), testSessionRecord(key, sessionID)); err != nil {
+		t.Fatalf("second OpenSession returned error: %v", err)
+	}
+
+	summary, err := store.RuntimeAggregateSummary(context.Background())
+	if err != nil {
+		t.Fatalf("RuntimeAggregateSummary returned error: %v", err)
+	}
+
+	if summary.ActiveSessions.Total.Count != 1 {
+		t.Fatalf("active total = %d, want 1", summary.ActiveSessions.Total.Count)
+	}
+
+	if got := runtimeDimensionCount(summary.ActiveSessions.ByProtocol, testProtocolIMAP); got != 1 {
+		t.Fatalf("protocol aggregate = %d, want 1", got)
+	}
+
+	store.decrementAggregateCounters(context.Background(), aggregateSessionDimensions{
+		SessionID:    "not-counted",
+		Protocol:     testProtocolPOP3,
+		ListenerName: testProtocolPOP3,
+		ServiceName:  testProtocolPOP3,
+		ShardTag:     testShardC,
+	})
+
+	if got := aggregateHashField(t, store, builder.AggregateActiveDimensionKey(aggregateDimensionProtocol), testProtocolPOP3); got != "" {
+		t.Fatalf("underflow field = %q, want absent", got)
+	}
+
+	if _, err := store.CloseSession(context.Background(), key, sessionID); err != nil {
+		t.Fatalf("CloseSession returned error: %v", err)
+	}
+
+	store.removeSessionAggregate(context.Background(), sessionID)
+
+	summary, err = store.RuntimeAggregateSummary(context.Background())
+	if err != nil {
+		t.Fatalf("RuntimeAggregateSummary after close returned error: %v", err)
+	}
+
+	if summary.ActiveSessions.Total.Count != 0 {
+		t.Fatalf("active total after close = %d, want 0", summary.ActiveSessions.Total.Count)
+	}
+
+	if got := runtimeDimensionCount(summary.ActiveSessions.ByProtocol, testProtocolIMAP); got != 0 {
+		t.Fatalf("protocol aggregate after close = %d, want 0", got)
+	}
+
+	if summary.IdleAffinities.Count != 1 {
+		t.Fatalf("idle affinities = %d, want 1", summary.IdleAffinities.Count)
+	}
+}
+
+// TestReaperUpdatesRuntimeAggregateRepairCounters verifies reaping repairs aggregate views.
+func TestReaperUpdatesRuntimeAggregateRepairCounters(t *testing.T) {
+	store, client, builder := redisIntegrationStore(t)
+	key := AffinityKey{Tenant: "blue", AccountKey: "aggregate-reap@example.test"}
+	sessionID := "aggregate-reap-session"
+	reservationID := "aggregate-reap-reservation"
+
+	cleanupAffinity(t, client, builder, key, sessionID)
+	cleanupBackend(t, client, builder, testBackendIMAP)
+
+	if _, err := store.ReserveBackendCapacity(context.Background(), BackendReservationRequest{
+		BackendIdentifier: testBackendIMAP,
+		ReservationID:     reservationID,
+		MaxConnections:    10,
+		LeaseTTL:          time.Second,
+	}); err != nil {
+		t.Fatalf("ReserveBackendCapacity returned error: %v", err)
+	}
+
+	record := testSessionRecord(key, sessionID)
+	record.LeaseTTL = 20 * time.Millisecond
+
+	record.IdleGrace = time.Second
+	if _, err := store.OpenSession(context.Background(), record); err != nil {
+		t.Fatalf("OpenSession returned error: %v", err)
+	}
+
+	if _, err := store.AttachSelectedBackend(context.Background(), SessionBackendAttachment{
+		Key:               key,
+		SessionID:         sessionID,
+		BackendIdentifier: testBackendIMAP,
+		ReservationID:     reservationID,
+		MaxConnections:    10,
+	}); err != nil {
+		t.Fatalf("AttachSelectedBackend returned error: %v", err)
+	}
+
+	time.Sleep(40 * time.Millisecond)
+
+	reaped, err := store.ReapSessions(context.Background(), ReapRequest{Limit: 10, MaxPassDuration: time.Second})
+	if err != nil {
+		t.Fatalf("ReapSessions returned error: %v", err)
+	}
+
+	if reaped.ExpiredSessions != 1 || reaped.RepairedBackends != 1 {
+		t.Fatalf("reap result = %#v, want one expired session and backend repair", reaped)
+	}
+
+	summary, err := store.RuntimeAggregateSummary(context.Background())
+	if err != nil {
+		t.Fatalf("RuntimeAggregateSummary returned error: %v", err)
+	}
+
+	if summary.ActiveSessions.Total.Count != 0 || summary.IdleAffinities.Count != 1 {
+		t.Fatalf("summary active=%d idle=%d, want active 0 idle 1", summary.ActiveSessions.Total.Count, summary.IdleAffinities.Count)
+	}
+
+	if summary.Repairs.ExpiredSessions.Count != 1 || summary.Repairs.BackendReservations.Count != 1 {
+		t.Fatalf("repair summary = %#v, want expired and reservation repairs", summary.Repairs)
+	}
+}
+
+// TestBackendReservationRepairUpdatesAggregateCounters verifies reservation repair totals converge.
+func TestBackendReservationRepairUpdatesAggregateCounters(t *testing.T) {
+	store, client, builder := redisIntegrationStore(t)
+	backendID := testBackendLMTP + "-aggregate"
+	cleanupBackend(t, client, builder, backendID)
+
+	if _, err := store.ReserveBackendCapacity(context.Background(), BackendReservationRequest{
+		BackendIdentifier: backendID,
+		ReservationID:     testExpiredReserve,
+		MaxConnections:    10,
+		LeaseTTL:          20 * time.Millisecond,
+	}); err != nil {
+		t.Fatalf("ReserveBackendCapacity returned error: %v", err)
+	}
+
+	time.Sleep(40 * time.Millisecond)
+
+	record, err := store.ReapBackendReservations(context.Background(), BackendReservationReapRequest{
+		BackendIdentifier: backendID,
+		Limit:             10,
+	})
+	if err != nil {
+		t.Fatalf("ReapBackendReservations returned error: %v", err)
+	}
+
+	if record.RepairedCount != 1 || record.BackendActiveCount != 0 {
+		t.Fatalf("reservation reap = %#v, want one repair and zero active", record)
+	}
+
+	summary, err := store.RuntimeAggregateSummary(context.Background())
+	if err != nil {
+		t.Fatalf("RuntimeAggregateSummary returned error: %v", err)
+	}
+
+	if summary.Repairs.BackendReservations.Count != 1 {
+		t.Fatalf("backend reservation repair count = %d, want 1", summary.Repairs.BackendReservations.Count)
+	}
+
+	if capacity := runtimeBackendCapacity(summary.BackendCapacity, backendID); capacity.ReservedSessions.Count != 0 {
+		t.Fatalf("backend capacity = %#v, want zero reserved", capacity)
+	}
 }
 
 // TestRedisLookupAffinityDoesNotDependOnSecondaryIndexes verifies routing state remains authoritative.
@@ -2354,6 +2523,44 @@ func cleanupBackend(t *testing.T, client *redis.Client, builder KeyBuilder, back
 	if err := client.SRem(context.Background(), builder.BackendIndexKey(), backendID).Err(); err != nil {
 		t.Fatalf("cleanup backend index: %v", err)
 	}
+}
+
+// runtimeDimensionCount returns one aggregate dimension count from a summary list.
+func runtimeDimensionCount(counts []RuntimeDimensionCount, value string) int {
+	for _, count := range counts {
+		if count.Value == value {
+			return count.Count
+		}
+	}
+
+	return 0
+}
+
+// runtimeBackendCapacity returns one backend capacity summary or a zero value.
+func runtimeBackendCapacity(summaries []RuntimeBackendCapacitySummary, backendID string) RuntimeBackendCapacitySummary {
+	for _, summary := range summaries {
+		if summary.BackendIdentifier == backendID {
+			return summary
+		}
+	}
+
+	return RuntimeBackendCapacitySummary{}
+}
+
+// aggregateHashField reads one raw aggregate hash field for underflow assertions.
+func aggregateHashField(t *testing.T, store *RedisSessionStore, key string, field string) string {
+	t.Helper()
+
+	value, err := store.client.HGet(context.Background(), key, field).Result()
+	if errors.Is(err, redis.Nil) {
+		return ""
+	}
+
+	if err != nil {
+		t.Fatalf("read aggregate field: %v", err)
+	}
+
+	return value
 }
 
 // cleanupHealth deletes one backend health state and instance heartbeat keys.

@@ -62,6 +62,7 @@ type redisRuntimeReadStore interface {
 	ListRuntimeUsersPage(ctx context.Context, request state.RuntimeUserPageRequest) (state.RuntimeUserPage, error)
 	GetRuntimeUser(ctx context.Context, key state.AffinityKey) (state.RuntimeUserReadRecord, bool, error)
 	RuntimeReadPageLimits() state.RuntimeReadPageLimits
+	RuntimeAggregateSummary(ctx context.Context) (state.RuntimeAggregateSummary, error)
 }
 
 type publicRuntimeReadCursor struct {
@@ -235,6 +236,77 @@ func (r *RedisRuntimeReader) GetUserAffinity(ctx context.Context, key UserKey) (
 	}
 
 	return userRuntimeStateFromRedisRead(record), nil
+}
+
+// RuntimeSummary returns repairable operator totals without listing sessions.
+func (r *RedisRuntimeReader) RuntimeSummary(ctx context.Context) (Summary, error) {
+	if r == nil || r.store == nil {
+		return Summary{}, newRuntimeError(ErrorKindUnavailable, operationRuntimeSummary, "runtime summary reader unavailable")
+	}
+
+	summary, err := r.store.RuntimeAggregateSummary(ctx)
+	if err != nil {
+		return Summary{}, err
+	}
+
+	return runtimeSummaryFromState(summary), nil
+}
+
+// runtimeSummaryFromState maps state aggregate summaries into runtime domain values.
+func runtimeSummaryFromState(summary state.RuntimeAggregateSummary) Summary {
+	return Summary{
+		GeneratedAt:      summary.GeneratedAt,
+		RoutingAuthority: summary.RoutingAuthority,
+		ActiveSessions: ActiveSessionSummary{
+			Total:      runtimeCountFromState(summary.ActiveSessions.Total),
+			ByProtocol: runtimeDimensionCountsFromState(summary.ActiveSessions.ByProtocol),
+			ByListener: runtimeDimensionCountsFromState(summary.ActiveSessions.ByListener),
+			ByService:  runtimeDimensionCountsFromState(summary.ActiveSessions.ByService),
+			ByShardTag: runtimeDimensionCountsFromState(summary.ActiveSessions.ByShardTag),
+		},
+		IdleAffinities:  runtimeCountFromState(summary.IdleAffinities),
+		BackendCapacity: runtimeBackendCapacityFromState(summary.BackendCapacity),
+		Repairs: RepairSummary{
+			ExpiredSessions:     runtimeCountFromState(summary.Repairs.ExpiredSessions),
+			StaleIndexEntries:   runtimeCountFromState(summary.Repairs.StaleIndexEntries),
+			BackendReservations: runtimeCountFromState(summary.Repairs.BackendReservations),
+		},
+	}
+}
+
+// runtimeCountFromState maps one state count summary into runtime domain values.
+func runtimeCountFromState(count state.RuntimeCountSummary) CountSummary {
+	return CountSummary{Count: count.Count, Accuracy: count.Accuracy}
+}
+
+// runtimeDimensionCountsFromState maps dimension aggregate counts into runtime values.
+func runtimeDimensionCountsFromState(counts []state.RuntimeDimensionCount) []DimensionCount {
+	mapped := make([]DimensionCount, 0, len(counts))
+	for _, count := range counts {
+		mapped = append(mapped, DimensionCount{
+			Value:    count.Value,
+			Count:    count.Count,
+			Accuracy: count.Accuracy,
+		})
+	}
+
+	return mapped
+}
+
+// runtimeBackendCapacityFromState maps backend capacity aggregate counts into runtime values.
+func runtimeBackendCapacityFromState(counts []state.RuntimeBackendCapacitySummary) []BackendCapacitySummary {
+	mapped := make([]BackendCapacitySummary, 0, len(counts))
+	for _, count := range counts {
+		mapped = append(mapped, BackendCapacitySummary{
+			BackendIdentifier: count.BackendIdentifier,
+			ActiveSessions:    runtimeCountFromState(count.ActiveSessions),
+			ReservedSessions:  runtimeCountFromState(count.ReservedSessions),
+			SummaryRepairable: count.SummaryRepairable,
+			RoutingAuthority:  count.RoutingAuthority,
+		})
+	}
+
+	return mapped
 }
 
 // sessionRuntimeStateFromRedis maps Redis read state into the runtime REST model.

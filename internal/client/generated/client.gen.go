@@ -113,6 +113,42 @@ func (e MaintenanceMode) Valid() bool {
 	}
 }
 
+// Defines values for RuntimeCountSummaryAccuracy.
+const (
+	RuntimeCountSummaryAccuracyCumulative         RuntimeCountSummaryAccuracy = "cumulative"
+	RuntimeCountSummaryAccuracyEventuallyRepaired RuntimeCountSummaryAccuracy = "eventually_repaired"
+)
+
+// Valid indicates whether the value is a known member of the RuntimeCountSummaryAccuracy enum.
+func (e RuntimeCountSummaryAccuracy) Valid() bool {
+	switch e {
+	case RuntimeCountSummaryAccuracyCumulative:
+		return true
+	case RuntimeCountSummaryAccuracyEventuallyRepaired:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for RuntimeDimensionCountAccuracy.
+const (
+	RuntimeDimensionCountAccuracyCumulative         RuntimeDimensionCountAccuracy = "cumulative"
+	RuntimeDimensionCountAccuracyEventuallyRepaired RuntimeDimensionCountAccuracy = "eventually_repaired"
+)
+
+// Valid indicates whether the value is a known member of the RuntimeDimensionCountAccuracy enum.
+func (e RuntimeDimensionCountAccuracy) Valid() bool {
+	switch e {
+	case RuntimeDimensionCountAccuracyCumulative:
+		return true
+	case RuntimeDimensionCountAccuracyEventuallyRepaired:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for UserMoveRequestStrategy.
 const (
 	DrainExisting   UserMoveRequestStrategy = "drain_existing"
@@ -404,9 +440,63 @@ type RouteLookupRouting struct {
 	UsedDefaultShard bool    `json:"used_default_shard"`
 }
 
+// RuntimeBackendCapacitySummary defines model for RuntimeBackendCapacitySummary.
+type RuntimeBackendCapacitySummary struct {
+	ActiveSessions    RuntimeCountSummary `json:"active_sessions"`
+	Backend           string              `json:"backend"`
+	ReservedSessions  RuntimeCountSummary `json:"reserved_sessions"`
+	RoutingAuthority  bool                `json:"routing_authority"`
+	SummaryRepairable bool                `json:"summary_repairable"`
+}
+
+// RuntimeCountSummary defines model for RuntimeCountSummary.
+type RuntimeCountSummary struct {
+	Accuracy RuntimeCountSummaryAccuracy `json:"accuracy"`
+	Count    int                         `json:"count"`
+}
+
+// RuntimeCountSummaryAccuracy defines model for RuntimeCountSummary.Accuracy.
+type RuntimeCountSummaryAccuracy string
+
+// RuntimeDimensionCount defines model for RuntimeDimensionCount.
+type RuntimeDimensionCount struct {
+	Accuracy RuntimeDimensionCountAccuracy `json:"accuracy"`
+	Count    int                           `json:"count"`
+	Value    string                        `json:"value"`
+}
+
+// RuntimeDimensionCountAccuracy defines model for RuntimeDimensionCount.Accuracy.
+type RuntimeDimensionCountAccuracy string
+
 // RuntimeReasonRequest defines model for RuntimeReasonRequest.
 type RuntimeReasonRequest struct {
 	Reason string `json:"reason"`
+}
+
+// RuntimeRepairSummary defines model for RuntimeRepairSummary.
+type RuntimeRepairSummary struct {
+	BackendReservations RuntimeCountSummary `json:"backend_reservations"`
+	ExpiredSessions     RuntimeCountSummary `json:"expired_sessions"`
+	StaleIndexEntries   RuntimeCountSummary `json:"stale_index_entries"`
+}
+
+// RuntimeSessionAggregateSummary defines model for RuntimeSessionAggregateSummary.
+type RuntimeSessionAggregateSummary struct {
+	ByListener []RuntimeDimensionCount `json:"by_listener"`
+	ByProtocol []RuntimeDimensionCount `json:"by_protocol"`
+	ByService  []RuntimeDimensionCount `json:"by_service"`
+	ByShardTag []RuntimeDimensionCount `json:"by_shard_tag"`
+	Total      RuntimeCountSummary     `json:"total"`
+}
+
+// RuntimeSummaryResponse defines model for RuntimeSummaryResponse.
+type RuntimeSummaryResponse struct {
+	ActiveSessions   RuntimeSessionAggregateSummary  `json:"active_sessions"`
+	BackendCapacity  []RuntimeBackendCapacitySummary `json:"backend_capacity"`
+	GeneratedAt      time.Time                       `json:"generated_at"`
+	IdleAffinities   RuntimeCountSummary             `json:"idle_affinities"`
+	Repairs          RuntimeRepairSummary            `json:"repairs"`
+	RoutingAuthority bool                            `json:"routing_authority"`
 }
 
 // RuntimeWeightRequest defines model for RuntimeWeightRequest.
@@ -759,6 +849,9 @@ type ClientInterface interface {
 	LookupRouteWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	LookupRoute(ctx context.Context, body LookupRouteJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// GetRuntimeSummary request
+	GetRuntimeSummary(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// ListSessions request
 	ListSessions(ctx context.Context, params *ListSessionsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -1142,6 +1235,18 @@ func (c *Client) LookupRouteWithBody(ctx context.Context, contentType string, bo
 
 func (c *Client) LookupRoute(ctx context.Context, body LookupRouteJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewLookupRouteRequest(c.Server, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) GetRuntimeSummary(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetRuntimeSummaryRequest(c.Server)
 	if err != nil {
 		return nil, err
 	}
@@ -2202,6 +2307,33 @@ func NewLookupRouteRequestWithBody(server string, contentType string, body io.Re
 	return req, nil
 }
 
+// NewGetRuntimeSummaryRequest generates requests for GetRuntimeSummary
+func NewGetRuntimeSummaryRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/runtime/summary")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewListSessionsRequest generates requests for ListSessions
 func NewListSessionsRequest(server string, params *ListSessionsParams) (*http.Request, error) {
 	var err error
@@ -2954,6 +3086,9 @@ type ClientWithResponsesInterface interface {
 
 	LookupRouteWithResponse(ctx context.Context, body LookupRouteJSONRequestBody, reqEditors ...RequestEditorFn) (*LookupRouteResponse, error)
 
+	// GetRuntimeSummaryWithResponse request
+	GetRuntimeSummaryWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*GetRuntimeSummaryResponse, error)
+
 	// ListSessionsWithResponse request
 	ListSessionsWithResponse(ctx context.Context, params *ListSessionsParams, reqEditors ...RequestEditorFn) (*ListSessionsResponse, error)
 
@@ -3563,6 +3698,37 @@ func (r LookupRouteResponse) StatusCode() int {
 
 // ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
 func (r LookupRouteResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type GetRuntimeSummaryResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *RuntimeSummaryResponse
+	JSONDefault  *Error
+}
+
+// Status returns HTTPResponse.Status
+func (r GetRuntimeSummaryResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetRuntimeSummaryResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r GetRuntimeSummaryResponse) ContentType() string {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.Header.Get("Content-Type")
 	}
@@ -4274,6 +4440,15 @@ func (c *ClientWithResponses) LookupRouteWithResponse(ctx context.Context, body 
 		return nil, err
 	}
 	return ParseLookupRouteResponse(rsp)
+}
+
+// GetRuntimeSummaryWithResponse request returning *GetRuntimeSummaryResponse
+func (c *ClientWithResponses) GetRuntimeSummaryWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*GetRuntimeSummaryResponse, error) {
+	rsp, err := c.GetRuntimeSummary(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetRuntimeSummaryResponse(rsp)
 }
 
 // ListSessionsWithResponse request returning *ListSessionsResponse
@@ -5039,6 +5214,39 @@ func ParseLookupRouteResponse(rsp *http.Response) (*LookupRouteResponse, error) 
 			return nil, err
 		}
 		response.JSON400 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetRuntimeSummaryResponse parses an HTTP response from a GetRuntimeSummaryWithResponse call
+func ParseGetRuntimeSummaryResponse(rsp *http.Response) (*GetRuntimeSummaryResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetRuntimeSummaryResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest RuntimeSummaryResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
 		var dest Error

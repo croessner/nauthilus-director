@@ -86,6 +86,11 @@ type UserReader interface {
 	GetUserAffinity(ctx context.Context, key runtime.UserKey) (runtime.UserRuntimeState, error)
 }
 
+// RuntimeSummaryReader exposes aggregate runtime summaries to REST adapters.
+type RuntimeSummaryReader interface {
+	RuntimeSummary(ctx context.Context) (runtime.Summary, error)
+}
+
 // UserMutator exposes Redis-backed user runtime mutations to REST adapters.
 type UserMutator interface {
 	MoveUser(ctx context.Context, request runtime.MoveUserRequest) (runtime.UserMutationResult, error)
@@ -153,6 +158,7 @@ type HandlerOptions struct {
 	SessionReader             SessionReader
 	SessionMutator            SessionMutator
 	UserReader                UserReader
+	RuntimeSummaryReader      RuntimeSummaryReader
 	UserMutator               UserMutator
 	RouteLookup               RouteLookupService
 	ListenerRuntime           ListenerRuntimeService
@@ -174,6 +180,7 @@ type Handler struct {
 	sessionReader             SessionReader
 	sessionMutator            SessionMutator
 	userReader                UserReader
+	runtimeSummaryReader      RuntimeSummaryReader
 	userMutator               UserMutator
 	routeLookup               RouteLookupService
 	listenerRuntime           ListenerRuntimeService
@@ -197,6 +204,7 @@ func NewHandler(options HandlerOptions) *Handler {
 		sessionReader:             options.SessionReader,
 		sessionMutator:            options.SessionMutator,
 		userReader:                options.UserReader,
+		runtimeSummaryReader:      options.RuntimeSummaryReader,
 		userMutator:               options.UserMutator,
 		routeLookup:               options.RouteLookup,
 		listenerRuntime:           options.ListenerRuntime,
@@ -603,6 +611,16 @@ func (h *Handler) ListUsers(ctx context.Context, request generated.ListUsersRequ
 	}, nil
 }
 
+// GetRuntimeSummary returns repairable aggregate runtime totals.
+func (h *Handler) GetRuntimeSummary(ctx context.Context, _ generated.GetRuntimeSummaryRequestObject) (generated.GetRuntimeSummaryResponseObject, error) {
+	summary, err := h.runtimeSummaryReader.RuntimeSummary(ctx)
+	if err != nil {
+		return generated.GetRuntimeSummarydefaultJSONResponse{StatusCode: statusForError(err), Body: h.problemFromError("GetRuntimeSummary", err)}, nil
+	}
+
+	return generated.GetRuntimeSummary200JSONResponse(runtimeSummary(summary)), nil
+}
+
 // GetUser returns one user runtime state.
 func (h *Handler) GetUser(ctx context.Context, request generated.GetUserRequestObject) (generated.GetUserResponseObject, error) {
 	user, status, problem, ok := h.userStateOrProblem(ctx, "GetUser", request.UserKey, h.userReader.GetUser)
@@ -964,6 +982,10 @@ func withDefaultHandlerOptions(options HandlerOptions) HandlerOptions {
 
 	if options.UserReader == nil {
 		options.UserReader = emptyRuntimeReader{}
+	}
+
+	if options.RuntimeSummaryReader == nil {
+		options.RuntimeSummaryReader = emptyRuntimeReader{}
 	}
 
 	return options
@@ -1395,6 +1417,71 @@ func sessionDetail(session runtime.SessionRuntimeState) generated.SessionDetail 
 	}
 }
 
+// runtimeSummary adapts repairable runtime aggregates into generated DTOs.
+func runtimeSummary(summary runtime.Summary) generated.RuntimeSummaryResponse {
+	return generated.RuntimeSummaryResponse{
+		ActiveSessions: generated.RuntimeSessionAggregateSummary{
+			Total:      runtimeCount(summary.ActiveSessions.Total),
+			ByProtocol: runtimeDimensionCounts(summary.ActiveSessions.ByProtocol),
+			ByListener: runtimeDimensionCounts(summary.ActiveSessions.ByListener),
+			ByService:  runtimeDimensionCounts(summary.ActiveSessions.ByService),
+			ByShardTag: runtimeDimensionCounts(summary.ActiveSessions.ByShardTag),
+		},
+		BackendCapacity:  runtimeBackendCapacity(summary.BackendCapacity),
+		GeneratedAt:      summary.GeneratedAt.UTC(),
+		IdleAffinities:   runtimeCount(summary.IdleAffinities),
+		Repairs:          runtimeRepairSummary(summary.Repairs),
+		RoutingAuthority: summary.RoutingAuthority,
+	}
+}
+
+// runtimeCount adapts one count and its accuracy class.
+func runtimeCount(count runtime.CountSummary) generated.RuntimeCountSummary {
+	return generated.RuntimeCountSummary{
+		Accuracy: generated.RuntimeCountSummaryAccuracy(count.Accuracy),
+		Count:    count.Count,
+	}
+}
+
+// runtimeDimensionCounts adapts dimension aggregate buckets.
+func runtimeDimensionCounts(counts []runtime.DimensionCount) []generated.RuntimeDimensionCount {
+	details := make([]generated.RuntimeDimensionCount, 0, len(counts))
+	for _, count := range counts {
+		details = append(details, generated.RuntimeDimensionCount{
+			Accuracy: generated.RuntimeDimensionCountAccuracy(count.Accuracy),
+			Count:    count.Count,
+			Value:    count.Value,
+		})
+	}
+
+	return details
+}
+
+// runtimeBackendCapacity adapts backend aggregate summaries.
+func runtimeBackendCapacity(summaries []runtime.BackendCapacitySummary) []generated.RuntimeBackendCapacitySummary {
+	details := make([]generated.RuntimeBackendCapacitySummary, 0, len(summaries))
+	for _, summary := range summaries {
+		details = append(details, generated.RuntimeBackendCapacitySummary{
+			ActiveSessions:    runtimeCount(summary.ActiveSessions),
+			Backend:           summary.BackendIdentifier,
+			ReservedSessions:  runtimeCount(summary.ReservedSessions),
+			RoutingAuthority:  summary.RoutingAuthority,
+			SummaryRepairable: summary.SummaryRepairable,
+		})
+	}
+
+	return details
+}
+
+// runtimeRepairSummary adapts cumulative repair counters.
+func runtimeRepairSummary(summary runtime.RepairSummary) generated.RuntimeRepairSummary {
+	return generated.RuntimeRepairSummary{
+		BackendReservations: runtimeCount(summary.BackendReservations),
+		ExpiredSessions:     runtimeCount(summary.ExpiredSessions),
+		StaleIndexEntries:   runtimeCount(summary.StaleIndexEntries),
+	}
+}
+
 // userDetails adapts runtime users into generated DTOs.
 func userDetails(users []runtime.UserRuntimeState) []generated.UserDetail {
 	details := make([]generated.UserDetail, 0, len(users))
@@ -1718,6 +1805,22 @@ func (emptyRuntimeReader) GetUser(context.Context, runtime.UserKey) (runtime.Use
 // GetUserAffinity reports absent affinity when no runtime state reader is assembled.
 func (emptyRuntimeReader) GetUserAffinity(context.Context, runtime.UserKey) (runtime.UserRuntimeState, error) {
 	return runtime.UserRuntimeState{}, newRuntimeError(runtime.ErrorKindNotFound, "user_affinity", "user affinity not found")
+}
+
+// RuntimeSummary returns empty aggregate totals when no runtime reader is assembled.
+func (emptyRuntimeReader) RuntimeSummary(context.Context) (runtime.Summary, error) {
+	return runtime.Summary{
+		RoutingAuthority: false,
+		ActiveSessions: runtime.ActiveSessionSummary{
+			Total: runtime.CountSummary{Accuracy: runtime.AccuracyEventuallyRepaired},
+		},
+		IdleAffinities: runtime.CountSummary{Accuracy: runtime.AccuracyEventuallyRepaired},
+		Repairs: runtime.RepairSummary{
+			ExpiredSessions:     runtime.CountSummary{Accuracy: runtime.AccuracyCumulative},
+			StaleIndexEntries:   runtime.CountSummary{Accuracy: runtime.AccuracyCumulative},
+			BackendReservations: runtime.CountSummary{Accuracy: runtime.AccuracyCumulative},
+		},
+	}, nil
 }
 
 // newRuntimeError creates runtime errors without exporting construction to adapters.

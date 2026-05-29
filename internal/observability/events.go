@@ -105,6 +105,8 @@ const (
 	EventReload = "reload"
 	// EventRedisOperation records one Redis state operation class.
 	EventRedisOperation = "redis.operation"
+	// EventRuntimePagination records one bounded runtime-state page read.
+	EventRuntimePagination = "runtime.pagination"
 	// EventProxyPipe records transparent proxy lifecycle completion.
 	EventProxyPipe = "proxy.pipe"
 )
@@ -173,6 +175,7 @@ func RuntimeEventNames() []string {
 		EventRouteLookup,
 		EventReload,
 		EventRedisOperation,
+		EventRuntimePagination,
 	}
 }
 

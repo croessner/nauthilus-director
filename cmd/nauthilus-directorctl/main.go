@@ -56,6 +56,7 @@ const (
 	commandConfig    = "config"
 	commandSessions  = "sessions"
 	commandUsers     = "users"
+	commandRuntime   = "runtime"
 	commandRoute     = "route"
 	commandReload    = "reload"
 )
@@ -183,6 +184,8 @@ func (app application) dispatch(args []string) int {
 		return app.runSessions(args[1:])
 	case commandUsers:
 		return app.runUsers(args[1:])
+	case commandRuntime:
+		return app.runRuntime(args[1:])
 	case commandRoute:
 		return app.runRoute(args[1:])
 	case commandReload:
@@ -1507,6 +1510,52 @@ func (app application) runUsersKick(args []string) int {
 	return app.handleKickUserResponse(response)
 }
 
+// runRuntime dispatches runtime aggregate diagnostic commands.
+func (app application) runRuntime(args []string) int {
+	if len(args) == 0 {
+		return app.usageError("runtime requires a subcommand")
+	}
+
+	switch args[0] {
+	case "summary":
+		return app.runRuntimeSummary(args[1:])
+	default:
+		return app.usageError("unknown runtime subcommand %q", args[0])
+	}
+}
+
+// runRuntimeSummary prints repairable aggregate runtime totals.
+func (app application) runRuntimeSummary(args []string) int {
+	line, err := parseCommandLine(args, nil)
+	if err != nil {
+		return app.usageError("%v", err)
+	}
+	if len(line.positionals) != 0 {
+		return app.usageError("runtime summary does not accept positional arguments")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), app.options.Timeout)
+	defer cancel()
+
+	client, code := app.client()
+	if code != 0 {
+		return code
+	}
+
+	response, err := client.GetRuntimeSummaryWithResponse(ctx)
+	if err != nil {
+		return app.requestError("runtime summary", err)
+	}
+	if response.StatusCode() != http.StatusOK {
+		return app.serverError("runtime summary", response.StatusCode(), response.JSONDefault)
+	}
+	if response.JSON200 == nil {
+		return app.serverError("runtime summary", http.StatusBadGateway, nil)
+	}
+
+	return app.writeRuntimeSummary(response.JSON200)
+}
+
 // runRoute dispatches route diagnostic commands.
 func (app application) runRoute(args []string) int {
 	if len(args) == 0 {
@@ -1825,6 +1874,55 @@ func (app application) writeUserList(response *generated.UserListResponse) int {
 
 		return nil
 	})
+}
+
+// writeRuntimeSummary renders repairable aggregate runtime totals.
+func (app application) writeRuntimeSummary(response *generated.RuntimeSummaryResponse) int {
+	return app.writeObject(response, func(writer io.Writer) error {
+		_, _ = fmt.Fprintf(
+			writer,
+			"routing_authority=%t active_sessions=%d active_accuracy=%s idle_affinities=%d idle_accuracy=%s\n",
+			response.RoutingAuthority,
+			response.ActiveSessions.Total.Count,
+			response.ActiveSessions.Total.Accuracy,
+			response.IdleAffinities.Count,
+			response.IdleAffinities.Accuracy,
+		)
+		writeRuntimeDimensionCounts(writer, "active_sessions_by_protocol", "protocol", response.ActiveSessions.ByProtocol)
+		writeRuntimeDimensionCounts(writer, "active_sessions_by_listener", "listener", response.ActiveSessions.ByListener)
+		writeRuntimeDimensionCounts(writer, "active_sessions_by_service", "service", response.ActiveSessions.ByService)
+		writeRuntimeDimensionCounts(writer, "active_sessions_by_shard", "shard_tag", response.ActiveSessions.ByShardTag)
+		for _, backend := range response.BackendCapacity {
+			_, _ = fmt.Fprintf(
+				writer,
+				"backend_capacity backend=%s active_sessions=%d active_accuracy=%s reserved_sessions=%d reserved_accuracy=%s repairable=%t routing_authority=%t\n",
+				backend.Backend,
+				backend.ActiveSessions.Count,
+				backend.ActiveSessions.Accuracy,
+				backend.ReservedSessions.Count,
+				backend.ReservedSessions.Accuracy,
+				backend.SummaryRepairable,
+				backend.RoutingAuthority,
+			)
+		}
+		_, _ = fmt.Fprintf(
+			writer,
+			"repairs expired_sessions=%d stale_index_entries=%d backend_reservations=%d accuracy=%s\n",
+			response.Repairs.ExpiredSessions.Count,
+			response.Repairs.StaleIndexEntries.Count,
+			response.Repairs.BackendReservations.Count,
+			response.Repairs.ExpiredSessions.Accuracy,
+		)
+
+		return nil
+	})
+}
+
+// writeRuntimeDimensionCounts renders one aggregate dimension list.
+func writeRuntimeDimensionCounts(writer io.Writer, prefix string, key string, counts []generated.RuntimeDimensionCount) {
+	for _, count := range counts {
+		_, _ = fmt.Fprintf(writer, "%s %s=%s count=%d accuracy=%s\n", prefix, key, count.Value, count.Count, count.Accuracy)
+	}
 }
 
 // writeJSON renders stable indented JSON.

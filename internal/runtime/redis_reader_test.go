@@ -145,16 +145,44 @@ func TestRedisRuntimeReaderRejectsBadCursorAndLimit(t *testing.T) {
 	}
 }
 
+// TestRedisRuntimeReaderSummaryUsesAggregateStore verifies summary reads avoid paged lists.
+func TestRedisRuntimeReaderSummaryUsesAggregateStore(t *testing.T) {
+	store := &pagedRuntimeReadStore{
+		summary: state.RuntimeAggregateSummary{
+			RoutingAuthority: false,
+			ActiveSessions: state.RuntimeActiveSessionSummary{
+				Total: state.RuntimeCountSummary{Count: 5, Accuracy: AccuracyEventuallyRepaired},
+			},
+		},
+	}
+	reader := NewRedisRuntimeReader(store)
+
+	summary, err := reader.RuntimeSummary(context.Background())
+	if err != nil {
+		t.Fatalf("RuntimeSummary returned error: %v", err)
+	}
+
+	if store.summaryCalls != 1 || store.sessionPageCalls != 0 || store.userPageCalls != 0 {
+		t.Fatalf("calls summary=%d sessions=%d users=%d, want summary only", store.summaryCalls, store.sessionPageCalls, store.userPageCalls)
+	}
+
+	if summary.ActiveSessions.Total.Count != 5 || summary.RoutingAuthority {
+		t.Fatalf("summary = %#v, want non-authority aggregate total", summary)
+	}
+}
+
 type pagedRuntimeReadStore struct {
 	limits                  state.RuntimeReadPageLimits
 	sessionPage             state.RuntimeSessionPage
 	userPage                state.RuntimeUserPage
+	summary                 state.RuntimeAggregateSummary
 	sessionPageRequest      state.RuntimeSessionPageRequest
 	userPageRequest         state.RuntimeUserPageRequest
 	backendIdentifier       string
 	sessionPageCalls        int
 	backendSessionPageCalls int
 	userPageCalls           int
+	summaryCalls            int
 }
 
 // ListRuntimeSessionsPage records global session page requests.
@@ -204,6 +232,13 @@ func (s *pagedRuntimeReadStore) GetRuntimeUser(context.Context, state.AffinityKe
 // RuntimeReadPageLimits returns fake configured page limits.
 func (s *pagedRuntimeReadStore) RuntimeReadPageLimits() state.RuntimeReadPageLimits {
 	return s.limits
+}
+
+// RuntimeAggregateSummary records aggregate summary requests.
+func (s *pagedRuntimeReadStore) RuntimeAggregateSummary(context.Context) (state.RuntimeAggregateSummary, error) {
+	s.summaryCalls++
+
+	return s.summary, nil
 }
 
 // runtimeReaderSessionRecord builds one Redis session read fixture.

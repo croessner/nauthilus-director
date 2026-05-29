@@ -30,7 +30,10 @@ local due_sessions = redis.call("ZRANGEBYSCORE", session_due_index_key, "-inf", 
 local scanned = 0
 local expired = 0
 local repaired_backends = 0
+local stale_index_entries = 0
 local reservation_releases = {}
+local aggregate_removals = {}
+local idle_affinities = {}
 
 for _, session_id in ipairs(due_sessions) do
 	scanned = scanned + 1
@@ -39,9 +42,11 @@ for _, session_id in ipairs(due_sessions) do
 	if session_key == false or session_key == nil or session_key == "" then
 		redis.call("ZREM", session_due_index_key, session_id)
 		redis.call("HDEL", session_index_key, session_id)
+		stale_index_entries = stale_index_entries + 1
 	elseif redis.call("EXISTS", session_key) == 0 then
 		redis.call("ZREM", session_due_index_key, session_id)
 		redis.call("HDEL", session_index_key, session_id)
+		stale_index_entries = stale_index_entries + 1
 	else
 		local lease_expires_at = tonumber(redis.call("HGET", session_key, "lease_expires_at_ms") or "0")
 		if lease_expires_at == nil then
@@ -65,12 +70,18 @@ for _, session_id in ipairs(due_sessions) do
 				idle_grace_ms = 0
 			end
 
+			local holder_kind = tostring(redis.call("HGET", session_key, "holder_kind") or "session")
+			local affinity_hash = redis.call("HGET", session_key, "affinity_hash")
 			local counted = redis.call("HGET", session_key, "backend_counted")
 			local backend_id = redis.call("HGET", session_key, "selected_backend_id")
 			local reservation_id = redis.call("HGET", session_key, "backend_reservation_id")
 			if counted == "1" and backend_id ~= false and backend_id ~= nil and backend_id ~= "" and reservation_id ~= false and reservation_id ~= nil and reservation_id ~= "" then
 				repaired_backends = repaired_backends + 1
 				table.insert(reservation_releases, backend_id .. "\t" .. reservation_id)
+			end
+
+			if holder_kind == "session" then
+				table.insert(aggregate_removals, session_id)
 			end
 
 			local backend_sessions_key = redis.call("HGET", session_key, "backend_sessions_key")
@@ -98,6 +109,8 @@ for _, session_id in ipairs(due_sessions) do
 					if active_count > 0 then
 						local top = redis.call("ZREVRANGE", sessions_key, 0, 0, "WITHSCORES")
 						expires_at = tonumber(top[2]) or now
+					elseif affinity_hash ~= false and affinity_hash ~= nil and affinity_hash ~= "" and idle_grace_ms > 0 then
+						table.insert(idle_affinities, affinity_hash .. "\t" .. tostring(expires_at))
 					end
 					redis.call("HSET", state_key,
 						"active_session_count", active_count,
@@ -117,7 +130,10 @@ return {
 	"status", "reaped",
 	"scanned_sessions", tostring(scanned),
 	"expired_sessions", tostring(expired),
+	"stale_index_entries", tostring(stale_index_entries),
 	"repaired_backends", tostring(repaired_backends),
 	"reservation_releases", table.concat(reservation_releases, "\n"),
+	"aggregate_removals", table.concat(aggregate_removals, "\n"),
+	"idle_affinities", table.concat(idle_affinities, "\n"),
 	"server_time_ms", tostring(now)
 }

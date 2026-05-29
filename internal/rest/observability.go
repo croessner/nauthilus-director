@@ -63,6 +63,7 @@ var restRouteTemplates = map[string]string{
 	"GetMetrics":                "/metrics",
 	"GetNonDefaultConfig":       "/api/v1/config/non-default",
 	"GetReadyz":                 "/readyz",
+	"GetRuntimeSummary":         "/api/v1/runtime/summary",
 	"GetSession":                restRouteSession,
 	"GetUser":                   "/api/v1/users/{user_key}",
 	"GetUserAffinity":           restRouteUserAffinity,

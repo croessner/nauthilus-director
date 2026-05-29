@@ -178,6 +178,12 @@ func (s *RedisSessionStore) OpenSession(ctx context.Context, record SessionRecor
 
 	s.writeRepairableOpenIndexes(ctx, result.Delta, sessionKey)
 
+	if dimensions, ok := aggregateSessionDimensionsFromDelta(result.Delta); ok {
+		s.upsertSessionAggregate(ctx, dimensions)
+	}
+
+	s.updateIdleAffinityAggregate(ctx, result)
+
 	return result.Record, nil
 }
 
@@ -217,6 +223,7 @@ func (s *RedisSessionStore) AttachSelectedBackend(
 
 	record.BackendActiveCount = activeCount
 	s.writeRepairableAttachIndexes(ctx, attachment, sessionKey, record.LeaseExpiresAt)
+	s.upsertSessionAggregateFromSession(ctx, attachment.SessionID, sessionKey)
 
 	return record, nil
 }
@@ -257,6 +264,12 @@ func (s *RedisSessionStore) HeartbeatSession(
 
 	s.writeRepairableOpenIndexes(ctx, result.Delta, sessionKey)
 
+	if dimensions, ok := aggregateSessionDimensionsFromDelta(result.Delta); ok {
+		s.upsertSessionAggregate(ctx, dimensions)
+	}
+
+	s.updateIdleAffinityAggregate(ctx, result)
+
 	if err := s.refreshRepairableBackendReservation(ctx, result.Delta, ttl); err != nil {
 		return AffinityRecord{}, err
 	}
@@ -287,6 +300,8 @@ func (s *RedisSessionStore) CloseSession(ctx context.Context, key AffinityKey, s
 	}
 
 	s.writeRepairableCloseIndexes(ctx, result.Delta)
+	s.removeSessionAggregate(ctx, result.Delta.SessionID)
+	s.updateIdleAffinityAggregate(ctx, result)
 
 	return result.Record, nil
 }
@@ -919,6 +934,23 @@ func (s *RedisSessionStore) runRepairableIndexCommand(ctx context.Context, opera
 	started := time.Now()
 	err := ClassifyRedisError(operation, command(redisCtx))
 	s.recordRedisOperation(redisCtx, operation, started, err)
+}
+
+// runRepairableIndexCountCommand records a repairable write and counts successful removals.
+func (s *RedisSessionStore) runRepairableIndexCountCommand(
+	ctx context.Context,
+	operation string,
+	command func(context.Context) (int64, error),
+) {
+	redisCtx := redisContext(ctx)
+	started := time.Now()
+	count, err := command(redisCtx)
+	classified := ClassifyRedisError(operation, err)
+	s.recordRedisOperation(redisCtx, operation, started, classified)
+
+	if classified == nil && count > 0 {
+		s.incrementAggregateRepairCount(ctx, aggregateFieldStaleIndexEntries, int(count))
+	}
 }
 
 // redisZ converts a millisecond timestamp into a Redis sorted-set score.

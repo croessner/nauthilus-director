@@ -93,6 +93,7 @@ func TestNestedCommandsUseGeneratedClient(t *testing.T) {
 		{name: "users affinity clear", args: []string{"users", "affinity", "clear", "user-a", "--reason", "done"}, wantCalls: []string{"ClearUserAffinity"}},
 		{name: "users move", args: []string{"users", "move", "user-a", "--to-shard", "shard-b", "--strategy", "kick_existing", "--reason", "rebalance"}, wantCalls: []string{"MoveUser"}},
 		{name: "users kick", args: []string{"users", "kick", "user-a", "--reason", "abuse"}, wantCalls: []string{"KickUser"}},
+		{name: "runtime summary", args: []string{"runtime", "summary"}, wantCalls: []string{"GetRuntimeSummary"}},
 		{name: "route lookup", args: []string{"route", "lookup", "--protocol", "imap", "--user", "user-a", "--listener", "imap", "--attribute", "tier=gold"}, wantCalls: []string{"LookupRoute"}},
 		{name: "reload", args: []string{"reload"}, wantCalls: []string{"Reload"}},
 	}
@@ -283,6 +284,31 @@ func TestRuntimeListDefaultOutputReportsNextCursor(t *testing.T) {
 	}
 	if !strings.Contains(stdout, "more=true next_cursor=user-cursor-b") {
 		t.Fatalf("stdout = %q, want user continuation cursor", stdout)
+	}
+}
+
+// TestRuntimeSummaryUsesGeneratedClient verifies summaries avoid paged session listing.
+func TestRuntimeSummaryUsesGeneratedClient(t *testing.T) {
+	fake := newFakeControlClient()
+
+	stdout, stderr, code := runWithFakeClient([]string{"runtime", "summary"}, fake)
+	if code != 0 {
+		t.Fatalf("runtime summary returned exit code %d, want 0; stderr=%q", code, stderr)
+	}
+
+	if !reflect.DeepEqual(fake.calls, []string{"GetRuntimeSummary"}) {
+		t.Fatalf("calls = %#v, want only GetRuntimeSummary", fake.calls)
+	}
+
+	for _, want := range []string{
+		"routing_authority=false active_sessions=2",
+		"active_sessions_by_protocol protocol=imap count=2",
+		"backend_capacity backend=backend-a active_sessions=2",
+		"repairs expired_sessions=3 stale_index_entries=2 backend_reservations=1",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("runtime summary stdout = %q, want %q", stdout, want)
+		}
 	}
 }
 
@@ -628,6 +654,7 @@ func TestManpagesDocumentImplementedSurface(t *testing.T) {
 		"config dump -n",
 		"sessions kill",
 		"users affinity set",
+		"runtime summary",
 		"route lookup",
 		"reload",
 		"--address",
@@ -719,6 +746,7 @@ type fakeControlClient struct {
 	listUserPages          []generated.UserListResponse
 	listSessionsCalls      int
 	listUsersCalls         int
+	runtimeSummary         *generated.RuntimeSummaryResponse
 	routeRequest           generated.RouteLookupRequest
 	listenerDrainRequest   generated.ListenerDrainRequest
 	listenerResumeRequest  generated.ListenerResumeRequest
@@ -843,6 +871,45 @@ func userA() generated.UserDetail {
 		ActiveSessions: 1,
 		Affinity:       &affinity,
 		UserKey:        "user-a",
+	}
+}
+
+// runtimeSummaryFixture returns a stable aggregate summary fixture.
+func runtimeSummaryFixture() generated.RuntimeSummaryResponse {
+	count := func(value int, accuracy generated.RuntimeCountSummaryAccuracy) generated.RuntimeCountSummary {
+		return generated.RuntimeCountSummary{Accuracy: accuracy, Count: value}
+	}
+	dimension := func(value string, total int) generated.RuntimeDimensionCount {
+		return generated.RuntimeDimensionCount{
+			Accuracy: generated.RuntimeDimensionCountAccuracyEventuallyRepaired,
+			Count:    total,
+			Value:    value,
+		}
+	}
+
+	return generated.RuntimeSummaryResponse{
+		ActiveSessions: generated.RuntimeSessionAggregateSummary{
+			Total:      count(2, generated.RuntimeCountSummaryAccuracyEventuallyRepaired),
+			ByProtocol: []generated.RuntimeDimensionCount{dimension("imap", 2)},
+			ByListener: []generated.RuntimeDimensionCount{dimension("imap", 2)},
+			ByService:  []generated.RuntimeDimensionCount{dimension("imap-login", 2)},
+			ByShardTag: []generated.RuntimeDimensionCount{dimension("shard-a", 2)},
+		},
+		BackendCapacity: []generated.RuntimeBackendCapacitySummary{{
+			ActiveSessions:    count(2, generated.RuntimeCountSummaryAccuracyEventuallyRepaired),
+			Backend:           "backend-a",
+			ReservedSessions:  count(2, generated.RuntimeCountSummaryAccuracyEventuallyRepaired),
+			RoutingAuthority:  false,
+			SummaryRepairable: true,
+		}},
+		GeneratedAt:    time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC),
+		IdleAffinities: count(1, generated.RuntimeCountSummaryAccuracyEventuallyRepaired),
+		Repairs: generated.RuntimeRepairSummary{
+			BackendReservations: count(1, generated.RuntimeCountSummaryAccuracyCumulative),
+			ExpiredSessions:     count(3, generated.RuntimeCountSummaryAccuracyCumulative),
+			StaleIndexEntries:   count(2, generated.RuntimeCountSummaryAccuracyCumulative),
+		},
+		RoutingAuthority: false,
 	}
 }
 
@@ -1112,6 +1179,17 @@ func (fake *fakeControlClient) ListUsersWithResponse(_ context.Context, params *
 	fake.listUsersCalls++
 
 	return &generated.ListUsersResponse{HTTPResponse: httpResponse(http.StatusOK), JSON200: &page}, nil
+}
+
+// GetRuntimeSummaryWithResponse records and returns aggregate runtime totals.
+func (fake *fakeControlClient) GetRuntimeSummaryWithResponse(context.Context, ...generated.RequestEditorFn) (*generated.GetRuntimeSummaryResponse, error) {
+	fake.record("GetRuntimeSummary")
+	summary := runtimeSummaryFixture()
+	if fake.runtimeSummary != nil {
+		summary = *fake.runtimeSummary
+	}
+
+	return &generated.GetRuntimeSummaryResponse{HTTPResponse: httpResponse(http.StatusOK), JSON200: &summary}, nil
 }
 
 // GetUserWithResponse records and returns user detail data.

@@ -27,6 +27,8 @@ tags:
     description: Lease-backed frontend session inspection and control.
   - name: users
     description: User runtime state, affinity and administrative actions.
+  - name: runtime
+    description: Runtime aggregate summaries and bounded operator diagnostics.
   - name: routing
     description: Director-only side-effect-free route diagnostics.
   - name: metrics
@@ -81,6 +83,24 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/VersionResponse"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/v1/runtime/summary:
+    get:
+      operationId: getRuntimeSummary
+      tags:
+        - runtime
+      summary: Return repairable runtime aggregate summaries.
+      description: >
+        Returns operator-facing totals from repairable aggregate state. These
+        values are not routing authority and are not used for placement.
+      responses:
+        "200":
+          description: Runtime aggregate summary.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuntimeSummaryResponse"
         default:
           $ref: "#/components/responses/Error"
   /api/v1/config/effective:
@@ -1097,6 +1117,129 @@ components:
           type: string
         used_default_shard:
           type: boolean
+    RuntimeBackendCapacitySummary:
+      type: object
+      additionalProperties: false
+      required:
+        - backend
+        - active_sessions
+        - reserved_sessions
+        - summary_repairable
+        - routing_authority
+      properties:
+        backend:
+          type: string
+          minLength: 1
+        active_sessions:
+          $ref: "#/components/schemas/RuntimeCountSummary"
+        reserved_sessions:
+          $ref: "#/components/schemas/RuntimeCountSummary"
+        summary_repairable:
+          type: boolean
+        routing_authority:
+          type: boolean
+    RuntimeCountSummary:
+      type: object
+      additionalProperties: false
+      required:
+        - count
+        - accuracy
+      properties:
+        count:
+          type: integer
+          minimum: 0
+        accuracy:
+          type: string
+          enum:
+            - eventually_repaired
+            - cumulative
+    RuntimeDimensionCount:
+      type: object
+      additionalProperties: false
+      required:
+        - value
+        - count
+        - accuracy
+      properties:
+        value:
+          type: string
+          minLength: 1
+        count:
+          type: integer
+          minimum: 0
+        accuracy:
+          type: string
+          enum:
+            - eventually_repaired
+            - cumulative
+    RuntimeRepairSummary:
+      type: object
+      additionalProperties: false
+      required:
+        - expired_sessions
+        - stale_index_entries
+        - backend_reservations
+      properties:
+        expired_sessions:
+          $ref: "#/components/schemas/RuntimeCountSummary"
+        stale_index_entries:
+          $ref: "#/components/schemas/RuntimeCountSummary"
+        backend_reservations:
+          $ref: "#/components/schemas/RuntimeCountSummary"
+    RuntimeSessionAggregateSummary:
+      type: object
+      additionalProperties: false
+      required:
+        - total
+        - by_protocol
+        - by_listener
+        - by_service
+        - by_shard_tag
+      properties:
+        total:
+          $ref: "#/components/schemas/RuntimeCountSummary"
+        by_protocol:
+          type: array
+          items:
+            $ref: "#/components/schemas/RuntimeDimensionCount"
+        by_listener:
+          type: array
+          items:
+            $ref: "#/components/schemas/RuntimeDimensionCount"
+        by_service:
+          type: array
+          items:
+            $ref: "#/components/schemas/RuntimeDimensionCount"
+        by_shard_tag:
+          type: array
+          items:
+            $ref: "#/components/schemas/RuntimeDimensionCount"
+    RuntimeSummaryResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - generated_at
+        - routing_authority
+        - active_sessions
+        - idle_affinities
+        - backend_capacity
+        - repairs
+      properties:
+        generated_at:
+          type: string
+          format: date-time
+        routing_authority:
+          type: boolean
+        active_sessions:
+          $ref: "#/components/schemas/RuntimeSessionAggregateSummary"
+        idle_affinities:
+          $ref: "#/components/schemas/RuntimeCountSummary"
+        backend_capacity:
+          type: array
+          items:
+            $ref: "#/components/schemas/RuntimeBackendCapacitySummary"
+        repairs:
+          $ref: "#/components/schemas/RuntimeRepairSummary"
     RouteLookupAffinity:
       type: object
       additionalProperties: false

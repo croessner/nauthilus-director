@@ -262,6 +262,47 @@ func TestRuntimeListHandlersMapPaginationClientErrors(t *testing.T) {
 	}
 }
 
+// TestSummaryHandlerUsesAggregateReader verifies summaries do not call list readers.
+func TestSummaryHandlerUsesAggregateReader(t *testing.T) {
+	reader := &recordingRuntimeReadService{summary: runtime.Summary{
+		RoutingAuthority: false,
+		ActiveSessions: runtime.ActiveSessionSummary{
+			Total:      runtime.CountSummary{Count: 7, Accuracy: runtime.AccuracyEventuallyRepaired},
+			ByProtocol: []runtime.DimensionCount{{Value: "imap", Count: 7, Accuracy: runtime.AccuracyEventuallyRepaired}},
+		},
+		IdleAffinities: runtime.CountSummary{Count: 2, Accuracy: runtime.AccuracyEventuallyRepaired},
+		Repairs: runtime.RepairSummary{
+			ExpiredSessions:     runtime.CountSummary{Count: 1, Accuracy: runtime.AccuracyCumulative},
+			StaleIndexEntries:   runtime.CountSummary{Count: 3, Accuracy: runtime.AccuracyCumulative},
+			BackendReservations: runtime.CountSummary{Count: 4, Accuracy: runtime.AccuracyCumulative},
+		},
+	}}
+	handler := NewHandler(HandlerOptions{
+		Version:              testHandlerVersion,
+		SessionReader:        reader,
+		UserReader:           reader,
+		RuntimeSummaryReader: reader,
+	})
+
+	response, err := handler.GetRuntimeSummary(context.Background(), generated.GetRuntimeSummaryRequestObject{})
+	if err != nil {
+		t.Fatalf("GetRuntimeSummary returned error: %v", err)
+	}
+
+	summary, ok := response.(generated.GetRuntimeSummary200JSONResponse)
+	if !ok {
+		t.Fatalf("GetRuntimeSummary response = %T, want summary", response)
+	}
+
+	if reader.summaryCalls != 1 || reader.sessionListCalls != 0 || reader.userListCalls != 0 {
+		t.Fatalf("calls summary=%d sessions=%d users=%d, want summary only", reader.summaryCalls, reader.sessionListCalls, reader.userListCalls)
+	}
+
+	if summary.ActiveSessions.Total.Count != 7 || summary.RoutingAuthority {
+		t.Fatalf("summary = %#v, want repairable non-authority totals", summary)
+	}
+}
+
 // TestListListenersMapsRuntimeDetails verifies listener inventory uses generated DTOs.
 func TestListListenersMapsRuntimeDetails(t *testing.T) {
 	listenerRuntime := &recordingListenerRuntime{
@@ -532,12 +573,17 @@ func (r *recordingRouteLookup) Lookup(_ context.Context, request runtime.RouteLo
 
 // recordingRuntimeReadService captures paginated read requests.
 type recordingRuntimeReadService struct {
-	sessionRequest runtime.SessionListRequest
-	userRequest    runtime.UserListRequest
+	sessionRequest   runtime.SessionListRequest
+	userRequest      runtime.UserListRequest
+	summary          runtime.Summary
+	sessionListCalls int
+	userListCalls    int
+	summaryCalls     int
 }
 
 // ListSessions records session list requests and rejects invalid test cursors.
 func (r *recordingRuntimeReadService) ListSessions(_ context.Context, request runtime.SessionListRequest) (runtime.SessionListResult, error) {
+	r.sessionListCalls++
 	r.sessionRequest = request
 	if request.Cursor != "" {
 		return runtime.SessionListResult{}, newRuntimeError(runtime.ErrorKindInvalidRequest, "session_read", "cursor invalid")
@@ -558,6 +604,7 @@ func (r *recordingRuntimeReadService) ListUserSessions(context.Context, runtime.
 
 // ListUsers records user list requests and rejects excessive test limits.
 func (r *recordingRuntimeReadService) ListUsers(_ context.Context, request runtime.UserListRequest) (runtime.UserListResult, error) {
+	r.userListCalls++
 	r.userRequest = request
 	if request.Limit > 1000 {
 		return runtime.UserListResult{}, newRuntimeError(runtime.ErrorKindInvalidRequest, "user_read", "limit must not exceed 1000")
@@ -574,6 +621,13 @@ func (r *recordingRuntimeReadService) GetUser(context.Context, runtime.UserKey) 
 // GetUserAffinity is unused by pagination handler tests.
 func (r *recordingRuntimeReadService) GetUserAffinity(context.Context, runtime.UserKey) (runtime.UserRuntimeState, error) {
 	return runtime.UserRuntimeState{}, newRuntimeError(runtime.ErrorKindNotFound, "user_affinity", "user affinity not found")
+}
+
+// RuntimeSummary records summary calls without listing sessions or users.
+func (r *recordingRuntimeReadService) RuntimeSummary(context.Context) (runtime.Summary, error) {
+	r.summaryCalls++
+
+	return r.summary, nil
 }
 
 // recordingProtectedAudit records protected config audit events.

@@ -339,6 +339,7 @@ func (s *SessionService) ReapSessions(ctx context.Context, request ReapSessionsR
 
 	defer cancel()
 
+	started := time.Now()
 	record, err := s.store.ReapSessions(reapCtx, state.ReapRequest{
 		Limit:           request.Limit,
 		MaxPassDuration: request.MaxPassDuration,
@@ -369,7 +370,7 @@ func (s *SessionService) ReapSessions(ctx context.Context, request ReapSessionsR
 		auditFieldRepairedBackends:           strconv.Itoa(record.RepairedBackends),
 		auditFieldScannedSessions:            strconv.Itoa(record.ScannedSessions),
 		runtimeObservationFieldRuntimeStatus: record.Status,
-	})
+	}, time.Since(started))
 
 	return ReapSessionsResult{
 		ScannedSessions:  record.ScannedSessions,
@@ -388,12 +389,13 @@ func (s *SessionService) recordSessionOperation(
 	result string,
 	reasonClass string,
 	fields map[string]string,
+	duration ...time.Duration,
 ) {
 	if s == nil {
 		return
 	}
 
-	recordRuntimeObservation(ctx, s.recorder, event, observability.TraceBoundaryRESTRequest, operation, result, reasonClass, fields, nil)
+	recordRuntimeObservation(ctx, s.recorder, event, observability.TraceBoundaryRESTRequest, operation, result, reasonClass, fields, nil, duration...)
 }
 
 // LocalSessionInfo describes one locally proxied session for acceleration indexes.

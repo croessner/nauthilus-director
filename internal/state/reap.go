@@ -18,6 +18,7 @@ package state
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -66,7 +67,10 @@ func (s *RedisSessionStore) ReapSessions(ctx context.Context, request ReapReques
 
 		total.ScannedSessions += record.ScannedSessions
 		total.ExpiredSessions += record.ExpiredSessions
+		total.StaleIndexEntries += record.StaleIndexEntries
 		total.RepairedBackends += s.releaseReapedBackendReservations(ctx, record.releases)
+		s.removeReapedSessionAggregates(ctx, record.aggregateRemovals)
+		s.addReapedIdleAffinities(ctx, record.idleAffinities)
 		total.ServerTime = record.ServerTime
 
 		if total.ScannedSessions > 0 {
@@ -82,6 +86,8 @@ func (s *RedisSessionStore) ReapSessions(ctx context.Context, request ReapReques
 	}
 
 	total.RepairedBackends += repairedReservations
+	s.incrementAggregateRepairCount(ctx, aggregateFieldExpiredSessions, total.ExpiredSessions)
+	s.incrementAggregateRepairCount(ctx, aggregateFieldStaleIndexEntries, total.StaleIndexEntries)
 
 	return total, nil
 }
@@ -101,7 +107,23 @@ func (s *RedisSessionStore) releaseReapedBackendReservations(ctx context.Context
 		repaired += record.RepairedCount
 	}
 
+	s.incrementAggregateRepairCount(ctx, aggregateFieldBackendReservations, repaired)
+
 	return repaired
+}
+
+// removeReapedSessionAggregates removes aggregate markers for expired sessions.
+func (s *RedisSessionStore) removeReapedSessionAggregates(ctx context.Context, sessionIDs []string) {
+	for _, sessionID := range sessionIDs {
+		s.removeSessionAggregate(ctx, sessionID)
+	}
+}
+
+// addReapedIdleAffinities records affinities that became idle during reaping.
+func (s *RedisSessionStore) addReapedIdleAffinities(ctx context.Context, affinities []aggregateIdleAffinity) {
+	for _, affinity := range affinities {
+		s.addIdleAffinityAggregate(ctx, affinity)
+	}
 }
 
 // parseReapRecord converts the expired-session repair payload.
@@ -131,7 +153,19 @@ func parseReapRecord(value any) (ReapRecord, error) {
 		return ReapRecord{}, err
 	}
 
+	record.StaleIndexEntries, err = parseOptionalIntField(fields, "stale_index_entries")
+	if err != nil {
+		return ReapRecord{}, err
+	}
+
 	record.releases, err = parseBackendReservationReleases(fields["reservation_releases"])
+	if err != nil {
+		return ReapRecord{}, err
+	}
+
+	record.aggregateRemovals = parseAggregateRemovalSessions(fields["aggregate_removals"])
+
+	record.idleAffinities, err = parseAggregateIdleAffinities(fields["idle_affinities"])
 	if err != nil {
 		return ReapRecord{}, err
 	}
@@ -167,4 +201,54 @@ func parseBackendReservationReleases(value string) ([]BackendReservationReleaseR
 	}
 
 	return releases, nil
+}
+
+// parseAggregateRemovalSessions converts bounded reaper aggregate removal payloads.
+func parseAggregateRemovalSessions(value string) []string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+
+	lines := strings.Split(value, "\n")
+
+	sessionIDs := make([]string, 0, len(lines))
+	for _, line := range lines {
+		sessionID := strings.TrimSpace(line)
+		if sessionID != "" {
+			sessionIDs = append(sessionIDs, sessionID)
+		}
+	}
+
+	return sessionIDs
+}
+
+// parseAggregateIdleAffinities converts bounded reaper idle-affinity payloads.
+func parseAggregateIdleAffinities(value string) ([]aggregateIdleAffinity, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil, nil
+	}
+
+	lines := strings.Split(value, "\n")
+	affinities := make([]aggregateIdleAffinity, 0, len(lines))
+
+	for _, line := range lines {
+		parts := strings.Split(line, "\t")
+		if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" {
+			return nil, newStateError(RedisErrorKindAmbiguousState, "script_result", "idle affinity invalid", nil)
+		}
+
+		expiresAtMS, err := strconv.ParseInt(strings.TrimSpace(parts[1]), 10, 64)
+		if err != nil || expiresAtMS <= 0 {
+			return nil, newStateError(RedisErrorKindAmbiguousState, "script_result", "idle affinity expiry invalid", err)
+		}
+
+		affinities = append(affinities, aggregateIdleAffinity{
+			AffinityHash: strings.TrimSpace(parts[0]),
+			ExpiresAt:    time.UnixMilli(expiresAtMS).UTC(),
+		})
+	}
+
+	return affinities, nil
 }

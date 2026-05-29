@@ -325,6 +325,26 @@ func (b KeyBuilder) BackendIndexKey() string {
 	return b.namespaceBase() + ":idx:backends"
 }
 
+// AggregateSessionMarkerKey returns the repairable per-session aggregate marker hash.
+func (b KeyBuilder) AggregateSessionMarkerKey() string {
+	return b.namespaceBase() + ":runtime:aggregates:sessions"
+}
+
+// AggregateActiveDimensionKey returns one repairable active-session aggregate hash.
+func (b KeyBuilder) AggregateActiveDimensionKey(dimension string) string {
+	return b.namespaceBase() + ":runtime:aggregates:active:" + strings.TrimSpace(dimension)
+}
+
+// AggregateIdleAffinityKey returns the repairable idle-affinity aggregate set.
+func (b KeyBuilder) AggregateIdleAffinityKey() string {
+	return b.namespaceBase() + ":runtime:aggregates:idle_affinities"
+}
+
+// AggregateRepairKey returns the cumulative repair-counter hash.
+func (b KeyBuilder) AggregateRepairKey() string {
+	return b.namespaceBase() + ":runtime:aggregates:repairs"
+}
+
 // UserIndexKey returns the repairable user-affinity index key.
 func (b KeyBuilder) UserIndexKey() string {
 	return b.namespaceBase() + ":idx:users"

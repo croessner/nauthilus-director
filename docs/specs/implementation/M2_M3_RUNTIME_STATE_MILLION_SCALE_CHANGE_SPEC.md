@@ -639,6 +639,11 @@ cmd/nauthilus-directorctl/
 - Aggregates may be repaired asynchronously, but stale aggregate values must be
   marked or bounded enough that operators do not mistake them for exact
   placement decisions.
+- The production summary API reports active-session, idle-affinity and backend
+  capacity values as `eventually_repaired` operator summaries. Cumulative repair
+  counters are reported as `cumulative`. None of these aggregate values is
+  routing authority; placement continues to use affinity state and backend
+  reservation state.
 - Backend identifiers may be visible in REST and CLI diagnostics when necessary,
   but they remain forbidden as Prometheus labels.
 - Shard tags are allowed only if the existing metric policy treats them as

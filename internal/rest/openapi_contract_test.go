@@ -55,6 +55,7 @@ func TestOpenAPIContractIncludesPlannedEndpointGroupSet(t *testing.T) {
 		{method: http.MethodGet, path: "/api/v1/config/defaults"},
 		{method: http.MethodGet, path: "/api/v1/config/non-default"},
 		{method: http.MethodPost, path: "/api/v1/reload"},
+		{method: http.MethodGet, path: "/api/v1/runtime/summary"},
 		{method: http.MethodGet, path: pathContractListeners},
 		{method: http.MethodGet, path: pathContractListener},
 		{method: http.MethodPost, path: pathContractListenerDrain},
@@ -85,6 +86,27 @@ func TestOpenAPIContractIncludesPlannedEndpointGroupSet(t *testing.T) {
 	for _, endpoint := range planned {
 		if operation := contract.Paths.Find(endpoint.path).GetOperation(endpoint.method); operation == nil {
 			t.Fatalf("OpenAPI contract missing %s %s", endpoint.method, endpoint.path)
+		}
+	}
+}
+
+// TestOpenAPIContractIncludesRuntimeSummary checks aggregate summary semantics.
+func TestOpenAPIContractIncludesRuntimeSummary(t *testing.T) {
+	contract := loadContract(t)
+
+	operation := contract.Paths.Find("/api/v1/runtime/summary").GetOperation(http.MethodGet)
+	if operation == nil {
+		t.Fatal("OpenAPI contract missing runtime summary")
+	}
+
+	if operation.OperationID != "getRuntimeSummary" {
+		t.Fatalf("runtime summary operationId = %q, want getRuntimeSummary", operation.OperationID)
+	}
+
+	schema := contract.Components.Schemas["RuntimeSummaryResponse"].Value
+	for _, field := range []string{"active_sessions", "idle_affinities", "backend_capacity", "repairs", "routing_authority"} {
+		if _, ok := schema.Properties[field]; !ok {
+			t.Fatalf("RuntimeSummaryResponse missing %q", field)
 		}
 	}
 }

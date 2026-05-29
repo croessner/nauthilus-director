@@ -61,6 +61,7 @@ func (s *RedisSessionStore) ReserveBackendCapacity(
 	}
 
 	s.writeRepairableBackendReservationIndex(ctx, request.BackendIdentifier)
+	s.setBackendReservedAggregate(ctx, record.BackendIdentifier, record.BackendActiveCount)
 
 	return record, nil
 }
@@ -87,7 +88,14 @@ func (s *RedisSessionStore) ReleaseBackendReservation(
 		return BackendReservationRecord{}, err
 	}
 
-	return parseBackendReservationRecord(value)
+	record, err := parseBackendReservationRecord(value)
+	if err != nil {
+		return BackendReservationRecord{}, err
+	}
+
+	s.setBackendReservedAggregate(ctx, record.BackendIdentifier, record.BackendActiveCount)
+
+	return record, nil
 }
 
 // ReapBackendReservations repairs expired reservation leases for one backend slot.
@@ -112,7 +120,15 @@ func (s *RedisSessionStore) ReapBackendReservations(
 		return BackendReservationRecord{}, err
 	}
 
-	return parseBackendReservationRecord(value)
+	record, err := parseBackendReservationRecord(value)
+	if err != nil {
+		return BackendReservationRecord{}, err
+	}
+
+	s.setBackendReservedAggregate(ctx, record.BackendIdentifier, record.BackendActiveCount)
+	s.incrementAggregateRepairCount(ctx, aggregateFieldBackendReservations, record.RepairedCount)
+
+	return record, nil
 }
 
 // backendReservationActiveCount reads the Redis-coordinated backend capacity count.

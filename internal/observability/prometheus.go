@@ -76,6 +76,7 @@ const (
 	metricNameRoutingResolver         = "nauthilus_director_routing_resolver_total"
 	metricNameRoutingResolverSeconds  = "nauthilus_director_routing_resolver_duration_seconds"
 	metricNameRuntimeOperations       = "nauthilus_director_runtime_operations_total"
+	metricNameRuntimeSeconds          = "nauthilus_director_runtime_operation_duration_seconds"
 	metricNameSessions                = "nauthilus_director_sessions_total"
 
 	metricOperationUnknown = "unknown"
@@ -247,6 +248,7 @@ type prometheusInstruments struct {
 	routingResolver          *prometheus.CounterVec
 	routingResolverSeconds   *prometheus.HistogramVec
 	runtimeOperations        *prometheus.CounterVec
+	runtimeSeconds           *prometheus.HistogramVec
 	sessions                 *prometheus.CounterVec
 	sinkFailures             *prometheus.CounterVec
 }
@@ -451,6 +453,8 @@ func (m *prometheusRuntime) recordRuntimeMetric(event Event) {
 	case EventSessionReap, EventSessionKill, EventUserMove, EventUserKick, EventSelectorExclusion, EventSessionAttach,
 		EventListenerInventory, EventListenerDrain, EventListenerResume, EventListenerOperationFailure:
 		m.recordRuntimeOperation(event)
+	case EventRuntimePagination:
+		m.recordRuntimeOperation(event)
 	}
 }
 
@@ -606,6 +610,7 @@ func (m *prometheusRuntime) recordRedis(event Event) {
 // recordRuntimeOperation counts state-changing and diagnostic runtime operations.
 func (m *prometheusRuntime) recordRuntimeOperation(event Event) {
 	m.instrument.runtimeOperations.WithLabelValues(metricValues(event, operationResultReasonLabels)...).Inc()
+	observeDuration(m.instrument.runtimeSeconds, event, operationResultReasonLabels)
 }
 
 // newPrometheusInstruments creates all reviewed business metric families.
@@ -653,6 +658,7 @@ func newPrometheusInstruments() (prometheusInstruments, error) {
 		routingResolver:          builders.counterVec(metricNameRoutingResolver, "Total routing resolver outcomes.", protocolBackendLabels...),
 		routingResolverSeconds:   builders.histogramVec(metricNameRoutingResolverSeconds, "Routing resolver duration in seconds.", redisBuckets(), protocolBackendLabels...),
 		runtimeOperations:        builders.counterVec(metricNameRuntimeOperations, "Total runtime control and diagnostic operations.", operationResultReasonLabels...),
+		runtimeSeconds:           builders.histogramVec(metricNameRuntimeSeconds, "Runtime control and diagnostic operation duration in seconds.", redisBuckets(), operationResultReasonLabels...),
 		sessions:                 builders.counterVec(metricNameSessions, "Total frontend session lifecycle outcomes.", protocolSessionLabels...),
 		sinkFailures:             builders.counterVec(metricNameFailuresTotal, "Total non-fatal observability sink failures by sink operation and reason class.", metricLabelOperation, metricLabelReasonClass),
 	}, builders.err
@@ -701,6 +707,7 @@ func (i prometheusInstruments) collectors() []prometheus.Collector {
 		i.routingResolver,
 		i.routingResolverSeconds,
 		i.runtimeOperations,
+		i.runtimeSeconds,
 		i.sessions,
 		i.sinkFailures,
 	}

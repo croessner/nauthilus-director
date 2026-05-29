@@ -113,6 +113,42 @@ func (e MaintenanceMode) Valid() bool {
 	}
 }
 
+// Defines values for RuntimeCountSummaryAccuracy.
+const (
+	RuntimeCountSummaryAccuracyCumulative         RuntimeCountSummaryAccuracy = "cumulative"
+	RuntimeCountSummaryAccuracyEventuallyRepaired RuntimeCountSummaryAccuracy = "eventually_repaired"
+)
+
+// Valid indicates whether the value is a known member of the RuntimeCountSummaryAccuracy enum.
+func (e RuntimeCountSummaryAccuracy) Valid() bool {
+	switch e {
+	case RuntimeCountSummaryAccuracyCumulative:
+		return true
+	case RuntimeCountSummaryAccuracyEventuallyRepaired:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for RuntimeDimensionCountAccuracy.
+const (
+	RuntimeDimensionCountAccuracyCumulative         RuntimeDimensionCountAccuracy = "cumulative"
+	RuntimeDimensionCountAccuracyEventuallyRepaired RuntimeDimensionCountAccuracy = "eventually_repaired"
+)
+
+// Valid indicates whether the value is a known member of the RuntimeDimensionCountAccuracy enum.
+func (e RuntimeDimensionCountAccuracy) Valid() bool {
+	switch e {
+	case RuntimeDimensionCountAccuracyCumulative:
+		return true
+	case RuntimeDimensionCountAccuracyEventuallyRepaired:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for UserMoveRequestStrategy.
 const (
 	DrainExisting   UserMoveRequestStrategy = "drain_existing"
@@ -404,9 +440,63 @@ type RouteLookupRouting struct {
 	UsedDefaultShard bool    `json:"used_default_shard"`
 }
 
+// RuntimeBackendCapacitySummary defines model for RuntimeBackendCapacitySummary.
+type RuntimeBackendCapacitySummary struct {
+	ActiveSessions    RuntimeCountSummary `json:"active_sessions"`
+	Backend           string              `json:"backend"`
+	ReservedSessions  RuntimeCountSummary `json:"reserved_sessions"`
+	RoutingAuthority  bool                `json:"routing_authority"`
+	SummaryRepairable bool                `json:"summary_repairable"`
+}
+
+// RuntimeCountSummary defines model for RuntimeCountSummary.
+type RuntimeCountSummary struct {
+	Accuracy RuntimeCountSummaryAccuracy `json:"accuracy"`
+	Count    int                         `json:"count"`
+}
+
+// RuntimeCountSummaryAccuracy defines model for RuntimeCountSummary.Accuracy.
+type RuntimeCountSummaryAccuracy string
+
+// RuntimeDimensionCount defines model for RuntimeDimensionCount.
+type RuntimeDimensionCount struct {
+	Accuracy RuntimeDimensionCountAccuracy `json:"accuracy"`
+	Count    int                           `json:"count"`
+	Value    string                        `json:"value"`
+}
+
+// RuntimeDimensionCountAccuracy defines model for RuntimeDimensionCount.Accuracy.
+type RuntimeDimensionCountAccuracy string
+
 // RuntimeReasonRequest defines model for RuntimeReasonRequest.
 type RuntimeReasonRequest struct {
 	Reason string `json:"reason"`
+}
+
+// RuntimeRepairSummary defines model for RuntimeRepairSummary.
+type RuntimeRepairSummary struct {
+	BackendReservations RuntimeCountSummary `json:"backend_reservations"`
+	ExpiredSessions     RuntimeCountSummary `json:"expired_sessions"`
+	StaleIndexEntries   RuntimeCountSummary `json:"stale_index_entries"`
+}
+
+// RuntimeSessionAggregateSummary defines model for RuntimeSessionAggregateSummary.
+type RuntimeSessionAggregateSummary struct {
+	ByListener []RuntimeDimensionCount `json:"by_listener"`
+	ByProtocol []RuntimeDimensionCount `json:"by_protocol"`
+	ByService  []RuntimeDimensionCount `json:"by_service"`
+	ByShardTag []RuntimeDimensionCount `json:"by_shard_tag"`
+	Total      RuntimeCountSummary     `json:"total"`
+}
+
+// RuntimeSummaryResponse defines model for RuntimeSummaryResponse.
+type RuntimeSummaryResponse struct {
+	ActiveSessions   RuntimeSessionAggregateSummary  `json:"active_sessions"`
+	BackendCapacity  []RuntimeBackendCapacitySummary `json:"backend_capacity"`
+	GeneratedAt      time.Time                       `json:"generated_at"`
+	IdleAffinities   RuntimeCountSummary             `json:"idle_affinities"`
+	Repairs          RuntimeRepairSummary            `json:"repairs"`
+	RoutingAuthority bool                            `json:"routing_authority"`
 }
 
 // RuntimeWeightRequest defines model for RuntimeWeightRequest.
@@ -669,6 +759,9 @@ type ServerInterface interface {
 	// Explain director-only routing for a known identity key.
 	// (POST /api/v1/route/lookup)
 	LookupRoute(w http.ResponseWriter, r *http.Request)
+	// Return repairable runtime aggregate summaries.
+	// (GET /api/v1/runtime/summary)
+	GetRuntimeSummary(w http.ResponseWriter, r *http.Request)
 	// List active frontend sessions.
 	// (GET /api/v1/sessions)
 	ListSessions(w http.ResponseWriter, r *http.Request, params ListSessionsParams)
@@ -1196,6 +1289,20 @@ func (siw *ServerInterfaceWrapper) LookupRoute(w http.ResponseWriter, r *http.Re
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.LookupRoute(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetRuntimeSummary operation middleware
+func (siw *ServerInterfaceWrapper) GetRuntimeSummary(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetRuntimeSummary(w, r)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -1751,6 +1858,7 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/api/v1/listeners/{name}/runtime/resume", wrapper.ResumeListener)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/api/v1/reload", wrapper.Reload)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/api/v1/route/lookup", wrapper.LookupRoute)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/runtime/summary", wrapper.GetRuntimeSummary)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/sessions", wrapper.ListSessions)
 	m.HandleFunc(http.MethodDelete+" "+options.BaseURL+"/api/v1/sessions/{session_id}", wrapper.DeleteSession)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/sessions/{session_id}", wrapper.GetSession)
@@ -2496,6 +2604,44 @@ func (response LookupRoutedefaultJSONResponse) VisitLookupRouteResponse(w http.R
 	return err
 }
 
+type GetRuntimeSummaryRequestObject struct {
+}
+
+type GetRuntimeSummaryResponseObject interface {
+	VisitGetRuntimeSummaryResponse(w http.ResponseWriter) error
+}
+
+type GetRuntimeSummary200JSONResponse RuntimeSummaryResponse
+
+func (response GetRuntimeSummary200JSONResponse) VisitGetRuntimeSummaryResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetRuntimeSummarydefaultJSONResponse struct {
+	Body       ErrorResponse
+	StatusCode int
+}
+
+func (response GetRuntimeSummarydefaultJSONResponse) VisitGetRuntimeSummaryResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
 type ListSessionsRequestObject struct {
 	Params ListSessionsParams
 }
@@ -3149,6 +3295,9 @@ type StrictServerInterface interface {
 	// Explain director-only routing for a known identity key.
 	// (POST /api/v1/route/lookup)
 	LookupRoute(ctx context.Context, request LookupRouteRequestObject) (LookupRouteResponseObject, error)
+	// Return repairable runtime aggregate summaries.
+	// (GET /api/v1/runtime/summary)
+	GetRuntimeSummary(ctx context.Context, request GetRuntimeSummaryRequestObject) (GetRuntimeSummaryResponseObject, error)
 	// List active frontend sessions.
 	// (GET /api/v1/sessions)
 	ListSessions(ctx context.Context, request ListSessionsRequestObject) (ListSessionsResponseObject, error)
@@ -3748,6 +3897,30 @@ func (sh *strictHandler) LookupRoute(w http.ResponseWriter, r *http.Request) {
 		sh.options.ResponseErrorHandlerFunc(w, r, err)
 	} else if validResponse, ok := response.(LookupRouteResponseObject); ok {
 		if err := validResponse.VisitLookupRouteResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// GetRuntimeSummary operation middleware
+func (sh *strictHandler) GetRuntimeSummary(w http.ResponseWriter, r *http.Request) {
+	var request GetRuntimeSummaryRequestObject
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.GetRuntimeSummary(ctx, request.(GetRuntimeSummaryRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetRuntimeSummary")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetRuntimeSummaryResponseObject); ok {
+		if err := validResponse.VisitGetRuntimeSummaryResponse(w); err != nil {
 			sh.options.ResponseErrorHandlerFunc(w, r, err)
 		}
 	} else if response != nil {

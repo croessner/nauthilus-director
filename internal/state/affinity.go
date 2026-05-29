@@ -216,12 +216,15 @@ type ReapRequest struct {
 
 // ReapRecord describes expired session repair work completed by Redis.
 type ReapRecord struct {
-	Status           string
-	ScannedSessions  int
-	ExpiredSessions  int
-	RepairedBackends int
-	ServerTime       time.Time
-	releases         []BackendReservationReleaseRequest
+	Status            string
+	ScannedSessions   int
+	ExpiredSessions   int
+	StaleIndexEntries int
+	RepairedBackends  int
+	ServerTime        time.Time
+	aggregateRemovals []string
+	idleAffinities    []aggregateIdleAffinity
+	releases          []BackendReservationReleaseRequest
 }
 
 // BackendRuntimeMutation describes an atomic backend runtime override change.
