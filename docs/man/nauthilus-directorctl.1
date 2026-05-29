@@ -12,6 +12,7 @@ nauthilus-directorctl \- control a running Nauthilus Director
 .IR duration ]
 .RB [ --output
 .IR text|json ]
+.RB [ --help ]
 .IR command
 .RI [ arguments ]
 .SH DESCRIPTION
@@ -20,6 +21,12 @@ is the operator CLI for the Director control API.
 Every HTTP request is sent through the generated OpenAPI client SDK.
 The default output mode is compact key-value text for scripts.
 JSON output returns generated response bodies where practical.
+Use
+.B --help
+on the root command or any nested command to list available subcommands and
+command-local options.
+Long options require a double dash; single-dash options are reserved for
+documented one-letter shorthand flags.
 .PP
 Mutation commands manage runtime state in the running Director.
 They do not edit or rewrite YAML configuration files.
@@ -51,18 +58,11 @@ The default is
 .BR --output " " \fItext|json\fR
 Select output mode.
 .TP
-.BR --format " " \fItext|json\fR
-Alias for
-.BR --output
-when used before the command name.
-For
-.B config dump
-the command-local
-.B --format
-flag selects YAML or JSON config serialization.
-.TP
 .B --version
 Print the client version and exit.
+.TP
+.B --help
+Print command help and exit.
 .SH COMMANDS
 .TP
 .B status
@@ -133,13 +133,13 @@ configuration snapshot.
 Resume rebinds the listener from the current typed configuration and does not
 persist or clear any YAML setting.
 .TP
-.B config dump -d
+.B config dump -d|--defaults
 Read canonical default configuration from the running Director.
 .TP
-.B config dump -n
+.B config dump -n|--non-default
 Read non-default effective configuration from the running Director.
 .TP
-.B config dump -d|-n -P
+.B config dump -d|-n -P|--protected
 Request protected config output from the running Director by sending the
 generated protected config request flag.
 If the Director returns

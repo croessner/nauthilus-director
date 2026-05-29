@@ -57,6 +57,71 @@ func TestVersionOutput(t *testing.T) {
 	}
 }
 
+// TestHelpOutputListsCommands verifies root and nested help are operator-friendly.
+func TestHelpOutputListsCommands(t *testing.T) {
+	var rootOut, rootErr bytes.Buffer
+	code := run([]string{"--help"}, &rootOut, &rootErr)
+	if code != 0 {
+		t.Fatalf("root help exit code %d, want 0; stderr=%q", code, rootErr.String())
+	}
+	rootHelp := rootOut.String()
+	for _, want := range []string{
+		"Available Commands:",
+		"backends",
+		"listeners",
+		"route",
+		"sessions",
+		"users",
+		"Use \"nauthilus-directorctl [command] --help\"",
+	} {
+		if !strings.Contains(rootHelp, want) {
+			t.Fatalf("root help missing %q:\n%s", want, rootHelp)
+		}
+	}
+
+	var drainOut, drainErr bytes.Buffer
+	code = run([]string{"listeners", "drain", "--help"}, &drainOut, &drainErr)
+	if code != 0 {
+		t.Fatalf("nested help exit code %d, want 0; stderr=%q", code, drainErr.String())
+	}
+	drainHelp := drainOut.String()
+	for _, want := range []string{"--mode", "--reason", "--grace-seconds", "Global Flags:"} {
+		if !strings.Contains(drainHelp, want) {
+			t.Fatalf("nested help missing %q:\n%s", want, drainHelp)
+		}
+	}
+}
+
+// TestLongOptionsRequireDoubleDash rejects long options written with one dash.
+func TestLongOptionsRequireDoubleDash(t *testing.T) {
+	fake := newFakeControlClient()
+	stdout, stderr, code := runWithFakeClient([]string{"-address", "http://127.0.0.1:1", "status"}, fake)
+	if code != 2 {
+		t.Fatalf("run returned exit code %d, want 2; stderr=%q", code, stderr)
+	}
+	if stdout != "" {
+		t.Fatalf("stdout = %q, want empty output", stdout)
+	}
+	if !strings.Contains(stderr, "long options require double dash: -address") {
+		t.Fatalf("stderr = %q, want double-dash guidance", stderr)
+	}
+	if len(fake.calls) != 0 {
+		t.Fatalf("calls = %#v, want none", fake.calls)
+	}
+
+	fake = newFakeControlClient()
+	_, stderr, code = runWithFakeClient([]string{"sessions", "kill", "session-a", "-reason", "cleanup"}, fake)
+	if code != 2 {
+		t.Fatalf("run returned exit code %d, want 2; stderr=%q", code, stderr)
+	}
+	if !strings.Contains(stderr, "long options require double dash: -reason") {
+		t.Fatalf("stderr = %q, want double-dash guidance", stderr)
+	}
+	if len(fake.calls) != 0 {
+		t.Fatalf("calls = %#v, want none", fake.calls)
+	}
+}
+
 // TestNestedCommandsUseGeneratedClient verifies every stable command calls the generated SDK interface.
 func TestNestedCommandsUseGeneratedClient(t *testing.T) {
 	tests := []struct {

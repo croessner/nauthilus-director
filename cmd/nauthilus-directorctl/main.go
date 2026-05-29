@@ -16,13 +16,13 @@
 
 // Package main starts the nauthilus-directorctl client binary.
 //
-//nolint:dupl,funlen,goconst,gocyclo,wsl_v5 // The CLI keeps generated-client command paths explicit and dependency-free.
+//nolint:dupl,funlen,goconst,gocyclo,wsl_v5 // The CLI keeps generated-client command paths explicit.
 package main
 
 import (
 	"context"
 	"encoding/json"
-	"flag"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -34,6 +34,7 @@ import (
 	"time"
 
 	"github.com/croessner/nauthilus-director/internal/client/generated"
+	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 )
 
@@ -104,6 +105,16 @@ type parsedCommandLine struct {
 	bools       map[string]bool
 }
 
+// exitCodeError carries the intended process code through Cobra execution.
+type exitCodeError struct {
+	code int
+}
+
+// Error describes the non-zero command result for generic callers.
+func (err exitCodeError) Error() string {
+	return fmt.Sprintf("exit code %d", err.code)
+}
+
 // main delegates to run so command behavior stays testable at the binary boundary.
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
@@ -111,50 +122,482 @@ func main() {
 
 // run parses global flags and dispatches supported operator commands.
 func run(args []string, stdout io.Writer, stderr io.Writer) int {
-	flags := flag.NewFlagSet("nauthilus-directorctl", flag.ContinueOnError)
-	flags.SetOutput(stderr)
-
-	showVersion := flags.Bool("version", false, "print version and exit")
-	address := flags.String("address", defaultControlAddress, "control API base URL")
-	timeout := flags.Duration("timeout", defaultTimeout, "control API request timeout")
-	output := flags.String("output", string(outputText), "output mode: text or json")
-	flags.StringVar(output, "format", string(outputText), "output mode: text or json")
-
-	if err := flags.Parse(args); err != nil {
+	if err := rejectSingleDashLongOptions(args); err != nil {
+		_, _ = fmt.Fprintln(stderr, err)
 		return 2
 	}
 
-	if *showVersion {
-		_, _ = fmt.Fprintf(stdout, "nauthilus-directorctl %s\n", version)
-		return 0
+	root := newDirectorCtlCommand(stdout, stderr)
+	root.SetArgs(args)
+	if err := root.Execute(); err != nil {
+		var exitErr exitCodeError
+		if errors.As(err, &exitErr) {
+			return exitErr.code
+		}
+		_, _ = fmt.Fprintln(stderr, err)
+		return 2
 	}
 
-	mode, err := parseOutputMode(*output)
+	return 0
+}
+
+// newDirectorCtlCommand builds the operator command tree.
+func newDirectorCtlCommand(stdout io.Writer, stderr io.Writer) *cobra.Command {
+	root := &cobra.Command{
+		Use:               "nauthilus-directorctl",
+		Short:             "Control a running Nauthilus Director",
+		SilenceUsage:      true,
+		SilenceErrors:     true,
+		CompletionOptions: cobra.CompletionOptions{DisableDefaultCmd: true},
+		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
+			showVersion, _ := cmd.Root().PersistentFlags().GetBool("version")
+			if showVersion {
+				_, _ = fmt.Fprintf(stdout, "nauthilus-directorctl %s\n", version)
+				return exitCodeError{code: 0}
+			}
+
+			return nil
+		},
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) != 0 {
+				return cobraHandler(stdout, stderr, application.dispatch)(cmd, args)
+			}
+
+			return cmd.Help()
+		},
+	}
+	root.SetOut(stdout)
+	root.SetErr(stderr)
+
+	root.PersistentFlags().String("address", defaultControlAddress, "control API base URL")
+	root.PersistentFlags().Duration("timeout", defaultTimeout, "control API request timeout")
+	root.PersistentFlags().String("output", string(outputText), "output mode: text or json")
+	root.PersistentFlags().Bool("version", false, "print version and exit")
+
+	root.AddCommand(newStatusCommand(stdout, stderr))
+	root.AddCommand(newBackendsCommand(stdout, stderr))
+	root.AddCommand(newListenersCommand(stdout, stderr))
+	root.AddCommand(newConfigCommand(stdout, stderr))
+	root.AddCommand(newSessionsCommand(stdout, stderr))
+	root.AddCommand(newUsersCommand(stdout, stderr))
+	root.AddCommand(newRuntimeCommand(stdout, stderr))
+	root.AddCommand(newRouteCommand(stdout, stderr))
+	root.AddCommand(newReloadCommand(stdout, stderr))
+
+	return root
+}
+
+// newStatusCommand builds the status command.
+func newStatusCommand(stdout io.Writer, stderr io.Writer) *cobra.Command {
+	return &cobra.Command{
+		Use:   "status",
+		Short: "Show health, readiness and version data",
+		RunE:  cobraHandler(stdout, stderr, application.runStatus),
+	}
+}
+
+// newBackendsCommand builds backend inventory and runtime-control commands.
+func newBackendsCommand(stdout io.Writer, stderr io.Writer) *cobra.Command {
+	command := &cobra.Command{
+		Use:   "backends",
+		Short: "Inspect and control backend runtime state",
+		RunE:  cobraHandler(stdout, stderr, application.runBackends),
+	}
+	command.AddCommand(&cobra.Command{
+		Use:   "list",
+		Short: "List backend runtime state",
+		RunE:  cobraHandler(stdout, stderr, application.runBackendsList),
+	})
+	command.AddCommand(&cobra.Command{
+		Use:   "show <identifier>",
+		Short: "Show one backend",
+		RunE:  cobraHandler(stdout, stderr, application.runBackendsShow),
+	})
+	command.AddCommand(newBackendMaintenanceCommand(stdout, stderr))
+	command.AddCommand(runtimeReasonCommand("out <identifier>", "Exclude a backend from placement", stdout, stderr, application.runBackendsOut))
+	command.AddCommand(runtimeReasonCommand("in <identifier>", "Return a backend to placement", stdout, stderr, application.runBackendsIn))
+	drain := &cobra.Command{
+		Use:   "drain <identifier>",
+		Short: "Drain a backend",
+		RunE:  cobraHandler(stdout, stderr, application.runBackendsDrain, "mode", "reason", "grace-seconds"),
+	}
+	addRuntimeDrainFlags(drain)
+	command.AddCommand(drain)
+	command.AddCommand(backendWeightCommand("weight <identifier>", "Override backend runtime weight", stdout, stderr, application.runBackendsWeight))
+	command.AddCommand(newBackendRuntimeCommand(stdout, stderr))
+
+	return command
+}
+
+// newBackendMaintenanceCommand builds backend maintenance commands.
+func newBackendMaintenanceCommand(stdout io.Writer, stderr io.Writer) *cobra.Command {
+	command := &cobra.Command{
+		Use:   "maintenance",
+		Short: "Control backend maintenance state",
+		RunE:  cobraHandler(stdout, stderr, application.runBackendMaintenance),
+	}
+	enable := &cobra.Command{
+		Use:   "enable <identifier>",
+		Short: "Enable backend maintenance",
+		RunE:  cobraHandler(stdout, stderr, application.runBackendMaintenanceEnable, "reason", "mode", "grace-seconds"),
+	}
+	addRuntimeDrainFlags(enable)
+	command.AddCommand(enable)
+	command.AddCommand(runtimeReasonCommand("disable <identifier>", "Disable backend maintenance", stdout, stderr, application.runBackendMaintenanceDisable))
+
+	return command
+}
+
+// newBackendRuntimeCommand builds backend runtime override commands.
+func newBackendRuntimeCommand(stdout io.Writer, stderr io.Writer) *cobra.Command {
+	command := &cobra.Command{
+		Use:   "runtime",
+		Short: "Control backend runtime overrides",
+		RunE:  cobraHandler(stdout, stderr, application.runBackendRuntime),
+	}
+	command.AddCommand(runtimeReasonCommand("clear <identifier>", "Clear backend runtime overrides", stdout, stderr, application.runBackendRuntimeClear))
+	command.AddCommand(backendWeightCommand("weight <identifier>", "Override backend runtime weight", stdout, stderr, application.runBackendsWeight))
+
+	return command
+}
+
+// newListenersCommand builds listener runtime-control commands.
+func newListenersCommand(stdout io.Writer, stderr io.Writer) *cobra.Command {
+	command := &cobra.Command{
+		Use:   "listeners",
+		Short: "Inspect and control process-local listeners",
+		RunE:  cobraHandler(stdout, stderr, application.runListeners),
+	}
+	command.AddCommand(&cobra.Command{
+		Use:   "list",
+		Short: "List configured listeners",
+		RunE:  cobraHandler(stdout, stderr, application.runListenersList),
+	})
+	command.AddCommand(&cobra.Command{
+		Use:   "show <name>",
+		Short: "Show one configured listener",
+		RunE:  cobraHandler(stdout, stderr, application.runListenersShow),
+	})
+	drain := &cobra.Command{
+		Use:   "drain <name>",
+		Short: "Drain one process-local listener",
+		RunE:  cobraHandler(stdout, stderr, application.runListenersDrain, "mode", "reason", "grace-seconds"),
+	}
+	addRuntimeDrainFlags(drain)
+	command.AddCommand(drain)
+	command.AddCommand(runtimeReasonCommand("resume <name>", "Resume one process-local listener", stdout, stderr, application.runListenersResume))
+
+	return command
+}
+
+// newConfigCommand builds remote configuration inspection commands.
+func newConfigCommand(stdout io.Writer, stderr io.Writer) *cobra.Command {
+	command := &cobra.Command{
+		Use:   "config",
+		Short: "Inspect Director configuration through the control API",
+		RunE:  cobraHandler(stdout, stderr, application.runConfig),
+	}
+	dump := &cobra.Command{
+		Use:   "dump",
+		Short: "Print remote configuration",
+		RunE:  cobraHandler(stdout, stderr, application.runConfigDump, "defaults", "non-default", "protected", "format"),
+	}
+	dump.Flags().BoolP("defaults", "d", false, "dump canonical defaults")
+	dump.Flags().BoolP("non-default", "n", false, "dump non-default effective config")
+	dump.Flags().BoolP("protected", "P", false, "include protected values in config output")
+	dump.Flags().StringP("format", "f", "", "config dump format: yaml or json")
+	command.AddCommand(dump)
+
+	return command
+}
+
+// newSessionsCommand builds active-session commands.
+func newSessionsCommand(stdout io.Writer, stderr io.Writer) *cobra.Command {
+	command := &cobra.Command{
+		Use:   "sessions",
+		Short: "Inspect and control active sessions",
+		RunE:  cobraHandler(stdout, stderr, application.runSessions),
+	}
+	list := &cobra.Command{
+		Use:   "list",
+		Short: "List active sessions",
+		RunE:  cobraHandler(stdout, stderr, application.runSessionsList, "protocol", "backend", "cursor", "limit", "all"),
+	}
+	list.Flags().String("protocol", "", "filter by protocol")
+	list.Flags().String("backend", "", "filter by backend identifier")
+	addPaginationFlags(list)
+	command.AddCommand(list)
+	command.AddCommand(&cobra.Command{
+		Use:   "show <session-id>",
+		Short: "Show one active session",
+		RunE:  cobraHandler(stdout, stderr, application.runSessionsShow),
+	})
+	command.AddCommand(runtimeReasonCommand("kill <session-id>", "Terminate one active session", stdout, stderr, application.runSessionsKill))
+
+	return command
+}
+
+// newUsersCommand builds user runtime-state commands.
+func newUsersCommand(stdout io.Writer, stderr io.Writer) *cobra.Command {
+	command := &cobra.Command{
+		Use:   "users",
+		Short: "Inspect and control user runtime state",
+		RunE:  cobraHandler(stdout, stderr, application.runUsers),
+	}
+	list := &cobra.Command{
+		Use:   "list",
+		Short: "List users with runtime state",
+		RunE:  cobraHandler(stdout, stderr, application.runUsersList, "cursor", "limit", "all"),
+	}
+	addPaginationFlags(list)
+	command.AddCommand(list)
+	command.AddCommand(&cobra.Command{
+		Use:   "show <user-key>",
+		Short: "Show one user's runtime state",
+		RunE:  cobraHandler(stdout, stderr, application.runUsersShow),
+	})
+	command.AddCommand(&cobra.Command{
+		Use:   "sessions <user-key>",
+		Short: "List sessions for one user",
+		RunE:  cobraHandler(stdout, stderr, application.runUsersSessions),
+	})
+	command.AddCommand(newUserAffinityCommand(stdout, stderr))
+	move := &cobra.Command{
+		Use:   "move <user-key>",
+		Short: "Move future user placement",
+		RunE:  cobraHandler(stdout, stderr, application.runUsersMove, "to-shard", "strategy", "reason"),
+	}
+	move.Flags().String("to-shard", "", "target shard")
+	move.Flags().String("strategy", "", "move strategy")
+	move.Flags().String("reason", "", "auditable reason")
+	command.AddCommand(move)
+	command.AddCommand(runtimeReasonCommand("kick <user-key>", "Terminate active sessions for one user", stdout, stderr, application.runUsersKick))
+
+	return command
+}
+
+// newUserAffinityCommand builds user-affinity commands.
+func newUserAffinityCommand(stdout io.Writer, stderr io.Writer) *cobra.Command {
+	command := &cobra.Command{
+		Use:   "affinity",
+		Short: "Inspect and control user affinity",
+		RunE:  cobraHandler(stdout, stderr, application.runUsersAffinity),
+	}
+	command.AddCommand(&cobra.Command{
+		Use:   "show <user-key>",
+		Short: "Show active affinity for one user",
+		RunE:  cobraHandler(stdout, stderr, application.runUsersAffinityShow),
+	})
+	set := &cobra.Command{
+		Use:   "set <user-key>",
+		Short: "Set user affinity for future sessions",
+		RunE:  cobraHandler(stdout, stderr, application.runUsersAffinitySet, "shard", "reason"),
+	}
+	set.Flags().String("shard", "", "target shard")
+	set.Flags().String("reason", "", "auditable reason")
+	command.AddCommand(set)
+	command.AddCommand(runtimeReasonCommand("clear <user-key>", "Clear inactive user affinity", stdout, stderr, application.runUsersAffinityClear))
+
+	return command
+}
+
+// newRuntimeCommand builds runtime summary commands.
+func newRuntimeCommand(stdout io.Writer, stderr io.Writer) *cobra.Command {
+	command := &cobra.Command{
+		Use:   "runtime",
+		Short: "Inspect aggregate runtime state",
+		RunE:  cobraHandler(stdout, stderr, application.runRuntime),
+	}
+	command.AddCommand(&cobra.Command{
+		Use:   "summary",
+		Short: "Show aggregate runtime totals",
+		RunE:  cobraHandler(stdout, stderr, application.runRuntimeSummary),
+	})
+
+	return command
+}
+
+// newRouteCommand builds route diagnostic commands.
+func newRouteCommand(stdout io.Writer, stderr io.Writer) *cobra.Command {
+	command := &cobra.Command{
+		Use:   "route",
+		Short: "Run side-effect-free routing diagnostics",
+		RunE:  cobraHandler(stdout, stderr, application.runRoute),
+	}
+	lookup := &cobra.Command{
+		Use:   "lookup",
+		Short: "Explain a route lookup",
+		RunE: cobraHandler(stdout, stderr, application.runRouteLookup,
+			"protocol", "user", "recipient", "tenant", "listener", "service-name",
+			"backend-pool", "client-ip", "attribute", "include-affinity"),
+	}
+	lookup.Flags().String("protocol", "", "protocol name")
+	lookup.Flags().String("user", "", "user key")
+	lookup.Flags().String("recipient", "", "recipient address")
+	lookup.Flags().String("tenant", "", "tenant name")
+	lookup.Flags().String("listener", "", "listener name")
+	lookup.Flags().String("service-name", "", "service name")
+	lookup.Flags().String("backend-pool", "", "backend pool")
+	lookup.Flags().String("client-ip", "", "client IP address")
+	lookup.Flags().StringArray("attribute", nil, "routing attribute as key=value")
+	lookup.Flags().Bool("include-affinity", false, "include read-only affinity context")
+	command.AddCommand(lookup)
+
+	return command
+}
+
+// newReloadCommand builds the safe reload command.
+func newReloadCommand(stdout io.Writer, stderr io.Writer) *cobra.Command {
+	return &cobra.Command{
+		Use:   "reload",
+		Short: "Request a safe runtime reload",
+		RunE:  cobraHandler(stdout, stderr, application.runReload),
+	}
+}
+
+// runtimeReasonCommand builds a command with a required auditable reason.
+func runtimeReasonCommand(use string, short string, stdout io.Writer, stderr io.Writer, runner func(application, []string) int) *cobra.Command {
+	command := &cobra.Command{
+		Use:   use,
+		Short: short,
+		RunE:  cobraHandler(stdout, stderr, runner, "reason"),
+	}
+	command.Flags().String("reason", "", "auditable reason")
+
+	return command
+}
+
+// backendWeightCommand builds a backend weight command.
+func backendWeightCommand(use string, short string, stdout io.Writer, stderr io.Writer, runner func(application, []string) int) *cobra.Command {
+	command := &cobra.Command{
+		Use:   use,
+		Short: short,
+		RunE:  cobraHandler(stdout, stderr, runner, "weight", "reason"),
+	}
+	command.Flags().String("weight", "", "runtime weight")
+	command.Flags().String("reason", "", "auditable reason")
+
+	return command
+}
+
+// addRuntimeDrainFlags adds shared drain and maintenance flags.
+func addRuntimeDrainFlags(command *cobra.Command) {
+	command.Flags().String("mode", "", "runtime mode: soft or hard")
+	command.Flags().String("reason", "", "auditable reason")
+	command.Flags().String("grace-seconds", "", "grace period in seconds")
+}
+
+// addPaginationFlags adds common cursor pagination flags.
+func addPaginationFlags(command *cobra.Command) {
+	command.Flags().String("cursor", "", "opaque pagination cursor")
+	command.Flags().String("limit", "", "page size")
+	command.Flags().Bool("all", false, "iterate all pages")
+}
+
+// cobraHandler adapts existing generated-client command handlers to Cobra.
+func cobraHandler(stdout io.Writer, stderr io.Writer, runner func(application, []string) int, flagNames ...string) func(*cobra.Command, []string) error {
+	return func(cmd *cobra.Command, args []string) error {
+		app, code := applicationFromCommand(cmd, stdout, stderr)
+		if code != 0 {
+			return exitCodeError{code: code}
+		}
+
+		commandArgs, err := commandArgsFromFlags(cmd, args, flagNames...)
+		if err != nil {
+			_, _ = fmt.Fprintln(stderr, err)
+			return exitCodeError{code: 2}
+		}
+
+		return errorFromExitCode(runner(app, commandArgs))
+	}
+}
+
+// applicationFromCommand reads validated global options from the Cobra root.
+func applicationFromCommand(cmd *cobra.Command, stdout io.Writer, stderr io.Writer) (application, int) {
+	flags := cmd.Root().PersistentFlags()
+	address, _ := flags.GetString("address")
+	timeout, _ := flags.GetDuration("timeout")
+	output, _ := flags.GetString("output")
+
+	mode, err := parseOutputMode(output)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "%v\n", err)
-		return 2
+		return application{}, 2
 	}
-	if *timeout <= 0 {
+	if timeout <= 0 {
 		_, _ = fmt.Fprintln(stderr, "timeout must be greater than zero")
-		return 2
+		return application{}, 2
 	}
 
-	app := application{
+	return application{
 		options: commandOptions{
-			Address: *address,
-			Timeout: *timeout,
+			Address: address,
+			Timeout: timeout,
 			Output:  mode,
 		},
 		stdout: stdout,
 		stderr: stderr,
+	}, 0
+}
+
+// commandArgsFromFlags recreates the existing handler input from parsed flags.
+func commandArgsFromFlags(cmd *cobra.Command, positionals []string, flagNames ...string) ([]string, error) {
+	commandArgs := make([]string, 0, len(positionals)+(len(flagNames)*2))
+	for _, name := range flagNames {
+		flag := cmd.Flags().Lookup(name)
+		if flag == nil || !flag.Changed {
+			continue
+		}
+
+		switch flag.Value.Type() {
+		case "bool":
+			value, err := cmd.Flags().GetBool(name)
+			if err != nil {
+				return nil, err
+			}
+			commandArgs = append(commandArgs, "--"+name+"="+strconv.FormatBool(value))
+		case "stringArray":
+			values, err := cmd.Flags().GetStringArray(name)
+			if err != nil {
+				return nil, err
+			}
+			for _, value := range values {
+				commandArgs = append(commandArgs, "--"+name, value)
+			}
+		default:
+			commandArgs = append(commandArgs, "--"+name, flag.Value.String())
+		}
 	}
 
-	remaining := flags.Args()
-	if len(remaining) == 0 {
-		return 0
+	return append(commandArgs, positionals...), nil
+}
+
+// rejectSingleDashLongOptions rejects accidental long-option shorthand forms.
+func rejectSingleDashLongOptions(args []string) error {
+	for _, arg := range args {
+		if arg == "--" {
+			return nil
+		}
+		if len(arg) <= 2 || !strings.HasPrefix(arg, "-") || strings.HasPrefix(arg, "--") {
+			continue
+		}
+		if arg[1] >= '0' && arg[1] <= '9' {
+			continue
+		}
+
+		return fmt.Errorf("long options require double dash: %s", arg)
 	}
 
-	return app.dispatch(remaining)
+	return nil
+}
+
+// errorFromExitCode converts handler result codes into Cobra errors.
+func errorFromExitCode(code int) error {
+	if code == 0 {
+		return nil
+	}
+
+	return exitCodeError{code: code}
 }
 
 // parseOutputMode validates a global output mode.
