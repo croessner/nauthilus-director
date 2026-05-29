@@ -71,6 +71,8 @@ local protocol = require_value(redis.call("HGET", session_key, "protocol"), "pro
 local listener_name = tostring(redis.call("HGET", session_key, "listener_name") or "")
 local service_name = tostring(redis.call("HGET", session_key, "service_name") or "")
 local selected_backend_id = tostring(redis.call("HGET", session_key, "selected_backend_id") or "")
+local backend_reservation_id = tostring(redis.call("HGET", session_key, "backend_reservation_id") or "")
+local backend_max_connections = tostring(redis.call("HGET", session_key, "backend_max_connections") or "0")
 local backend_counted = tostring(redis.call("HGET", session_key, "backend_counted") or "0")
 local control_generation = tostring(redis.call("HGET", state_key, "control_generation") or "0")
 local move_strategy = redis.call("HGET", state_key, "move_strategy") or ""
@@ -125,6 +127,8 @@ return {
 	"control_generation", control_generation,
 	"control_action", "none",
 	"backend_id", selected_backend_id,
+	"backend_reservation_id", backend_reservation_id,
+	"backend_max_connections", backend_max_connections,
 	"backend_counted", backend_counted,
 	"session_id", session_id,
 	"affinity_hash", affinity_hash,

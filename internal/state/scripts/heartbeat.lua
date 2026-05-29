@@ -150,6 +150,8 @@ return {
 	"control_generation", tostring(control_generation),
 	"control_action", control_action,
 	"backend_id", tostring(redis.call("HGET", session_key, "selected_backend_id") or ""),
+	"backend_reservation_id", tostring(redis.call("HGET", session_key, "backend_reservation_id") or ""),
+	"backend_max_connections", tostring(redis.call("HGET", session_key, "backend_max_connections") or "0"),
 	"backend_counted", tostring(redis.call("HGET", session_key, "backend_counted") or "0"),
 	"session_id", session_id,
 	"affinity_hash", affinity_hash,

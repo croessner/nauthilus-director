@@ -50,6 +50,13 @@ type AffinityKeys struct {
 	Override string
 }
 
+// BackendReservationKeys contains the Redis key group for one backend slot.
+type BackendReservationKeys struct {
+	HashTag string
+	State   string
+	Due     string
+}
+
 const (
 	affinityKeySessionPrefix = "session:"
 	affinityKeyState         = "state"
@@ -140,6 +147,40 @@ func (b KeyBuilder) BackendRuntimeKey(backendID string) (string, error) {
 	}
 
 	return b.namespaceBase() + ":runtime:backend:" + backendID, nil
+}
+
+// BackendHash returns the stable backend hash used inside Redis Cluster hash tags.
+func (b KeyBuilder) BackendHash(backendID string) (string, error) {
+	backendID = strings.TrimSpace(backendID)
+	if backendID == "" {
+		return "", newStateError(RedisErrorKindAmbiguousState, "keys", "backend id required", nil)
+	}
+
+	sum := sha256.Sum256([]byte(backendID))
+
+	return hex.EncodeToString(sum[:]), nil
+}
+
+// BackendReservationKeys returns the same-slot reservation key group for one backend.
+func (b KeyBuilder) BackendReservationKeys(backendID string) (BackendReservationKeys, error) {
+	backendID = strings.TrimSpace(backendID)
+	if backendID == "" {
+		return BackendReservationKeys{}, newStateError(RedisErrorKindAmbiguousState, "keys", "backend id required", nil)
+	}
+
+	backendHash, err := b.BackendHash(backendID)
+	if err != nil {
+		return BackendReservationKeys{}, err
+	}
+
+	hashTag := "{backend:" + backendHash + "}"
+	base := b.namespaceBase() + ":" + hashTag + ":runtime:backend:" + backendID
+
+	return BackendReservationKeys{
+		HashTag: hashTag,
+		State:   base + ":reservations",
+		Due:     base + ":reservations_due",
+	}, nil
 }
 
 // InstanceKey returns the Redis key for one director instance heartbeat.
@@ -415,14 +456,42 @@ func (b KeyBuilder) indexShard(operation string, value string, total int, emptyM
 
 // validateAffinityOwnedKeys rejects Redis script keys outside one affinity hash tag.
 func (b KeyBuilder) validateAffinityOwnedKeys(operation string, keys []string) error {
+	return b.validateSingleHashTaggedKeys(
+		operation,
+		keys,
+		"affinity script keys required",
+		"affinity script keys use multiple hash tags",
+		b.affinityOwnedHashTag,
+	)
+}
+
+// validateBackendReservationOwnedKeys rejects reservation scripts outside one backend hash tag.
+func (b KeyBuilder) validateBackendReservationOwnedKeys(operation string, keys []string) error {
+	return b.validateSingleHashTaggedKeys(
+		operation,
+		keys,
+		"backend reservation script keys required",
+		"backend reservation script keys use multiple hash tags",
+		b.backendReservationOwnedHashTag,
+	)
+}
+
+// validateSingleHashTaggedKeys rejects script key lists spanning multiple Redis hash tags.
+func (b KeyBuilder) validateSingleHashTaggedKeys(
+	operation string,
+	keys []string,
+	emptyMessage string,
+	mismatchMessage string,
+	extractHashTag func(string, string) (string, error),
+) error {
 	if len(keys) == 0 {
-		return newStateError(RedisErrorKindConfig, operation, "affinity script keys required", nil)
+		return newStateError(RedisErrorKindConfig, operation, emptyMessage, nil)
 	}
 
 	hashTag := ""
 
 	for _, key := range keys {
-		keyHashTag, err := b.affinityOwnedHashTag(operation, key)
+		keyHashTag, err := extractHashTag(operation, key)
 		if err != nil {
 			return err
 		}
@@ -434,7 +503,7 @@ func (b KeyBuilder) validateAffinityOwnedKeys(operation string, keys []string) e
 		}
 
 		if keyHashTag != hashTag {
-			return newStateError(RedisErrorKindConfig, operation, "affinity script keys use multiple hash tags", nil)
+			return newStateError(RedisErrorKindConfig, operation, mismatchMessage, nil)
 		}
 	}
 
@@ -478,6 +547,42 @@ func (b KeyBuilder) affinityOwnedHashTag(operation string, key string) (string, 
 	return hashTag, nil
 }
 
+// backendReservationOwnedHashTag extracts and validates one backend reservation key family.
+func (b KeyBuilder) backendReservationOwnedHashTag(operation string, key string) (string, error) {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return "", newStateError(RedisErrorKindConfig, operation, "empty backend reservation script key", nil)
+	}
+
+	start := strings.Index(key, "{backend:")
+	if start < 0 {
+		return "", newStateError(RedisErrorKindConfig, operation, "missing backend hash tag", nil)
+	}
+
+	end := strings.Index(key[start:], "}")
+	if end < 0 {
+		return "", newStateError(RedisErrorKindConfig, operation, "unterminated backend hash tag", nil)
+	}
+
+	end += start
+
+	hashTag := key[start : end+1]
+	if len(hashTag) <= len("{backend:}") {
+		return "", newStateError(RedisErrorKindConfig, operation, "empty backend hash tag", nil)
+	}
+
+	prefix := b.namespaceBase() + ":" + hashTag + ":runtime:backend:"
+	if !strings.HasPrefix(key, prefix) {
+		return "", newStateError(RedisErrorKindConfig, operation, "backend reservation namespace mismatch", nil)
+	}
+
+	if !backendReservationKeySuffixAllowed(strings.TrimPrefix(key, prefix)) {
+		return "", newStateError(RedisErrorKindConfig, operation, "non-reservation key in backend reservation script", nil)
+	}
+
+	return hashTag, nil
+}
+
 // affinityKeySuffixAllowed reports whether a key suffix belongs to one affinity.
 func affinityKeySuffixAllowed(suffix string) bool {
 	switch suffix {
@@ -486,6 +591,11 @@ func affinityKeySuffixAllowed(suffix string) bool {
 	default:
 		return strings.HasPrefix(suffix, affinityKeySessionPrefix) && strings.TrimPrefix(suffix, affinityKeySessionPrefix) != ""
 	}
+}
+
+// backendReservationKeySuffixAllowed reports whether a suffix belongs to one backend reservation group.
+func backendReservationKeySuffixAllowed(suffix string) bool {
+	return strings.HasSuffix(suffix, ":reservations") || strings.HasSuffix(suffix, ":reservations_due")
 }
 
 // normalizeAffinityPart canonicalizes input before hashing.

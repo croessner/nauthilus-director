@@ -83,6 +83,7 @@ type SessionBackendAttachment struct {
 	Key               AffinityKey
 	SessionID         string
 	BackendIdentifier string
+	ReservationID     string
 	MaxConnections    int
 }
 
@@ -90,10 +91,42 @@ type SessionBackendAttachment struct {
 type SessionBackendRecord struct {
 	Status             string
 	BackendIdentifier  string
+	ReservationID      string
 	BackendActiveCount int
 	ServerTime         time.Time
 	LeaseExpiresAt     time.Time
 	ControlGeneration  string
+}
+
+// BackendReservationRequest asks Redis to reserve one backend capacity slot.
+type BackendReservationRequest struct {
+	BackendIdentifier string
+	ReservationID     string
+	MaxConnections    int
+	LeaseTTL          time.Duration
+}
+
+// BackendReservationReleaseRequest asks Redis to release one backend capacity slot.
+type BackendReservationReleaseRequest struct {
+	BackendIdentifier string
+	ReservationID     string
+}
+
+// BackendReservationReapRequest asks Redis to repair expired backend reservations.
+type BackendReservationReapRequest struct {
+	BackendIdentifier string
+	Limit             int
+}
+
+// BackendReservationRecord describes one backend reservation mutation result.
+type BackendReservationRecord struct {
+	Status             string
+	BackendIdentifier  string
+	ReservationID      string
+	BackendActiveCount int
+	RepairedCount      int
+	ServerTime         time.Time
+	LeaseExpiresAt     time.Time
 }
 
 // RuntimeSessionRecord describes one Redis-visible frontend session for control reads.
@@ -188,6 +221,7 @@ type ReapRecord struct {
 	ExpiredSessions  int
 	RepairedBackends int
 	ServerTime       time.Time
+	releases         []BackendReservationReleaseRequest
 }
 
 // BackendRuntimeMutation describes an atomic backend runtime override change.
@@ -239,6 +273,13 @@ type SessionStore interface {
 	AttachSelectedBackend(ctx context.Context, attachment SessionBackendAttachment) (SessionBackendRecord, error)
 	HeartbeatSession(ctx context.Context, key AffinityKey, sessionID string, ttl time.Duration) (AffinityRecord, error)
 	CloseSession(ctx context.Context, key AffinityKey, sessionID string) (AffinityRecord, error)
+}
+
+// BackendReservationStore owns Redis-backed backend capacity reservations.
+type BackendReservationStore interface {
+	ReserveBackendCapacity(ctx context.Context, request BackendReservationRequest) (BackendReservationRecord, error)
+	ReleaseBackendReservation(ctx context.Context, request BackendReservationReleaseRequest) (BackendReservationRecord, error)
+	ReapBackendReservations(ctx context.Context, request BackendReservationReapRequest) (BackendReservationRecord, error)
 }
 
 // RuntimeStateStore owns Redis-backed operator runtime state.

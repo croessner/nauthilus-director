@@ -176,6 +176,10 @@ func (s *RedisSessionStore) SetBackendRuntime(
 		return BackendRuntimeRecord{}, err
 	}
 
+	if err := s.applyBackendReservationCount(ctx, &record, mutation.BackendIdentifier); err != nil {
+		return BackendRuntimeRecord{}, err
+	}
+
 	if backendRuntimeMutationMarksSessions(mutation) {
 		marked, markErr := s.markBackendRuntimeSessions(ctx, mutation.BackendIdentifier)
 		if markErr != nil {
@@ -215,7 +219,28 @@ func (s *RedisSessionStore) ClearBackendRuntime(
 		return BackendRuntimeRecord{}, err
 	}
 
-	return parseBackendRuntimeRecord(value)
+	record, err := parseBackendRuntimeRecord(value)
+	if err != nil {
+		return BackendRuntimeRecord{}, err
+	}
+
+	if err := s.applyBackendReservationCount(ctx, &record, request.BackendIdentifier); err != nil {
+		return BackendRuntimeRecord{}, err
+	}
+
+	return record, nil
+}
+
+// applyBackendReservationCount overlays runtime mutation output with reservation counts.
+func (s *RedisSessionStore) applyBackendReservationCount(ctx context.Context, record *BackendRuntimeRecord, backendIdentifier string) error {
+	activeCount, err := s.backendReservationActiveCount(ctx, backendIdentifier)
+	if err != nil {
+		return err
+	}
+
+	record.ActiveSessionCount = activeCount
+
+	return nil
 }
 
 // moveUserScriptKeys returns the same-slot key list for user move mutations.

@@ -462,7 +462,11 @@ func assertSessionOpenRequest(t *testing.T, store *recordingSessionStore) {
 		t.Fatalf("backend attach calls = %d, want 1", store.attachCalls)
 	}
 
-	if store.attachment.BackendIdentifier != "mailstore-b-imap" || store.attachment.MaxConnections <= 0 {
+	if store.reserveCalls != 1 {
+		t.Fatalf("backend reservation calls = %d, want 1", store.reserveCalls)
+	}
+
+	if store.attachment.BackendIdentifier != "mailstore-b-imap" || store.attachment.MaxConnections <= 0 || store.attachment.ReservationID == "" {
 		t.Fatalf("backend attachment = %#v", store.attachment)
 	}
 }
@@ -642,8 +646,11 @@ type recordingSessionStore struct {
 	attachCalls     int
 	heartbeatCalls  int
 	closeCalls      int
+	reserveCalls    int
+	releaseCalls    int
 	record          state.SessionRecord
 	attachment      state.SessionBackendAttachment
+	reservation     state.BackendReservationRequest
 	result          state.AffinityRecord
 	attachResult    state.SessionBackendRecord
 	heartbeatResult state.AffinityRecord
@@ -663,6 +670,41 @@ func (s *recordingSessionStore) OpenSession(_ context.Context, record state.Sess
 	return s.result, s.err
 }
 
+// ReserveBackendCapacity records backend reservation before selected-backend attach.
+func (s *recordingSessionStore) ReserveBackendCapacity(
+	_ context.Context,
+	request state.BackendReservationRequest,
+) (state.BackendReservationRecord, error) {
+	s.reserveCalls++
+	s.reservation = request
+
+	return state.BackendReservationRecord{
+		Status:             "reserved",
+		BackendIdentifier:  request.BackendIdentifier,
+		ReservationID:      request.ReservationID,
+		BackendActiveCount: 1,
+		LeaseExpiresAt:     time.Now().Add(request.LeaseTTL),
+	}, nil
+}
+
+// ReleaseBackendReservation records rollback of a reservation.
+func (s *recordingSessionStore) ReleaseBackendReservation(
+	context.Context,
+	state.BackendReservationReleaseRequest,
+) (state.BackendReservationRecord, error) {
+	s.releaseCalls++
+
+	return state.BackendReservationRecord{Status: "released", RepairedCount: 1}, nil
+}
+
+// ReapBackendReservations is unused by the auth pipeline tests.
+func (s *recordingSessionStore) ReapBackendReservations(
+	context.Context,
+	state.BackendReservationReapRequest,
+) (state.BackendReservationRecord, error) {
+	return state.BackendReservationRecord{}, nil
+}
+
 // AttachSelectedBackend records selected-backend registration after placement.
 func (s *recordingSessionStore) AttachSelectedBackend(
 	_ context.Context,
@@ -672,6 +714,9 @@ func (s *recordingSessionStore) AttachSelectedBackend(
 	s.attachment = attachment
 	if s.attachResult.BackendIdentifier == "" {
 		s.attachResult.BackendIdentifier = attachment.BackendIdentifier
+	}
+	if s.attachResult.ReservationID == "" {
+		s.attachResult.ReservationID = attachment.ReservationID
 	}
 
 	return s.attachResult, s.attachErr

@@ -2421,18 +2421,20 @@ func (b *fakeIMAPBackend) handleBackendAuth(conn net.Conn, reader *bufio.Reader,
 }
 
 type memorySessionStore struct {
-	mu          sync.Mutex
-	records     map[state.AffinityKey]state.AffinityRecord
-	counts      map[state.AffinityKey]int
-	attachments map[string]state.SessionBackendAttachment
+	mu           sync.Mutex
+	records      map[state.AffinityKey]state.AffinityRecord
+	counts       map[state.AffinityKey]int
+	attachments  map[string]state.SessionBackendAttachment
+	reservations map[string]state.BackendReservationRequest
 }
 
 // newMemorySessionStore creates deterministic lease semantics for the fake lane.
 func newMemorySessionStore() *memorySessionStore {
 	return &memorySessionStore{
-		records:     make(map[state.AffinityKey]state.AffinityRecord),
-		counts:      make(map[state.AffinityKey]int),
-		attachments: make(map[string]state.SessionBackendAttachment),
+		records:      make(map[state.AffinityKey]state.AffinityRecord),
+		counts:       make(map[state.AffinityKey]int),
+		attachments:  make(map[string]state.SessionBackendAttachment),
+		reservations: make(map[string]state.BackendReservationRequest),
 	}
 }
 
@@ -2455,6 +2457,52 @@ func (s *memorySessionStore) OpenSession(_ context.Context, record state.Session
 	return current, nil
 }
 
+// ReserveBackendCapacity records one in-memory backend reservation.
+func (s *memorySessionStore) ReserveBackendCapacity(
+	_ context.Context,
+	request state.BackendReservationRequest,
+) (state.BackendReservationRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.reservations[request.ReservationID] = request
+
+	return state.BackendReservationRecord{
+		Status:             "reserved",
+		BackendIdentifier:  request.BackendIdentifier,
+		ReservationID:      request.ReservationID,
+		BackendActiveCount: len(s.reservations),
+		LeaseExpiresAt:     time.Now().Add(request.LeaseTTL),
+	}, nil
+}
+
+// ReleaseBackendReservation removes one in-memory backend reservation.
+func (s *memorySessionStore) ReleaseBackendReservation(
+	_ context.Context,
+	request state.BackendReservationReleaseRequest,
+) (state.BackendReservationRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	delete(s.reservations, request.ReservationID)
+
+	return state.BackendReservationRecord{
+		Status:             "released",
+		BackendIdentifier:  request.BackendIdentifier,
+		ReservationID:      request.ReservationID,
+		BackendActiveCount: len(s.reservations),
+		RepairedCount:      1,
+	}, nil
+}
+
+// ReapBackendReservations is unused by the in-memory fake lane.
+func (s *memorySessionStore) ReapBackendReservations(
+	context.Context,
+	state.BackendReservationReapRequest,
+) (state.BackendReservationRecord, error) {
+	return state.BackendReservationRecord{}, nil
+}
+
 // AttachSelectedBackend records selected-backend metadata for fake-lane sessions.
 func (s *memorySessionStore) AttachSelectedBackend(
 	_ context.Context,
@@ -2468,6 +2516,7 @@ func (s *memorySessionStore) AttachSelectedBackend(
 	return state.SessionBackendRecord{
 		Status:             "attached",
 		BackendIdentifier:  attachment.BackendIdentifier,
+		ReservationID:      attachment.ReservationID,
 		BackendActiveCount: len(s.attachments),
 	}, nil
 }
@@ -2486,6 +2535,7 @@ func (s *memorySessionStore) CloseSession(_ context.Context, key state.AffinityK
 	defer s.mu.Unlock()
 
 	delete(s.attachments, sessionID)
+	delete(s.reservations, sessionID)
 
 	current := s.records[key]
 	if s.counts[key] > 0 {

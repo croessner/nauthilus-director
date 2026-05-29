@@ -176,7 +176,7 @@ func (s *Session) placeAuthenticatedSession(
 		return err
 	}
 
-	backendResult, err = s.attachSelectedBackend(selectCtx, sessionRecord.Key, selectionRequest, backendResult)
+	backendResult, err = s.attachSelectedBackend(selectCtx, sessionRecord.Key, selectionRequest, backendResult, sessionRecord.LeaseTTL)
 	if err != nil {
 		s.recordBackendSelect(selectCtx, observationResultFailure, reasonClass(err), selectedShardTag, time.Since(selectStarted))
 		s.recordSessionAttach(selectCtx, observationResultFailure, reasonClass(err), backendResult.Backend.Identifier, selectedShardTag)
@@ -216,13 +216,9 @@ func (s *Session) attachSelectedBackend(
 	key state.AffinityKey,
 	request backend.SelectionRequest,
 	initial backend.SelectionResult,
+	reservationTTL time.Duration,
 ) (backend.SelectionResult, error) {
-	if _, err := s.sessionStore.AttachSelectedBackend(ctx, state.SessionBackendAttachment{
-		Key:               key,
-		SessionID:         s.context.ID,
-		BackendIdentifier: initial.Backend.Identifier,
-		MaxConnections:    initial.Backend.MaxConnections,
-	}); err != nil {
+	if err := s.reserveAndAttachSelectedBackend(ctx, key, initial, reservationTTL); err != nil {
 		retrySelector, ok := s.backendSelector.(interface {
 			RetryAfterAttachFailure(context.Context, backend.SelectionRequest, string) (backend.SelectionResult, error)
 		})
@@ -235,12 +231,7 @@ func (s *Session) attachSelectedBackend(
 			return backend.SelectionResult{}, retryErr
 		}
 
-		if _, attachErr := s.sessionStore.AttachSelectedBackend(ctx, state.SessionBackendAttachment{
-			Key:               key,
-			SessionID:         s.context.ID,
-			BackendIdentifier: retry.Backend.Identifier,
-			MaxConnections:    retry.Backend.MaxConnections,
-		}); attachErr != nil {
+		if attachErr := s.reserveAndAttachSelectedBackend(ctx, key, retry, reservationTTL); attachErr != nil {
 			return backend.SelectionResult{}, attachErr
 		}
 
@@ -248,6 +239,46 @@ func (s *Session) attachSelectedBackend(
 	}
 
 	return initial, nil
+}
+
+// reserveAndAttachSelectedBackend claims capacity before storing the backend pin.
+func (s *Session) reserveAndAttachSelectedBackend(
+	ctx context.Context,
+	key state.AffinityKey,
+	selected backend.SelectionResult,
+	reservationTTL time.Duration,
+) error {
+	reservations, ok := s.sessionStore.(state.BackendReservationStore)
+	if !ok {
+		return errors.New("imap: backend reservation store unavailable")
+	}
+
+	reservation, err := reservations.ReserveBackendCapacity(ctx, state.BackendReservationRequest{
+		BackendIdentifier: selected.Backend.Identifier,
+		ReservationID:     s.context.ID,
+		MaxConnections:    selected.Backend.MaxConnections,
+		LeaseTTL:          reservationTTL,
+	})
+	if err != nil {
+		return err
+	}
+
+	if _, err = s.sessionStore.AttachSelectedBackend(ctx, state.SessionBackendAttachment{
+		Key:               key,
+		SessionID:         s.context.ID,
+		BackendIdentifier: selected.Backend.Identifier,
+		ReservationID:     reservation.ReservationID,
+		MaxConnections:    selected.Backend.MaxConnections,
+	}); err != nil {
+		_, _ = reservations.ReleaseBackendReservation(context.Background(), state.BackendReservationReleaseRequest{
+			BackendIdentifier: selected.Backend.Identifier,
+			ReservationID:     reservation.ReservationID,
+		})
+
+		return err
+	}
+
+	return nil
 }
 
 // withEffectiveDefaultShard fills an omitted route shard from the immutable config snapshot.

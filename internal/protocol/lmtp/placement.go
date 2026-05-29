@@ -333,7 +333,7 @@ func (s *Session) accountRecipientBackend(ctx context.Context, placement *Recipi
 
 	selectionRequest := s.selectionRequest(placement.Routing, placement.SelectedShardTag, placement.Affinity)
 
-	selected, err := s.attachSelectedBackend(ctx, placement.hold.key, selectionRequest, placement.Backend, placement.HoldID)
+	selected, err := s.attachSelectedBackend(ctx, placement.hold.key, selectionRequest, placement.Backend, placement.HoldID, defaultDeliveryLease(s.sessionLeaseTTL))
 	if err != nil {
 		return err
 	}
@@ -352,13 +352,9 @@ func (s *Session) attachSelectedBackend(
 	request backend.SelectionRequest,
 	initial backend.SelectionResult,
 	holdID string,
+	reservationTTL time.Duration,
 ) (backend.SelectionResult, error) {
-	if _, err := s.sessionStore.AttachSelectedBackend(ctx, state.SessionBackendAttachment{
-		Key:               key,
-		SessionID:         holdID,
-		BackendIdentifier: initial.Backend.Identifier,
-		MaxConnections:    initial.Backend.MaxConnections,
-	}); err != nil {
+	if err := s.reserveAndAttachSelectedBackend(ctx, key, initial, holdID, reservationTTL); err != nil {
 		retrySelector, ok := s.backendSelector.(interface {
 			RetryAfterAttachFailure(context.Context, backend.SelectionRequest, string) (backend.SelectionResult, error)
 		})
@@ -371,12 +367,7 @@ func (s *Session) attachSelectedBackend(
 			return backend.SelectionResult{}, retryErr
 		}
 
-		if _, attachErr := s.sessionStore.AttachSelectedBackend(ctx, state.SessionBackendAttachment{
-			Key:               key,
-			SessionID:         holdID,
-			BackendIdentifier: retry.Backend.Identifier,
-			MaxConnections:    retry.Backend.MaxConnections,
-		}); attachErr != nil {
+		if attachErr := s.reserveAndAttachSelectedBackend(ctx, key, retry, holdID, reservationTTL); attachErr != nil {
 			return backend.SelectionResult{}, attachErr
 		}
 
@@ -384,6 +375,47 @@ func (s *Session) attachSelectedBackend(
 	}
 
 	return initial, nil
+}
+
+// reserveAndAttachSelectedBackend claims backend capacity before storing a delivery pin.
+func (s *Session) reserveAndAttachSelectedBackend(
+	ctx context.Context,
+	key state.AffinityKey,
+	selected backend.SelectionResult,
+	holdID string,
+	reservationTTL time.Duration,
+) error {
+	reservations, ok := s.sessionStore.(state.BackendReservationStore)
+	if !ok {
+		return errors.New("lmtp: backend reservation store unavailable")
+	}
+
+	reservation, err := reservations.ReserveBackendCapacity(ctx, state.BackendReservationRequest{
+		BackendIdentifier: selected.Backend.Identifier,
+		ReservationID:     holdID,
+		MaxConnections:    selected.Backend.MaxConnections,
+		LeaseTTL:          reservationTTL,
+	})
+	if err != nil {
+		return err
+	}
+
+	if _, err = s.sessionStore.AttachSelectedBackend(ctx, state.SessionBackendAttachment{
+		Key:               key,
+		SessionID:         holdID,
+		BackendIdentifier: selected.Backend.Identifier,
+		ReservationID:     reservation.ReservationID,
+		MaxConnections:    selected.Backend.MaxConnections,
+	}); err != nil {
+		_, _ = reservations.ReleaseBackendReservation(context.Background(), state.BackendReservationReleaseRequest{
+			BackendIdentifier: selected.Backend.Identifier,
+			ReservationID:     reservation.ReservationID,
+		})
+
+		return err
+	}
+
+	return nil
 }
 
 // deliverySessionRecord builds the Redis lease used for one delivery hold.

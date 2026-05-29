@@ -2,8 +2,10 @@
 --
 -- SPDX-License-Identifier: AGPL-3.0-only
 --
--- Repairs due session leases, active affinity counts, backend counts and
--- repairable listing indexes using Redis server time.
+-- Repairs due session leases, active affinity counts and repairable listing
+-- indexes using Redis server time. Backend capacity release is returned as an
+-- idempotent follow-up delta because backend reservation keys live in another
+-- Redis Cluster slot.
 
 local session_index_key = KEYS[1]
 local session_due_index_key = KEYS[2]
@@ -19,31 +21,6 @@ local function now_ms()
 	return (tonumber(now[1]) * 1000) + math.floor(tonumber(now[2]) / 1000)
 end
 
-local function decrement_backend(session_key)
-	local counted = redis.call("HGET", session_key, "backend_counted")
-	if counted ~= "1" then
-		return 0
-	end
-
-	local backend_key = redis.call("HGET", session_key, "backend_runtime_key")
-	if backend_key == false or backend_key == nil or backend_key == "" then
-		return ambiguous("backend_key_required")
-	end
-
-	local current = tonumber(redis.call("HGET", backend_key, "active_session_count") or "0")
-	if current == nil or current < 0 then
-		return ambiguous("backend_count_invalid")
-	end
-
-	if current > 0 then
-		redis.call("HINCRBY", backend_key, "active_session_count", -1)
-	else
-		redis.call("HSET", backend_key, "active_session_count", 0)
-	end
-
-	return 1
-end
-
 if limit == nil or limit <= 0 then
 	return ambiguous("limit_invalid")
 end
@@ -53,6 +30,7 @@ local due_sessions = redis.call("ZRANGEBYSCORE", session_due_index_key, "-inf", 
 local scanned = 0
 local expired = 0
 local repaired_backends = 0
+local reservation_releases = {}
 
 for _, session_id in ipairs(due_sessions) do
 	scanned = scanned + 1
@@ -87,7 +65,13 @@ for _, session_id in ipairs(due_sessions) do
 				idle_grace_ms = 0
 			end
 
-			repaired_backends = repaired_backends + decrement_backend(session_key)
+			local counted = redis.call("HGET", session_key, "backend_counted")
+			local backend_id = redis.call("HGET", session_key, "selected_backend_id")
+			local reservation_id = redis.call("HGET", session_key, "backend_reservation_id")
+			if counted == "1" and backend_id ~= false and backend_id ~= nil and backend_id ~= "" and reservation_id ~= false and reservation_id ~= nil and reservation_id ~= "" then
+				repaired_backends = repaired_backends + 1
+				table.insert(reservation_releases, backend_id .. "\t" .. reservation_id)
+			end
 
 			local backend_sessions_key = redis.call("HGET", session_key, "backend_sessions_key")
 			if backend_sessions_key ~= false and backend_sessions_key ~= nil and backend_sessions_key ~= "" then
@@ -134,5 +118,6 @@ return {
 	"scanned_sessions", tostring(scanned),
 	"expired_sessions", tostring(expired),
 	"repaired_backends", tostring(repaired_backends),
+	"reservation_releases", table.concat(reservation_releases, "\n"),
 	"server_time_ms", tostring(now)
 }

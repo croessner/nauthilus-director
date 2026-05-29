@@ -44,6 +44,10 @@ const (
 	testProtocolIMAP     = "imap"
 	testProtocolLMTP     = "lmtp"
 	testRedisModeCluster = "cluster"
+	testExpiredReserve   = "expired-reservation"
+	testReservationOne   = "reservation-1"
+	testReservationTwo   = "reservation-2"
+	testReservationThree = "reservation-3"
 	testRuntimeSessionID = "runtime-session"
 	testSessionOne       = "session-1"
 	testSessionTwo       = "session-2"
@@ -252,11 +256,17 @@ func TestPerAffinityScriptWrappersUseAffinityOwnedKeys(t *testing.T) {
 		t.Fatalf("closeSessionScriptKeys returned error: %v", err)
 	}
 
+	_, _, attachKeys, err := store.attachSelectedBackendScriptKeys(key, testSessionOne)
+	if err != nil {
+		t.Fatalf("attachSelectedBackendScriptKeys returned error: %v", err)
+	}
+
 	for _, item := range []struct {
 		operation string
 		keys      []string
 	}{
 		{operation: scriptOpen, keys: openKeys},
+		{operation: scriptAttach, keys: attachKeys},
 		{operation: scriptHeartbeat, keys: heartbeatKeys},
 		{operation: scriptClose, keys: closeKeys},
 		{operation: scriptLookup, keys: store.lookupAffinityScriptKeys(affinityKeys)},
@@ -289,6 +299,32 @@ func TestPerAffinityScriptValidationRejectsForeignKeys(t *testing.T) {
 		if !IsRedisErrorKind(err, RedisErrorKindConfig) {
 			t.Fatalf("validateScriptKeys(%q) error = %v, want config", foreignKey, err)
 		}
+	}
+}
+
+// TestBackendReservationScriptWrappersUseBackendOwnedKeys protects backend-slot Lua dispatch.
+func TestBackendReservationScriptWrappersUseBackendOwnedKeys(t *testing.T) {
+	builder := mustKeyBuilder(t)
+	store := &RedisSessionStore{keys: builder}
+
+	keys, err := builder.BackendReservationKeys(testBackendIMAP)
+	if err != nil {
+		t.Fatalf("BackendReservationKeys returned error: %v", err)
+	}
+
+	for _, operation := range []string{scriptBackendReserve, scriptBackendRelease, scriptBackendReap} {
+		if err := store.validateScriptKeys(operation, []string{keys.State, keys.Due}); err != nil {
+			t.Fatalf("validateScriptKeys(%s) returned error: %v", operation, err)
+		}
+	}
+
+	other, err := builder.BackendReservationKeys(testBackendLMTP)
+	if err != nil {
+		t.Fatalf("BackendReservationKeys other returned error: %v", err)
+	}
+
+	if err := store.validateScriptKeys(scriptBackendReserve, []string{keys.State, other.Due}); !IsRedisErrorKind(err, RedisErrorKindConfig) {
+		t.Fatalf("mixed backend reservation keys error = %v, want config", err)
 	}
 }
 
@@ -417,6 +453,19 @@ func TestBackendAndIndexKeysFollowRuntimeShape(t *testing.T) {
 		t.Fatalf("backend session index key = %q", backendSessions)
 	}
 
+	reservationKeys, err := builder.BackendReservationKeys(testBackendIMAP)
+	if err != nil {
+		t.Fatalf("BackendReservationKeys returned error: %v", err)
+	}
+
+	if !strings.HasPrefix(reservationKeys.State, "nd:v1:{backend:") || !strings.HasSuffix(reservationKeys.State, ":runtime:backend:"+testBackendIMAP+":reservations") {
+		t.Fatalf("backend reservation key = %q", reservationKeys.State)
+	}
+
+	if got := redisHashTag(t, reservationKeys.Due); got != redisHashTag(t, reservationKeys.State) {
+		t.Fatalf("backend reservation due hash tag = %q, want %q", got, redisHashTag(t, reservationKeys.State))
+	}
+
 	if got := builder.UserIndexKey(); got != "nd:v1:idx:users" {
 		t.Fatalf("user index key = %q", got)
 	}
@@ -514,6 +563,9 @@ func TestScriptLoaderTracksSHAAndMissingScripts(t *testing.T) {
 
 	for _, name := range []string{
 		scriptAttach,
+		scriptBackendReap,
+		scriptBackendRelease,
+		scriptBackendReserve,
 		scriptBackendRuntimeClear,
 		scriptBackendRuntimeSet,
 		scriptClear,
@@ -860,10 +912,13 @@ func openDeliveryHoldForTest(t *testing.T, store *RedisSessionStore, key Affinit
 		t.Fatalf("OpenSession delivery returned error: %v", err)
 	}
 
+	reservation := reserveBackendForTest(t, store, testBackendLMTP, deliveryID, 10)
+
 	if _, err := store.AttachSelectedBackend(context.Background(), SessionBackendAttachment{
 		Key:               key,
 		SessionID:         deliveryID,
 		BackendIdentifier: testBackendLMTP,
+		ReservationID:     reservation.ReservationID,
 		MaxConnections:    10,
 	}); err != nil {
 		t.Fatalf("AttachSelectedBackend delivery returned error: %v", err)
@@ -951,10 +1006,13 @@ func TestRedisReapRepairsExpiredDeliveryHold(t *testing.T) {
 		t.Fatalf("OpenSession delivery returned error: %v", err)
 	}
 
+	reservation := reserveBackendForTest(t, store, testBackendLMTP, deliveryID, 10)
+
 	if _, err := store.AttachSelectedBackend(context.Background(), SessionBackendAttachment{
 		Key:               key,
 		SessionID:         deliveryID,
 		BackendIdentifier: testBackendLMTP,
+		ReservationID:     reservation.ReservationID,
 		MaxConnections:    10,
 	}); err != nil {
 		t.Fatalf("AttachSelectedBackend delivery returned error: %v", err)
@@ -1057,10 +1115,13 @@ func TestRedisBackendAttachAndCloseCountsExactlyOnce(t *testing.T) {
 		t.Fatalf("OpenSession returned error: %v", err)
 	}
 
+	reservation := reserveBackendForTest(t, store, backendID, sessionID, 10)
+
 	firstAttach, err := store.AttachSelectedBackend(context.Background(), SessionBackendAttachment{
 		Key:               key,
 		SessionID:         sessionID,
 		BackendIdentifier: backendID,
+		ReservationID:     reservation.ReservationID,
 		MaxConnections:    10,
 	})
 	if err != nil {
@@ -1071,10 +1132,20 @@ func TestRedisBackendAttachAndCloseCountsExactlyOnce(t *testing.T) {
 		t.Fatalf("backend active count after attach = %d, want 1", firstAttach.BackendActiveCount)
 	}
 
+	sessionKey, err := builder.SessionKey(key.Tenant, key.AccountKey, sessionID)
+	if err != nil {
+		t.Fatalf("SessionKey returned error: %v", err)
+	}
+
+	if got := client.HGet(context.Background(), sessionKey, scriptFieldBackendReservation).Val(); got != reservation.ReservationID {
+		t.Fatalf("attached reservation id = %q, want %q", got, reservation.ReservationID)
+	}
+
 	secondAttach, err := store.AttachSelectedBackend(context.Background(), SessionBackendAttachment{
 		Key:               key,
 		SessionID:         sessionID,
 		BackendIdentifier: backendID,
+		ReservationID:     reservation.ReservationID,
 		MaxConnections:    10,
 	})
 	if err != nil {
@@ -1089,12 +1160,175 @@ func TestRedisBackendAttachAndCloseCountsExactlyOnce(t *testing.T) {
 		t.Fatalf("redis backend active count = %d, want 1", count)
 	}
 
+	reservationKeys, err := builder.BackendReservationKeys(backendID)
+	if err != nil {
+		t.Fatalf("BackendReservationKeys returned error: %v", err)
+	}
+
+	beforeHeartbeat := client.ZScore(context.Background(), reservationKeys.Due, reservation.ReservationID).Val()
+
+	time.Sleep(time.Millisecond)
+
+	if _, err := store.HeartbeatSession(context.Background(), key, sessionID, 2*time.Second); err != nil {
+		t.Fatalf("HeartbeatSession returned error: %v", err)
+	}
+
+	afterHeartbeat := client.ZScore(context.Background(), reservationKeys.Due, reservation.ReservationID).Val()
+	if afterHeartbeat <= beforeHeartbeat {
+		t.Fatalf("reservation expiry did not advance: before=%f after=%f", beforeHeartbeat, afterHeartbeat)
+	}
+
 	if _, err := store.CloseSession(context.Background(), key, sessionID); err != nil {
 		t.Fatalf("CloseSession returned error: %v", err)
 	}
 
 	if count := redisBackendActiveCount(t, client, builder, backendID); count != 0 {
 		t.Fatalf("redis backend active count after close = %d, want 0", count)
+	}
+}
+
+// TestRedisBackendReservationsEnforceCapacity verifies backend-local capacity gates.
+func TestRedisBackendReservationsEnforceCapacity(t *testing.T) {
+	store, client, builder := redisIntegrationStore(t)
+	backendID := testBackendIMAP
+
+	cleanupBackend(t, client, builder, backendID)
+
+	assertBackendReservationCount(t, reserveBackendForTest(t, store, backendID, testReservationOne, 2), 1, "first reservation")
+	assertBackendReservationCount(t, reserveBackendForTest(t, store, backendID, testReservationOne, 2), 1, "idempotent reservation")
+	assertBackendReservationCount(t, reserveBackendForTest(t, store, backendID, testReservationTwo, 2), 2, "second reservation")
+	assertBackendReservationCapacityFull(t, store, backendID, testReservationThree)
+	assertBackendReservationRelease(t, store, backendID, testReservationOne, 1, 1, "release")
+	assertBackendReservationRelease(t, store, backendID, testReservationOne, 1, 0, "repeated release")
+
+	if _, err := store.ReleaseBackendReservation(context.Background(), BackendReservationReleaseRequest{
+		BackendIdentifier: backendID,
+		ReservationID:     testReservationTwo,
+	}); err != nil {
+		t.Fatalf("release second reservation returned error: %v", err)
+	}
+
+	if count := redisBackendActiveCount(t, client, builder, backendID); count != 0 {
+		t.Fatalf("backend active count after releases = %d, want 0", count)
+	}
+}
+
+// TestRedisBackendReservationReapRepairsExpiredReservations verifies stale slots converge.
+func TestRedisBackendReservationReapRepairsExpiredReservations(t *testing.T) {
+	store, client, builder := redisIntegrationStore(t)
+	backendID := testBackendIMAP
+
+	cleanupBackend(t, client, builder, backendID)
+
+	if _, err := store.ReserveBackendCapacity(context.Background(), BackendReservationRequest{
+		BackendIdentifier: backendID,
+		ReservationID:     testExpiredReserve,
+		MaxConnections:    1,
+		LeaseTTL:          25 * time.Millisecond,
+	}); err != nil {
+		t.Fatalf("ReserveBackendCapacity returned error: %v", err)
+	}
+
+	time.Sleep(60 * time.Millisecond)
+
+	reaped, err := store.ReapBackendReservations(context.Background(), BackendReservationReapRequest{
+		BackendIdentifier: backendID,
+		Limit:             10,
+	})
+	if err != nil {
+		t.Fatalf("ReapBackendReservations returned error: %v", err)
+	}
+
+	if reaped.RepairedCount != 1 || reaped.BackendActiveCount != 0 {
+		t.Fatalf("backend reservation reap = %#v, want one repair and count 0", reaped)
+	}
+
+	if _, err := store.ReleaseBackendReservation(context.Background(), BackendReservationReleaseRequest{
+		BackendIdentifier: backendID,
+		ReservationID:     testExpiredReserve,
+	}); err != nil {
+		t.Fatalf("release after reap returned error: %v", err)
+	}
+
+	if count := redisBackendActiveCount(t, client, builder, backendID); count != 0 {
+		t.Fatalf("backend active count after repeated repair = %d, want 0", count)
+	}
+}
+
+// TestRedisConcurrentReservationsCannotExceedMaxConnections verifies cross-store safety.
+func TestRedisConcurrentReservationsCannotExceedMaxConnections(t *testing.T) {
+	store, client, builder := redisIntegrationStore(t)
+	backendID := testBackendIMAP
+
+	cleanupBackend(t, client, builder, backendID)
+
+	secondStore, err := NewRedisSessionStore(client, builder, nil)
+	if err != nil {
+		t.Fatalf("NewRedisSessionStore returned error: %v", err)
+	}
+
+	start := make(chan struct{})
+	results := make(chan error, 2)
+
+	for _, item := range []struct {
+		store         *RedisSessionStore
+		reservationID string
+	}{
+		{store: store, reservationID: "concurrent-a"},
+		{store: secondStore, reservationID: "concurrent-b"},
+	} {
+		go func(item struct {
+			store         *RedisSessionStore
+			reservationID string
+		}) {
+			<-start
+
+			_, reserveErr := item.store.ReserveBackendCapacity(context.Background(), BackendReservationRequest{
+				BackendIdentifier: backendID,
+				ReservationID:     item.reservationID,
+				MaxConnections:    1,
+				LeaseTTL:          time.Second,
+			})
+			results <- reserveErr
+		}(item)
+	}
+
+	close(start)
+
+	successes := 0
+
+	for range 2 {
+		if err := <-results; err == nil {
+			successes++
+		} else if !IsRedisErrorKind(err, RedisErrorKindAmbiguousState) {
+			t.Fatalf("concurrent reservation error = %v, want nil or ambiguous_state", err)
+		}
+	}
+
+	if successes != 1 {
+		t.Fatalf("successful concurrent reservations = %d, want 1", successes)
+	}
+
+	if count := redisBackendActiveCount(t, client, builder, backendID); count != 1 {
+		t.Fatalf("backend active count after concurrent reserve = %d, want 1", count)
+	}
+}
+
+// TestRedisBackendSnapshotReadsReservationCapacity verifies route lookup sees reservations only as reads.
+func TestRedisBackendSnapshotReadsReservationCapacity(t *testing.T) {
+	store, client, builder := redisIntegrationStore(t)
+	backendID := testBackendIMAP
+
+	cleanupBackend(t, client, builder, backendID)
+	reserveBackendForTest(t, store, backendID, "snapshot-reservation", 10)
+
+	snapshot, err := store.BackendSnapshot(context.Background(), backendID)
+	if err != nil {
+		t.Fatalf("BackendSnapshot returned error: %v", err)
+	}
+
+	if snapshot.ActiveSessions != 1 {
+		t.Fatalf("snapshot active sessions = %d, want reservation-backed count 1", snapshot.ActiveSessions)
 	}
 }
 
@@ -1112,10 +1346,13 @@ func TestRedisKickAndSessionKillAreObservedByHeartbeat(t *testing.T) {
 			t.Fatalf("OpenSession %s returned error: %v", sessionID, err)
 		}
 
+		reservation := reserveBackendForTest(t, store, backendID, sessionID, 10)
+
 		if _, err := store.AttachSelectedBackend(context.Background(), SessionBackendAttachment{
 			Key:               key,
 			SessionID:         sessionID,
 			BackendIdentifier: backendID,
+			ReservationID:     reservation.ReservationID,
 			MaxConnections:    10,
 		}); err != nil {
 			t.Fatalf("AttachSelectedBackend %s returned error: %v", sessionID, err)
@@ -1184,10 +1421,13 @@ func TestRedisReapRepairsExpiredSessions(t *testing.T) {
 		t.Fatalf("OpenSession returned error: %v", err)
 	}
 
+	reservation := reserveBackendForTest(t, store, backendID, sessionID, 10)
+
 	if _, err := store.AttachSelectedBackend(context.Background(), SessionBackendAttachment{
 		Key:               key,
 		SessionID:         sessionID,
 		BackendIdentifier: backendID,
+		ReservationID:     reservation.ReservationID,
 		MaxConnections:    10,
 	}); err != nil {
 		t.Fatalf("AttachSelectedBackend returned error: %v", err)
@@ -1240,10 +1480,13 @@ func TestRedisReapReadsOnlyDueSessions(t *testing.T) {
 		t.Fatalf("OpenSession expired returned error: %v", err)
 	}
 
+	expiredReservation := reserveBackendForTest(t, store, backendID, expiredID, 10)
+
 	if _, err := store.AttachSelectedBackend(context.Background(), SessionBackendAttachment{
 		Key:               key,
 		SessionID:         expiredID,
 		BackendIdentifier: backendID,
+		ReservationID:     expiredReservation.ReservationID,
 		MaxConnections:    10,
 	}); err != nil {
 		t.Fatalf("AttachSelectedBackend expired returned error: %v", err)
@@ -1257,10 +1500,13 @@ func TestRedisReapReadsOnlyDueSessions(t *testing.T) {
 		t.Fatalf("OpenSession active returned error: %v", err)
 	}
 
+	activeReservation := reserveBackendForTest(t, store, backendID, activeID, 10)
+
 	if _, err := store.AttachSelectedBackend(context.Background(), SessionBackendAttachment{
 		Key:               key,
 		SessionID:         activeID,
 		BackendIdentifier: backendID,
+		ReservationID:     activeReservation.ReservationID,
 		MaxConnections:    10,
 	}); err != nil {
 		t.Fatalf("AttachSelectedBackend active returned error: %v", err)
@@ -1301,10 +1547,13 @@ func TestRedisReapRespectsBatchSize(t *testing.T) {
 			t.Fatalf("OpenSession %s returned error: %v", sessionID, err)
 		}
 
+		reservation := reserveBackendForTest(t, store, backendID, sessionID, 10)
+
 		if _, err := store.AttachSelectedBackend(context.Background(), SessionBackendAttachment{
 			Key:               key,
 			SessionID:         sessionID,
 			BackendIdentifier: backendID,
+			ReservationID:     reservation.ReservationID,
 			MaxConnections:    10,
 		}); err != nil {
 			t.Fatalf("AttachSelectedBackend %s returned error: %v", sessionID, err)
@@ -1350,10 +1599,13 @@ func TestRedisReapIsIdempotentForAlreadyRepairedDueSession(t *testing.T) {
 		t.Fatalf("OpenSession returned error: %v", err)
 	}
 
+	reservation := reserveBackendForTest(t, store, backendID, sessionID, 10)
+
 	if _, err := store.AttachSelectedBackend(context.Background(), SessionBackendAttachment{
 		Key:               key,
 		SessionID:         sessionID,
 		BackendIdentifier: backendID,
+		ReservationID:     reservation.ReservationID,
 		MaxConnections:    10,
 	}); err != nil {
 		t.Fatalf("AttachSelectedBackend returned error: %v", err)
@@ -2089,7 +2341,12 @@ func cleanupBackend(t *testing.T, client *redis.Client, builder KeyBuilder, back
 		t.Fatalf("BackendSessionIndexShardKeys returned error: %v", err)
 	}
 
-	redisKeys := append([]string{backendKey}, backendSessionsKeys...)
+	reservationKeys, err := builder.BackendReservationKeys(backendID)
+	if err != nil {
+		t.Fatalf("BackendReservationKeys returned error: %v", err)
+	}
+
+	redisKeys := append([]string{backendKey, reservationKeys.State, reservationKeys.Due}, backendSessionsKeys...)
 	if err := client.Del(context.Background(), redisKeys...).Err(); err != nil {
 		t.Fatalf("cleanup backend keys: %v", err)
 	}
@@ -2133,17 +2390,83 @@ func cleanupHealth(t *testing.T, client *redis.Client, builder KeyBuilder, backe
 func redisBackendActiveCount(t *testing.T, client *redis.Client, builder KeyBuilder, backendID string) int {
 	t.Helper()
 
-	backendKey, err := builder.BackendRuntimeKey(backendID)
+	reservationKeys, err := builder.BackendReservationKeys(backendID)
 	if err != nil {
-		t.Fatalf("BackendRuntimeKey returned error: %v", err)
+		t.Fatalf("BackendReservationKeys returned error: %v", err)
 	}
 
-	count, err := client.HGet(context.Background(), backendKey, scriptFieldActiveSessionCount).Int()
+	count, err := client.HGet(context.Background(), reservationKeys.State, scriptFieldActiveSessionCount).Int()
 	if err != nil && !errors.Is(err, redis.Nil) {
 		t.Fatalf("read backend active count: %v", err)
 	}
 
 	return count
+}
+
+// reserveBackendForTest reserves one backend capacity slot for an integration fixture.
+func reserveBackendForTest(t *testing.T, store *RedisSessionStore, backendID string, reservationID string, maxConnections int) BackendReservationRecord {
+	t.Helper()
+
+	record, err := store.ReserveBackendCapacity(context.Background(), BackendReservationRequest{
+		BackendIdentifier: backendID,
+		ReservationID:     reservationID,
+		MaxConnections:    maxConnections,
+		LeaseTTL:          time.Second,
+	})
+	if err != nil {
+		t.Fatalf("ReserveBackendCapacity returned error: %v", err)
+	}
+
+	return record
+}
+
+// assertBackendReservationCount verifies the active count on a reservation result.
+func assertBackendReservationCount(t *testing.T, record BackendReservationRecord, want int, label string) {
+	t.Helper()
+
+	if record.BackendActiveCount != want {
+		t.Fatalf("%s count = %d, want %d", label, record.BackendActiveCount, want)
+	}
+}
+
+// assertBackendReservationCapacityFull verifies a backend slot fails closed at capacity.
+func assertBackendReservationCapacityFull(t *testing.T, store *RedisSessionStore, backendID string, reservationID string) {
+	t.Helper()
+
+	_, err := store.ReserveBackendCapacity(context.Background(), BackendReservationRequest{
+		BackendIdentifier: backendID,
+		ReservationID:     reservationID,
+		MaxConnections:    2,
+		LeaseTTL:          time.Second,
+	})
+	if !IsRedisErrorKind(err, RedisErrorKindAmbiguousState) {
+		t.Fatalf("reservation at capacity error = %v, want ambiguous_state", err)
+	}
+}
+
+// assertBackendReservationRelease verifies release count and idempotency semantics.
+func assertBackendReservationRelease(
+	t *testing.T,
+	store *RedisSessionStore,
+	backendID string,
+	reservationID string,
+	wantActive int,
+	wantRepaired int,
+	label string,
+) {
+	t.Helper()
+
+	released, err := store.ReleaseBackendReservation(context.Background(), BackendReservationReleaseRequest{
+		BackendIdentifier: backendID,
+		ReservationID:     reservationID,
+	})
+	if err != nil {
+		t.Fatalf("%s ReleaseBackendReservation returned error: %v", label, err)
+	}
+
+	if released.BackendActiveCount != wantActive || released.RepairedCount != wantRepaired {
+		t.Fatalf("%s release result = %#v, want count %d and repaired %d", label, released, wantActive, wantRepaired)
+	}
 }
 
 // openAttachedSession opens a lease and registers its selected backend.
@@ -2160,10 +2483,13 @@ func openAttachedSession(
 		t.Fatalf("OpenSession returned error: %v", err)
 	}
 
+	reservation := reserveBackendForTest(t, store, backendID, sessionID, 10)
+
 	if _, err := store.AttachSelectedBackend(context.Background(), SessionBackendAttachment{
 		Key:               key,
 		SessionID:         sessionID,
 		BackendIdentifier: backendID,
+		ReservationID:     reservation.ReservationID,
 		MaxConnections:    10,
 	}); err != nil {
 		t.Fatalf("AttachSelectedBackend returned error: %v", err)

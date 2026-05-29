@@ -18,6 +18,7 @@ package state
 
 import (
 	"context"
+	"strings"
 	"time"
 )
 
@@ -65,7 +66,7 @@ func (s *RedisSessionStore) ReapSessions(ctx context.Context, request ReapReques
 
 		total.ScannedSessions += record.ScannedSessions
 		total.ExpiredSessions += record.ExpiredSessions
-		total.RepairedBackends += record.RepairedBackends
+		total.RepairedBackends += s.releaseReapedBackendReservations(ctx, record.releases)
 		total.ServerTime = record.ServerTime
 
 		if total.ScannedSessions > 0 {
@@ -75,7 +76,32 @@ func (s *RedisSessionStore) ReapSessions(ctx context.Context, request ReapReques
 		remaining -= record.ScannedSessions
 	}
 
+	repairedReservations, err := s.reapIndexedBackendReservations(ctx, request.Limit)
+	if err != nil {
+		return ReapRecord{}, err
+	}
+
+	total.RepairedBackends += repairedReservations
+
 	return total, nil
+}
+
+// releaseReapedBackendReservations applies backend release deltas returned by session repair.
+func (s *RedisSessionStore) releaseReapedBackendReservations(ctx context.Context, releases []BackendReservationReleaseRequest) int {
+	repaired := 0
+
+	for _, release := range releases {
+		record, err := s.ReleaseBackendReservation(ctx, release)
+		if err != nil {
+			s.recordRedisOperation(redisContext(ctx), "reap_backend_reservation_release", time.Now(), err)
+
+			continue
+		}
+
+		repaired += record.RepairedCount
+	}
+
+	return repaired
 }
 
 // parseReapRecord converts the expired-session repair payload.
@@ -105,10 +131,40 @@ func parseReapRecord(value any) (ReapRecord, error) {
 		return ReapRecord{}, err
 	}
 
+	record.releases, err = parseBackendReservationReleases(fields["reservation_releases"])
+	if err != nil {
+		return ReapRecord{}, err
+	}
+
 	record.ServerTime, err = parseTimeField(fields, "server_time_ms")
 	if err != nil {
 		return ReapRecord{}, err
 	}
 
 	return record, nil
+}
+
+// parseBackendReservationReleases converts a compact release-delta payload.
+func parseBackendReservationReleases(value string) ([]BackendReservationReleaseRequest, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil, nil
+	}
+
+	lines := strings.Split(value, "\n")
+	releases := make([]BackendReservationReleaseRequest, 0, len(lines))
+
+	for _, line := range lines {
+		parts := strings.Split(line, "\t")
+		if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
+			return nil, newStateError(RedisErrorKindAmbiguousState, "script_result", "reservation release invalid", nil)
+		}
+
+		releases = append(releases, BackendReservationReleaseRequest{
+			BackendIdentifier: strings.TrimSpace(parts[0]),
+			ReservationID:     strings.TrimSpace(parts[1]),
+		})
+	}
+
+	return releases, nil
 }

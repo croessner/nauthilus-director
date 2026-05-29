@@ -27,11 +27,14 @@ import (
 )
 
 const (
-	scriptAttach    = "attach"
-	scriptClose     = "close"
-	scriptHeartbeat = "heartbeat"
-	scriptLookup    = "lookup"
-	scriptOpen      = "open"
+	scriptAttach         = "attach"
+	scriptBackendReap    = "backend_reap"
+	scriptBackendRelease = "backend_release"
+	scriptBackendReserve = "backend_reserve"
+	scriptClose          = "close"
+	scriptHeartbeat      = "heartbeat"
+	scriptLookup         = "lookup"
+	scriptOpen           = "open"
 )
 
 const (
@@ -40,6 +43,8 @@ const (
 	scriptFieldAffinityHash       = "affinity_hash"
 	scriptFieldBackendCounted     = "backend_counted"
 	scriptFieldBackendID          = "backend_id"
+	scriptFieldBackendMaxConn     = "backend_max_connections"
+	scriptFieldBackendReservation = "backend_reservation_id"
 	scriptFieldControlAction      = "control_action"
 	scriptFieldControlGeneration  = "control_generation"
 	scriptFieldExpiresAtMS        = "expires_at_ms"
@@ -80,21 +85,23 @@ type affinityMutationResult struct {
 
 // sessionMutationDelta describes idempotent secondary work after an affinity mutation.
 type sessionMutationDelta struct {
-	SessionID         string
-	AffinityHash      string
-	Tenant            string
-	AccountKey        string
-	HolderKind        string
-	Protocol          string
-	ListenerName      string
-	ServiceName       string
-	ShardTag          string
-	BackendIdentifier string
-	BackendCounted    bool
-	Generation        string
-	ControlGeneration string
-	LeaseExpiresAt    time.Time
-	IdleExpiresAt     time.Time
+	SessionID          string
+	AffinityHash       string
+	Tenant             string
+	AccountKey         string
+	HolderKind         string
+	Protocol           string
+	ListenerName       string
+	ServiceName        string
+	ShardTag           string
+	BackendIdentifier  string
+	BackendReservation string
+	BackendMaxConn     int
+	BackendCounted     bool
+	Generation         string
+	ControlGeneration  string
+	LeaseExpiresAt     time.Time
+	IdleExpiresAt      time.Time
 }
 
 // NewRedisSessionStore creates a Redis-backed session store with embedded scripts.
@@ -183,56 +190,35 @@ func (s *RedisSessionStore) AttachSelectedBackend(
 		return SessionBackendRecord{}, err
 	}
 
-	keys, sessionKey, err := s.sessionKeys(attachment.Key, attachment.SessionID)
+	_, sessionKey, scriptKeys, err := s.attachSelectedBackendScriptKeys(attachment.Key, attachment.SessionID)
 	if err != nil {
 		return SessionBackendRecord{}, err
 	}
 
-	backendRuntimeKey, err := s.keys.BackendRuntimeKey(attachment.BackendIdentifier)
-	if err != nil {
-		return SessionBackendRecord{}, err
-	}
-
-	backendSessionIndexKey, err := s.keys.BackendSessionIndexShardKey(attachment.BackendIdentifier, attachment.SessionID)
-	if err != nil {
-		return SessionBackendRecord{}, err
-	}
-
-	userSessionIndexKey, err := s.keys.UserSessionIndexShardKey(attachment.Key.Tenant, attachment.Key.AccountKey, attachment.SessionID)
-	if err != nil {
-		return SessionBackendRecord{}, err
-	}
-
-	sessionIndexKey, err := s.keys.SessionIndexShardKey(attachment.SessionID)
-	if err != nil {
-		return SessionBackendRecord{}, err
-	}
-
-	sessionDueIndexKey, err := s.keys.SessionDueIndexShardKey(attachment.SessionID)
-	if err != nil {
-		return SessionBackendRecord{}, err
-	}
-
-	value, err := s.runScript(ctx, scriptAttach, []string{
-		keys.State,
-		keys.Sessions,
-		sessionKey,
-		backendRuntimeKey,
-		sessionIndexKey,
-		s.keys.BackendIndexKey(),
-		backendSessionIndexKey,
-		userSessionIndexKey,
-		sessionDueIndexKey,
-	},
+	value, err := s.runScript(ctx, scriptAttach, scriptKeys,
 		attachment.SessionID,
 		attachment.BackendIdentifier,
+		attachment.ReservationID,
 		attachment.MaxConnections,
 	)
 	if err != nil {
 		return SessionBackendRecord{}, err
 	}
 
-	return parseSessionBackendRecord(value)
+	record, err := parseSessionBackendRecord(value)
+	if err != nil {
+		return SessionBackendRecord{}, err
+	}
+
+	activeCount, countErr := s.backendReservationActiveCount(ctx, attachment.BackendIdentifier)
+	if countErr != nil {
+		return SessionBackendRecord{}, countErr
+	}
+
+	record.BackendActiveCount = activeCount
+	s.writeRepairableAttachIndexes(ctx, attachment, sessionKey, record.LeaseExpiresAt)
+
+	return record, nil
 }
 
 // HeartbeatSession extends one existing session lease using Redis server time.
@@ -270,6 +256,10 @@ func (s *RedisSessionStore) HeartbeatSession(
 	}
 
 	s.writeRepairableOpenIndexes(ctx, result.Delta, sessionKey)
+
+	if err := s.refreshRepairableBackendReservation(ctx, result.Delta, ttl); err != nil {
+		return AffinityRecord{}, err
+	}
 
 	return result.Record, nil
 }
@@ -343,6 +333,16 @@ func (s *RedisSessionStore) closeSessionScriptKeys(key AffinityKey, sessionID st
 	return s.heartbeatSessionScriptKeys(key, sessionID)
 }
 
+// attachSelectedBackendScriptKeys returns the same-slot key list for backend attach.
+func (s *RedisSessionStore) attachSelectedBackendScriptKeys(key AffinityKey, sessionID string) (AffinityKeys, string, []string, error) {
+	keys, sessionKey, err := s.sessionKeys(key, sessionID)
+	if err != nil {
+		return AffinityKeys{}, "", nil, err
+	}
+
+	return keys, sessionKey, []string{keys.State, keys.Sessions, sessionKey}, nil
+}
+
 // lookupAffinityScriptKeys returns the same-slot key list for read-only affinity lookup.
 func (s *RedisSessionStore) lookupAffinityScriptKeys(keys AffinityKeys) []string {
 	return []string{keys.State, keys.Sessions}
@@ -406,17 +406,31 @@ func (s *RedisSessionStore) runScript(ctx context.Context, name string, keys []s
 
 // validateScriptKeys applies local Cluster-safety checks before script dispatch.
 func (s *RedisSessionStore) validateScriptKeys(name string, keys []string) error {
-	if !isPerAffinityScript(name) {
-		return nil
+	if isPerAffinityScript(name) {
+		return s.keys.validateAffinityOwnedKeys(name, keys)
 	}
 
-	return s.keys.validateAffinityOwnedKeys(name, keys)
+	if isBackendReservationScript(name) {
+		return s.keys.validateBackendReservationOwnedKeys(name, keys)
+	}
+
+	return nil
 }
 
 // isPerAffinityScript reports whether a script must stay inside one affinity slot.
 func isPerAffinityScript(name string) bool {
 	switch name {
-	case scriptOpen, scriptHeartbeat, scriptClose, scriptLookup, scriptMove, scriptKick, scriptClear:
+	case scriptAttach, scriptOpen, scriptHeartbeat, scriptClose, scriptLookup, scriptMove, scriptKick, scriptClear:
+		return true
+	default:
+		return false
+	}
+}
+
+// isBackendReservationScript reports whether a script must stay inside one backend slot.
+func isBackendReservationScript(name string) bool {
+	switch name {
+	case scriptBackendReserve, scriptBackendRelease, scriptBackendReap:
 		return true
 	default:
 		return false
@@ -472,6 +486,10 @@ func validateSessionBackendAttachment(attachment SessionBackendAttachment) error
 
 	if strings.TrimSpace(attachment.BackendIdentifier) == "" {
 		return newStateError(RedisErrorKindAmbiguousState, scriptAttach, "backend id required", nil)
+	}
+
+	if strings.TrimSpace(attachment.ReservationID) == "" {
+		return newStateError(RedisErrorKindAmbiguousState, scriptAttach, "reservation id required", nil)
 	}
 
 	if attachment.MaxConnections <= 0 {
@@ -565,18 +583,19 @@ func parseAffinityRecordFields(key AffinityKey, fields map[string]string) (Affin
 // parseSessionMutationDelta converts required follow-up fields from a mutation response.
 func parseSessionMutationDelta(fields map[string]string) (sessionMutationDelta, error) {
 	delta := sessionMutationDelta{
-		SessionID:         strings.TrimSpace(fields[scriptFieldSessionID]),
-		AffinityHash:      strings.TrimSpace(fields[scriptFieldAffinityHash]),
-		Tenant:            strings.TrimSpace(fields[scriptFieldTenant]),
-		AccountKey:        strings.TrimSpace(fields[scriptFieldAccountKey]),
-		HolderKind:        strings.TrimSpace(fields[scriptFieldHolderKind]),
-		Protocol:          strings.TrimSpace(fields[scriptFieldProtocol]),
-		ListenerName:      strings.TrimSpace(fields[scriptFieldListenerName]),
-		ServiceName:       strings.TrimSpace(fields[scriptFieldServiceName]),
-		ShardTag:          strings.TrimSpace(fields[scriptFieldShardTag]),
-		BackendIdentifier: strings.TrimSpace(fields[scriptFieldBackendID]),
-		Generation:        strings.TrimSpace(fields[scriptFieldGeneration]),
-		ControlGeneration: strings.TrimSpace(fields[scriptFieldControlGeneration]),
+		SessionID:          strings.TrimSpace(fields[scriptFieldSessionID]),
+		AffinityHash:       strings.TrimSpace(fields[scriptFieldAffinityHash]),
+		Tenant:             strings.TrimSpace(fields[scriptFieldTenant]),
+		AccountKey:         strings.TrimSpace(fields[scriptFieldAccountKey]),
+		HolderKind:         strings.TrimSpace(fields[scriptFieldHolderKind]),
+		Protocol:           strings.TrimSpace(fields[scriptFieldProtocol]),
+		ListenerName:       strings.TrimSpace(fields[scriptFieldListenerName]),
+		ServiceName:        strings.TrimSpace(fields[scriptFieldServiceName]),
+		ShardTag:           strings.TrimSpace(fields[scriptFieldShardTag]),
+		BackendIdentifier:  strings.TrimSpace(fields[scriptFieldBackendID]),
+		BackendReservation: strings.TrimSpace(fields[scriptFieldBackendReservation]),
+		Generation:         strings.TrimSpace(fields[scriptFieldGeneration]),
+		ControlGeneration:  strings.TrimSpace(fields[scriptFieldControlGeneration]),
 	}
 
 	if err := validateSessionMutationDeltaIdentity(delta); err != nil {
@@ -602,6 +621,11 @@ func parseSessionMutationDelta(fields map[string]string) (sessionMutationDelta, 
 	}
 
 	var err error
+
+	delta.BackendMaxConn, err = parseOptionalIntField(fields, scriptFieldBackendMaxConn)
+	if err != nil {
+		return sessionMutationDelta{}, err
+	}
 
 	delta.LeaseExpiresAt, err = parseTimeField(fields, scriptFieldLeaseExpiresAtMS)
 	if err != nil {
@@ -647,6 +671,7 @@ func parseSessionBackendRecord(value any) (SessionBackendRecord, error) {
 	record := SessionBackendRecord{
 		Status:            parsed.Status,
 		BackendIdentifier: parsed.BackendIdentifier,
+		ReservationID:     parsed.Fields[scriptFieldBackendReservation],
 		ServerTime:        parsed.ServerTime,
 		ControlGeneration: parsed.Fields[scriptFieldControlGeneration],
 	}
@@ -715,6 +740,66 @@ func (s *RedisSessionStore) writeRepairableOpenIndexes(ctx context.Context, delt
 	})
 }
 
+// writeRepairableAttachIndexes updates secondary indexes after selected-backend attach.
+func (s *RedisSessionStore) writeRepairableAttachIndexes(
+	ctx context.Context,
+	attachment SessionBackendAttachment,
+	sessionKey string,
+	leaseExpiresAt time.Time,
+) {
+	backendSessionIndexKey, err := s.keys.BackendSessionIndexShardKey(attachment.BackendIdentifier, attachment.SessionID)
+	if err != nil {
+		s.recordRedisOperation(redisContext(ctx), "attach_backend_session_index", time.Now(), err)
+
+		return
+	}
+
+	userSessionIndexKey, err := s.keys.UserSessionIndexShardKey(attachment.Key.Tenant, attachment.Key.AccountKey, attachment.SessionID)
+	if err != nil {
+		s.recordRedisOperation(redisContext(ctx), "attach_user_session_index", time.Now(), err)
+
+		return
+	}
+
+	sessionIndexKey, err := s.keys.SessionIndexShardKey(attachment.SessionID)
+	if err != nil {
+		s.recordRedisOperation(redisContext(ctx), "attach_session_index", time.Now(), err)
+
+		return
+	}
+
+	sessionDueIndexKey, err := s.keys.SessionDueIndexShardKey(attachment.SessionID)
+	if err != nil {
+		s.recordRedisOperation(redisContext(ctx), "attach_session_due_index", time.Now(), err)
+
+		return
+	}
+
+	s.runRepairableIndexCommand(ctx, "attach_backend_index", func(redisCtx context.Context) error {
+		return s.client.SAdd(redisCtx, s.keys.BackendIndexKey(), attachment.BackendIdentifier).Err()
+	})
+	s.runRepairableIndexCommand(ctx, "attach_backend_session_index", func(redisCtx context.Context) error {
+		return s.client.SAdd(redisCtx, backendSessionIndexKey, attachment.SessionID).Err()
+	})
+	s.runRepairableIndexCommand(ctx, "attach_user_session_index", func(redisCtx context.Context) error {
+		return s.client.SAdd(redisCtx, userSessionIndexKey, attachment.SessionID).Err()
+	})
+	s.runRepairableIndexCommand(ctx, "attach_session_due_index", func(redisCtx context.Context) error {
+		return s.client.ZAdd(redisCtx, sessionDueIndexKey, redisZ(leaseExpiresAt, attachment.SessionID)).Err()
+	})
+	s.runRepairableIndexCommand(ctx, "attach_session_index", func(redisCtx context.Context) error {
+		return s.client.HSet(redisCtx, sessionIndexKey, attachment.SessionID, sessionKey).Err()
+	})
+	s.runRepairableIndexCommand(ctx, "attach_session_index_metadata", func(redisCtx context.Context) error {
+		return s.client.HSet(redisCtx, sessionKey,
+			scriptFieldSessionIndexKey, sessionIndexKey,
+			scriptFieldSessionDueIndexKey, sessionDueIndexKey,
+			scriptFieldUserSessionsKey, userSessionIndexKey,
+			"backend_sessions_key", backendSessionIndexKey,
+		).Err()
+	})
+}
+
 // writeRepairableCloseIndexes updates secondary indexes after authoritative close.
 func (s *RedisSessionStore) writeRepairableCloseIndexes(ctx context.Context, delta sessionMutationDelta) {
 	userSessionIndexKey, err := s.keys.UserSessionIndexShardKey(delta.Tenant, delta.AccountKey, delta.SessionID)
@@ -764,12 +849,49 @@ func (s *RedisSessionStore) writeRepairableCloseIndexes(ctx context.Context, del
 	})
 
 	if delta.BackendCounted {
-		s.decrementRepairableBackendCount(ctx, delta.BackendIdentifier)
+		s.releaseRepairableBackendReservation(ctx, delta)
 	}
 }
 
-// decrementRepairableBackendCount releases one backend count after a close delta.
-func (s *RedisSessionStore) decrementRepairableBackendCount(ctx context.Context, backendIdentifier string) {
+// releaseRepairableBackendReservation releases one backend reservation after a close delta.
+func (s *RedisSessionStore) releaseRepairableBackendReservation(ctx context.Context, delta sessionMutationDelta) {
+	if delta.BackendReservation == "" {
+		s.decrementLegacyBackendCount(ctx, delta.BackendIdentifier)
+
+		return
+	}
+
+	_, err := s.ReleaseBackendReservation(ctx, BackendReservationReleaseRequest{
+		BackendIdentifier: delta.BackendIdentifier,
+		ReservationID:     delta.BackendReservation,
+	})
+	if err != nil {
+		s.recordRedisOperation(redisContext(ctx), "close_backend_reservation", time.Now(), err)
+	}
+}
+
+// refreshRepairableBackendReservation extends the backend reservation with the session lease.
+func (s *RedisSessionStore) refreshRepairableBackendReservation(ctx context.Context, delta sessionMutationDelta, ttl time.Duration) error {
+	if !delta.BackendCounted || delta.BackendReservation == "" {
+		return nil
+	}
+
+	if delta.BackendMaxConn <= 0 {
+		return newStateError(RedisErrorKindAmbiguousState, scriptHeartbeat, "backend max connections required", nil)
+	}
+
+	_, err := s.ReserveBackendCapacity(ctx, BackendReservationRequest{
+		BackendIdentifier: delta.BackendIdentifier,
+		ReservationID:     delta.BackendReservation,
+		MaxConnections:    delta.BackendMaxConn,
+		LeaseTTL:          ttl,
+	})
+
+	return err
+}
+
+// decrementLegacyBackendCount prevents negative counts for older counted sessions.
+func (s *RedisSessionStore) decrementLegacyBackendCount(ctx context.Context, backendIdentifier string) {
 	backendRuntimeKey, err := s.keys.BackendRuntimeKey(backendIdentifier)
 	if err != nil {
 		s.recordRedisOperation(redisContext(ctx), "close_backend_count", time.Now(), err)
