@@ -8,8 +8,6 @@
 local state_key = KEYS[1]
 local sessions_key = KEYS[2]
 local session_key = KEYS[3]
-local session_index_key = KEYS[4]
-local user_sessions_key = KEYS[5]
 
 local session_id = ARGV[1]
 
@@ -48,28 +46,6 @@ local function max_session_expiry(default_expiry)
 	return default_expiry
 end
 
-local function decrement_backend(session_backend_key)
-	local counted = redis.call("HGET", session_key, "backend_counted")
-	if counted ~= "1" then
-		return
-	end
-
-	if session_backend_key == false or session_backend_key == nil or session_backend_key == "" then
-		return ambiguous("backend_key_required")
-	end
-
-	local current = tonumber(redis.call("HGET", session_backend_key, "active_session_count") or "0")
-	if current == nil or current < 0 then
-		return ambiguous("backend_count_invalid")
-	end
-
-	if current > 0 then
-		redis.call("HINCRBY", session_backend_key, "active_session_count", -1)
-	else
-		redis.call("HSET", session_backend_key, "active_session_count", 0)
-	end
-end
-
 require_value(session_id, "session_id_required")
 
 local now = now_ms()
@@ -87,8 +63,16 @@ require_value(redis.call("HGET", state_key, "generation"), "state_generation_req
 
 local session_shard = require_value(redis.call("HGET", session_key, "shard_tag"), "session_shard_required")
 local idle_grace_ms = tonumber(require_value(redis.call("HGET", session_key, "idle_grace_ms"), "idle_grace_required"))
-local backend_key = redis.call("HGET", session_key, "backend_runtime_key")
-local backend_sessions_key = redis.call("HGET", session_key, "backend_sessions_key")
+local affinity_hash = require_value(redis.call("HGET", session_key, "affinity_hash"), "affinity_hash_required")
+local tenant = require_value(redis.call("HGET", session_key, "tenant"), "tenant_required")
+local account_key = require_value(redis.call("HGET", session_key, "account_key"), "account_key_required")
+local holder_kind = require_value(redis.call("HGET", session_key, "holder_kind"), "holder_kind_required")
+local protocol = require_value(redis.call("HGET", session_key, "protocol"), "protocol_required")
+local listener_name = tostring(redis.call("HGET", session_key, "listener_name") or "")
+local service_name = tostring(redis.call("HGET", session_key, "service_name") or "")
+local selected_backend_id = tostring(redis.call("HGET", session_key, "selected_backend_id") or "")
+local backend_counted = tostring(redis.call("HGET", session_key, "backend_counted") or "0")
+local control_generation = tostring(redis.call("HGET", state_key, "control_generation") or "0")
 local move_strategy = redis.call("HGET", state_key, "move_strategy") or ""
 
 if idle_grace_ms == nil or idle_grace_ms < 0 then
@@ -100,12 +84,6 @@ if session_shard ~= shard and state_control_action ~= "move_generation_changed" 
 	return ambiguous("session_shard_conflict")
 end
 
-decrement_backend(backend_key)
-if backend_sessions_key ~= false and backend_sessions_key ~= nil and backend_sessions_key ~= "" then
-	redis.call("SREM", backend_sessions_key, session_id)
-end
-redis.call("HDEL", session_index_key, session_id)
-redis.call("SREM", user_sessions_key, session_id)
 redis.call("ZREM", sessions_key, session_id)
 redis.call("DEL", session_key)
 redis.call("ZREMRANGEBYSCORE", sessions_key, "-inf", now)
@@ -144,11 +122,21 @@ return {
 	"present", "1",
 	"shard_tag", shard,
 	"generation", tostring(generation),
-	"control_generation", tostring(redis.call("HGET", state_key, "control_generation") or "0"),
+	"control_generation", control_generation,
 	"control_action", "none",
-	"backend_id", "",
+	"backend_id", selected_backend_id,
+	"backend_counted", backend_counted,
+	"session_id", session_id,
+	"affinity_hash", affinity_hash,
+	"tenant", tenant,
+	"account_key", account_key,
+	"holder_kind", holder_kind,
+	"protocol", protocol,
+	"listener_name", listener_name,
+	"service_name", service_name,
 	"active_session_count", tostring(active_count),
 	"server_time_ms", tostring(now),
 	"expires_at_ms", tostring(state_expires_at),
-	"lease_expires_at_ms", tostring(lease_expires_at)
+	"lease_expires_at_ms", tostring(lease_expires_at),
+	"idle_expires_at_ms", tostring(state_expires_at)
 }

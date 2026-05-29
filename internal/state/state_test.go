@@ -45,10 +45,16 @@ const (
 	testProtocolLMTP     = "lmtp"
 	testRedisModeCluster = "cluster"
 	testRuntimeSessionID = "runtime-session"
+	testSessionOne       = "session-1"
+	testSessionTwo       = "session-2"
+	testTenantDefault    = "default"
 	testClearStatus      = "cleared"
+	testListenerIMAPS    = "imaps"
 	testShardA           = "mailstore-a"
 	testShardB           = "mailstore-b"
 	testShardC           = "mailstore-c"
+	testStatusCreated    = "created"
+	testUserExample      = "user@example.org"
 )
 
 var packageRedisAddr string
@@ -179,7 +185,7 @@ func waitForPackageValkey(client *redis.Client) bool {
 func TestKeyBuilderCreatesClusterHashTaggedAffinityKeys(t *testing.T) {
 	builder := mustKeyBuilder(t)
 
-	keys, err := builder.AffinityKeys("default", "user@example.org")
+	keys, err := builder.AffinityKeys(testTenantDefault, testUserExample)
 	if err != nil {
 		t.Fatalf("AffinityKeys returned error: %v", err)
 	}
@@ -198,13 +204,133 @@ func TestKeyBuilderCreatesClusterHashTaggedAffinityKeys(t *testing.T) {
 		}
 	}
 
-	sessionKey, err := builder.SessionKey("default", "user@example.org", "session-1")
+	sessionKey, err := builder.SessionKey(testTenantDefault, testUserExample, testSessionOne)
 	if err != nil {
 		t.Fatalf("SessionKey returned error: %v", err)
 	}
 
-	if !strings.Contains(sessionKey, keys.HashTag) || !strings.HasSuffix(sessionKey, ":session:session-1") {
+	if !strings.Contains(sessionKey, keys.HashTag) || !strings.HasSuffix(sessionKey, ":session:"+testSessionOne) {
 		t.Fatalf("session key = %q, hash tag = %q", sessionKey, keys.HashTag)
+	}
+
+	firstTag := redisHashTag(t, keys.State)
+	for name, key := range map[string]string{
+		"state":    keys.State,
+		"sessions": keys.Sessions,
+		"override": keys.Override,
+		"session":  sessionKey,
+	} {
+		if got := redisHashTag(t, key); got != firstTag {
+			t.Fatalf("%s key hash tag = %q, want %q", name, got, firstTag)
+		}
+	}
+}
+
+// TestPerAffinityScriptWrappersUseAffinityOwnedKeys protects Cluster-safe Lua dispatch.
+func TestPerAffinityScriptWrappersUseAffinityOwnedKeys(t *testing.T) {
+	builder := mustKeyBuilder(t)
+	store := &RedisSessionStore{keys: builder}
+	key := AffinityKey{Tenant: testTenantDefault, AccountKey: testUserExample}
+
+	affinityKeys, err := builder.AffinityKeys(key.Tenant, key.AccountKey)
+	if err != nil {
+		t.Fatalf("AffinityKeys returned error: %v", err)
+	}
+
+	_, _, openKeys, err := store.openSessionScriptKeys(key, testSessionOne)
+	if err != nil {
+		t.Fatalf("openSessionScriptKeys returned error: %v", err)
+	}
+
+	_, _, heartbeatKeys, err := store.heartbeatSessionScriptKeys(key, testSessionOne)
+	if err != nil {
+		t.Fatalf("heartbeatSessionScriptKeys returned error: %v", err)
+	}
+
+	_, _, closeKeys, err := store.closeSessionScriptKeys(key, testSessionOne)
+	if err != nil {
+		t.Fatalf("closeSessionScriptKeys returned error: %v", err)
+	}
+
+	for _, item := range []struct {
+		operation string
+		keys      []string
+	}{
+		{operation: scriptOpen, keys: openKeys},
+		{operation: scriptHeartbeat, keys: heartbeatKeys},
+		{operation: scriptClose, keys: closeKeys},
+		{operation: scriptLookup, keys: store.lookupAffinityScriptKeys(affinityKeys)},
+		{operation: scriptMove, keys: store.moveUserScriptKeys(affinityKeys)},
+		{operation: scriptKick, keys: store.kickUserScriptKeys(affinityKeys)},
+		{operation: scriptClear, keys: store.clearUserAffinityScriptKeys(affinityKeys)},
+	} {
+		assertAffinityOwnedScriptKeys(t, store, item.operation, item.keys)
+	}
+}
+
+// TestPerAffinityScriptValidationRejectsForeignKeys verifies local Cluster-mode guardrails.
+func TestPerAffinityScriptValidationRejectsForeignKeys(t *testing.T) {
+	builder := mustKeyBuilder(t)
+	store := &RedisSessionStore{keys: builder}
+	key := AffinityKey{Tenant: testTenantDefault, AccountKey: testUserExample}
+
+	keys, err := builder.AffinityKeys(key.Tenant, key.AccountKey)
+	if err != nil {
+		t.Fatalf("AffinityKeys returned error: %v", err)
+	}
+
+	backendKey, err := builder.BackendRuntimeKey(testBackendIMAP)
+	if err != nil {
+		t.Fatalf("BackendRuntimeKey returned error: %v", err)
+	}
+
+	for _, foreignKey := range []string{builder.SessionIndexKey(), backendKey} {
+		err := store.validateScriptKeys(scriptOpen, []string{keys.State, keys.Sessions, foreignKey})
+		if !IsRedisErrorKind(err, RedisErrorKindConfig) {
+			t.Fatalf("validateScriptKeys(%q) error = %v, want config", foreignKey, err)
+		}
+	}
+}
+
+// TestAffinityMutationDeltaRequiresRepairFields verifies authoritative script delta parsing.
+func TestAffinityMutationDeltaRequiresRepairFields(t *testing.T) {
+	key := AffinityKey{Tenant: testTenantDefault, AccountKey: testUserExample}
+	fields := []any{
+		scriptFieldStatus, testStatusCreated,
+		scriptFieldPresent, "1",
+		scriptFieldShardTag, testShardA,
+		scriptFieldGeneration, "1",
+		scriptFieldControlGeneration, "0",
+		scriptFieldControlAction, "none",
+		scriptFieldBackendID, "",
+		scriptFieldBackendCounted, "0",
+		scriptFieldSessionID, testSessionOne,
+		scriptFieldAffinityHash, strings.Repeat("a", 64),
+		scriptFieldTenant, key.Tenant,
+		scriptFieldAccountKey, key.AccountKey,
+		scriptFieldHolderKind, HolderKindSession,
+		scriptFieldProtocol, testProtocolIMAP,
+		scriptFieldListenerName, testListenerIMAPS,
+		scriptFieldServiceName, testProtocolIMAP,
+		scriptFieldActiveSessionCount, "1",
+		scriptFieldServerTimeMS, "1000",
+		scriptFieldExpiresAtMS, "3000",
+		scriptFieldLeaseExpiresAtMS, "2000",
+		scriptFieldIdleExpiresAtMS, "3000",
+	}
+
+	result, err := parseAffinityMutationResult(key, fields)
+	if err != nil {
+		t.Fatalf("parseAffinityMutationResult returned error: %v", err)
+	}
+
+	if result.Delta.SessionID != testSessionOne || result.Delta.AffinityHash == "" || result.Delta.LeaseExpiresAt.IsZero() || result.Delta.IdleExpiresAt.IsZero() {
+		t.Fatalf("delta missing required fields: %#v", result.Delta)
+	}
+
+	withoutSessionID := replaceScriptField(t, fields, scriptFieldSessionID, "")
+	if _, err := parseAffinityMutationResult(key, withoutSessionID); !IsRedisErrorKind(err, RedisErrorKindAmbiguousState) {
+		t.Fatalf("missing session delta error = %v, want ambiguous_state", err)
 	}
 }
 
@@ -213,7 +339,7 @@ func TestKeyBuilderDoesNotRequireRawUsernameInKeys(t *testing.T) {
 	rawAccount := "User.Name+Secret@example.org"
 	builder := mustKeyBuilder(t)
 
-	keys, err := builder.AffinityKeys("default", rawAccount)
+	keys, err := builder.AffinityKeys(testTenantDefault, rawAccount)
 	if err != nil {
 		t.Fatalf("AffinityKeys returned error: %v", err)
 	}
@@ -224,7 +350,7 @@ func TestKeyBuilderDoesNotRequireRawUsernameInKeys(t *testing.T) {
 		}
 	}
 
-	sessionKey, err := builder.SessionKey("default", rawAccount, "session-1")
+	sessionKey, err := builder.SessionKey(testTenantDefault, rawAccount, testSessionOne)
 	if err != nil {
 		t.Fatalf("SessionKey returned error: %v", err)
 	}
@@ -295,12 +421,12 @@ func TestBackendAndIndexKeysFollowRuntimeShape(t *testing.T) {
 		t.Fatalf("user index key = %q", got)
 	}
 
-	userSessions, err := builder.UserSessionIndexKey("default", "user@example.org")
+	userSessions, err := builder.UserSessionIndexKey(testTenantDefault, testUserExample)
 	if err != nil {
 		t.Fatalf("UserSessionIndexKey returned error: %v", err)
 	}
 
-	if strings.Contains(userSessions, "user@example.org") || !strings.HasPrefix(userSessions, "nd:v1:idx:user:") {
+	if strings.Contains(userSessions, testUserExample) || !strings.HasPrefix(userSessions, "nd:v1:idx:user:") {
 		t.Fatalf("user session index key = %q", userSessions)
 	}
 }
@@ -360,17 +486,17 @@ func TestScriptLoaderTracksSHAAndMissingScripts(t *testing.T) {
 
 // TestAmbiguousScriptPayloadFailsClosed verifies parser-level control-action validation.
 func TestAmbiguousScriptPayloadFailsClosed(t *testing.T) {
-	_, err := parseAffinityRecord(AffinityKey{Tenant: "default", AccountKey: "hash"}, []any{
-		"status", scriptHeartbeat,
-		"present", "1",
-		"shard_tag", testShardA,
-		"generation", "1",
-		"control_generation", "1",
-		"control_action", "unknown",
-		"active_session_count", "1",
-		"server_time_ms", "1000",
-		"expires_at_ms", "2000",
-		"lease_expires_at_ms", "1500",
+	_, err := parseAffinityRecord(AffinityKey{Tenant: testTenantDefault, AccountKey: "hash"}, []any{
+		scriptFieldStatus, scriptHeartbeat,
+		scriptFieldPresent, "1",
+		scriptFieldShardTag, testShardA,
+		scriptFieldGeneration, "1",
+		scriptFieldControlGeneration, "1",
+		scriptFieldControlAction, "unknown",
+		scriptFieldActiveSessionCount, "1",
+		scriptFieldServerTimeMS, "1000",
+		scriptFieldExpiresAtMS, "2000",
+		scriptFieldLeaseExpiresAtMS, "1500",
 	})
 	if !IsRedisErrorKind(err, RedisErrorKindAmbiguousState) {
 		t.Fatalf("parseAffinityRecord error = %v, want ambiguous_state", err)
@@ -432,10 +558,10 @@ func TestRedisObservationClassifiesAmbiguousStateWithoutKeys(t *testing.T) {
 func TestRedisSessionLifecycleScripts(t *testing.T) {
 	store, client, builder := redisIntegrationStore(t)
 	key := AffinityKey{Tenant: "blue", AccountKey: "User.Name+Secret@example.test"}
-	cleanupAffinity(t, client, builder, key, "session-1", "session-2")
+	cleanupAffinity(t, client, builder, key, testSessionOne, testSessionTwo)
 
 	first := SessionRecord{
-		ID:        "session-1",
+		ID:        testSessionOne,
 		Key:       key,
 		Protocol:  testProtocolIMAP,
 		ShardTag:  testShardA,
@@ -448,11 +574,11 @@ func TestRedisSessionLifecycleScripts(t *testing.T) {
 		t.Fatalf("OpenSession returned error: %v", err)
 	}
 
-	assertAffinityRecord(t, opened, "created", testShardA, 1)
+	assertAffinityRecord(t, opened, testStatusCreated, testShardA, 1)
 	assertLookupAndHeartbeat(t, store, key, opened)
 
 	second := first
-	second.ID = "session-2"
+	second.ID = testSessionTwo
 	second.ShardTag = testShardB
 
 	reused, err := store.OpenSession(context.Background(), second)
@@ -462,14 +588,14 @@ func TestRedisSessionLifecycleScripts(t *testing.T) {
 
 	assertAffinityRecord(t, reused, "reused", testShardA, 2)
 
-	closedFirst, err := store.CloseSession(context.Background(), key, "session-1")
+	closedFirst, err := store.CloseSession(context.Background(), key, testSessionOne)
 	if err != nil {
 		t.Fatalf("first CloseSession returned error: %v", err)
 	}
 
 	assertAffinityRecord(t, closedFirst, "closed", testShardA, 1)
 
-	closedSecond, err := store.CloseSession(context.Background(), key, "session-2")
+	closedSecond, err := store.CloseSession(context.Background(), key, testSessionTwo)
 	if err != nil {
 		t.Fatalf("second CloseSession returned error: %v", err)
 	}
@@ -477,10 +603,47 @@ func TestRedisSessionLifecycleScripts(t *testing.T) {
 	assertAffinityRecord(t, closedSecond, "idle", testShardA, 0)
 }
 
+// TestRedisLookupAffinityDoesNotDependOnSecondaryIndexes verifies routing state remains authoritative.
+func TestRedisLookupAffinityDoesNotDependOnSecondaryIndexes(t *testing.T) {
+	store, client, builder := redisIntegrationStore(t)
+	key := AffinityKey{Tenant: "blue", AccountKey: "missing-index@example.test"}
+	cleanupAffinity(t, client, builder, key, "indexed-session", "reuse-session")
+
+	if _, err := store.OpenSession(context.Background(), testSessionRecord(key, "indexed-session")); err != nil {
+		t.Fatalf("OpenSession returned error: %v", err)
+	}
+
+	userSessionIndexKey, err := builder.UserSessionIndexKey(key.Tenant, key.AccountKey)
+	if err != nil {
+		t.Fatalf("UserSessionIndexKey returned error: %v", err)
+	}
+
+	if err := client.Del(context.Background(), builder.SessionIndexKey(), builder.UserIndexKey(), userSessionIndexKey).Err(); err != nil {
+		t.Fatalf("delete secondary indexes: %v", err)
+	}
+
+	lookedUp, err := store.LookupAffinity(context.Background(), key)
+	if err != nil {
+		t.Fatalf("LookupAffinity returned error with missing indexes: %v", err)
+	}
+
+	assertAffinityRecord(t, lookedUp, "found", testShardA, 1)
+
+	reused := testSessionRecord(key, "reuse-session")
+	reused.ShardTag = testShardB
+
+	opened, err := store.OpenSession(context.Background(), reused)
+	if err != nil {
+		t.Fatalf("OpenSession reuse returned error with missing indexes: %v", err)
+	}
+
+	assertAffinityRecord(t, opened, "reused", testShardA, 2)
+}
+
 // TestRedisRuntimeReadModelListsSessionsAndUsers verifies production control reads use Redis state.
 func TestRedisRuntimeReadModelListsSessionsAndUsers(t *testing.T) {
 	store, client, builder := redisIntegrationStore(t)
-	key := AffinityKey{Tenant: "default", AccountKey: "reader@example.test"}
+	key := AffinityKey{Tenant: testTenantDefault, AccountKey: "reader@example.test"}
 	cleanupAffinity(t, client, builder, key, "reader-session-1", "reader-session-2")
 	cleanupBackend(t, client, builder, testBackendIMAP)
 
@@ -1370,6 +1533,66 @@ func TestRedisAmbiguousSessionStateFailsClosed(t *testing.T) {
 	}
 }
 
+// redisHashTag extracts a Redis Cluster hash tag from a key fixture.
+func redisHashTag(t *testing.T, key string) string {
+	t.Helper()
+
+	start := strings.Index(key, "{")
+
+	end := strings.Index(key, "}")
+	if start < 0 || end <= start {
+		t.Fatalf("key %q has no hash tag", key)
+	}
+
+	return key[start : end+1]
+}
+
+// assertAffinityOwnedScriptKeys verifies a wrapper key list stays in one affinity slot.
+func assertAffinityOwnedScriptKeys(t *testing.T, store *RedisSessionStore, operation string, keys []string) {
+	t.Helper()
+
+	if err := store.validateScriptKeys(operation, keys); err != nil {
+		t.Fatalf("validateScriptKeys(%s, %#v) returned error: %v", operation, keys, err)
+	}
+
+	hashTag := ""
+
+	for _, key := range keys {
+		if strings.Contains(key, ":idx:") || strings.Contains(key, ":runtime:backend:") {
+			t.Fatalf("%s key list includes secondary or backend key: %#v", operation, keys)
+		}
+
+		current := redisHashTag(t, key)
+		if hashTag == "" {
+			hashTag = current
+
+			continue
+		}
+
+		if current != hashTag {
+			t.Fatalf("%s key %q hash tag = %q, want %q", operation, key, current, hashTag)
+		}
+	}
+}
+
+// replaceScriptField clones a flat script response with one field changed.
+func replaceScriptField(t *testing.T, fields []any, name string, value any) []any {
+	t.Helper()
+
+	replaced := append([]any{}, fields...)
+	for index := 0; index < len(replaced)-1; index += 2 {
+		if replaced[index] == name {
+			replaced[index+1] = value
+
+			return replaced
+		}
+	}
+
+	t.Fatalf("script field %q not found in %#v", name, fields)
+
+	return nil
+}
+
 // mustKeyBuilder creates the standard Redis key builder fixture.
 func mustKeyBuilder(t *testing.T) KeyBuilder {
 	t.Helper()
@@ -1397,7 +1620,7 @@ func assertLookupAndHeartbeat(t *testing.T, store *RedisSessionStore, key Affini
 		t.Fatalf("lookup generation = %q, want unchanged %q", lookedUp.Generation, opened.Generation)
 	}
 
-	heartbeat, err := store.HeartbeatSession(context.Background(), key, "session-1", 3*time.Second)
+	heartbeat, err := store.HeartbeatSession(context.Background(), key, testSessionOne, 3*time.Second)
 	if err != nil {
 		t.Fatalf("HeartbeatSession returned error: %v", err)
 	}
@@ -1547,7 +1770,7 @@ func redisBackendActiveCount(t *testing.T, client *redis.Client, builder KeyBuil
 		t.Fatalf("BackendRuntimeKey returned error: %v", err)
 	}
 
-	count, err := client.HGet(context.Background(), backendKey, "active_session_count").Int()
+	count, err := client.HGet(context.Background(), backendKey, scriptFieldActiveSessionCount).Int()
 	if err != nil && !errors.Is(err, redis.Nil) {
 		t.Fatalf("read backend active count: %v", err)
 	}
@@ -1585,8 +1808,8 @@ func testSessionRecord(key AffinityKey, sessionID string) SessionRecord {
 		ID:                 sessionID,
 		Key:                key,
 		Protocol:           testProtocolIMAP,
-		ListenerName:       "imaps",
-		ServiceName:        "imap",
+		ListenerName:       testListenerIMAPS,
+		ServiceName:        testProtocolIMAP,
 		ShardTag:           testShardA,
 		DirectorInstanceID: "director-test",
 		LeaseTTL:           2 * time.Second,

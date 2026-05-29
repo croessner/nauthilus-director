@@ -46,7 +46,7 @@ func (s *RedisSessionStore) MoveUser(ctx context.Context, request UserMoveReques
 		return UserRuntimeRecord{}, err
 	}
 
-	value, err := s.runScript(ctx, scriptMove, []string{keys.State, keys.Sessions, keys.Override},
+	value, err := s.runScript(ctx, scriptMove, s.moveUserScriptKeys(keys),
 		normalizedStateValue(request.TargetShard),
 		normalizedStateValue(request.Strategy),
 		normalizedStateValue(request.Reason),
@@ -70,7 +70,7 @@ func (s *RedisSessionStore) KickUser(ctx context.Context, request UserKickReques
 		return UserRuntimeRecord{}, err
 	}
 
-	value, err := s.runScript(ctx, scriptKick, []string{keys.State, keys.Sessions},
+	value, err := s.runScript(ctx, scriptKick, s.kickUserScriptKeys(keys),
 		normalizedStateValue(request.Reason),
 		normalizedStateValue(request.Actor),
 	)
@@ -97,7 +97,7 @@ func (s *RedisSessionStore) ClearUserAffinity(ctx context.Context, request UserC
 		allowActive = "1"
 	}
 
-	value, err := s.runScript(ctx, scriptClear, []string{keys.State, keys.Sessions, keys.Override},
+	value, err := s.runScript(ctx, scriptClear, s.clearUserAffinityScriptKeys(keys),
 		allowActive,
 		normalizedStateValue(request.Reason),
 		normalizedStateValue(request.Actor),
@@ -195,6 +195,21 @@ func (s *RedisSessionStore) ClearBackendRuntime(
 	}
 
 	return parseBackendRuntimeRecord(value)
+}
+
+// moveUserScriptKeys returns the same-slot key list for user move mutations.
+func (s *RedisSessionStore) moveUserScriptKeys(keys AffinityKeys) []string {
+	return []string{keys.State, keys.Sessions, keys.Override}
+}
+
+// kickUserScriptKeys returns the same-slot key list for user kick mutations.
+func (s *RedisSessionStore) kickUserScriptKeys(keys AffinityKeys) []string {
+	return []string{keys.State, keys.Sessions}
+}
+
+// clearUserAffinityScriptKeys returns the same-slot key list for affinity clears.
+func (s *RedisSessionStore) clearUserAffinityScriptKeys(keys AffinityKeys) []string {
+	return []string{keys.State, keys.Sessions, keys.Override}
 }
 
 // backendRuntimeKeys returns the runtime state and membership index for a backend.

@@ -43,6 +43,13 @@ type AffinityKeys struct {
 	Override string
 }
 
+const (
+	affinityKeySessionPrefix = "session:"
+	affinityKeyState         = "state"
+	affinityKeySessions      = "sessions"
+	affinityKeyOverride      = "override"
+)
+
 // NewKeyBuilder creates a Redis key builder with a stable namespace prefix.
 func NewKeyBuilder(options KeyBuilderOptions) (KeyBuilder, error) {
 	prefix := strings.Trim(strings.TrimSpace(options.Prefix), ":")
@@ -191,6 +198,81 @@ func (b KeyBuilder) namespaceBase() string {
 // affinityBase returns the per-affinity Redis key prefix.
 func (b KeyBuilder) affinityBase(hashTag string) string {
 	return b.namespaceBase() + ":" + hashTag
+}
+
+// validateAffinityOwnedKeys rejects Redis script keys outside one affinity hash tag.
+func (b KeyBuilder) validateAffinityOwnedKeys(operation string, keys []string) error {
+	if len(keys) == 0 {
+		return newStateError(RedisErrorKindConfig, operation, "affinity script keys required", nil)
+	}
+
+	hashTag := ""
+
+	for _, key := range keys {
+		keyHashTag, err := b.affinityOwnedHashTag(operation, key)
+		if err != nil {
+			return err
+		}
+
+		if hashTag == "" {
+			hashTag = keyHashTag
+
+			continue
+		}
+
+		if keyHashTag != hashTag {
+			return newStateError(RedisErrorKindConfig, operation, "affinity script keys use multiple hash tags", nil)
+		}
+	}
+
+	return nil
+}
+
+// affinityOwnedHashTag extracts and validates the one allowed affinity key family.
+func (b KeyBuilder) affinityOwnedHashTag(operation string, key string) (string, error) {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return "", newStateError(RedisErrorKindConfig, operation, "empty affinity script key", nil)
+	}
+
+	start := strings.Index(key, "{aff:")
+	if start < 0 {
+		return "", newStateError(RedisErrorKindConfig, operation, "missing affinity hash tag", nil)
+	}
+
+	end := strings.Index(key[start:], "}")
+	if end < 0 {
+		return "", newStateError(RedisErrorKindConfig, operation, "unterminated affinity hash tag", nil)
+	}
+
+	end += start
+
+	hashTag := key[start : end+1]
+	if len(hashTag) <= len("{aff:}") {
+		return "", newStateError(RedisErrorKindConfig, operation, "empty affinity hash tag", nil)
+	}
+
+	prefix := b.namespaceBase() + ":" + hashTag + ":"
+	if !strings.HasPrefix(key, prefix) {
+		return "", newStateError(RedisErrorKindConfig, operation, "affinity key namespace mismatch", nil)
+	}
+
+	suffix := strings.TrimPrefix(key, prefix)
+	if !affinityKeySuffixAllowed(suffix) {
+		return "", newStateError(RedisErrorKindConfig, operation, "non-affinity key in affinity script", nil)
+	}
+
+	return hashTag, nil
+}
+
+// affinityKeySuffixAllowed reports whether a key suffix belongs to one affinity.
+func affinityKeySuffixAllowed(suffix string) bool {
+	switch suffix {
+	case affinityKeyState, affinityKeySessions, affinityKeyOverride:
+		return true
+	default:
+		return strings.HasPrefix(suffix, affinityKeySessionPrefix) && strings.TrimPrefix(suffix, affinityKeySessionPrefix) != ""
+	}
 }
 
 // normalizeAffinityPart canonicalizes input before hashing.
