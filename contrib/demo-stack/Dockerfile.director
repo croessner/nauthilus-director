@@ -41,4 +41,4 @@ USER director:director
 EXPOSE 9090 10143 10993 11024
 
 ENTRYPOINT ["/usr/local/bin/director-entrypoint.sh"]
-CMD ["-config", "/etc/nauthilus-director/nauthilus-director.yml", "serve"]
+CMD ["--config", "/etc/nauthilus-director/nauthilus-director.yml", "serve"]
