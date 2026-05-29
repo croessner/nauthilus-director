@@ -177,7 +177,6 @@ decision plus docs, examples, migration notes and tests:
 - `director.listeners.lmtps`
 - common listener fields under those listeners: `protocol`, `service_name`,
   `network`, `address`, `authority`, `backend_pool`, `proxy_protocol` and `tls`
-- `director.listeners.lmtp.lmtp.smtputf8`
 - `director.listeners.lmtp.lmtp.client_auth.required`
 - `director.listeners.lmtp.lmtp.client_auth.authority`
 - `director.listeners.lmtp.lmtp.client_auth.mechanisms`
@@ -204,6 +203,12 @@ backend-pool capability policy. If an operator configures `CHUNKING`, M5 must
 implement and test `BDAT`/CHUNKING end to end. It must not advertise `CHUNKING`
 while accepting only `DATA` or while the selected backend path cannot safely
 forward `BDAT`.
+
+The earlier `director.listeners.<name>.lmtp.smtputf8` boolean was removed as a
+duplicate source of truth. `SMTPUTF8` is now controlled exclusively by
+`director.listeners.<name>.lmtp.capabilities`: adding the capability enables the
+frontend extension when it is otherwise safe, and omitting it disables the
+related protocol behavior.
 
 Capability omission is also a protocol boundary. If an operator removes
 `STARTTLS`, `AUTH`, `SMTPUTF8` or `CHUNKING` from the effective frontend

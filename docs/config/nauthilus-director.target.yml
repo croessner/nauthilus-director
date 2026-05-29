@@ -309,7 +309,6 @@ director:
         min_tls_version: TLS1.2
 
       lmtp:
-        smtputf8: true
         client_auth:
           # Client auth verifies the submitting LMTP peer. This block controls
           # SASL peer auth with technical submitter credentials checked by
@@ -354,7 +353,6 @@ director:
         min_tls_version: TLS1.2
 
       lmtp:
-        smtputf8: true
         client_auth:
           # Client auth verifies the submitting LMTP peer. This block controls
           # SASL peer auth with technical submitter credentials checked by

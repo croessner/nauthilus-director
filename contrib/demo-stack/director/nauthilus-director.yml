@@ -332,8 +332,6 @@ director:
         min_tls_version: TLS1.2
 
       lmtp:
-        smtputf8: true
-
         # LMTP recipient lookup uses the default Nauthilus authority, but the
         # SMTP-to-LMTP demo relay itself does not require frontend SASL or mTLS.
         client_auth:

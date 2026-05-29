@@ -175,6 +175,24 @@ func TestUnknownFieldsAreRejected(t *testing.T) {
 	}
 }
 
+// TestLMTPConfigRejectsObsoleteSMTPUTF8Flag keeps SMTPUTF8 policy owned by capabilities.
+func TestLMTPConfigRejectsObsoleteSMTPUTF8Flag(t *testing.T) {
+	path := writeConfigFile(t, t.TempDir(), "obsolete-lmtp.yaml", `director:
+  listeners:
+    lmtp:
+      lmtp:
+        smtputf8: false
+`)
+
+	_, err := NewLoader().LoadFile(path)
+	if err == nil {
+		t.Fatal("LoadFile returned nil error for obsolete smtputf8 field")
+	}
+	if !strings.Contains(err.Error(), "smtputf8") {
+		t.Fatalf("error = %q, want obsolete field name", err.Error())
+	}
+}
+
 // TestIncludesEnvPatchesExpansionAndLoaderKeys covers the loader ordering contract.
 func TestIncludesEnvPatchesExpansionAndLoaderKeys(t *testing.T) {
 	t.Setenv("DIRECTOR_TEST_INSTANCE", "patched-instance")

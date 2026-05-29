@@ -465,9 +465,7 @@ func validateLMTPCapabilities(path string, listener ListenerConfig, lmtp LMTPLis
 	for _, capability := range lmtp.Capabilities {
 		switch {
 		case capability == "SMTPUTF8":
-			if !lmtp.SMTPUTF8 {
-				addProblem(problems, path+" advertises SMTPUTF8 while smtputf8 is false")
-			}
+			continue
 		case capability == "STARTTLS":
 			if listener.TLS.Mode != "starttls" {
 				addProblem(problems, path+" advertises STARTTLS for non-starttls listener TLS mode")

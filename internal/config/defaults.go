@@ -406,7 +406,6 @@ func defaultLMTPListener(serviceName string, address string, tlsMode string, cer
 			MinTLSVersion: "TLS1.2",
 		},
 		LMTP: &LMTPListenerConfig{
-			SMTPUTF8: true,
 			ClientAuth: LMTPClientAuthConfig{
 				Required:   true,
 				Authority:  "default",

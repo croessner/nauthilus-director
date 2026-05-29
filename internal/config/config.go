@@ -338,7 +338,6 @@ type IMAPListenerConfig struct {
 }
 
 type LMTPListenerConfig struct {
-	SMTPUTF8     bool                 `mapstructure:"smtputf8" yaml:"smtputf8"`
 	ClientAuth   LMTPClientAuthConfig `mapstructure:"client_auth" yaml:"client_auth" validate:"required"`
 	Capabilities []string             `mapstructure:"capabilities" yaml:"capabilities"`
 }
