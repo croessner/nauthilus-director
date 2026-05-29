@@ -13,6 +13,7 @@ local session_index_key = KEYS[5]
 local backend_index_key = KEYS[6]
 local backend_sessions_key = KEYS[7]
 local user_sessions_key = KEYS[8]
+local session_due_index_key = KEYS[9]
 
 local session_id = ARGV[1]
 local backend_id = ARGV[2]
@@ -100,10 +101,13 @@ redis.call("HSET", backend_key,
 redis.call("SADD", backend_index_key, backend_id)
 redis.call("SADD", backend_sessions_key, session_id)
 redis.call("SADD", user_sessions_key, session_id)
+redis.call("ZADD", session_due_index_key, lease_expires_at, session_id)
 redis.call("HSET", session_key,
 	"selected_backend_id", backend_id,
 	"backend_runtime_key", backend_key,
 	"backend_sessions_key", backend_sessions_key,
+	"user_sessions_key", user_sessions_key,
+	"session_due_index_key", session_due_index_key,
 	"backend_counted", "1",
 	"status", "active",
 	"control_generation", control_generation,

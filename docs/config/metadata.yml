@@ -2,6 +2,9 @@ paths:
   runtime.**:
     stability: stable
     description: Runtime process identity, control listener, timeout, and client behavior.
+  runtime.state.**:
+    stability: stable
+    description: Bounded Redis runtime-state indexes, pagination limits, and due-time reaper behavior.
   observability.**:
     stability: stable
     description: Logging, metrics, tracing, and local diagnostic profile settings.

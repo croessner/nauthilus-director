@@ -36,8 +36,10 @@ const (
 )
 
 type redisStoreOptions struct {
-	recorder  observability.Recorder
-	redisMode string
+	recorder         observability.Recorder
+	redisMode        string
+	indexPageDefault int
+	indexPageMax     int
 }
 
 // RedisSessionStoreOption customizes Redis state-store construction.
@@ -57,11 +59,21 @@ func WithRedisMode(mode string) RedisSessionStoreOption {
 	}
 }
 
+// WithRuntimeIndexPages configures bounded repairable index reads.
+func WithRuntimeIndexPages(pageDefault int, pageMax int) RedisSessionStoreOption {
+	return func(options *redisStoreOptions) {
+		options.indexPageDefault = pageDefault
+		options.indexPageMax = pageMax
+	}
+}
+
 // defaultRedisStoreOptions keeps state-store telemetry disabled unless injected.
 func defaultRedisStoreOptions() redisStoreOptions {
 	return redisStoreOptions{
-		recorder:  observability.NoopRecorder{},
-		redisMode: redisObservationModeUnknown,
+		recorder:         observability.NoopRecorder{},
+		redisMode:        redisObservationModeUnknown,
+		indexPageDefault: 100,
+		indexPageMax:     1000,
 	}
 }
 
@@ -78,6 +90,18 @@ func applyRedisStoreOptions(options []RedisSessionStoreOption) redisStoreOptions
 	applied.recorder = observability.NormalizeRecorder(applied.recorder)
 	if strings.TrimSpace(applied.redisMode) == "" {
 		applied.redisMode = redisObservationModeUnknown
+	}
+
+	if applied.indexPageDefault <= 0 {
+		applied.indexPageDefault = 100
+	}
+
+	if applied.indexPageMax <= 0 {
+		applied.indexPageMax = 1000
+	}
+
+	if applied.indexPageDefault > applied.indexPageMax {
+		applied.indexPageDefault = applied.indexPageMax
 	}
 
 	return applied

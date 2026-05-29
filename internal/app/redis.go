@@ -69,10 +69,13 @@ func newRedisClient(cfg config.RedisConfig) (redis.UniversalClient, error) {
 }
 
 // newRedisStore creates the Redis-backed session and runtime store.
-func newRedisStore(client redis.UniversalClient, cfg config.RedisConfig, recorder observability.Recorder) (*state.RedisSessionStore, error) {
+func newRedisStore(client redis.UniversalClient, cfg config.Config, recorder observability.Recorder) (*state.RedisSessionStore, error) {
 	keys, err := state.NewKeyBuilder(state.KeyBuilderOptions{
-		Prefix:        cfg.KeyPrefix,
-		SchemaVersion: cfg.SchemaVersion,
+		Prefix:             cfg.Storage.Redis.KeyPrefix,
+		SchemaVersion:      cfg.Storage.Redis.SchemaVersion,
+		SessionIndexShards: cfg.Runtime.State.Indexes.SessionShards,
+		UserIndexShards:    cfg.Runtime.State.Indexes.UserShards,
+		BackendIndexShards: cfg.Runtime.State.Indexes.BackendShards,
 	})
 	if err != nil {
 		return nil, err
@@ -83,7 +86,8 @@ func newRedisStore(client redis.UniversalClient, cfg config.RedisConfig, recorde
 		keys,
 		nil,
 		state.WithObservabilityRecorder(recorder),
-		state.WithRedisMode(cfg.Mode),
+		state.WithRedisMode(cfg.Storage.Redis.Mode),
+		state.WithRuntimeIndexPages(cfg.Runtime.State.Indexes.PageDefault, cfg.Runtime.State.Indexes.PageMax),
 	)
 }
 

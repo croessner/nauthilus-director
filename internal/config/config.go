@@ -97,6 +97,7 @@ type RuntimeConfig struct {
 	InstanceName string               `mapstructure:"instance_name" yaml:"instance_name" validate:"required"`
 	Process      ProcessConfig        `mapstructure:"process" yaml:"process" validate:"required"`
 	Servers      RuntimeServersConfig `mapstructure:"servers" yaml:"servers" validate:"required"`
+	State        RuntimeStateConfig   `mapstructure:"state" yaml:"state" validate:"required"`
 	Timeouts     RuntimeTimeouts      `mapstructure:"timeouts" yaml:"timeouts" validate:"required"`
 	Clients      RuntimeClients       `mapstructure:"clients" yaml:"clients" validate:"required"`
 }
@@ -107,6 +108,29 @@ type ProcessConfig struct {
 
 type RuntimeServersConfig struct {
 	Control ControlServerConfig `mapstructure:"control" yaml:"control" validate:"required"`
+}
+
+// RuntimeStateConfig contains bounded Redis runtime-state scaling controls.
+type RuntimeStateConfig struct {
+	Reaper  RuntimeStateReaperConfig  `mapstructure:"reaper" yaml:"reaper" validate:"required"`
+	Indexes RuntimeStateIndexesConfig `mapstructure:"indexes" yaml:"indexes" validate:"required"`
+}
+
+// RuntimeStateReaperConfig configures due-time expired-session repair passes.
+type RuntimeStateReaperConfig struct {
+	Interval        Duration `mapstructure:"interval" yaml:"interval"`
+	BatchSize       int      `mapstructure:"batch_size" yaml:"batch_size"`
+	MaxPassDuration Duration `mapstructure:"max_pass_duration" yaml:"max_pass_duration"`
+	Jitter          Duration `mapstructure:"jitter" yaml:"jitter"`
+}
+
+// RuntimeStateIndexesConfig configures repairable index sharding and page bounds.
+type RuntimeStateIndexesConfig struct {
+	SessionShards int `mapstructure:"session_shards" yaml:"session_shards"`
+	UserShards    int `mapstructure:"user_shards" yaml:"user_shards"`
+	BackendShards int `mapstructure:"backend_shards" yaml:"backend_shards"`
+	PageDefault   int `mapstructure:"page_default" yaml:"page_default"`
+	PageMax       int `mapstructure:"page_max" yaml:"page_max"`
 }
 
 type ControlServerConfig struct {

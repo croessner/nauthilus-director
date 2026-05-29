@@ -486,6 +486,18 @@ runtime:
                 key: <redacted>
                 min_tls_version: TLS1.2
                 require_client_cert: false
+    state:
+        indexes:
+            backend_shards: 32
+            page_default: 100
+            page_max: 1000
+            session_shards: 64
+            user_shards: 32
+        reaper:
+            batch_size: 100
+            interval: 5s
+            jitter: 500ms
+            max_pass_duration: 2s
     timeouts:
         auth: 10s
         backend_connect: 5s

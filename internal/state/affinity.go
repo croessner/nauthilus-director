@@ -177,7 +177,8 @@ type SessionKillRecord struct {
 
 // ReapRequest describes a bounded expired-session repair pass.
 type ReapRequest struct {
-	Limit int
+	Limit           int
+	MaxPassDuration time.Duration
 }
 
 // ReapRecord describes expired session repair work completed by Redis.

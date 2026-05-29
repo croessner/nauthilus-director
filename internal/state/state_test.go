@@ -413,7 +413,7 @@ func TestBackendAndIndexKeysFollowRuntimeShape(t *testing.T) {
 		t.Fatalf("BackendSessionIndexKey returned error: %v", err)
 	}
 
-	if backendSessions != "nd:v1:idx:backend:"+testBackendIMAP+":sessions" {
+	if backendSessions != "nd:v1:idx:backend:"+testBackendIMAP+":sessions:00" {
 		t.Fatalf("backend session index key = %q", backendSessions)
 	}
 
@@ -428,6 +428,57 @@ func TestBackendAndIndexKeysFollowRuntimeShape(t *testing.T) {
 
 	if strings.Contains(userSessions, testUserExample) || !strings.HasPrefix(userSessions, "nd:v1:idx:user:") {
 		t.Fatalf("user session index key = %q", userSessions)
+	}
+
+	sessionShardKey, err := builder.SessionIndexShardKey(testSessionOne)
+	if err != nil {
+		t.Fatalf("SessionIndexShardKey returned error: %v", err)
+	}
+
+	if sessionShardKey == builder.SessionIndexKey() || !strings.HasPrefix(sessionShardKey, "nd:v1:idx:sessions:") {
+		t.Fatalf("session shard key = %q", sessionShardKey)
+	}
+
+	dueShardKey, err := builder.SessionDueIndexShardKey(testSessionOne)
+	if err != nil {
+		t.Fatalf("SessionDueIndexShardKey returned error: %v", err)
+	}
+
+	if !strings.HasPrefix(dueShardKey, "nd:v1:idx:sessions_due:") {
+		t.Fatalf("session due shard key = %q", dueShardKey)
+	}
+}
+
+// TestSessionLocatorIndexesAreShardedDeterministically verifies stable shard mapping.
+func TestSessionLocatorIndexesAreShardedDeterministically(t *testing.T) {
+	builder := mustKeyBuilder(t)
+
+	first, err := builder.SessionIndexShard(testSessionOne)
+	if err != nil {
+		t.Fatalf("SessionIndexShard returned error: %v", err)
+	}
+
+	second, err := builder.SessionIndexShard(testSessionOne)
+	if err != nil {
+		t.Fatalf("SessionIndexShard second call returned error: %v", err)
+	}
+
+	if first != second {
+		t.Fatalf("session shard changed from %d to %d", first, second)
+	}
+
+	key, err := builder.SessionIndexShardKey(testSessionOne)
+	if err != nil {
+		t.Fatalf("SessionIndexShardKey returned error: %v", err)
+	}
+
+	again, err := builder.SessionIndexShardKey(testSessionOne)
+	if err != nil {
+		t.Fatalf("SessionIndexShardKey second call returned error: %v", err)
+	}
+
+	if key != again {
+		t.Fatalf("session shard key changed from %q to %q", key, again)
 	}
 }
 
@@ -480,6 +531,36 @@ func TestScriptLoaderTracksSHAAndMissingScripts(t *testing.T) {
 	} {
 		if _, ok := registry.Get(name); !ok {
 			t.Fatalf("%s script missing; scripts=%v", name, registry.Names())
+		}
+	}
+}
+
+// TestRuntimeSessionPathsAvoidFullIndexReads rejects deployment-wide scans on session paths.
+func TestRuntimeSessionPathsAvoidFullIndexReads(t *testing.T) {
+	files := map[string][]string{
+		"runtime_read.go": {
+			"HGetAll(redisCtx, s.keys.SessionIndexKey()",
+			"SMembers(redisCtx",
+			".Keys(",
+		},
+		"scripts/reap.lua": {
+			"HGETALL",
+			"SMEMBERS",
+			"redis.call(\"KEYS\"",
+		},
+	}
+
+	for file, forbidden := range files {
+		data, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatalf("read %s: %v", file, err)
+		}
+
+		source := string(data)
+		for _, pattern := range forbidden {
+			if strings.Contains(source, pattern) {
+				t.Fatalf("%s contains forbidden runtime scan pattern %q", file, pattern)
+			}
 		}
 	}
 }
@@ -613,13 +694,37 @@ func TestRedisLookupAffinityDoesNotDependOnSecondaryIndexes(t *testing.T) {
 		t.Fatalf("OpenSession returned error: %v", err)
 	}
 
-	userSessionIndexKey, err := builder.UserSessionIndexKey(key.Tenant, key.AccountKey)
+	userSessionIndexKeys, err := builder.UserSessionIndexShardKeys(key.Tenant, key.AccountKey)
 	if err != nil {
-		t.Fatalf("UserSessionIndexKey returned error: %v", err)
+		t.Fatalf("UserSessionIndexShardKeys returned error: %v", err)
 	}
 
-	if err := client.Del(context.Background(), builder.SessionIndexKey(), builder.UserIndexKey(), userSessionIndexKey).Err(); err != nil {
+	indexKeys := append([]string{}, userSessionIndexKeys...)
+
+	affinityHash, err := builder.AffinityHash(key.Tenant, key.AccountKey)
+	if err != nil {
+		t.Fatalf("AffinityHash returned error: %v", err)
+	}
+
+	userIndexKey, err := builder.UserIndexShardKey(affinityHash)
+	if err != nil {
+		t.Fatalf("UserIndexShardKey returned error: %v", err)
+	}
+
+	indexKeys = append(indexKeys, userIndexKey)
+	if err := client.Del(context.Background(), indexKeys...).Err(); err != nil {
 		t.Fatalf("delete secondary indexes: %v", err)
+	}
+
+	for _, sessionID := range []string{"indexed-session"} {
+		sessionIndexKey, err := builder.SessionIndexShardKey(sessionID)
+		if err != nil {
+			t.Fatalf("SessionIndexShardKey returned error: %v", err)
+		}
+
+		if err := client.HDel(context.Background(), sessionIndexKey, sessionID).Err(); err != nil {
+			t.Fatalf("delete session index: %v", err)
+		}
 	}
 
 	lookedUp, err := store.LookupAffinity(context.Background(), key)
@@ -653,6 +758,74 @@ func TestRedisRuntimeReadModelListsSessionsAndUsers(t *testing.T) {
 	assertRuntimeSessionList(t, store, key)
 	assertRuntimeSessionLookup(t, store, key)
 	assertRuntimeUserReads(t, store, key)
+}
+
+// TestRedisRuntimeReadPagesUseBoundedMembershipScans verifies cursor-readable indexes.
+func TestRedisRuntimeReadPagesUseBoundedMembershipScans(t *testing.T) {
+	store, client, builder := redisIntegrationStoreWithOptions(t, WithRuntimeIndexPages(1, 1))
+	key := AffinityKey{Tenant: testTenantDefault, AccountKey: "reader-page@example.test"}
+	cleanupAffinity(t, client, builder, key, "reader-page-1", "reader-page-2")
+	cleanupBackend(t, client, builder, testBackendIMAP)
+
+	openAttachedSession(t, store, key, "reader-page-1", testBackendIMAP)
+	openAttachedSession(t, store, key, "reader-page-2", testBackendIMAP)
+
+	userPage, err := store.ListRuntimeSessionsForUserPage(context.Background(), key, RuntimeSessionPageRequest{Limit: 1})
+	if err != nil {
+		t.Fatalf("ListRuntimeSessionsForUserPage returned error: %v", err)
+	}
+
+	if len(userPage.Records) == 0 {
+		t.Fatal("user session page was empty")
+	}
+
+	backendPage, err := store.ListRuntimeSessionsForBackendPage(context.Background(), testBackendIMAP, RuntimeSessionPageRequest{Limit: 1})
+	if err != nil {
+		t.Fatalf("ListRuntimeSessionsForBackendPage returned error: %v", err)
+	}
+
+	if len(backendPage.Records) == 0 {
+		t.Fatal("backend session page was empty")
+	}
+
+	globalPage, err := store.ListRuntimeSessionsPage(context.Background(), RuntimeSessionPageRequest{Limit: 1})
+	if err != nil {
+		t.Fatalf("ListRuntimeSessionsPage returned error: %v", err)
+	}
+
+	if len(globalPage.Records) == 0 {
+		t.Fatal("global session page was empty")
+	}
+}
+
+// TestRedisRuntimeReadRemovesStaleLocator verifies stale locator repair during paging.
+func TestRedisRuntimeReadRemovesStaleLocator(t *testing.T) {
+	store, client, builder := redisIntegrationStore(t)
+	sessionID := "stale-locator-session"
+
+	sessionIndexKey, err := builder.SessionIndexShardKey(sessionID)
+	if err != nil {
+		t.Fatalf("SessionIndexShardKey returned error: %v", err)
+	}
+
+	if err := client.HSet(context.Background(), sessionIndexKey, sessionID, "missing-session-key").Err(); err != nil {
+		t.Fatalf("seed stale session locator: %v", err)
+	}
+
+	page, err := store.ListRuntimeSessionsPage(context.Background(), RuntimeSessionPageRequest{Limit: 10})
+	if err != nil {
+		t.Fatalf("ListRuntimeSessionsPage returned error: %v", err)
+	}
+
+	for _, record := range page.Records {
+		if record.SessionID == sessionID {
+			t.Fatalf("stale session appeared in page: %#v", record)
+		}
+	}
+
+	if exists := client.HExists(context.Background(), sessionIndexKey, sessionID).Val(); exists {
+		t.Fatal("stale session locator still exists")
+	}
 }
 
 // TestRedisDeliveryHoldPinsAffinityWithoutSessionListing verifies LMTP holds are not login sessions.
@@ -1045,6 +1218,165 @@ func TestRedisReapRepairsExpiredSessions(t *testing.T) {
 
 	if cleared.Status != testClearStatus {
 		t.Fatalf("clear after reap = %#v, want %q", cleared, testClearStatus)
+	}
+}
+
+// TestRedisReapReadsOnlyDueSessions verifies future leases are not inspected or expired.
+func TestRedisReapReadsOnlyDueSessions(t *testing.T) {
+	store, client, builder := redisIntegrationStore(t)
+	key := AffinityKey{Tenant: "blue", AccountKey: "reap-due@example.test"}
+	backendID := testBackendIMAP
+	expiredID := "reap-due-expired"
+	activeID := "reap-due-active"
+
+	cleanupAffinity(t, client, builder, key, expiredID, activeID)
+	cleanupBackend(t, client, builder, backendID)
+
+	expired := testSessionRecord(key, expiredID)
+	expired.LeaseTTL = 25 * time.Millisecond
+
+	expired.IdleGrace = time.Second
+	if _, err := store.OpenSession(context.Background(), expired); err != nil {
+		t.Fatalf("OpenSession expired returned error: %v", err)
+	}
+
+	if _, err := store.AttachSelectedBackend(context.Background(), SessionBackendAttachment{
+		Key:               key,
+		SessionID:         expiredID,
+		BackendIdentifier: backendID,
+		MaxConnections:    10,
+	}); err != nil {
+		t.Fatalf("AttachSelectedBackend expired returned error: %v", err)
+	}
+
+	active := testSessionRecord(key, activeID)
+	active.LeaseTTL = 5 * time.Second
+
+	active.IdleGrace = time.Second
+	if _, err := store.OpenSession(context.Background(), active); err != nil {
+		t.Fatalf("OpenSession active returned error: %v", err)
+	}
+
+	if _, err := store.AttachSelectedBackend(context.Background(), SessionBackendAttachment{
+		Key:               key,
+		SessionID:         activeID,
+		BackendIdentifier: backendID,
+		MaxConnections:    10,
+	}); err != nil {
+		t.Fatalf("AttachSelectedBackend active returned error: %v", err)
+	}
+
+	time.Sleep(60 * time.Millisecond)
+
+	reaped, err := store.ReapSessions(context.Background(), ReapRequest{Limit: 100, MaxPassDuration: time.Second})
+	if err != nil {
+		t.Fatalf("ReapSessions returned error: %v", err)
+	}
+
+	if reaped.ScannedSessions != 1 || reaped.ExpiredSessions != 1 {
+		t.Fatalf("reap result = %#v, want only due session scanned and expired", reaped)
+	}
+
+	if _, ok, err := store.GetRuntimeSession(context.Background(), activeID); err != nil || !ok {
+		t.Fatalf("active session lookup ok=%t err=%v, want present", ok, err)
+	}
+}
+
+// TestRedisReapRespectsBatchSize verifies each pass stops at the requested due bound.
+func TestRedisReapRespectsBatchSize(t *testing.T) {
+	store, client, builder := redisIntegrationStore(t)
+	key := AffinityKey{Tenant: "blue", AccountKey: "reap-batch@example.test"}
+	backendID := testBackendIMAP
+	sessionIDs := []string{"reap-batch-1", "reap-batch-2", "reap-batch-3"}
+
+	cleanupAffinity(t, client, builder, key, sessionIDs...)
+	cleanupBackend(t, client, builder, backendID)
+
+	for _, sessionID := range sessionIDs {
+		record := testSessionRecord(key, sessionID)
+		record.LeaseTTL = 25 * time.Millisecond
+
+		record.IdleGrace = time.Second
+		if _, err := store.OpenSession(context.Background(), record); err != nil {
+			t.Fatalf("OpenSession %s returned error: %v", sessionID, err)
+		}
+
+		if _, err := store.AttachSelectedBackend(context.Background(), SessionBackendAttachment{
+			Key:               key,
+			SessionID:         sessionID,
+			BackendIdentifier: backendID,
+			MaxConnections:    10,
+		}); err != nil {
+			t.Fatalf("AttachSelectedBackend %s returned error: %v", sessionID, err)
+		}
+	}
+
+	time.Sleep(60 * time.Millisecond)
+
+	first, err := store.ReapSessions(context.Background(), ReapRequest{Limit: 2, MaxPassDuration: time.Second})
+	if err != nil {
+		t.Fatalf("first ReapSessions returned error: %v", err)
+	}
+
+	if first.ScannedSessions != 2 || first.ExpiredSessions != 2 {
+		t.Fatalf("first reap = %#v, want batch of two", first)
+	}
+
+	second, err := store.ReapSessions(context.Background(), ReapRequest{Limit: 2, MaxPassDuration: time.Second})
+	if err != nil {
+		t.Fatalf("second ReapSessions returned error: %v", err)
+	}
+
+	if second.ExpiredSessions != 1 {
+		t.Fatalf("second reap = %#v, want remaining expired session", second)
+	}
+}
+
+// TestRedisReapIsIdempotentForAlreadyRepairedDueSession verifies duplicate workers are harmless.
+func TestRedisReapIsIdempotentForAlreadyRepairedDueSession(t *testing.T) {
+	store, client, builder := redisIntegrationStore(t)
+	key := AffinityKey{Tenant: "blue", AccountKey: "reap-idempotent@example.test"}
+	backendID := testBackendIMAP
+	sessionID := "reap-idempotent"
+
+	cleanupAffinity(t, client, builder, key, sessionID)
+	cleanupBackend(t, client, builder, backendID)
+
+	record := testSessionRecord(key, sessionID)
+	record.LeaseTTL = 25 * time.Millisecond
+
+	record.IdleGrace = time.Second
+	if _, err := store.OpenSession(context.Background(), record); err != nil {
+		t.Fatalf("OpenSession returned error: %v", err)
+	}
+
+	if _, err := store.AttachSelectedBackend(context.Background(), SessionBackendAttachment{
+		Key:               key,
+		SessionID:         sessionID,
+		BackendIdentifier: backendID,
+		MaxConnections:    10,
+	}); err != nil {
+		t.Fatalf("AttachSelectedBackend returned error: %v", err)
+	}
+
+	time.Sleep(60 * time.Millisecond)
+
+	first, err := store.ReapSessions(context.Background(), ReapRequest{Limit: 10, MaxPassDuration: time.Second})
+	if err != nil {
+		t.Fatalf("first ReapSessions returned error: %v", err)
+	}
+
+	second, err := store.ReapSessions(context.Background(), ReapRequest{Limit: 10, MaxPassDuration: time.Second})
+	if err != nil {
+		t.Fatalf("second ReapSessions returned error: %v", err)
+	}
+
+	if first.ExpiredSessions != 1 || second.ExpiredSessions != 0 {
+		t.Fatalf("reap results first=%#v second=%#v, want idempotent repair", first, second)
+	}
+
+	if count := redisBackendActiveCount(t, client, builder, backendID); count != 0 {
+		t.Fatalf("backend count after duplicate reap = %d, want 0", count)
 	}
 }
 
@@ -1634,6 +1966,11 @@ func assertLookupAndHeartbeat(t *testing.T, store *RedisSessionStore, key Affini
 
 // redisIntegrationStore creates a store backed by an optional Redis-compatible test service.
 func redisIntegrationStore(t *testing.T) (*RedisSessionStore, *redis.Client, KeyBuilder) {
+	return redisIntegrationStoreWithOptions(t)
+}
+
+// redisIntegrationStoreWithOptions creates a store with caller-provided options.
+func redisIntegrationStoreWithOptions(t *testing.T, options ...RedisSessionStoreOption) (*RedisSessionStore, *redis.Client, KeyBuilder) {
 	t.Helper()
 
 	addr := os.Getenv("NAUTHILUS_DIRECTOR_REDIS_ADDR")
@@ -1662,7 +1999,7 @@ func redisIntegrationStore(t *testing.T) (*RedisSessionStore, *redis.Client, Key
 		t.Fatalf("NewKeyBuilder returned error: %v", err)
 	}
 
-	store, err := NewRedisSessionStore(client, builder, nil)
+	store, err := NewRedisSessionStore(client, builder, nil, options...)
 	if err != nil {
 		t.Fatalf("NewRedisSessionStore returned error: %v", err)
 	}
@@ -1681,12 +2018,12 @@ func cleanupAffinity(t *testing.T, client *redis.Client, builder KeyBuilder, key
 
 	redisKeys := []string{keys.State, keys.Sessions, keys.Override}
 
-	userSessionIndex, err := builder.UserSessionIndexKey(key.Tenant, key.AccountKey)
+	userSessionIndexes, err := builder.UserSessionIndexShardKeys(key.Tenant, key.AccountKey)
 	if err != nil {
-		t.Fatalf("UserSessionIndexKey returned error: %v", err)
+		t.Fatalf("UserSessionIndexShardKeys returned error: %v", err)
 	}
 
-	redisKeys = append(redisKeys, userSessionIndex)
+	redisKeys = append(redisKeys, userSessionIndexes...)
 
 	for _, sessionID := range sessionIDs {
 		sessionKey, err := builder.SessionKey(key.Tenant, key.AccountKey, sessionID)
@@ -1702,9 +2039,39 @@ func cleanupAffinity(t *testing.T, client *redis.Client, builder KeyBuilder, key
 	}
 
 	if len(sessionIDs) > 0 {
-		if err := client.HDel(context.Background(), builder.SessionIndexKey(), sessionIDs...).Err(); err != nil {
-			t.Fatalf("cleanup session index: %v", err)
+		for _, sessionID := range sessionIDs {
+			sessionIndexKey, err := builder.SessionIndexShardKey(sessionID)
+			if err != nil {
+				t.Fatalf("SessionIndexShardKey returned error: %v", err)
+			}
+
+			if err := client.HDel(context.Background(), sessionIndexKey, sessionID).Err(); err != nil {
+				t.Fatalf("cleanup session index: %v", err)
+			}
+
+			sessionDueIndexKey, err := builder.SessionDueIndexShardKey(sessionID)
+			if err != nil {
+				t.Fatalf("SessionDueIndexShardKey returned error: %v", err)
+			}
+
+			if err := client.ZRem(context.Background(), sessionDueIndexKey, sessionID).Err(); err != nil {
+				t.Fatalf("cleanup session due index: %v", err)
+			}
 		}
+	}
+
+	affinityHash, err := builder.AffinityHash(key.Tenant, key.AccountKey)
+	if err != nil {
+		t.Fatalf("AffinityHash returned error: %v", err)
+	}
+
+	userIndexKey, err := builder.UserIndexShardKey(affinityHash)
+	if err != nil {
+		t.Fatalf("UserIndexShardKey returned error: %v", err)
+	}
+
+	if err := client.HDel(context.Background(), userIndexKey, affinityHash).Err(); err != nil {
+		t.Fatalf("cleanup user index: %v", err)
 	}
 }
 
@@ -1717,12 +2084,13 @@ func cleanupBackend(t *testing.T, client *redis.Client, builder KeyBuilder, back
 		t.Fatalf("BackendRuntimeKey returned error: %v", err)
 	}
 
-	backendSessionsKey, err := builder.BackendSessionIndexKey(backendID)
+	backendSessionsKeys, err := builder.BackendSessionIndexShardKeys(backendID)
 	if err != nil {
-		t.Fatalf("BackendSessionIndexKey returned error: %v", err)
+		t.Fatalf("BackendSessionIndexShardKeys returned error: %v", err)
 	}
 
-	if err := client.Del(context.Background(), backendKey, backendSessionsKey).Err(); err != nil {
+	redisKeys := append([]string{backendKey}, backendSessionsKeys...)
+	if err := client.Del(context.Background(), redisKeys...).Err(); err != nil {
 		t.Fatalf("cleanup backend keys: %v", err)
 	}
 

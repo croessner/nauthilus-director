@@ -18,6 +18,8 @@ package state
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"sort"
 	"strings"
@@ -28,40 +30,134 @@ import (
 
 const operationRuntimeRead = "runtime_read"
 
+const (
+	runtimeReadCursorVersion   = 1
+	runtimeReadFamilySessions  = "sessions"
+	runtimeReadFamilyUser      = "user_sessions"
+	runtimeReadFamilyBackend   = "backend_sessions"
+	runtimeReadFamilyUsers     = "users"
+	runtimeReadUserIndexFields = 2
+)
+
+// RuntimeSessionPageRequest describes one bounded runtime session index read.
+type RuntimeSessionPageRequest struct {
+	Protocol string
+	Limit    int
+	Cursor   string
+}
+
+// RuntimeSessionPage contains one bounded runtime session page.
+type RuntimeSessionPage struct {
+	Records    []RuntimeSessionRecord
+	NextCursor string
+}
+
+// RuntimeUserPageRequest describes one bounded runtime user index read.
+type RuntimeUserPageRequest struct {
+	Limit  int
+	Cursor string
+}
+
+// RuntimeUserPage contains one bounded runtime user page.
+type RuntimeUserPage struct {
+	Records    []RuntimeUserReadRecord
+	NextCursor string
+}
+
+type runtimeReadCursor struct {
+	Version     int    `json:"v"`
+	Family      string `json:"f"`
+	Shard       int    `json:"s"`
+	RedisCursor uint64 `json:"c"`
+}
+
 // ListRuntimeSessions returns active sessions from repairable Redis indexes.
 func (s *RedisSessionStore) ListRuntimeSessions(ctx context.Context, protocol string) ([]RuntimeSessionRecord, error) {
-	redisCtx := redisContext(ctx)
-	started := time.Now()
-
-	entries, err := s.client.HGetAll(redisCtx, s.keys.SessionIndexKey()).Result()
+	page, err := s.ListRuntimeSessionsPage(ctx, RuntimeSessionPageRequest{Protocol: protocol, Limit: s.defaultRuntimeIndexPageLimit()})
 	if err != nil {
-		classified := ClassifyRedisError(operationRuntimeRead, err)
-		s.recordRedisOperation(redisCtx, "runtime_session_list", started, classified)
-
-		return nil, classified
+		return nil, err
 	}
 
-	s.recordRedisOperation(redisCtx, "runtime_session_list", started, nil)
+	sortRuntimeSessions(page.Records)
 
-	protocol = strings.ToLower(strings.TrimSpace(protocol))
+	return page.Records, nil
+}
 
-	records := make([]RuntimeSessionRecord, 0, len(entries))
-	for sessionID, sessionKey := range entries {
-		record, ok, readErr := s.readRuntimeSession(ctx, sessionID, sessionKey)
-		if readErr != nil {
-			return nil, readErr
-		}
-
-		if !ok || (protocol != "" && record.Protocol != protocol) {
-			continue
-		}
-
-		records = append(records, record)
+// ListRuntimeSessionsPage returns a bounded page from sharded session locators.
+//
+//nolint:gocyclo,funlen // The cursor walk keeps shard, stale-index repair and filtering together.
+func (s *RedisSessionStore) ListRuntimeSessionsPage(ctx context.Context, request RuntimeSessionPageRequest) (RuntimeSessionPage, error) {
+	cursor, err := s.decodeRuntimeReadCursor(request.Cursor, runtimeReadFamilySessions, s.keys.sessionIndexShards)
+	if err != nil {
+		return RuntimeSessionPage{}, err
 	}
 
-	sortRuntimeSessions(records)
+	limit := s.runtimeReadLimit(request.Limit)
+	protocol := strings.ToLower(strings.TrimSpace(request.Protocol))
+	records := make([]RuntimeSessionRecord, 0, limit)
+	redisCtx := redisContext(ctx)
 
-	return records, nil
+	for shard := cursor.Shard; shard < s.keys.sessionIndexShards && len(records) < limit; shard++ {
+		scanCursor := uint64(0)
+		if shard == cursor.Shard {
+			scanCursor = cursor.RedisCursor
+		}
+
+		indexKey, keyErr := s.keys.SessionIndexShardKeyByNumber(shard)
+		if keyErr != nil {
+			return RuntimeSessionPage{}, keyErr
+		}
+
+		started := time.Now()
+
+		entries, next, scanErr := s.client.HScan(redisCtx, indexKey, scanCursor, "*", int64(limit)).Result()
+		if scanErr != nil {
+			classified := ClassifyRedisError(operationRuntimeRead, scanErr)
+			s.recordRedisOperation(redisCtx, "runtime_session_index_scan", started, classified)
+
+			return RuntimeSessionPage{}, classified
+		}
+
+		s.recordRedisOperation(redisCtx, "runtime_session_index_scan", started, nil)
+
+		for index := 0; index+1 < len(entries); index += 2 {
+			sessionID := entries[index]
+			sessionKey := entries[index+1]
+
+			record, visible, present, readErr := s.readRuntimeSession(ctx, sessionID, sessionKey)
+			if readErr != nil {
+				return RuntimeSessionPage{}, readErr
+			}
+
+			if !present {
+				s.removeStaleSessionLocator(ctx, indexKey, sessionID)
+
+				continue
+			}
+
+			if !visible || (protocol != "" && record.Protocol != protocol) {
+				continue
+			}
+
+			records = append(records, record)
+		}
+
+		if next != 0 {
+			return RuntimeSessionPage{
+				Records:    records,
+				NextCursor: s.encodeRuntimeReadCursor(runtimeReadFamilySessions, shard, next),
+			}, nil
+		}
+
+		if len(records) >= limit && shard+1 < s.keys.sessionIndexShards {
+			return RuntimeSessionPage{
+				Records:    records,
+				NextCursor: s.encodeRuntimeReadCursor(runtimeReadFamilySessions, shard+1, 0),
+			}, nil
+		}
+	}
+
+	return RuntimeSessionPage{Records: records}, nil
 }
 
 // GetRuntimeSession returns one active session from the Redis session index.
@@ -74,7 +170,12 @@ func (s *RedisSessionStore) GetRuntimeSession(ctx context.Context, sessionID str
 	redisCtx := redisContext(ctx)
 	started := time.Now()
 
-	sessionKey, err := s.client.HGet(redisCtx, s.keys.SessionIndexKey(), sessionID).Result()
+	sessionIndexKey, err := s.keys.SessionIndexShardKey(sessionID)
+	if err != nil {
+		return RuntimeSessionRecord{}, false, err
+	}
+
+	sessionKey, err := s.client.HGet(redisCtx, sessionIndexKey, sessionID).Result()
 	if errors.Is(err, redis.Nil) {
 		s.recordRedisOperation(redisCtx, "runtime_session_get", started, nil)
 
@@ -90,88 +191,146 @@ func (s *RedisSessionStore) GetRuntimeSession(ctx context.Context, sessionID str
 
 	s.recordRedisOperation(redisCtx, "runtime_session_get", started, nil)
 
-	return s.readRuntimeSession(ctx, sessionID, sessionKey)
+	record, visible, present, err := s.readRuntimeSession(ctx, sessionID, sessionKey)
+	if err != nil || !present || !visible {
+		return RuntimeSessionRecord{}, false, err
+	}
+
+	return record, true, nil
 }
 
 // ListRuntimeSessionsForUser returns active sessions indexed for one affinity key.
 func (s *RedisSessionStore) ListRuntimeSessionsForUser(ctx context.Context, key AffinityKey) ([]RuntimeSessionRecord, error) {
-	userSessionsKey, err := s.keys.UserSessionIndexKey(key.Tenant, key.AccountKey)
+	page, err := s.ListRuntimeSessionsForUserPage(ctx, key, RuntimeSessionPageRequest{Limit: s.defaultRuntimeIndexPageLimit()})
 	if err != nil {
 		return nil, err
 	}
 
-	redisCtx := redisContext(ctx)
-	started := time.Now()
+	sortRuntimeSessions(page.Records)
 
-	sessionIDs, err := s.client.SMembers(redisCtx, userSessionsKey).Result()
+	return page.Records, nil
+}
+
+// ListRuntimeSessionsForUserPage returns a bounded page from sharded user membership.
+func (s *RedisSessionStore) ListRuntimeSessionsForUserPage(
+	ctx context.Context,
+	key AffinityKey,
+	request RuntimeSessionPageRequest,
+) (RuntimeSessionPage, error) {
+	indexKeys, err := s.keys.UserSessionIndexShardKeys(key.Tenant, key.AccountKey)
 	if err != nil {
-		classified := ClassifyRedisError(operationRuntimeRead, err)
-		s.recordRedisOperation(redisCtx, "runtime_user_sessions_list", started, classified)
-
-		return nil, classified
+		return RuntimeSessionPage{}, err
 	}
 
-	s.recordRedisOperation(redisCtx, "runtime_user_sessions_list", started, nil)
+	return s.listRuntimeSessionSetPage(ctx, indexKeys, runtimeReadFamilyUser, request)
+}
 
-	records := make([]RuntimeSessionRecord, 0, len(sessionIDs))
-	for _, sessionID := range sessionIDs {
-		record, ok, readErr := s.GetRuntimeSession(ctx, sessionID)
-		if readErr != nil {
-			return nil, readErr
-		}
-
-		if ok {
-			records = append(records, record)
-		}
+// ListRuntimeSessionsForBackendPage returns a bounded page from sharded backend membership.
+func (s *RedisSessionStore) ListRuntimeSessionsForBackendPage(
+	ctx context.Context,
+	backendIdentifier string,
+	request RuntimeSessionPageRequest,
+) (RuntimeSessionPage, error) {
+	indexKeys, err := s.keys.BackendSessionIndexShardKeys(backendIdentifier)
+	if err != nil {
+		return RuntimeSessionPage{}, err
 	}
 
-	sortRuntimeSessions(records)
-
-	return records, nil
+	return s.listRuntimeSessionSetPage(ctx, indexKeys, runtimeReadFamilyBackend, request)
 }
 
 // ListRuntimeUsers derives user runtime views from active Redis session records.
 func (s *RedisSessionStore) ListRuntimeUsers(ctx context.Context) ([]RuntimeUserReadRecord, error) {
-	sessions, err := s.ListRuntimeSessions(ctx, "")
+	page, err := s.ListRuntimeUsersPage(ctx, RuntimeUserPageRequest{Limit: s.defaultRuntimeIndexPageLimit()})
 	if err != nil {
 		return nil, err
 	}
 
-	groups := make(map[AffinityKey]RuntimeUserReadRecord)
-
-	for _, session := range sessions {
-		key := session.Key
-		record := groups[key]
-		record.Key = key
-		record.ShardTag = firstNonEmptyState(record.ShardTag, session.ShardTag)
-		record.ActiveSessionCount++
-		record.Present = true
-		groups[key] = record
-	}
-
-	records := make([]RuntimeUserReadRecord, 0, len(groups))
-	for key, fallback := range groups {
-		record, ok, readErr := s.GetRuntimeUser(ctx, key)
-		if readErr != nil {
-			return nil, readErr
+	sort.Slice(page.Records, func(left int, right int) bool {
+		if page.Records[left].Key.Tenant == page.Records[right].Key.Tenant {
+			return page.Records[left].Key.AccountKey < page.Records[right].Key.AccountKey
 		}
 
-		if !ok {
-			record = fallback
-		}
-
-		records = append(records, record)
-	}
-
-	sort.Slice(records, func(left int, right int) bool {
-		if records[left].Key.Tenant == records[right].Key.Tenant {
-			return records[left].Key.AccountKey < records[right].Key.AccountKey
-		}
-
-		return records[left].Key.Tenant < records[right].Key.Tenant
+		return page.Records[left].Key.Tenant < page.Records[right].Key.Tenant
 	})
 
-	return records, nil
+	return page.Records, nil
+}
+
+// ListRuntimeUsersPage returns a bounded page from sharded user indexes.
+//
+//nolint:gocyclo,funlen // The cursor walk keeps user-index repair and page continuation together.
+func (s *RedisSessionStore) ListRuntimeUsersPage(ctx context.Context, request RuntimeUserPageRequest) (RuntimeUserPage, error) {
+	cursor, err := s.decodeRuntimeReadCursor(request.Cursor, runtimeReadFamilyUsers, s.keys.userIndexShards)
+	if err != nil {
+		return RuntimeUserPage{}, err
+	}
+
+	limit := s.runtimeReadLimit(request.Limit)
+	records := make([]RuntimeUserReadRecord, 0, limit)
+	redisCtx := redisContext(ctx)
+
+	for shard := cursor.Shard; shard < s.keys.userIndexShards && len(records) < limit; shard++ {
+		scanCursor := uint64(0)
+		if shard == cursor.Shard {
+			scanCursor = cursor.RedisCursor
+		}
+
+		indexKey, keyErr := s.keys.UserIndexShardKeyByNumber(shard)
+		if keyErr != nil {
+			return RuntimeUserPage{}, keyErr
+		}
+
+		started := time.Now()
+
+		entries, next, scanErr := s.client.HScan(redisCtx, indexKey, scanCursor, "*", int64(limit)).Result()
+		if scanErr != nil {
+			classified := ClassifyRedisError(operationRuntimeRead, scanErr)
+			s.recordRedisOperation(redisCtx, "runtime_user_index_scan", started, classified)
+
+			return RuntimeUserPage{}, classified
+		}
+
+		s.recordRedisOperation(redisCtx, "runtime_user_index_scan", started, nil)
+
+		for index := 0; index+1 < len(entries); index += 2 {
+			key, parseErr := parseUserIndexValue(entries[index+1])
+			if parseErr != nil {
+				s.removeStaleUserIndex(ctx, indexKey, entries[index])
+
+				continue
+			}
+
+			record, ok, readErr := s.GetRuntimeUser(ctx, key)
+			if readErr != nil {
+				return RuntimeUserPage{}, readErr
+			}
+
+			if !ok {
+				s.removeStaleUserIndex(ctx, indexKey, entries[index])
+
+				continue
+			}
+
+			records = append(records, record)
+		}
+
+		if next != 0 {
+			return RuntimeUserPage{
+				Records:    records,
+				NextCursor: s.encodeRuntimeReadCursor(runtimeReadFamilyUsers, shard, next),
+			}, nil
+		}
+
+		if len(records) >= limit && shard+1 < s.keys.userIndexShards {
+			return RuntimeUserPage{
+				Records:    records,
+				NextCursor: s.encodeRuntimeReadCursor(runtimeReadFamilyUsers, shard+1, 0),
+			}, nil
+		}
+	}
+
+	return RuntimeUserPage{Records: records}, nil
 }
 
 // GetRuntimeUser reads one affinity record without refreshing session leases.
@@ -196,10 +355,10 @@ func (s *RedisSessionStore) GetRuntimeUser(ctx context.Context, key AffinityKey)
 }
 
 // readRuntimeSession reads one indexed session hash without repairing indexes.
-func (s *RedisSessionStore) readRuntimeSession(ctx context.Context, sessionID string, sessionKey string) (RuntimeSessionRecord, bool, error) {
+func (s *RedisSessionStore) readRuntimeSession(ctx context.Context, sessionID string, sessionKey string) (RuntimeSessionRecord, bool, bool, error) {
 	sessionKey = strings.TrimSpace(sessionKey)
 	if sessionKey == "" {
-		return RuntimeSessionRecord{}, false, nil
+		return RuntimeSessionRecord{}, false, false, nil
 	}
 
 	redisCtx := redisContext(ctx)
@@ -210,25 +369,235 @@ func (s *RedisSessionStore) readRuntimeSession(ctx context.Context, sessionID st
 		classified := ClassifyRedisError(operationRuntimeRead, err)
 		s.recordRedisOperation(redisCtx, "runtime_session_read", started, classified)
 
-		return RuntimeSessionRecord{}, false, classified
+		return RuntimeSessionRecord{}, false, false, classified
 	}
 
 	s.recordRedisOperation(redisCtx, "runtime_session_read", started, nil)
 
 	if len(fields) == 0 {
-		return RuntimeSessionRecord{}, false, nil
+		return RuntimeSessionRecord{}, false, false, nil
 	}
 
 	record, err := parseRuntimeSessionFields(sessionID, fields)
 	if err != nil {
-		return RuntimeSessionRecord{}, false, err
+		return RuntimeSessionRecord{}, false, true, err
 	}
 
 	if strings.EqualFold(strings.TrimSpace(fields["holder_kind"]), HolderKindDelivery) {
-		return RuntimeSessionRecord{}, false, nil
+		return RuntimeSessionRecord{}, false, true, nil
 	}
 
-	return record, true, nil
+	return record, true, true, nil
+}
+
+// listRuntimeSessionSetPage returns one bounded page from sharded set membership.
+//
+//nolint:gocyclo,funlen // The set cursor walk handles stale repair and visibility filtering atomically.
+func (s *RedisSessionStore) listRuntimeSessionSetPage(
+	ctx context.Context,
+	indexKeys []string,
+	family string,
+	request RuntimeSessionPageRequest,
+) (RuntimeSessionPage, error) {
+	cursor, err := s.decodeRuntimeReadCursor(request.Cursor, family, len(indexKeys))
+	if err != nil {
+		return RuntimeSessionPage{}, err
+	}
+
+	limit := s.runtimeReadLimit(request.Limit)
+	protocol := strings.ToLower(strings.TrimSpace(request.Protocol))
+	records := make([]RuntimeSessionRecord, 0, limit)
+	redisCtx := redisContext(ctx)
+
+	for shard := cursor.Shard; shard < len(indexKeys) && len(records) < limit; shard++ {
+		scanCursor := uint64(0)
+		if shard == cursor.Shard {
+			scanCursor = cursor.RedisCursor
+		}
+
+		started := time.Now()
+
+		sessionIDs, next, scanErr := s.client.SScan(redisCtx, indexKeys[shard], scanCursor, "*", int64(limit)).Result()
+		if scanErr != nil {
+			classified := ClassifyRedisError(operationRuntimeRead, scanErr)
+			s.recordRedisOperation(redisCtx, "runtime_session_membership_scan", started, classified)
+
+			return RuntimeSessionPage{}, classified
+		}
+
+		s.recordRedisOperation(redisCtx, "runtime_session_membership_scan", started, nil)
+
+		for _, sessionID := range sessionIDs {
+			record, visible, present, readErr := s.readRuntimeSessionByID(ctx, sessionID)
+			if readErr != nil {
+				return RuntimeSessionPage{}, readErr
+			}
+
+			if !present {
+				s.removeStaleSetMember(ctx, indexKeys[shard], sessionID)
+
+				continue
+			}
+
+			if !visible || (protocol != "" && record.Protocol != protocol) {
+				continue
+			}
+
+			records = append(records, record)
+		}
+
+		if next != 0 {
+			return RuntimeSessionPage{
+				Records:    records,
+				NextCursor: s.encodeRuntimeReadCursor(family, shard, next),
+			}, nil
+		}
+
+		if len(records) >= limit && shard+1 < len(indexKeys) {
+			return RuntimeSessionPage{
+				Records:    records,
+				NextCursor: s.encodeRuntimeReadCursor(family, shard+1, 0),
+			}, nil
+		}
+	}
+
+	return RuntimeSessionPage{Records: records}, nil
+}
+
+// readRuntimeSessionByID resolves a sharded locator and reads one session hash.
+func (s *RedisSessionStore) readRuntimeSessionByID(ctx context.Context, sessionID string) (RuntimeSessionRecord, bool, bool, error) {
+	sessionIndexKey, err := s.keys.SessionIndexShardKey(sessionID)
+	if err != nil {
+		return RuntimeSessionRecord{}, false, false, err
+	}
+
+	redisCtx := redisContext(ctx)
+	started := time.Now()
+
+	sessionKey, err := s.client.HGet(redisCtx, sessionIndexKey, sessionID).Result()
+	if errors.Is(err, redis.Nil) {
+		s.recordRedisOperation(redisCtx, "runtime_session_get", started, nil)
+
+		return RuntimeSessionRecord{}, false, false, nil
+	}
+
+	if err != nil {
+		classified := ClassifyRedisError(operationRuntimeRead, err)
+		s.recordRedisOperation(redisCtx, "runtime_session_get", started, classified)
+
+		return RuntimeSessionRecord{}, false, false, classified
+	}
+
+	s.recordRedisOperation(redisCtx, "runtime_session_get", started, nil)
+
+	record, visible, present, err := s.readRuntimeSession(ctx, sessionID, sessionKey)
+	if !present {
+		s.removeStaleSessionLocator(ctx, sessionIndexKey, sessionID)
+	}
+
+	return record, visible, present, err
+}
+
+// removeStaleSetMember removes one stale secondary membership entry.
+func (s *RedisSessionStore) removeStaleSetMember(ctx context.Context, indexKey string, sessionID string) {
+	s.runRepairableIndexCommand(ctx, "runtime_session_membership_stale_remove", func(redisCtx context.Context) error {
+		return s.client.SRem(redisCtx, indexKey, sessionID).Err()
+	})
+}
+
+// removeStaleUserIndex removes one stale user index entry.
+func (s *RedisSessionStore) removeStaleUserIndex(ctx context.Context, indexKey string, affinityHash string) {
+	s.runRepairableIndexCommand(ctx, "runtime_user_index_stale_remove", func(redisCtx context.Context) error {
+		return s.client.HDel(redisCtx, indexKey, affinityHash).Err()
+	})
+}
+
+// defaultRuntimeIndexPageLimit returns the default control-read bound.
+func (s *RedisSessionStore) defaultRuntimeIndexPageLimit() int {
+	if s == nil || s.indexPageDefault <= 0 {
+		return 100
+	}
+
+	return s.indexPageDefault
+}
+
+// runtimeReadLimit clamps requested page size to configured bounds.
+func (s *RedisSessionStore) runtimeReadLimit(limit int) int {
+	if limit <= 0 {
+		limit = s.defaultRuntimeIndexPageLimit()
+	}
+
+	maximum := 1000
+	if s != nil && s.indexPageMax > 0 {
+		maximum = s.indexPageMax
+	}
+
+	if limit > maximum {
+		return maximum
+	}
+
+	return limit
+}
+
+// encodeRuntimeReadCursor serializes bounded position data without raw identifiers.
+func (s *RedisSessionStore) encodeRuntimeReadCursor(family string, shard int, redisCursor uint64) string {
+	payload, err := json.Marshal(runtimeReadCursor{
+		Version:     runtimeReadCursorVersion,
+		Family:      family,
+		Shard:       shard,
+		RedisCursor: redisCursor,
+	})
+	if err != nil {
+		return ""
+	}
+
+	return base64.RawURLEncoding.EncodeToString(payload)
+}
+
+// decodeRuntimeReadCursor validates an opaque runtime read cursor.
+func (s *RedisSessionStore) decodeRuntimeReadCursor(raw string, family string, shardCount int) (runtimeReadCursor, error) {
+	if shardCount <= 0 {
+		return runtimeReadCursor{}, newStateError(RedisErrorKindConfig, operationRuntimeRead, "index shards required", nil)
+	}
+
+	if strings.TrimSpace(raw) == "" {
+		return runtimeReadCursor{Version: runtimeReadCursorVersion, Family: family}, nil
+	}
+
+	payload, err := base64.RawURLEncoding.DecodeString(strings.TrimSpace(raw))
+	if err != nil {
+		return runtimeReadCursor{}, newStateError(RedisErrorKindAmbiguousState, operationRuntimeRead, "cursor invalid", err)
+	}
+
+	var cursor runtimeReadCursor
+	if err := json.Unmarshal(payload, &cursor); err != nil {
+		return runtimeReadCursor{}, newStateError(RedisErrorKindAmbiguousState, operationRuntimeRead, "cursor invalid", err)
+	}
+
+	if cursor.Version != runtimeReadCursorVersion || cursor.Family != family {
+		return runtimeReadCursor{}, newStateError(RedisErrorKindAmbiguousState, operationRuntimeRead, "cursor family invalid", nil)
+	}
+
+	if cursor.Shard < 0 || cursor.Shard >= shardCount {
+		return runtimeReadCursor{}, newStateError(RedisErrorKindAmbiguousState, operationRuntimeRead, "cursor shard invalid", nil)
+	}
+
+	return cursor, nil
+}
+
+// parseUserIndexValue converts a repairable user-index value into an affinity key.
+func parseUserIndexValue(value string) (AffinityKey, error) {
+	parts := strings.SplitN(value, "\t", runtimeReadUserIndexFields)
+	if len(parts) != runtimeReadUserIndexFields {
+		return AffinityKey{}, newStateError(RedisErrorKindAmbiguousState, operationRuntimeRead, "user index value invalid", nil)
+	}
+
+	key := AffinityKey{Tenant: strings.TrimSpace(parts[0]), AccountKey: strings.TrimSpace(parts[1])}
+	if key.Tenant == "" || key.AccountKey == "" {
+		return AffinityKey{}, newStateError(RedisErrorKindAmbiguousState, operationRuntimeRead, "user index value incomplete", nil)
+	}
+
+	return key, nil
 }
 
 // parseRuntimeSessionFields converts a Redis session hash into a control-read record.

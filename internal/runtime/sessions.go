@@ -72,9 +72,10 @@ type KillSessionRequest struct {
 
 // ReapSessionsRequest asks runtime state to repair expired session leases.
 type ReapSessionsRequest struct {
-	Reason string
-	Actor  Actor
-	Limit  int
+	Reason          string
+	Actor           Actor
+	Limit           int
+	MaxPassDuration time.Duration
 }
 
 // SessionMutationResult describes a runtime session mutation outcome.
@@ -107,10 +108,12 @@ type SessionService struct {
 
 // ReaperConfig configures lifecycle-managed expired-session repair.
 type ReaperConfig struct {
-	Interval time.Duration
-	Limit    int
-	Reason   string
-	Actor    Actor
+	Interval        time.Duration
+	Limit           int
+	MaxPassDuration time.Duration
+	Jitter          time.Duration
+	Reason          string
+	Actor           Actor
 }
 
 // Reaper runs bounded expired-session repair until process shutdown.
@@ -143,8 +146,16 @@ func NewReaper(service *SessionService, config ReaperConfig) (*Reaper, error) {
 		config.Reason = "periodic session reap"
 	}
 
-	if config.Limit < 0 {
-		return nil, newRuntimeError(ErrorKindInvalidRequest, operationSessionReap, "limit must not be negative")
+	if config.Limit <= 0 {
+		return nil, newRuntimeError(ErrorKindInvalidRequest, operationSessionReap, "limit must be greater than zero")
+	}
+
+	if config.MaxPassDuration <= 0 {
+		return nil, newRuntimeError(ErrorKindInvalidRequest, operationSessionReap, "max pass duration required")
+	}
+
+	if config.Jitter < 0 {
+		return nil, newRuntimeError(ErrorKindInvalidRequest, operationSessionReap, "jitter must not be negative")
 	}
 
 	return &Reaper{service: service, config: config}, nil
@@ -219,9 +230,10 @@ func (r *Reaper) RunOnce(ctx context.Context) (ReapSessionsResult, error) {
 	}
 
 	return r.service.ReapSessions(ctx, ReapSessionsRequest{
-		Reason: r.config.Reason,
-		Actor:  r.config.Actor,
-		Limit:  r.config.Limit,
+		Reason:          r.config.Reason,
+		Actor:           r.config.Actor,
+		Limit:           r.config.Limit,
+		MaxPassDuration: r.config.MaxPassDuration,
 	})
 }
 
@@ -296,11 +308,27 @@ func (s *SessionService) ReapSessions(ctx context.Context, request ReapSessionsR
 		return ReapSessionsResult{}, err
 	}
 
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	if s == nil || s.store == nil {
 		return ReapSessionsResult{}, newRuntimeError(ErrorKindInvalidRequest, operationSessionReap, "session store required")
 	}
 
-	record, err := s.store.ReapSessions(ctx, state.ReapRequest{Limit: request.Limit})
+	reapCtx := ctx
+	cancel := func() {}
+
+	if request.MaxPassDuration > 0 {
+		reapCtx, cancel = context.WithTimeout(ctx, request.MaxPassDuration)
+	}
+
+	defer cancel()
+
+	record, err := s.store.ReapSessions(reapCtx, state.ReapRequest{
+		Limit:           request.Limit,
+		MaxPassDuration: request.MaxPassDuration,
+	})
 	if err != nil {
 		return ReapSessionsResult{}, err
 	}
@@ -561,8 +589,34 @@ func (r *Reaper) run(ctx context.Context, done chan struct{}) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			if !r.waitJitter(ctx) {
+				return
+			}
+
 			_, _ = r.RunOnce(ctx)
 		}
+	}
+}
+
+// waitJitter staggers periodic repair without delaying process shutdown.
+func (r *Reaper) waitJitter(ctx context.Context) bool {
+	if r.config.Jitter <= 0 {
+		return true
+	}
+
+	delay := time.Duration(time.Now().UnixNano() % int64(r.config.Jitter))
+	if delay <= 0 {
+		return true
+	}
+
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
 	}
 }
 
@@ -677,8 +731,12 @@ func (r KillSessionRequest) Validate() error {
 
 // Validate checks the reap request before it crosses a persistence boundary.
 func (r ReapSessionsRequest) Validate() error {
-	if r.Limit < 0 {
-		return newRuntimeError(ErrorKindInvalidRequest, operationSessionReap, "limit must not be negative")
+	if r.Limit <= 0 {
+		return newRuntimeError(ErrorKindInvalidRequest, operationSessionReap, "limit must be greater than zero")
+	}
+
+	if r.MaxPassDuration <= 0 {
+		return newRuntimeError(ErrorKindInvalidRequest, operationSessionReap, "max pass duration required")
 	}
 
 	return requireReason(operationSessionReap, r.Reason)

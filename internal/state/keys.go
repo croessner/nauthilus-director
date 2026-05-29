@@ -18,6 +18,7 @@ package state
 
 import (
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"strings"
@@ -25,14 +26,20 @@ import (
 
 // KeyBuilderOptions contains Redis key namespace settings.
 type KeyBuilderOptions struct {
-	Prefix        string
-	SchemaVersion int
+	Prefix             string
+	SchemaVersion      int
+	SessionIndexShards int
+	UserIndexShards    int
+	BackendIndexShards int
 }
 
 // KeyBuilder creates Redis Cluster-safe keys for affinity state.
 type KeyBuilder struct {
-	prefix        string
-	schemaVersion int
+	prefix             string
+	schemaVersion      int
+	sessionIndexShards int
+	userIndexShards    int
+	backendIndexShards int
 }
 
 // AffinityKeys contains the per-affinity Redis key group.
@@ -48,6 +55,10 @@ const (
 	affinityKeyState         = "state"
 	affinityKeySessions      = "sessions"
 	affinityKeyOverride      = "override"
+
+	defaultSessionIndexShards = 64
+	defaultUserIndexShards    = 32
+	defaultBackendIndexShards = 32
 )
 
 // NewKeyBuilder creates a Redis key builder with a stable namespace prefix.
@@ -61,7 +72,13 @@ func NewKeyBuilder(options KeyBuilderOptions) (KeyBuilder, error) {
 		return KeyBuilder{}, newStateError(RedisErrorKindConfig, "keys", "schema version required", nil)
 	}
 
-	return KeyBuilder{prefix: prefix, schemaVersion: options.SchemaVersion}, nil
+	return KeyBuilder{
+		prefix:             prefix,
+		schemaVersion:      options.SchemaVersion,
+		sessionIndexShards: normalizeIndexShardCount(options.SessionIndexShards, defaultSessionIndexShards),
+		userIndexShards:    normalizeIndexShardCount(options.UserIndexShards, defaultUserIndexShards),
+		backendIndexShards: normalizeIndexShardCount(options.BackendIndexShards, defaultBackendIndexShards),
+	}, nil
 }
 
 // AffinityHash returns the hash used inside Redis Cluster hash tags.
@@ -157,17 +174,109 @@ func (b KeyBuilder) HealthStateKey(backendID string) (string, error) {
 
 // BackendSessionIndexKey returns the repairable backend-to-session index key.
 func (b KeyBuilder) BackendSessionIndexKey(backendID string) (string, error) {
+	return b.BackendSessionIndexShardKeyByNumber(backendID, 0)
+}
+
+// BackendSessionIndexShardKey returns the repairable backend-session shard for a session.
+func (b KeyBuilder) BackendSessionIndexShardKey(backendID string, sessionID string) (string, error) {
+	shard, err := b.BackendSessionIndexShard(sessionID)
+	if err != nil {
+		return "", err
+	}
+
+	return b.BackendSessionIndexShardKeyByNumber(backendID, shard)
+}
+
+// BackendSessionIndexShardKeyByNumber returns one repairable backend-session shard key.
+func (b KeyBuilder) BackendSessionIndexShardKeyByNumber(backendID string, shard int) (string, error) {
 	backendID = strings.TrimSpace(backendID)
 	if backendID == "" {
 		return "", newStateError(RedisErrorKindAmbiguousState, "keys", "backend id required", nil)
 	}
 
-	return b.namespaceBase() + ":idx:backend:" + backendID + ":sessions", nil
+	if err := b.validateShardNumber("keys", shard, b.backendIndexShards); err != nil {
+		return "", err
+	}
+
+	return fmt.Sprintf("%s:idx:backend:%s:sessions:%02d", b.namespaceBase(), backendID, shard), nil
+}
+
+// BackendSessionIndexShardKeys returns every repairable backend-session shard key.
+func (b KeyBuilder) BackendSessionIndexShardKeys(backendID string) ([]string, error) {
+	keys := make([]string, 0, b.backendIndexShards)
+	for shard := range b.backendIndexShards {
+		key, err := b.BackendSessionIndexShardKeyByNumber(backendID, shard)
+		if err != nil {
+			return nil, err
+		}
+
+		keys = append(keys, key)
+	}
+
+	return keys, nil
 }
 
 // SessionIndexKey returns the repairable session index key.
 func (b KeyBuilder) SessionIndexKey() string {
 	return b.namespaceBase() + ":idx:sessions"
+}
+
+// SessionIndexShardKey returns the repairable session locator shard for a session.
+func (b KeyBuilder) SessionIndexShardKey(sessionID string) (string, error) {
+	shard, err := b.SessionIndexShard(sessionID)
+	if err != nil {
+		return "", err
+	}
+
+	return b.SessionIndexShardKeyByNumber(shard)
+}
+
+// SessionIndexShardKeyByNumber returns one repairable session locator shard key.
+func (b KeyBuilder) SessionIndexShardKeyByNumber(shard int) (string, error) {
+	if err := b.validateShardNumber("keys", shard, b.sessionIndexShards); err != nil {
+		return "", err
+	}
+
+	return fmt.Sprintf("%s:idx:sessions:%02d", b.namespaceBase(), shard), nil
+}
+
+// SessionIndexShardKeys returns every repairable session locator shard key.
+func (b KeyBuilder) SessionIndexShardKeys() []string {
+	keys := make([]string, 0, b.sessionIndexShards)
+	for shard := range b.sessionIndexShards {
+		keys = append(keys, fmt.Sprintf("%s:idx:sessions:%02d", b.namespaceBase(), shard))
+	}
+
+	return keys
+}
+
+// SessionDueIndexShardKey returns the due-time shard for one session lease.
+func (b KeyBuilder) SessionDueIndexShardKey(sessionID string) (string, error) {
+	shard, err := b.SessionIndexShard(sessionID)
+	if err != nil {
+		return "", err
+	}
+
+	return b.SessionDueIndexShardKeyByNumber(shard)
+}
+
+// SessionDueIndexShardKeyByNumber returns one due-time repair shard key.
+func (b KeyBuilder) SessionDueIndexShardKeyByNumber(shard int) (string, error) {
+	if err := b.validateShardNumber("keys", shard, b.sessionIndexShards); err != nil {
+		return "", err
+	}
+
+	return fmt.Sprintf("%s:idx:sessions_due:%02d", b.namespaceBase(), shard), nil
+}
+
+// SessionDueIndexShardKeys returns every due-time repair shard key.
+func (b KeyBuilder) SessionDueIndexShardKeys() []string {
+	keys := make([]string, 0, b.sessionIndexShards)
+	for shard := range b.sessionIndexShards {
+		keys = append(keys, fmt.Sprintf("%s:idx:sessions_due:%02d", b.namespaceBase(), shard))
+	}
+
+	return keys
 }
 
 // BackendIndexKey returns the repairable backend index key.
@@ -180,14 +289,97 @@ func (b KeyBuilder) UserIndexKey() string {
 	return b.namespaceBase() + ":idx:users"
 }
 
+// UserIndexShardKey returns the repairable user-affinity index shard for an affinity hash.
+func (b KeyBuilder) UserIndexShardKey(affinityHash string) (string, error) {
+	shard, err := b.UserIndexShard(affinityHash)
+	if err != nil {
+		return "", err
+	}
+
+	return b.UserIndexShardKeyByNumber(shard)
+}
+
+// UserIndexShardKeyByNumber returns one repairable user-affinity index shard key.
+func (b KeyBuilder) UserIndexShardKeyByNumber(shard int) (string, error) {
+	if err := b.validateShardNumber("keys", shard, b.userIndexShards); err != nil {
+		return "", err
+	}
+
+	return fmt.Sprintf("%s:idx:users:%02d", b.namespaceBase(), shard), nil
+}
+
+// UserIndexShardKeys returns every repairable user-affinity index shard key.
+func (b KeyBuilder) UserIndexShardKeys() []string {
+	keys := make([]string, 0, b.userIndexShards)
+	for shard := range b.userIndexShards {
+		keys = append(keys, fmt.Sprintf("%s:idx:users:%02d", b.namespaceBase(), shard))
+	}
+
+	return keys
+}
+
 // UserSessionIndexKey returns the repairable user-to-session index key.
 func (b KeyBuilder) UserSessionIndexKey(tenant string, normalizedAccount string) (string, error) {
+	return b.UserSessionIndexShardKeyByNumber(tenant, normalizedAccount, 0)
+}
+
+// UserSessionIndexShardKey returns the repairable user-session shard for a session.
+func (b KeyBuilder) UserSessionIndexShardKey(tenant string, normalizedAccount string, sessionID string) (string, error) {
+	shard, err := b.UserSessionIndexShard(sessionID)
+	if err != nil {
+		return "", err
+	}
+
+	return b.UserSessionIndexShardKeyByNumber(tenant, normalizedAccount, shard)
+}
+
+// UserSessionIndexShardKeyByNumber returns one repairable user-session shard key.
+func (b KeyBuilder) UserSessionIndexShardKeyByNumber(tenant string, normalizedAccount string, shard int) (string, error) {
 	hash, err := b.AffinityHash(tenant, normalizedAccount)
 	if err != nil {
 		return "", err
 	}
 
-	return b.namespaceBase() + ":idx:user:" + hash + ":sessions", nil
+	if err := b.validateShardNumber("keys", shard, b.userIndexShards); err != nil {
+		return "", err
+	}
+
+	return fmt.Sprintf("%s:idx:user:%s:sessions:%02d", b.namespaceBase(), hash, shard), nil
+}
+
+// UserSessionIndexShardKeys returns every repairable user-session shard key.
+func (b KeyBuilder) UserSessionIndexShardKeys(tenant string, normalizedAccount string) ([]string, error) {
+	keys := make([]string, 0, b.userIndexShards)
+	for shard := range b.userIndexShards {
+		key, err := b.UserSessionIndexShardKeyByNumber(tenant, normalizedAccount, shard)
+		if err != nil {
+			return nil, err
+		}
+
+		keys = append(keys, key)
+	}
+
+	return keys, nil
+}
+
+// SessionIndexShard returns the deterministic session locator shard number.
+func (b KeyBuilder) SessionIndexShard(sessionID string) (int, error) {
+	return b.indexShard("keys", sessionID, b.sessionIndexShards, "session id required")
+}
+
+// UserIndexShard returns the deterministic user index shard number.
+func (b KeyBuilder) UserIndexShard(affinityHash string) (int, error) {
+	return b.indexShard("keys", affinityHash, b.userIndexShards, "affinity hash required")
+}
+
+// UserSessionIndexShard returns the deterministic user-session shard number.
+func (b KeyBuilder) UserSessionIndexShard(sessionID string) (int, error) {
+	return b.indexShard("keys", sessionID, b.userIndexShards, "session id required")
+}
+
+// BackendSessionIndexShard returns the deterministic backend-session shard number.
+func (b KeyBuilder) BackendSessionIndexShard(sessionID string) (int, error) {
+	return b.indexShard("keys", sessionID, b.backendIndexShards, "session id required")
 }
 
 // namespaceBase returns the versioned Redis namespace prefix.
@@ -198,6 +390,27 @@ func (b KeyBuilder) namespaceBase() string {
 // affinityBase returns the per-affinity Redis key prefix.
 func (b KeyBuilder) affinityBase(hashTag string) string {
 	return b.namespaceBase() + ":" + hashTag
+}
+
+// validateShardNumber rejects a shard outside the configured index family.
+func (b KeyBuilder) validateShardNumber(operation string, shard int, total int) error {
+	if shard < 0 || shard >= total {
+		return newStateError(RedisErrorKindAmbiguousState, operation, "index shard out of range", nil)
+	}
+
+	return nil
+}
+
+// indexShard maps a stable value to one configured index shard.
+func (b KeyBuilder) indexShard(operation string, value string, total int, emptyMessage string) (int, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, newStateError(RedisErrorKindAmbiguousState, operation, emptyMessage, nil)
+	}
+
+	sum := sha256.Sum256([]byte(value))
+
+	return int(binary.BigEndian.Uint64(sum[:8]) % uint64(total)), nil
 }
 
 // validateAffinityOwnedKeys rejects Redis script keys outside one affinity hash tag.
@@ -278,4 +491,13 @@ func affinityKeySuffixAllowed(suffix string) bool {
 // normalizeAffinityPart canonicalizes input before hashing.
 func normalizeAffinityPart(value string) string {
 	return strings.ToLower(strings.TrimSpace(value))
+}
+
+// normalizeIndexShardCount applies production-safe defaults for zero-valued tests.
+func normalizeIndexShardCount(value int, fallback int) int {
+	if value <= 0 {
+		return fallback
+	}
+
+	return value
 }

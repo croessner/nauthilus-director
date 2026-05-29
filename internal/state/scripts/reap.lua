@@ -2,10 +2,11 @@
 --
 -- SPDX-License-Identifier: AGPL-3.0-only
 --
--- Repairs expired session leases, active affinity counts, backend counts and
+-- Repairs due session leases, active affinity counts, backend counts and
 -- repairable listing indexes using Redis server time.
 
 local session_index_key = KEYS[1]
+local session_due_index_key = KEYS[2]
 
 local limit = tonumber(ARGV[1])
 
@@ -43,26 +44,25 @@ local function decrement_backend(session_key)
 	return 1
 end
 
-if limit == nil or limit < 0 then
+if limit == nil or limit <= 0 then
 	return ambiguous("limit_invalid")
 end
 
 local now = now_ms()
-local entries = redis.call("HGETALL", session_index_key)
+local due_sessions = redis.call("ZRANGEBYSCORE", session_due_index_key, "-inf", now, "LIMIT", 0, limit)
 local scanned = 0
 local expired = 0
 local repaired_backends = 0
 
-for index = 1, #entries, 2 do
-	if limit > 0 and scanned >= limit then
-		break
-	end
-
-	local session_id = entries[index]
-	local session_key = entries[index + 1]
+for _, session_id in ipairs(due_sessions) do
 	scanned = scanned + 1
 
-	if session_key == false or session_key == nil or session_key == "" or redis.call("EXISTS", session_key) == 0 then
+	local session_key = redis.call("HGET", session_index_key, session_id)
+	if session_key == false or session_key == nil or session_key == "" then
+		redis.call("ZREM", session_due_index_key, session_id)
+		redis.call("HDEL", session_index_key, session_id)
+	elseif redis.call("EXISTS", session_key) == 0 then
+		redis.call("ZREM", session_due_index_key, session_id)
 		redis.call("HDEL", session_index_key, session_id)
 	else
 		local lease_expires_at = tonumber(redis.call("HGET", session_key, "lease_expires_at_ms") or "0")
@@ -70,22 +70,23 @@ for index = 1, #entries, 2 do
 			return ambiguous("lease_invalid")
 		end
 
-		local sessions_key = redis.call("HGET", session_key, "sessions_key")
-		local state_key = redis.call("HGET", session_key, "state_key")
-		if sessions_key == false or sessions_key == nil or sessions_key == "" then
-			return ambiguous("sessions_key_required")
-		end
-		if state_key == false or state_key == nil or state_key == "" then
-			return ambiguous("state_key_required")
-		end
+		if lease_expires_at > now then
+			redis.call("ZADD", session_due_index_key, lease_expires_at, session_id)
+		else
+			local sessions_key = redis.call("HGET", session_key, "sessions_key")
+			local state_key = redis.call("HGET", session_key, "state_key")
+			if sessions_key == false or sessions_key == nil or sessions_key == "" then
+				return ambiguous("sessions_key_required")
+			end
+			if state_key == false or state_key == nil or state_key == "" then
+				return ambiguous("state_key_required")
+			end
 
-		redis.call("ZREMRANGEBYSCORE", sessions_key, "-inf", now)
-		local score = tonumber(redis.call("ZSCORE", sessions_key, session_id) or "0")
-		if score == nil then
-			return ambiguous("session_score_invalid")
-		end
+			local idle_grace_ms = tonumber(redis.call("HGET", state_key, "idle_grace_ms") or redis.call("HGET", session_key, "idle_grace_ms") or "0")
+			if idle_grace_ms == nil or idle_grace_ms < 0 then
+				idle_grace_ms = 0
+			end
 
-		if lease_expires_at <= now or score <= now then
 			repaired_backends = repaired_backends + decrement_backend(session_key)
 
 			local backend_sessions_key = redis.call("HGET", session_key, "backend_sessions_key")
@@ -99,16 +100,12 @@ for index = 1, #entries, 2 do
 			end
 
 			redis.call("ZREM", sessions_key, session_id)
+			redis.call("ZREM", session_due_index_key, session_id)
 			redis.call("HDEL", session_index_key, session_id)
 			redis.call("DEL", session_key)
 
 			local active_count = redis.call("ZCARD", sessions_key)
 			if redis.call("EXISTS", state_key) == 1 then
-				local idle_grace_ms = tonumber(redis.call("HGET", state_key, "idle_grace_ms") or redis.call("HGET", session_key, "idle_grace_ms") or "0")
-				if idle_grace_ms == nil or idle_grace_ms < 0 then
-					idle_grace_ms = 0
-				end
-
 				if active_count == 0 and idle_grace_ms == 0 then
 					redis.call("DEL", state_key)
 					redis.call("DEL", sessions_key)

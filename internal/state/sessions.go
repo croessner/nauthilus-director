@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/croessner/nauthilus-director/internal/observability"
+	"github.com/redis/go-redis/v9"
 )
 
 const (
@@ -52,18 +53,23 @@ const (
 	scriptFieldServerTimeMS       = "server_time_ms"
 	scriptFieldServiceName        = "service_name"
 	scriptFieldSessionID          = "session_id"
+	scriptFieldSessionIndexKey    = "session_index_key"
+	scriptFieldSessionDueIndexKey = "session_due_index_key"
 	scriptFieldShardTag           = "shard_tag"
 	scriptFieldStatus             = "status"
 	scriptFieldTenant             = "tenant"
+	scriptFieldUserSessionsKey    = "user_sessions_key"
 )
 
 // RedisSessionStore coordinates active affinity and session leases through Redis scripts.
 type RedisSessionStore struct {
-	client    RedisClient
-	keys      KeyBuilder
-	registry  *ScriptRegistry
-	recorder  observability.Recorder
-	redisMode string
+	client           RedisClient
+	keys             KeyBuilder
+	registry         *ScriptRegistry
+	recorder         observability.Recorder
+	redisMode        string
+	indexPageDefault int
+	indexPageMax     int
 }
 
 // affinityMutationResult keeps authoritative affinity state and repair deltas together.
@@ -113,11 +119,13 @@ func NewRedisSessionStore(client RedisClient, keys KeyBuilder, registry *ScriptR
 	applied := applyRedisStoreOptions(options)
 
 	return &RedisSessionStore{
-		client:    client,
-		keys:      keys,
-		registry:  registry,
-		recorder:  applied.recorder,
-		redisMode: applied.redisMode,
+		client:           client,
+		keys:             keys,
+		registry:         registry,
+		recorder:         applied.recorder,
+		redisMode:        applied.redisMode,
+		indexPageDefault: applied.indexPageDefault,
+		indexPageMax:     applied.indexPageMax,
 	}, nil
 }
 
@@ -185,12 +193,22 @@ func (s *RedisSessionStore) AttachSelectedBackend(
 		return SessionBackendRecord{}, err
 	}
 
-	backendSessionIndexKey, err := s.keys.BackendSessionIndexKey(attachment.BackendIdentifier)
+	backendSessionIndexKey, err := s.keys.BackendSessionIndexShardKey(attachment.BackendIdentifier, attachment.SessionID)
 	if err != nil {
 		return SessionBackendRecord{}, err
 	}
 
-	userSessionIndexKey, err := s.keys.UserSessionIndexKey(attachment.Key.Tenant, attachment.Key.AccountKey)
+	userSessionIndexKey, err := s.keys.UserSessionIndexShardKey(attachment.Key.Tenant, attachment.Key.AccountKey, attachment.SessionID)
+	if err != nil {
+		return SessionBackendRecord{}, err
+	}
+
+	sessionIndexKey, err := s.keys.SessionIndexShardKey(attachment.SessionID)
+	if err != nil {
+		return SessionBackendRecord{}, err
+	}
+
+	sessionDueIndexKey, err := s.keys.SessionDueIndexShardKey(attachment.SessionID)
 	if err != nil {
 		return SessionBackendRecord{}, err
 	}
@@ -200,10 +218,11 @@ func (s *RedisSessionStore) AttachSelectedBackend(
 		keys.Sessions,
 		sessionKey,
 		backendRuntimeKey,
-		s.keys.SessionIndexKey(),
+		sessionIndexKey,
 		s.keys.BackendIndexKey(),
 		backendSessionIndexKey,
 		userSessionIndexKey,
+		sessionDueIndexKey,
 	},
 		attachment.SessionID,
 		attachment.BackendIdentifier,
@@ -232,7 +251,7 @@ func (s *RedisSessionStore) HeartbeatSession(
 		return AffinityRecord{}, newStateError(RedisErrorKindAmbiguousState, scriptHeartbeat, "lease ttl required", nil)
 	}
 
-	_, _, scriptKeys, err := s.heartbeatSessionScriptKeys(key, sessionID)
+	_, sessionKey, scriptKeys, err := s.heartbeatSessionScriptKeys(key, sessionID)
 	if err != nil {
 		return AffinityRecord{}, err
 	}
@@ -249,6 +268,8 @@ func (s *RedisSessionStore) HeartbeatSession(
 	if err != nil {
 		return AffinityRecord{}, err
 	}
+
+	s.writeRepairableOpenIndexes(ctx, result.Delta, sessionKey)
 
 	return result.Record, nil
 }
@@ -645,35 +666,83 @@ func parseSessionBackendRecord(value any) (SessionBackendRecord, error) {
 
 // writeRepairableOpenIndexes updates secondary indexes after authoritative open.
 func (s *RedisSessionStore) writeRepairableOpenIndexes(ctx context.Context, delta sessionMutationDelta, sessionKey string) {
-	userSessionIndexKey, err := s.keys.UserSessionIndexKey(delta.Tenant, delta.AccountKey)
+	userSessionIndexKey, err := s.keys.UserSessionIndexShardKey(delta.Tenant, delta.AccountKey, delta.SessionID)
 	if err != nil {
 		s.recordRedisOperation(redisContext(ctx), "open_repairable_indexes", time.Now(), err)
 
 		return
 	}
 
+	sessionIndexKey, err := s.keys.SessionIndexShardKey(delta.SessionID)
+	if err != nil {
+		s.recordRedisOperation(redisContext(ctx), "open_session_index", time.Now(), err)
+
+		return
+	}
+
+	sessionDueIndexKey, err := s.keys.SessionDueIndexShardKey(delta.SessionID)
+	if err != nil {
+		s.recordRedisOperation(redisContext(ctx), "open_session_due_index", time.Now(), err)
+
+		return
+	}
+
+	userIndexKey, err := s.keys.UserIndexShardKey(delta.AffinityHash)
+	if err != nil {
+		s.recordRedisOperation(redisContext(ctx), "open_user_index", time.Now(), err)
+
+		return
+	}
+
 	s.runRepairableIndexCommand(ctx, "open_session_index", func(redisCtx context.Context) error {
-		return s.client.HSet(redisCtx, s.keys.SessionIndexKey(), delta.SessionID, sessionKey).Err()
+		return s.client.HSet(redisCtx, sessionIndexKey, delta.SessionID, sessionKey).Err()
+	})
+	s.runRepairableIndexCommand(ctx, "open_session_due_index", func(redisCtx context.Context) error {
+		return s.client.ZAdd(redisCtx, sessionDueIndexKey, redisZ(delta.LeaseExpiresAt, delta.SessionID)).Err()
 	})
 	s.runRepairableIndexCommand(ctx, "open_user_index", func(redisCtx context.Context) error {
-		return s.client.SAdd(redisCtx, s.keys.UserIndexKey(), delta.AffinityHash).Err()
+		return s.client.HSet(redisCtx, userIndexKey, delta.AffinityHash, userIndexValue(delta.Tenant, delta.AccountKey)).Err()
 	})
 	s.runRepairableIndexCommand(ctx, "open_user_session_index", func(redisCtx context.Context) error {
 		return s.client.SAdd(redisCtx, userSessionIndexKey, delta.SessionID).Err()
+	})
+	s.runRepairableIndexCommand(ctx, "open_session_index_metadata", func(redisCtx context.Context) error {
+		return s.client.HSet(redisCtx, sessionKey,
+			scriptFieldSessionIndexKey, sessionIndexKey,
+			scriptFieldSessionDueIndexKey, sessionDueIndexKey,
+			scriptFieldUserSessionsKey, userSessionIndexKey,
+		).Err()
 	})
 }
 
 // writeRepairableCloseIndexes updates secondary indexes after authoritative close.
 func (s *RedisSessionStore) writeRepairableCloseIndexes(ctx context.Context, delta sessionMutationDelta) {
-	userSessionIndexKey, err := s.keys.UserSessionIndexKey(delta.Tenant, delta.AccountKey)
+	userSessionIndexKey, err := s.keys.UserSessionIndexShardKey(delta.Tenant, delta.AccountKey, delta.SessionID)
 	if err != nil {
 		s.recordRedisOperation(redisContext(ctx), "close_repairable_indexes", time.Now(), err)
 
 		return
 	}
 
+	sessionIndexKey, err := s.keys.SessionIndexShardKey(delta.SessionID)
+	if err != nil {
+		s.recordRedisOperation(redisContext(ctx), "close_session_index", time.Now(), err)
+
+		return
+	}
+
+	sessionDueIndexKey, err := s.keys.SessionDueIndexShardKey(delta.SessionID)
+	if err != nil {
+		s.recordRedisOperation(redisContext(ctx), "close_session_due_index", time.Now(), err)
+
+		return
+	}
+
 	s.runRepairableIndexCommand(ctx, "close_session_index", func(redisCtx context.Context) error {
-		return s.client.HDel(redisCtx, s.keys.SessionIndexKey(), delta.SessionID).Err()
+		return s.client.HDel(redisCtx, sessionIndexKey, delta.SessionID).Err()
+	})
+	s.runRepairableIndexCommand(ctx, "close_session_due_index", func(redisCtx context.Context) error {
+		return s.client.ZRem(redisCtx, sessionDueIndexKey, delta.SessionID).Err()
 	})
 	s.runRepairableIndexCommand(ctx, "close_user_session_index", func(redisCtx context.Context) error {
 		return s.client.SRem(redisCtx, userSessionIndexKey, delta.SessionID).Err()
@@ -683,7 +752,7 @@ func (s *RedisSessionStore) writeRepairableCloseIndexes(ctx context.Context, del
 		return
 	}
 
-	backendSessionIndexKey, err := s.keys.BackendSessionIndexKey(delta.BackendIdentifier)
+	backendSessionIndexKey, err := s.keys.BackendSessionIndexShardKey(delta.BackendIdentifier, delta.SessionID)
 	if err != nil {
 		s.recordRedisOperation(redisContext(ctx), "close_backend_session_index", time.Now(), err)
 
@@ -728,6 +797,16 @@ func (s *RedisSessionStore) runRepairableIndexCommand(ctx context.Context, opera
 	started := time.Now()
 	err := ClassifyRedisError(operation, command(redisCtx))
 	s.recordRedisOperation(redisCtx, operation, started, err)
+}
+
+// redisZ converts a millisecond timestamp into a Redis sorted-set score.
+func redisZ(score time.Time, member string) redis.Z {
+	return redis.Z{Score: float64(score.UnixMilli()), Member: member}
+}
+
+// userIndexValue stores enough identity to read one affinity without key material.
+func userIndexValue(tenant string, accountKey string) string {
+	return strings.TrimSpace(tenant) + "\t" + strings.TrimSpace(accountKey)
 }
 
 type parsedBackendScriptFields struct {

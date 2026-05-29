@@ -18,8 +18,12 @@ package state
 
 import (
 	"context"
+	"errors"
 	"strconv"
 	"strings"
+	"time"
+
+	"github.com/redis/go-redis/v9"
 )
 
 const (
@@ -119,7 +123,12 @@ func (s *RedisSessionStore) KillSession(ctx context.Context, request SessionKill
 		return SessionKillRecord{}, newStateError(RedisErrorKindAmbiguousState, scriptSessionKill, "reason required", nil)
 	}
 
-	value, err := s.runScript(ctx, scriptSessionKill, []string{s.keys.SessionIndexKey()},
+	sessionIndexKey, err := s.keys.SessionIndexShardKey(request.SessionID)
+	if err != nil {
+		return SessionKillRecord{}, err
+	}
+
+	value, err := s.runScript(ctx, scriptSessionKill, []string{sessionIndexKey},
 		normalizedStateValue(request.SessionID),
 		normalizedStateValue(request.Reason),
 		normalizedStateValue(request.Actor),
@@ -140,7 +149,7 @@ func (s *RedisSessionStore) SetBackendRuntime(
 		return BackendRuntimeRecord{}, err
 	}
 
-	backendRuntimeKey, backendSessionIndexKey, err := s.backendRuntimeKeys(mutation.BackendIdentifier)
+	backendRuntimeKey, _, err := s.backendRuntimeKeys(mutation.BackendIdentifier)
 	if err != nil {
 		return BackendRuntimeRecord{}, err
 	}
@@ -148,8 +157,6 @@ func (s *RedisSessionStore) SetBackendRuntime(
 	value, err := s.runScript(ctx, scriptBackendRuntimeSet, []string{
 		backendRuntimeKey,
 		s.keys.BackendIndexKey(),
-		backendSessionIndexKey,
-		s.keys.SessionIndexKey(),
 	},
 		normalizedStateValue(mutation.BackendIdentifier),
 		optionalBool(mutation.InService),
@@ -164,7 +171,21 @@ func (s *RedisSessionStore) SetBackendRuntime(
 		return BackendRuntimeRecord{}, err
 	}
 
-	return parseBackendRuntimeRecord(value)
+	record, err := parseBackendRuntimeRecord(value)
+	if err != nil {
+		return BackendRuntimeRecord{}, err
+	}
+
+	if backendRuntimeMutationMarksSessions(mutation) {
+		marked, markErr := s.markBackendRuntimeSessions(ctx, mutation.BackendIdentifier)
+		if markErr != nil {
+			return BackendRuntimeRecord{}, markErr
+		}
+
+		record.MarkedSessionCount = marked
+	}
+
+	return record, nil
 }
 
 // ClearBackendRuntime removes runtime-only backend overrides without touching counts.
@@ -225,6 +246,165 @@ func (s *RedisSessionStore) backendRuntimeKeys(backendIdentifier string) (string
 	}
 
 	return backendRuntimeKey, backendSessionIndexKey, nil
+}
+
+// backendRuntimeMutationMarksSessions reports whether active streams must observe drain.
+func backendRuntimeMutationMarksSessions(mutation BackendRuntimeMutation) bool {
+	if strings.EqualFold(strings.TrimSpace(mutation.MaintenanceMode), "hard") {
+		return true
+	}
+
+	return mutation.DrainEnabled
+}
+
+// markBackendRuntimeSessions applies heartbeat-observed drain to indexed backend sessions.
+func (s *RedisSessionStore) markBackendRuntimeSessions(ctx context.Context, backendIdentifier string) (int, error) {
+	indexKeys, err := s.keys.BackendSessionIndexShardKeys(backendIdentifier)
+	if err != nil {
+		return 0, err
+	}
+
+	redisCtx := redisContext(ctx)
+	total := 0
+
+	for _, indexKey := range indexKeys {
+		cursor := uint64(0)
+
+		for {
+			started := time.Now()
+
+			sessionIDs, next, scanErr := s.client.SScan(redisCtx, indexKey, cursor, "*", int64(s.indexPageMax)).Result()
+			if scanErr != nil {
+				classified := ClassifyRedisError(scriptBackendRuntimeSet, scanErr)
+				s.recordRedisOperation(redisCtx, "backend_session_index_scan", started, classified)
+
+				return total, classified
+			}
+
+			s.recordRedisOperation(redisCtx, "backend_session_index_scan", started, nil)
+
+			for _, sessionID := range sessionIDs {
+				marked, markErr := s.markBackendRuntimeSession(ctx, indexKey, sessionID)
+				if markErr != nil {
+					return total, markErr
+				}
+
+				if marked {
+					total++
+				}
+			}
+
+			if next == 0 {
+				break
+			}
+
+			cursor = next
+		}
+	}
+
+	return total, nil
+}
+
+// markBackendRuntimeSession marks one indexed session or removes stale membership.
+//
+//nolint:gocyclo,funlen // The repair path keeps locator, existence and generation handling together.
+func (s *RedisSessionStore) markBackendRuntimeSession(ctx context.Context, backendSessionsKey string, sessionID string) (bool, error) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return false, nil
+	}
+
+	sessionIndexKey, err := s.keys.SessionIndexShardKey(sessionID)
+	if err != nil {
+		return false, err
+	}
+
+	redisCtx := redisContext(ctx)
+	started := time.Now()
+
+	sessionKey, err := s.client.HGet(redisCtx, sessionIndexKey, sessionID).Result()
+	if errors.Is(err, redis.Nil) {
+		s.recordRedisOperation(redisCtx, "backend_session_locator_get", started, nil)
+		s.removeStaleBackendSessionIndex(ctx, backendSessionsKey, sessionID)
+
+		return false, nil
+	}
+
+	if err != nil {
+		classified := ClassifyRedisError(scriptBackendRuntimeSet, err)
+		s.recordRedisOperation(redisCtx, "backend_session_locator_get", started, classified)
+
+		return false, classified
+	}
+
+	s.recordRedisOperation(redisCtx, "backend_session_locator_get", started, nil)
+
+	if strings.TrimSpace(sessionKey) == "" {
+		s.removeStaleBackendSessionIndex(ctx, backendSessionsKey, sessionID)
+
+		return false, nil
+	}
+
+	exists, err := s.client.Exists(redisCtx, sessionKey).Result()
+	if err != nil {
+		classified := ClassifyRedisError(scriptBackendRuntimeSet, err)
+		s.recordRedisOperation(redisCtx, "backend_session_exists", time.Now(), classified)
+
+		return false, classified
+	}
+
+	if exists == 0 {
+		s.removeStaleBackendSessionIndex(ctx, backendSessionsKey, sessionID)
+		s.removeStaleSessionLocator(ctx, sessionIndexKey, sessionID)
+
+		return false, nil
+	}
+
+	observed, err := s.client.HGet(redisCtx, sessionKey, scriptFieldControlGeneration).Result()
+	if errors.Is(err, redis.Nil) {
+		observed = "0"
+	} else if err != nil {
+		classified := ClassifyRedisError(scriptBackendRuntimeSet, err)
+		s.recordRedisOperation(redisCtx, "backend_session_generation_get", time.Now(), classified)
+
+		return false, classified
+	}
+
+	generation, err := strconv.Atoi(strings.TrimSpace(observed))
+	if err != nil || generation < 0 {
+		return false, newStateError(RedisErrorKindAmbiguousState, scriptBackendRuntimeSet, "session control generation invalid", err)
+	}
+
+	started = time.Now()
+
+	err = s.client.HSet(redisCtx, sessionKey,
+		"session_control_generation", generation+1,
+		"session_control_action", "drain",
+	).Err()
+	if err != nil {
+		classified := ClassifyRedisError(scriptBackendRuntimeSet, err)
+		s.recordRedisOperation(redisCtx, "backend_session_mark", started, classified)
+
+		return false, classified
+	}
+
+	s.recordRedisOperation(redisCtx, "backend_session_mark", started, nil)
+
+	return true, nil
+}
+
+// removeStaleBackendSessionIndex removes one stale backend membership entry.
+func (s *RedisSessionStore) removeStaleBackendSessionIndex(ctx context.Context, backendSessionsKey string, sessionID string) {
+	s.runRepairableIndexCommand(ctx, "backend_session_index_stale_remove", func(redisCtx context.Context) error {
+		return s.client.SRem(redisCtx, backendSessionsKey, sessionID).Err()
+	})
+}
+
+// removeStaleSessionLocator removes one stale session locator entry.
+func (s *RedisSessionStore) removeStaleSessionLocator(ctx context.Context, sessionIndexKey string, sessionID string) {
+	s.runRepairableIndexCommand(ctx, "session_index_stale_remove", func(redisCtx context.Context) error {
+		return s.client.HDel(redisCtx, sessionIndexKey, sessionID).Err()
+	})
 }
 
 // validateUserMoveRequest rejects ambiguous move payloads before Redis mutation.

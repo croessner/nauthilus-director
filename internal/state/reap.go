@@ -16,22 +16,66 @@
 
 package state
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 const scriptReap = "reap"
 
 // ReapSessions repairs expired session leases, counts and listing indexes.
 func (s *RedisSessionStore) ReapSessions(ctx context.Context, request ReapRequest) (ReapRecord, error) {
-	if request.Limit < 0 {
-		return ReapRecord{}, newStateError(RedisErrorKindAmbiguousState, scriptReap, "limit must not be negative", nil)
+	if request.Limit <= 0 {
+		return ReapRecord{}, newStateError(RedisErrorKindAmbiguousState, scriptReap, "limit must be greater than zero", nil)
 	}
 
-	value, err := s.runScript(ctx, scriptReap, []string{s.keys.SessionIndexKey()}, request.Limit)
-	if err != nil {
-		return ReapRecord{}, err
+	remaining := request.Limit
+
+	deadline := time.Time{}
+	if request.MaxPassDuration > 0 {
+		deadline = time.Now().Add(request.MaxPassDuration)
 	}
 
-	return parseReapRecord(value)
+	total := ReapRecord{Status: "reaped"}
+
+	for shard := 0; shard < s.keys.sessionIndexShards && remaining > 0; shard++ {
+		if !deadline.IsZero() && !time.Now().Before(deadline) {
+			break
+		}
+
+		sessionIndexKey, err := s.keys.SessionIndexShardKeyByNumber(shard)
+		if err != nil {
+			return ReapRecord{}, err
+		}
+
+		sessionDueIndexKey, err := s.keys.SessionDueIndexShardKeyByNumber(shard)
+		if err != nil {
+			return ReapRecord{}, err
+		}
+
+		value, err := s.runScript(ctx, scriptReap, []string{sessionIndexKey, sessionDueIndexKey}, remaining)
+		if err != nil {
+			return ReapRecord{}, err
+		}
+
+		record, err := parseReapRecord(value)
+		if err != nil {
+			return ReapRecord{}, err
+		}
+
+		total.ScannedSessions += record.ScannedSessions
+		total.ExpiredSessions += record.ExpiredSessions
+		total.RepairedBackends += record.RepairedBackends
+		total.ServerTime = record.ServerTime
+
+		if total.ScannedSessions > 0 {
+			total.Status = record.Status
+		}
+
+		remaining -= record.ScannedSessions
+	}
+
+	return total, nil
 }
 
 // parseReapRecord converts the expired-session repair payload.
