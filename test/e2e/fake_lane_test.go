@@ -62,20 +62,21 @@ import (
 )
 
 const (
-	e2eAccount       = "alice@example.test"
-	e2eBackendAID    = "mailstore-a-imap"
-	e2eBackendBID    = "mailstore-b-imap"
-	e2eBackendPool   = "imap-default"
-	e2eListenerName  = "imap"
-	e2ePassword      = "e2e-secret-password"
-	e2eProtocol      = "imap"
-	e2eService       = "imap"
-	e2eShardTagB     = "mailstore-b"
-	e2eShardTag      = "mailstore-a"
-	e2eTenant        = "default"
-	e2eToken         = "e2e-bearer-token"
-	fakeBackendReady = "* OK fake IMAP backend ready\r\n"
-	serverBinaryEnv  = "NAUTHILUS_DIRECTOR_E2E_SERVER_BINARY"
+	e2eAccount          = "alice@example.test"
+	e2eBackendAID       = "mailstore-a-imap"
+	e2eBackendBID       = "mailstore-b-imap"
+	e2eBackendPool      = "imap-default"
+	e2eListenerName     = "imap"
+	e2ePassword         = "e2e-secret-password"
+	e2eProtocol         = "imap"
+	e2eProcessKeyPrefix = "nauthilus-director-e2e-process"
+	e2eService          = "imap"
+	e2eShardTagB        = "mailstore-b"
+	e2eShardTag         = "mailstore-a"
+	e2eTenant           = "default"
+	e2eToken            = "e2e-bearer-token"
+	fakeBackendReady    = "* OK fake IMAP backend ready\r\n"
+	serverBinaryEnv     = "NAUTHILUS_DIRECTOR_E2E_SERVER_BINARY"
 )
 
 // TestFakeHTTPAuthorityPublicIMAPFlow proves the guardrail lane uses public sockets.
@@ -211,6 +212,63 @@ func TestServerBinaryControlRESTCLIParity(t *testing.T) {
 	output := runDirectorctl(t, ctl, controlURL, "backends", "show", e2eBackendAID)
 	if !strings.Contains(output, "in_service=true") {
 		t.Fatalf("CLI backend state after REST in = %q", output)
+	}
+}
+
+// TestServerBinaryRuntimePaginationUsesSeededRedisState proves generated REST and CLI pagination.
+func TestServerBinaryRuntimePaginationUsesSeededRedisState(t *testing.T) {
+	binary := e2eServerBinary(t)
+	ctl := buildDirectorctl(t)
+	redisFixture := startValkeySessionStore(t)
+	authority := startFakeHTTPAuthority(t, map[string][]string{
+		"account":   {e2eAccount},
+		"tenant":    {e2eTenant},
+		"mailShard": {e2eShardTag},
+	})
+	fakeBackend := startFakeIMAPBackend(t, fakeBackendOptions{})
+	directorAddress := net.JoinHostPort("127.0.0.1", strconv.Itoa(reserveLoopbackPort(t)))
+	controlAddress := net.JoinHostPort("127.0.0.1", strconv.Itoa(reserveLoopbackPort(t)))
+	controlURL := "http://" + controlAddress
+	configPath := writeProcessConfig(t, processConfigOptions{
+		RedisAddress:    redisFixture.addr,
+		AuthorityURL:    authority.URL(),
+		DirectorAddress: directorAddress,
+		ControlAddress:  controlAddress,
+		ControlEnabled:  true,
+		BackendAddress:  fakeBackend.Address(),
+	})
+	process := startDirectorProcess(t, binary, configPath)
+
+	waitForControlReady(t, controlURL, process)
+	seedProcessRuntimeSessions(t, processRuntimeStore(t, redisFixture.addr), 3)
+
+	first := getSessionListPage(t, controlURL, "2", "")
+	if len(first.Sessions) != 2 || first.NextCursor == nil || strings.TrimSpace(*first.NextCursor) == "" {
+		t.Fatalf("first REST session page = %#v, want two sessions and cursor", first)
+	}
+	second := getSessionListPage(t, controlURL, "2", *first.NextCursor)
+	if len(second.Sessions) != 1 || second.NextCursor != nil {
+		t.Fatalf("second REST session page = %#v, want final single session", second)
+	}
+
+	cliFirst := runDirectorctl(t, ctl, controlURL, "sessions", "list", "--limit", "2")
+	cliCursor := nextCursorFromCLI(t, cliFirst)
+	cliSecond := runDirectorctl(t, ctl, controlURL, "sessions", "list", "--limit", "2", "--cursor", cliCursor)
+	if strings.Count(cliFirst, "session_id=") != 2 || strings.Count(cliSecond, "session_id=") != 1 {
+		t.Fatalf("CLI session pages = %q / %q, want 2 then 1 sessions", cliFirst, cliSecond)
+	}
+	if strings.Contains(cliSecond, "more=true") {
+		t.Fatalf("second CLI session page still advertised continuation: %q", cliSecond)
+	}
+
+	cliUsers := runDirectorctl(t, ctl, controlURL, "users", "list", "--limit", "2", "--all")
+	for _, want := range []string{"user_key=e2e-scale-0@example.test", "user_key=e2e-scale-1@example.test", "user_key=e2e-scale-2@example.test"} {
+		if !strings.Contains(cliUsers, want) {
+			t.Fatalf("CLI users --all output = %q, want %q", cliUsers, want)
+		}
+	}
+	if strings.Contains(cliUsers, "more=true") {
+		t.Fatalf("CLI users --all output advertised continuation: %q", cliUsers)
 	}
 }
 
@@ -852,7 +910,7 @@ runtime:
 storage:
   redis:
     protocol: 2
-    key_prefix: "nauthilus-director-e2e-process"
+    key_prefix: %q
     standalone:
       address: %q
     auth:
@@ -908,6 +966,7 @@ director:
         enabled: false
 `, options.ControlEnabled,
 		controlAddress,
+		e2eProcessKeyPrefix,
 		options.RedisAddress,
 		options.AuthorityURL,
 		options.DirectorAddress,
@@ -938,6 +997,75 @@ director:
 	}
 
 	return path
+}
+
+// processRuntimeStore creates a Redis store using the real-process key prefix.
+func processRuntimeStore(t *testing.T, redisAddress string) *state.RedisSessionStore {
+	t.Helper()
+
+	client := redis.NewClient(&redis.Options{Addr: redisAddress, Protocol: 2})
+	t.Cleanup(func() { _ = client.Close() })
+	builder, err := state.NewKeyBuilder(state.KeyBuilderOptions{Prefix: e2eProcessKeyPrefix, SchemaVersion: 1})
+	if err != nil {
+		t.Fatalf("NewKeyBuilder: %v", err)
+	}
+	store, err := state.NewRedisSessionStore(client, builder, nil)
+	if err != nil {
+		t.Fatalf("NewRedisSessionStore: %v", err)
+	}
+
+	return store
+}
+
+// seedProcessRuntimeSessions writes active runtime state for real-binary control reads.
+func seedProcessRuntimeSessions(t *testing.T, store *state.RedisSessionStore, count int) {
+	t.Helper()
+
+	for index := range count {
+		user := fmt.Sprintf("e2e-scale-%d@example.test", index)
+		sessionID := fmt.Sprintf("e2e-scale-session-%d", index)
+		key := state.AffinityKey{Tenant: e2eTenant, AccountKey: user}
+		record := state.SessionRecord{
+			ID:                 sessionID,
+			Key:                key,
+			Protocol:           e2eProtocol,
+			ListenerName:       e2eListenerName,
+			ServiceName:        e2eService,
+			ShardTag:           e2eShardTag,
+			DirectorInstanceID: "e2e-scale-director",
+			LeaseTTL:           5 * time.Minute,
+			IdleGrace:          time.Minute,
+		}
+		if _, err := store.OpenSession(context.Background(), record); err != nil {
+			t.Fatalf("OpenSession %s: %v", sessionID, err)
+		}
+
+		attachProcessRuntimeBackend(t, store, key, sessionID)
+	}
+}
+
+// attachProcessRuntimeBackend reserves and attaches one backend slot for a seeded session.
+func attachProcessRuntimeBackend(t *testing.T, store *state.RedisSessionStore, key state.AffinityKey, sessionID string) {
+	t.Helper()
+
+	reservationID := "reservation-" + sessionID
+	if _, err := store.ReserveBackendCapacity(context.Background(), state.BackendReservationRequest{
+		BackendIdentifier: e2eBackendAID,
+		ReservationID:     reservationID,
+		MaxConnections:    100,
+		LeaseTTL:          5 * time.Minute,
+	}); err != nil {
+		t.Fatalf("ReserveBackendCapacity %s: %v", sessionID, err)
+	}
+	if _, err := store.AttachSelectedBackend(context.Background(), state.SessionBackendAttachment{
+		Key:               key,
+		SessionID:         sessionID,
+		BackendIdentifier: e2eBackendAID,
+		ReservationID:     reservationID,
+		MaxConnections:    100,
+	}); err != nil {
+		t.Fatalf("AttachSelectedBackend %s: %v", sessionID, err)
+	}
 }
 
 // quotedYAMLStrings renders a small inline string sequence.
@@ -1825,6 +1953,39 @@ func getBackendDetail(t *testing.T, baseURL string, backendID string) generated.
 	requestJSON(t, http.MethodGet, baseURL+"/api/v1/backends/"+backendID, nil, http.StatusOK, &response)
 
 	return response
+}
+
+// getSessionListPage reads one generated session page through the public REST API.
+func getSessionListPage(t *testing.T, baseURL string, limit string, cursor string) generated.SessionListResponse {
+	t.Helper()
+
+	values := url.Values{"limit": []string{limit}}
+	if strings.TrimSpace(cursor) != "" {
+		values.Set("cursor", cursor)
+	}
+
+	var response generated.SessionListResponse
+	requestJSON(t, http.MethodGet, baseURL+"/api/v1/sessions?"+values.Encode(), nil, http.StatusOK, &response)
+
+	return response
+}
+
+// nextCursorFromCLI extracts the continuation cursor from text-mode CLI output.
+func nextCursorFromCLI(t *testing.T, output string) string {
+	t.Helper()
+
+	for field := range strings.FieldsSeq(output) {
+		if value, ok := strings.CutPrefix(field, "next_cursor="); ok {
+			value = strings.Trim(value, `"`)
+			if value != "" {
+				return value
+			}
+		}
+	}
+
+	t.Fatalf("CLI output did not contain next_cursor: %q", output)
+
+	return ""
 }
 
 // postAccepted posts one generated JSON body and expects an accepted response.

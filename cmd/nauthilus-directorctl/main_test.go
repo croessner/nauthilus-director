@@ -342,6 +342,36 @@ func TestRuntimeListAllIteratesUntilCursorExhausted(t *testing.T) {
 	}
 }
 
+// TestRuntimeUserListAllIteratesUntilCursorExhausted verifies explicit user walks are paginated.
+func TestRuntimeUserListAllIteratesUntilCursorExhausted(t *testing.T) {
+	nextCursor := "user-cursor-b"
+	fake := newFakeControlClient()
+	fake.listUserPages = []generated.UserListResponse{
+		{NextCursor: &nextCursor, Users: []generated.UserDetail{userA()}},
+		{Users: []generated.UserDetail{userB()}},
+	}
+
+	stdout, stderr, code := runWithFakeClient([]string{"users", "list", "--all"}, fake)
+	if code != 0 {
+		t.Fatalf("users list --all returned exit code %d, want 0; stderr=%q", code, stderr)
+	}
+	if !reflect.DeepEqual(fake.calls, []string{"ListUsers", "ListUsers"}) {
+		t.Fatalf("calls = %#v, want two ListUsers calls", fake.calls)
+	}
+	if len(fake.listUsersHistory) != 2 || fake.listUsersHistory[0].Cursor != nil || fake.listUsersHistory[1].Cursor == nil {
+		t.Fatalf("user cursor history = %#v, want nil then cursor", fake.listUsersHistory)
+	}
+	if got := string(*fake.listUsersHistory[1].Cursor); got != nextCursor {
+		t.Fatalf("second user cursor = %q, want %q", got, nextCursor)
+	}
+	if !strings.Contains(stdout, "user_key=user-a") || !strings.Contains(stdout, "user_key=user-b") {
+		t.Fatalf("stdout = %q, want both paged users", stdout)
+	}
+	if strings.Contains(stdout, "more=true") {
+		t.Fatalf("stdout = %q, want no continuation after --all completes", stdout)
+	}
+}
+
 // TestRuntimeListAllDetectsRepeatedCursor verifies pagination loops fail closed.
 func TestRuntimeListAllDetectsRepeatedCursor(t *testing.T) {
 	repeated := "same-cursor"
@@ -872,6 +902,14 @@ func userA() generated.UserDetail {
 		Affinity:       &affinity,
 		UserKey:        "user-a",
 	}
+}
+
+// userB returns a second stable user fixture.
+func userB() generated.UserDetail {
+	user := userA()
+	user.UserKey = "user-b"
+
+	return user
 }
 
 // runtimeSummaryFixture returns a stable aggregate summary fixture.

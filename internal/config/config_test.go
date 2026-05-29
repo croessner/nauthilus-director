@@ -72,6 +72,7 @@ func TestTargetConfigDecodesAndValidates(t *testing.T) {
 // TestDemoStackConfigDecodesAndValidates keeps the public demo aligned with typed config.
 func TestDemoStackConfigDecodesAndValidates(t *testing.T) {
 	t.Setenv("DIRECTOR_INSTANCE_NAME", "demo-director-test")
+	t.Setenv("DOVECOT_MASTER_PASSWORD", "demo-master-password-test")
 
 	snapshot, err := NewLoader().LoadFile(filepath.Join("..", "..", "contrib", "demo-stack", "director", "nauthilus-director.yml"))
 	if err != nil {

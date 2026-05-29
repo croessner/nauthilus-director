@@ -1151,6 +1151,12 @@ Binary-entry E2E proves CLI and REST state parity against the running
 control surface against six real Dovecot backends behind three Director
 processes.
 
+The follow-up million-scale runtime-state pass is complete within the M2/M3
+scope. Runtime reads are cursor-paginated, reaping is due-time bounded, backend
+capacity uses Redis Cluster-safe reservations, aggregate summaries avoid full
+session listing and the optional Redis/Redis Cluster scale harness is documented
+outside normal guardrails.
+
 - OpenAPI-first workflow
 - generated REST server boundary
 - reproducible OpenAPI generation and stale-output check

@@ -1,9 +1,9 @@
 # M2/M3 Runtime State Million-Scale Change Specification
 
-Status: draft. This change specification is pending implementation. It amends
-the completed M2/M3 backend runtime and control milestone so the Redis-backed
-runtime state can scale from demonstration and moderate production sizes to
-deployments with millions of active or recently idle frontend sessions.
+Status: completed. This change specification amends the completed M2/M3 backend
+runtime and control milestone so the Redis-backed runtime state can scale from
+demonstration and moderate production sizes to deployments with millions of
+active or recently idle frontend sessions.
 
 This document does not replace the M6 ManageSieve milestone in the architecture
 roadmap. It is a focused M2/M3 runtime-state change set because the affected
@@ -856,20 +856,45 @@ Makefile
 
 ## Top-Level Acceptance Checklist
 
-- [ ] Authoritative affinity scripts touch only same-slot affinity keys.
-- [ ] Backend capacity enforcement is Redis Cluster-safe and fail-closed.
-- [ ] Reaping is due-time and bounded by batch size and duration.
-- [ ] Runtime session, user and backend list APIs are cursor-paginated.
-- [ ] REST and CLI default list operations have hard maximum page sizes.
-- [ ] `users list` no longer derives users by loading every session.
-- [ ] Full-index `HGETALL`, unbounded `SMEMBERS`, `KEYS` and whole-index Lua
+- [x] Authoritative affinity scripts touch only same-slot affinity keys.
+- [x] Backend capacity enforcement is Redis Cluster-safe and fail-closed.
+- [x] Reaping is due-time and bounded by batch size and duration.
+- [x] Runtime session, user and backend list APIs are cursor-paginated.
+- [x] REST and CLI default list operations have hard maximum page sizes.
+- [x] `users list` no longer derives users by loading every session.
+- [x] Full-index `HGETALL`, unbounded `SMEMBERS`, `KEYS` and whole-index Lua
       reads are absent from million-scale runtime paths.
-- [ ] Aggregates answer common operator totals without full scans.
-- [ ] OpenAPI server/client code is regenerated reproducibly.
-- [ ] Config defaults, generated references, manpages and examples are updated.
-- [ ] Deterministic tests prove bounded operation shape.
-- [ ] Optional stress harness documentation explains Redis Cluster sizing limits.
-- [ ] `make guardrails` passes after implementation.
+- [x] Aggregates answer common operator totals without full scans.
+- [x] OpenAPI server/client code is regenerated reproducibly.
+- [x] Config defaults, generated references, manpages and examples are updated.
+- [x] Deterministic tests prove bounded operation shape.
+- [x] Optional stress harness documentation explains Redis Cluster sizing limits.
+- [x] `make guardrails` passes after implementation.
+
+### Completion Evidence
+
+The million-scale runtime-state redesign keeps authoritative affinity scripts
+inside one affinity hash slot, uses backend-local reservation scripts for
+capacity, writes repairable sharded indexes and reads runtime sessions and
+users through bounded cursors. Runtime read cursors now carry an intra-scan
+offset so Redis `HSCAN` or `SSCAN` batches cannot exceed the configured page
+limit even when Redis returns more entries than requested.
+
+Deterministic unit and integration coverage includes cursor round-trips and
+tamper rejection, maximum page-size enforcement, large seeded session and user
+indexes, due-time reaper behavior, idempotent backend reservation repair,
+aggregate repair behavior, generated REST pagination and generated-client CLI
+pagination including `--all`. The production-binary E2E lane seeds Redis
+runtime state and proves paginated REST plus `nauthilus-directorctl` reads
+through public process boundaries.
+
+The optional `test/scale` harness can target standalone Redis or Redis Cluster
+only when an explicit target is supplied. It refuses non-loopback or
+production-looking targets unless an override is set, avoids destructive Redis
+commands, reports active counts, open/heartbeat/close/reaper rates, latency
+percentiles, error classes, memory estimates and Cluster slot distribution, and
+is documented in `docs/scale-runtime-state.md`. `make guardrails` intentionally
+does not run unbounded stress targets.
 
 ## Final Review Questions
 

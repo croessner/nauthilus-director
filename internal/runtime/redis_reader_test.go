@@ -95,6 +95,25 @@ func TestRedisRuntimeReaderListSessionsAcceptsPublicCursor(t *testing.T) {
 	}
 }
 
+// TestRedisRuntimeReaderRejectsTamperedPublicCursor verifies public cursor integrity.
+func TestRedisRuntimeReaderRejectsTamperedPublicCursor(t *testing.T) {
+	store := &pagedRuntimeReadStore{
+		limits:      state.RuntimeReadPageLimits{Default: 2, Max: 3},
+		sessionPage: state.RuntimeSessionPage{NextCursor: runtimeReaderStateCursorB},
+	}
+	reader := NewRedisRuntimeReader(store)
+
+	first, err := reader.ListSessions(context.Background(), SessionListRequest{})
+	if err != nil {
+		t.Fatalf("ListSessions returned error: %v", err)
+	}
+
+	_, err = reader.ListSessions(context.Background(), SessionListRequest{Cursor: tamperRuntimeCursor(first.NextCursor)})
+	if !IsErrorKind(err, ErrorKindInvalidRequest) {
+		t.Fatalf("ListSessions tampered cursor error = %v, want invalid request", err)
+	}
+}
+
 // TestRedisRuntimeReaderListUsersUsesPagedStore verifies user pages do not derive from sessions.
 func TestRedisRuntimeReaderListUsersUsesPagedStore(t *testing.T) {
 	store := &pagedRuntimeReadStore{
@@ -292,4 +311,13 @@ func assertSessionListResult(t *testing.T, result SessionListResult, wantFirst s
 		result.Sessions[1].SessionID != wantSecond {
 		t.Fatalf("sessions = %#v, want deterministic session-id order", result.Sessions)
 	}
+}
+
+// tamperRuntimeCursor changes one byte while keeping a non-empty cursor string.
+func tamperRuntimeCursor(cursor string) string {
+	if before, ok := strings.CutSuffix(cursor, "A"); ok {
+		return before + "B"
+	}
+
+	return cursor[:len(cursor)-1] + "A"
 }
