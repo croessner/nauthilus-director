@@ -54,6 +54,54 @@ func TestVersionOutput(t *testing.T) {
 	}
 }
 
+// TestHelpOutputListsCommands verifies server help exposes its subcommands.
+func TestHelpOutputListsCommands(t *testing.T) {
+	var rootOut, rootErr bytes.Buffer
+	code := run([]string{"--help"}, &rootOut, &rootErr)
+	if code != 0 {
+		t.Fatalf("root help exit code %d, want 0; stderr=%q", code, rootErr.String())
+	}
+	rootHelp := rootOut.String()
+	for _, want := range []string{
+		"Available Commands:",
+		"config",
+		"serve",
+		"--config",
+		"Use \"nauthilus-director [command] --help\"",
+	} {
+		if !strings.Contains(rootHelp, want) {
+			t.Fatalf("root help missing %q:\n%s", want, rootHelp)
+		}
+	}
+
+	var dumpOut, dumpErr bytes.Buffer
+	code = run([]string{"config", "dump", "--help"}, &dumpOut, &dumpErr)
+	if code != 0 {
+		t.Fatalf("config dump help exit code %d, want 0; stderr=%q", code, dumpErr.String())
+	}
+	dumpHelp := dumpOut.String()
+	for _, want := range []string{"--defaults", "--non-default", "--protected", "--format", "Global Flags:"} {
+		if !strings.Contains(dumpHelp, want) {
+			t.Fatalf("config dump help missing %q:\n%s", want, dumpHelp)
+		}
+	}
+}
+
+// TestLongOptionsRequireDoubleDash rejects long options written with one dash.
+func TestLongOptionsRequireDoubleDash(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runWithContext(context.Background(), []string{"-config", "/tmp/director.yml", "serve"}, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("run returned exit code %d, want 2; stderr=%q", code, stderr.String())
+	}
+	if stdout.String() != "" {
+		t.Fatalf("stdout = %q, want empty output", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "long options require double dash: -config") {
+		t.Fatalf("stderr = %q, want double-dash guidance", stderr.String())
+	}
+}
+
 // TestConfigDumpDefaultsCommand verifies the CLI default dump stays redacted.
 func TestConfigDumpDefaultsCommand(t *testing.T) {
 	var (
