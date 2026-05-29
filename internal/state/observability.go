@@ -33,11 +33,21 @@ const (
 	redisObservationModeUnknown      = "unknown"
 	redisObservationResultFailure    = "failure"
 	redisObservationResultOK         = "ok"
+	runtimePaginationFieldLimit      = "limit"
+	runtimePaginationFieldOperation  = "operation"
+	runtimePaginationFieldPageBucket = "page_size_bucket"
+	runtimePaginationFieldReason     = "reason_class"
+	runtimePaginationFieldResult     = "result"
+	runtimePaginationResultEmpty     = "empty"
+	runtimePaginationResultMore      = "more"
+	runtimePaginationResultPartial   = "partial"
 )
 
 type redisStoreOptions struct {
-	recorder  observability.Recorder
-	redisMode string
+	recorder         observability.Recorder
+	redisMode        string
+	indexPageDefault int
+	indexPageMax     int
 }
 
 // RedisSessionStoreOption customizes Redis state-store construction.
@@ -57,11 +67,21 @@ func WithRedisMode(mode string) RedisSessionStoreOption {
 	}
 }
 
+// WithRuntimeIndexPages configures bounded repairable index reads.
+func WithRuntimeIndexPages(pageDefault int, pageMax int) RedisSessionStoreOption {
+	return func(options *redisStoreOptions) {
+		options.indexPageDefault = pageDefault
+		options.indexPageMax = pageMax
+	}
+}
+
 // defaultRedisStoreOptions keeps state-store telemetry disabled unless injected.
 func defaultRedisStoreOptions() redisStoreOptions {
 	return redisStoreOptions{
-		recorder:  observability.NoopRecorder{},
-		redisMode: redisObservationModeUnknown,
+		recorder:         observability.NoopRecorder{},
+		redisMode:        redisObservationModeUnknown,
+		indexPageDefault: 100,
+		indexPageMax:     1000,
 	}
 }
 
@@ -78,6 +98,18 @@ func applyRedisStoreOptions(options []RedisSessionStoreOption) redisStoreOptions
 	applied.recorder = observability.NormalizeRecorder(applied.recorder)
 	if strings.TrimSpace(applied.redisMode) == "" {
 		applied.redisMode = redisObservationModeUnknown
+	}
+
+	if applied.indexPageDefault <= 0 {
+		applied.indexPageDefault = 100
+	}
+
+	if applied.indexPageMax <= 0 {
+		applied.indexPageMax = 1000
+	}
+
+	if applied.indexPageDefault > applied.indexPageMax {
+		applied.indexPageDefault = applied.indexPageMax
 	}
 
 	return applied
@@ -129,4 +161,74 @@ func redisReasonClass(err error) string {
 	}
 
 	return "transport"
+}
+
+// recordRuntimePagination emits one bounded page-read observation without cursor values.
+func (s *RedisSessionStore) recordRuntimePagination(
+	ctx context.Context,
+	operation string,
+	records int,
+	limit int,
+	hasMore bool,
+	started time.Time,
+) {
+	if s == nil {
+		return
+	}
+
+	result := runtimePaginationResultPartial
+
+	switch {
+	case hasMore:
+		result = runtimePaginationResultMore
+	case records == 0:
+		result = runtimePaginationResultEmpty
+	}
+
+	operation = strings.TrimSpace(operation)
+	if operation == "" {
+		operation = operationRuntimeRead
+	}
+
+	fields := map[string]string{
+		runtimePaginationFieldLimit:      runtimePaginationLimitBucket(limit),
+		runtimePaginationFieldOperation:  operation,
+		runtimePaginationFieldPageBucket: runtimePaginationLimitBucket(records),
+		runtimePaginationFieldReason:     redisObservationResultOK,
+		runtimePaginationFieldResult:     result,
+	}
+	labels := map[string]string{
+		runtimePaginationFieldOperation: operation,
+		runtimePaginationFieldReason:    redisObservationResultOK,
+		runtimePaginationFieldResult:    result,
+	}
+
+	event, err := observability.NewEvent(observability.EventRuntimePagination, "", fields, labels)
+	if err != nil {
+		return
+	}
+
+	if !started.IsZero() {
+		event.Measurements = observability.NewMetricMeasurements(map[string]float64{
+			observability.MetricMeasurementDurationSeconds: time.Since(started).Seconds(),
+		})
+	}
+
+	observability.NormalizeRecorder(s.recorder).Record(ctx, event)
+}
+
+// runtimePaginationLimitBucket keeps page-size details bounded in logs.
+func runtimePaginationLimitBucket(value int) string {
+	switch {
+	case value <= 0:
+		return "0"
+	case value <= 10:
+		return "1_10"
+	case value <= 100:
+		return "11_100"
+	case value <= 1000:
+		return "101_1000"
+	default:
+		return "gt_1000"
+	}
 }

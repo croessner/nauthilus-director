@@ -166,6 +166,84 @@ func TestRuntimeSelectorMaxConnectionsExcludesFullBackend(t *testing.T) {
 	}
 }
 
+// TestRuntimeSelectorSafetyExclusionsPrecedeCapacity verifies hard exclusions win over capacity.
+func TestRuntimeSelectorSafetyExclusionsPrecedeCapacity(t *testing.T) {
+	now := time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)
+
+	for _, testCase := range []safetyExclusionCase{
+		{
+			name: "drain",
+			snapshot: RuntimeSnapshot{RuntimeOverride: RuntimeOverride{
+				Drain: &DrainState{Enabled: true, Mode: DrainModeHard},
+			}},
+			wantReason: EffectiveExclusionRuntimeDrain,
+		},
+		{
+			name: "hard maintenance",
+			snapshot: RuntimeSnapshot{RuntimeOverride: RuntimeOverride{
+				Maintenance: &MaintenanceState{Mode: MaintenanceModeHard},
+			}},
+			wantReason: EffectiveExclusionRuntimeHardMaintenance,
+		},
+		{
+			name: "runtime out",
+			snapshot: RuntimeSnapshot{RuntimeOverride: RuntimeOverride{
+				InService: new(false),
+			}},
+			wantReason: EffectiveExclusionRuntimeOut,
+		},
+		{
+			name: "hard down",
+			snapshot: RuntimeSnapshot{Health: HealthState{
+				Enabled:   true,
+				Status:    HealthStatusUnhealthy,
+				ExpiresAt: now.Add(time.Minute),
+			}},
+			enforceHealth: true,
+			wantReason:    EffectiveExclusionHealth,
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			assertSafetyExclusionPrecedesCapacity(t, testCase, now)
+		})
+	}
+}
+
+type safetyExclusionCase struct {
+	name          string
+	snapshot      RuntimeSnapshot
+	enforceHealth bool
+	wantReason    EffectiveExclusionReason
+}
+
+// assertSafetyExclusionPrecedesCapacity verifies safety exclusions hide capacity exhaustion.
+func assertSafetyExclusionPrecedesCapacity(t *testing.T, testCase safetyExclusionCase, now time.Time) {
+	t.Helper()
+
+	policy := runtimeSelectionPolicy(true)
+	if testCase.enforceHealth {
+		policy.EffectiveBackend.EnforceHealth = true
+	}
+
+	selector := mustRuntimeSelector(t, singleBackendConfig(string(MaintenanceModeDisabled), 100), fakeSnapshots{
+		testBackendID: testCase.snapshot,
+	}, policy)
+	selector.WithClock(func() time.Time { return now })
+
+	explanation, err := selector.Explain(context.Background(), defaultSelectionRequest(testAccountKey))
+	if !IsErrorKind(err, ErrorKindNoBackend) {
+		t.Fatalf("Explain error = %v, want no_backend", err)
+	}
+
+	if len(explanation.EffectiveBackends) != 1 || !explanation.EffectiveBackends[0].HasExclusion(testCase.wantReason) {
+		t.Fatalf("effective backends = %#v, want exclusion %q", explanation.EffectiveBackends, testCase.wantReason)
+	}
+
+	if explanation.EffectiveBackends[0].HasExclusion(EffectiveExclusionMaxConnections) {
+		t.Fatalf("capacity exclusion unexpectedly present for %s: %#v", testCase.name, explanation.EffectiveBackends[0].Exclusions)
+	}
+}
+
 // TestRuntimeSelectorActiveAffinityOverridesWeightedPlacement verifies active pins are first-class.
 func TestRuntimeSelectorActiveAffinityOverridesWeightedPlacement(t *testing.T) {
 	cfg := sameShardBackendsConfig()

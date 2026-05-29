@@ -35,7 +35,7 @@ message["To"] = recipient
 message["Subject"] = f"Nauthilus Director demo {token}"
 message.set_content(
     "This message travelled through HAProxy, Postfix, LMTPS, "
-    f"nauthilus-director and Dovecot.\n\nToken: {token}\n"
+    f"nauthilus-director and the selected backend shard.\n\nToken: {token}\n"
 )
 
 with smtplib.SMTP(host, port, timeout=20) as client:

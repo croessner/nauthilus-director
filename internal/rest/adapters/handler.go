@@ -69,7 +69,7 @@ type BackendMutator interface {
 
 // SessionReader exposes runtime session state to REST adapters.
 type SessionReader interface {
-	ListSessions(ctx context.Context, protocol string) ([]runtime.SessionRuntimeState, error)
+	ListSessions(ctx context.Context, request runtime.SessionListRequest) (runtime.SessionListResult, error)
 	GetSession(ctx context.Context, sessionID string) (runtime.SessionRuntimeState, error)
 	ListUserSessions(ctx context.Context, key runtime.UserKey) ([]runtime.SessionRuntimeState, error)
 }
@@ -81,9 +81,14 @@ type SessionMutator interface {
 
 // UserReader exposes user runtime state to REST adapters.
 type UserReader interface {
-	ListUsers(ctx context.Context) ([]runtime.UserRuntimeState, error)
+	ListUsers(ctx context.Context, request runtime.UserListRequest) (runtime.UserListResult, error)
 	GetUser(ctx context.Context, key runtime.UserKey) (runtime.UserRuntimeState, error)
 	GetUserAffinity(ctx context.Context, key runtime.UserKey) (runtime.UserRuntimeState, error)
+}
+
+// RuntimeSummaryReader exposes aggregate runtime summaries to REST adapters.
+type RuntimeSummaryReader interface {
+	RuntimeSummary(ctx context.Context) (runtime.Summary, error)
 }
 
 // UserMutator exposes Redis-backed user runtime mutations to REST adapters.
@@ -153,6 +158,7 @@ type HandlerOptions struct {
 	SessionReader             SessionReader
 	SessionMutator            SessionMutator
 	UserReader                UserReader
+	RuntimeSummaryReader      RuntimeSummaryReader
 	UserMutator               UserMutator
 	RouteLookup               RouteLookupService
 	ListenerRuntime           ListenerRuntimeService
@@ -174,6 +180,7 @@ type Handler struct {
 	sessionReader             SessionReader
 	sessionMutator            SessionMutator
 	userReader                UserReader
+	runtimeSummaryReader      RuntimeSummaryReader
 	userMutator               UserMutator
 	routeLookup               RouteLookupService
 	listenerRuntime           ListenerRuntimeService
@@ -197,6 +204,7 @@ func NewHandler(options HandlerOptions) *Handler {
 		sessionReader:             options.SessionReader,
 		sessionMutator:            options.SessionMutator,
 		userReader:                options.UserReader,
+		runtimeSummaryReader:      options.RuntimeSummaryReader,
 		userMutator:               options.UserMutator,
 		routeLookup:               options.RouteLookup,
 		listenerRuntime:           options.ListenerRuntime,
@@ -543,12 +551,20 @@ func (h *Handler) LookupRoute(ctx context.Context, request generated.LookupRoute
 
 // ListSessions returns active frontend sessions.
 func (h *Handler) ListSessions(ctx context.Context, request generated.ListSessionsRequestObject) (generated.ListSessionsResponseObject, error) {
-	sessions, err := h.sessionReader.ListSessions(ctx, pointerString(request.Params.Protocol))
+	result, err := h.sessionReader.ListSessions(ctx, runtime.SessionListRequest{
+		Protocol:          pointerString(request.Params.Protocol),
+		BackendIdentifier: pointerString(request.Params.Backend),
+		Cursor:            pointerGeneratedString(request.Params.Cursor),
+		Limit:             pointerGeneratedInt(request.Params.Limit),
+	})
 	if err != nil {
 		return generated.ListSessionsdefaultJSONResponse{StatusCode: statusForError(err), Body: h.problemFromError("ListSessions", err)}, nil
 	}
 
-	return generated.ListSessions200JSONResponse{Sessions: sessionDetails(sessions)}, nil
+	return generated.ListSessions200JSONResponse{
+		NextCursor: nonEmptyStringPointer(result.NextCursor),
+		Sessions:   sessionDetails(result.Sessions),
+	}, nil
 }
 
 // DeleteSession marks one frontend session for termination.
@@ -580,13 +596,29 @@ func (h *Handler) GetSession(ctx context.Context, request generated.GetSessionRe
 }
 
 // ListUsers returns users with runtime state.
-func (h *Handler) ListUsers(ctx context.Context, _ generated.ListUsersRequestObject) (generated.ListUsersResponseObject, error) {
-	users, err := h.userReader.ListUsers(ctx)
+func (h *Handler) ListUsers(ctx context.Context, request generated.ListUsersRequestObject) (generated.ListUsersResponseObject, error) {
+	result, err := h.userReader.ListUsers(ctx, runtime.UserListRequest{
+		Cursor: pointerGeneratedString(request.Params.Cursor),
+		Limit:  pointerGeneratedInt(request.Params.Limit),
+	})
 	if err != nil {
 		return generated.ListUsersdefaultJSONResponse{StatusCode: statusForError(err), Body: h.problemFromError("ListUsers", err)}, nil
 	}
 
-	return generated.ListUsers200JSONResponse{Users: userDetails(users)}, nil
+	return generated.ListUsers200JSONResponse{
+		NextCursor: nonEmptyStringPointer(result.NextCursor),
+		Users:      userDetails(result.Users),
+	}, nil
+}
+
+// GetRuntimeSummary returns repairable aggregate runtime totals.
+func (h *Handler) GetRuntimeSummary(ctx context.Context, _ generated.GetRuntimeSummaryRequestObject) (generated.GetRuntimeSummaryResponseObject, error) {
+	summary, err := h.runtimeSummaryReader.RuntimeSummary(ctx)
+	if err != nil {
+		return generated.GetRuntimeSummarydefaultJSONResponse{StatusCode: statusForError(err), Body: h.problemFromError("GetRuntimeSummary", err)}, nil
+	}
+
+	return generated.GetRuntimeSummary200JSONResponse(runtimeSummary(summary)), nil
 }
 
 // GetUser returns one user runtime state.
@@ -950,6 +982,10 @@ func withDefaultHandlerOptions(options HandlerOptions) HandlerOptions {
 
 	if options.UserReader == nil {
 		options.UserReader = emptyRuntimeReader{}
+	}
+
+	if options.RuntimeSummaryReader == nil {
+		options.RuntimeSummaryReader = emptyRuntimeReader{}
 	}
 
 	return options
@@ -1381,6 +1417,71 @@ func sessionDetail(session runtime.SessionRuntimeState) generated.SessionDetail 
 	}
 }
 
+// runtimeSummary adapts repairable runtime aggregates into generated DTOs.
+func runtimeSummary(summary runtime.Summary) generated.RuntimeSummaryResponse {
+	return generated.RuntimeSummaryResponse{
+		ActiveSessions: generated.RuntimeSessionAggregateSummary{
+			Total:      runtimeCount(summary.ActiveSessions.Total),
+			ByProtocol: runtimeDimensionCounts(summary.ActiveSessions.ByProtocol),
+			ByListener: runtimeDimensionCounts(summary.ActiveSessions.ByListener),
+			ByService:  runtimeDimensionCounts(summary.ActiveSessions.ByService),
+			ByShardTag: runtimeDimensionCounts(summary.ActiveSessions.ByShardTag),
+		},
+		BackendCapacity:  runtimeBackendCapacity(summary.BackendCapacity),
+		GeneratedAt:      summary.GeneratedAt.UTC(),
+		IdleAffinities:   runtimeCount(summary.IdleAffinities),
+		Repairs:          runtimeRepairSummary(summary.Repairs),
+		RoutingAuthority: summary.RoutingAuthority,
+	}
+}
+
+// runtimeCount adapts one count and its accuracy class.
+func runtimeCount(count runtime.CountSummary) generated.RuntimeCountSummary {
+	return generated.RuntimeCountSummary{
+		Accuracy: generated.RuntimeCountSummaryAccuracy(count.Accuracy),
+		Count:    count.Count,
+	}
+}
+
+// runtimeDimensionCounts adapts dimension aggregate buckets.
+func runtimeDimensionCounts(counts []runtime.DimensionCount) []generated.RuntimeDimensionCount {
+	details := make([]generated.RuntimeDimensionCount, 0, len(counts))
+	for _, count := range counts {
+		details = append(details, generated.RuntimeDimensionCount{
+			Accuracy: generated.RuntimeDimensionCountAccuracy(count.Accuracy),
+			Count:    count.Count,
+			Value:    count.Value,
+		})
+	}
+
+	return details
+}
+
+// runtimeBackendCapacity adapts backend aggregate summaries.
+func runtimeBackendCapacity(summaries []runtime.BackendCapacitySummary) []generated.RuntimeBackendCapacitySummary {
+	details := make([]generated.RuntimeBackendCapacitySummary, 0, len(summaries))
+	for _, summary := range summaries {
+		details = append(details, generated.RuntimeBackendCapacitySummary{
+			ActiveSessions:    runtimeCount(summary.ActiveSessions),
+			Backend:           summary.BackendIdentifier,
+			ReservedSessions:  runtimeCount(summary.ReservedSessions),
+			RoutingAuthority:  summary.RoutingAuthority,
+			SummaryRepairable: summary.SummaryRepairable,
+		})
+	}
+
+	return details
+}
+
+// runtimeRepairSummary adapts cumulative repair counters.
+func runtimeRepairSummary(summary runtime.RepairSummary) generated.RuntimeRepairSummary {
+	return generated.RuntimeRepairSummary{
+		BackendReservations: runtimeCount(summary.BackendReservations),
+		ExpiredSessions:     runtimeCount(summary.ExpiredSessions),
+		StaleIndexEntries:   runtimeCount(summary.StaleIndexEntries),
+	}
+}
+
 // userDetails adapts runtime users into generated DTOs.
 func userDetails(users []runtime.UserRuntimeState) []generated.UserDetail {
 	details := make([]generated.UserDetail, 0, len(users))
@@ -1563,6 +1664,34 @@ func pointerString(value *string) string {
 	return *value
 }
 
+// pointerGeneratedString unwraps optional generated string aliases.
+func pointerGeneratedString[T ~string](value *T) string {
+	if value == nil {
+		return ""
+	}
+
+	return string(*value)
+}
+
+// pointerGeneratedInt unwraps optional generated integer aliases.
+func pointerGeneratedInt[T ~int](value *T) int {
+	if value == nil {
+		return 0
+	}
+
+	return int(*value)
+}
+
+// nonEmptyStringPointer returns nil when optional response text is absent.
+func nonEmptyStringPointer(value string) *string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+
+	return &value
+}
+
 // pointerBool unwraps optional generated boolean fields.
 func pointerBool(value *bool) bool {
 	return value != nil && *value
@@ -1649,8 +1778,8 @@ func includeProtectedFromNonDefaultParams(params generated.GetNonDefaultConfigPa
 type emptyRuntimeReader struct{}
 
 // ListSessions returns no sessions when no runtime state reader is assembled.
-func (emptyRuntimeReader) ListSessions(context.Context, string) ([]runtime.SessionRuntimeState, error) {
-	return nil, nil
+func (emptyRuntimeReader) ListSessions(context.Context, runtime.SessionListRequest) (runtime.SessionListResult, error) {
+	return runtime.SessionListResult{}, nil
 }
 
 // GetSession reports an absent session when no runtime state reader is assembled.
@@ -1664,8 +1793,8 @@ func (emptyRuntimeReader) ListUserSessions(context.Context, runtime.UserKey) ([]
 }
 
 // ListUsers returns no users when no runtime state reader is assembled.
-func (emptyRuntimeReader) ListUsers(context.Context) ([]runtime.UserRuntimeState, error) {
-	return nil, nil
+func (emptyRuntimeReader) ListUsers(context.Context, runtime.UserListRequest) (runtime.UserListResult, error) {
+	return runtime.UserListResult{}, nil
 }
 
 // GetUser reports an absent user when no runtime state reader is assembled.
@@ -1676,6 +1805,22 @@ func (emptyRuntimeReader) GetUser(context.Context, runtime.UserKey) (runtime.Use
 // GetUserAffinity reports absent affinity when no runtime state reader is assembled.
 func (emptyRuntimeReader) GetUserAffinity(context.Context, runtime.UserKey) (runtime.UserRuntimeState, error) {
 	return runtime.UserRuntimeState{}, newRuntimeError(runtime.ErrorKindNotFound, "user_affinity", "user affinity not found")
+}
+
+// RuntimeSummary returns empty aggregate totals when no runtime reader is assembled.
+func (emptyRuntimeReader) RuntimeSummary(context.Context) (runtime.Summary, error) {
+	return runtime.Summary{
+		RoutingAuthority: false,
+		ActiveSessions: runtime.ActiveSessionSummary{
+			Total: runtime.CountSummary{Accuracy: runtime.AccuracyEventuallyRepaired},
+		},
+		IdleAffinities: runtime.CountSummary{Accuracy: runtime.AccuracyEventuallyRepaired},
+		Repairs: runtime.RepairSummary{
+			ExpiredSessions:     runtime.CountSummary{Accuracy: runtime.AccuracyCumulative},
+			StaleIndexEntries:   runtime.CountSummary{Accuracy: runtime.AccuracyCumulative},
+			BackendReservations: runtime.CountSummary{Accuracy: runtime.AccuracyCumulative},
+		},
+	}, nil
 }
 
 // newRuntimeError creates runtime errors without exporting construction to adapters.

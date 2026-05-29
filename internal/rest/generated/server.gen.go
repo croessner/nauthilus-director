@@ -113,6 +113,42 @@ func (e MaintenanceMode) Valid() bool {
 	}
 }
 
+// Defines values for RuntimeCountSummaryAccuracy.
+const (
+	RuntimeCountSummaryAccuracyCumulative         RuntimeCountSummaryAccuracy = "cumulative"
+	RuntimeCountSummaryAccuracyEventuallyRepaired RuntimeCountSummaryAccuracy = "eventually_repaired"
+)
+
+// Valid indicates whether the value is a known member of the RuntimeCountSummaryAccuracy enum.
+func (e RuntimeCountSummaryAccuracy) Valid() bool {
+	switch e {
+	case RuntimeCountSummaryAccuracyCumulative:
+		return true
+	case RuntimeCountSummaryAccuracyEventuallyRepaired:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for RuntimeDimensionCountAccuracy.
+const (
+	RuntimeDimensionCountAccuracyCumulative         RuntimeDimensionCountAccuracy = "cumulative"
+	RuntimeDimensionCountAccuracyEventuallyRepaired RuntimeDimensionCountAccuracy = "eventually_repaired"
+)
+
+// Valid indicates whether the value is a known member of the RuntimeDimensionCountAccuracy enum.
+func (e RuntimeDimensionCountAccuracy) Valid() bool {
+	switch e {
+	case RuntimeDimensionCountAccuracyCumulative:
+		return true
+	case RuntimeDimensionCountAccuracyEventuallyRepaired:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for UserMoveRequestStrategy.
 const (
 	DrainExisting   UserMoveRequestStrategy = "drain_existing"
@@ -404,9 +440,63 @@ type RouteLookupRouting struct {
 	UsedDefaultShard bool    `json:"used_default_shard"`
 }
 
+// RuntimeBackendCapacitySummary defines model for RuntimeBackendCapacitySummary.
+type RuntimeBackendCapacitySummary struct {
+	ActiveSessions    RuntimeCountSummary `json:"active_sessions"`
+	Backend           string              `json:"backend"`
+	ReservedSessions  RuntimeCountSummary `json:"reserved_sessions"`
+	RoutingAuthority  bool                `json:"routing_authority"`
+	SummaryRepairable bool                `json:"summary_repairable"`
+}
+
+// RuntimeCountSummary defines model for RuntimeCountSummary.
+type RuntimeCountSummary struct {
+	Accuracy RuntimeCountSummaryAccuracy `json:"accuracy"`
+	Count    int                         `json:"count"`
+}
+
+// RuntimeCountSummaryAccuracy defines model for RuntimeCountSummary.Accuracy.
+type RuntimeCountSummaryAccuracy string
+
+// RuntimeDimensionCount defines model for RuntimeDimensionCount.
+type RuntimeDimensionCount struct {
+	Accuracy RuntimeDimensionCountAccuracy `json:"accuracy"`
+	Count    int                           `json:"count"`
+	Value    string                        `json:"value"`
+}
+
+// RuntimeDimensionCountAccuracy defines model for RuntimeDimensionCount.Accuracy.
+type RuntimeDimensionCountAccuracy string
+
 // RuntimeReasonRequest defines model for RuntimeReasonRequest.
 type RuntimeReasonRequest struct {
 	Reason string `json:"reason"`
+}
+
+// RuntimeRepairSummary defines model for RuntimeRepairSummary.
+type RuntimeRepairSummary struct {
+	BackendReservations RuntimeCountSummary `json:"backend_reservations"`
+	ExpiredSessions     RuntimeCountSummary `json:"expired_sessions"`
+	StaleIndexEntries   RuntimeCountSummary `json:"stale_index_entries"`
+}
+
+// RuntimeSessionAggregateSummary defines model for RuntimeSessionAggregateSummary.
+type RuntimeSessionAggregateSummary struct {
+	ByListener []RuntimeDimensionCount `json:"by_listener"`
+	ByProtocol []RuntimeDimensionCount `json:"by_protocol"`
+	ByService  []RuntimeDimensionCount `json:"by_service"`
+	ByShardTag []RuntimeDimensionCount `json:"by_shard_tag"`
+	Total      RuntimeCountSummary     `json:"total"`
+}
+
+// RuntimeSummaryResponse defines model for RuntimeSummaryResponse.
+type RuntimeSummaryResponse struct {
+	ActiveSessions   RuntimeSessionAggregateSummary  `json:"active_sessions"`
+	BackendCapacity  []RuntimeBackendCapacitySummary `json:"backend_capacity"`
+	GeneratedAt      time.Time                       `json:"generated_at"`
+	IdleAffinities   RuntimeCountSummary             `json:"idle_affinities"`
+	Repairs          RuntimeRepairSummary            `json:"repairs"`
+	RoutingAuthority bool                            `json:"routing_authority"`
 }
 
 // RuntimeWeightRequest defines model for RuntimeWeightRequest.
@@ -427,7 +517,8 @@ type SessionDetail struct {
 
 // SessionListResponse defines model for SessionListResponse.
 type SessionListResponse struct {
-	Sessions []SessionDetail `json:"sessions"`
+	NextCursor *string         `json:"next_cursor,omitempty"`
+	Sessions   []SessionDetail `json:"sessions"`
 }
 
 // StatusResponse defines model for StatusResponse.
@@ -459,7 +550,8 @@ type UserKickRequest struct {
 
 // UserListResponse defines model for UserListResponse.
 type UserListResponse struct {
-	Users []UserDetail `json:"users"`
+	NextCursor *string      `json:"next_cursor,omitempty"`
+	Users      []UserDetail `json:"users"`
 }
 
 // UserMoveRequest defines model for UserMoveRequest.
@@ -490,6 +582,12 @@ type IncludeProtected = bool
 
 // ListenerName defines model for ListenerName.
 type ListenerName = string
+
+// RuntimeReadCursor defines model for RuntimeReadCursor.
+type RuntimeReadCursor = string
+
+// RuntimeReadLimit defines model for RuntimeReadLimit.
+type RuntimeReadLimit = int
 
 // SessionID defines model for SessionID.
 type SessionID = string
@@ -538,7 +636,26 @@ type GetNonDefaultConfigParamsFormat string
 
 // ListSessionsParams defines parameters for ListSessions.
 type ListSessionsParams struct {
+	// Protocol Optional page-local protocol filter applied during bounded cursor scans.
 	Protocol *string `form:"protocol,omitempty" json:"protocol,omitempty"`
+
+	// Backend Optional backend identifier filter backed by the backend session index.
+	Backend *string `form:"backend,omitempty" json:"backend,omitempty"`
+
+	// Cursor Opaque cursor returned by a previous runtime list page.
+	Cursor *RuntimeReadCursor `form:"cursor,omitempty" json:"cursor,omitempty"`
+
+	// Limit Maximum records to return in this page.
+	Limit *RuntimeReadLimit `form:"limit,omitempty" json:"limit,omitempty"`
+}
+
+// ListUsersParams defines parameters for ListUsers.
+type ListUsersParams struct {
+	// Cursor Opaque cursor returned by a previous runtime list page.
+	Cursor *RuntimeReadCursor `form:"cursor,omitempty" json:"cursor,omitempty"`
+
+	// Limit Maximum records to return in this page.
+	Limit *RuntimeReadLimit `form:"limit,omitempty" json:"limit,omitempty"`
 }
 
 // DisableBackendMaintenanceJSONRequestBody defines body for DisableBackendMaintenance for application/json ContentType.
@@ -642,6 +759,9 @@ type ServerInterface interface {
 	// Explain director-only routing for a known identity key.
 	// (POST /api/v1/route/lookup)
 	LookupRoute(w http.ResponseWriter, r *http.Request)
+	// Return repairable runtime aggregate summaries.
+	// (GET /api/v1/runtime/summary)
+	GetRuntimeSummary(w http.ResponseWriter, r *http.Request)
 	// List active frontend sessions.
 	// (GET /api/v1/sessions)
 	ListSessions(w http.ResponseWriter, r *http.Request, params ListSessionsParams)
@@ -653,7 +773,7 @@ type ServerInterface interface {
 	GetSession(w http.ResponseWriter, r *http.Request, sessionID SessionID)
 	// List users with runtime state.
 	// (GET /api/v1/users)
-	ListUsers(w http.ResponseWriter, r *http.Request)
+	ListUsers(w http.ResponseWriter, r *http.Request, params ListUsersParams)
 	// Show user runtime state.
 	// (GET /api/v1/users/{user_key})
 	GetUser(w http.ResponseWriter, r *http.Request, userKey UserKey)
@@ -1178,6 +1298,20 @@ func (siw *ServerInterfaceWrapper) LookupRoute(w http.ResponseWriter, r *http.Re
 	handler.ServeHTTP(w, r)
 }
 
+// GetRuntimeSummary operation middleware
+func (siw *ServerInterfaceWrapper) GetRuntimeSummary(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetRuntimeSummary(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // ListSessions operation middleware
 func (siw *ServerInterfaceWrapper) ListSessions(w http.ResponseWriter, r *http.Request) {
 
@@ -1196,6 +1330,45 @@ func (siw *ServerInterfaceWrapper) ListSessions(w http.ResponseWriter, r *http.R
 			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "protocol"})
 		} else {
 			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "protocol", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "backend" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "backend", r.URL.Query(), &params.Backend, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "backend"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "backend", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "cursor" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "cursor", r.URL.Query(), &params.Cursor, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "cursor"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "cursor", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "limit" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "limit", r.URL.Query(), &params.Limit, runtime.BindQueryParameterOptions{Type: "integer", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "limit"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "limit", Err: err})
 		}
 		return
 	}
@@ -1266,8 +1439,40 @@ func (siw *ServerInterfaceWrapper) GetSession(w http.ResponseWriter, r *http.Req
 // ListUsers operation middleware
 func (siw *ServerInterfaceWrapper) ListUsers(w http.ResponseWriter, r *http.Request) {
 
+	var err error
+	_ = err
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params ListUsersParams
+
+	// ------------- Optional query parameter "cursor" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "cursor", r.URL.Query(), &params.Cursor, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "cursor"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "cursor", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "limit" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "limit", r.URL.Query(), &params.Limit, runtime.BindQueryParameterOptions{Type: "integer", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "limit"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "limit", Err: err})
+		}
+		return
+	}
+
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		siw.Handler.ListUsers(w, r)
+		siw.Handler.ListUsers(w, r, params)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -1653,6 +1858,7 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/api/v1/listeners/{name}/runtime/resume", wrapper.ResumeListener)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/api/v1/reload", wrapper.Reload)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/api/v1/route/lookup", wrapper.LookupRoute)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/runtime/summary", wrapper.GetRuntimeSummary)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/sessions", wrapper.ListSessions)
 	m.HandleFunc(http.MethodDelete+" "+options.BaseURL+"/api/v1/sessions/{session_id}", wrapper.DeleteSession)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/sessions/{session_id}", wrapper.GetSession)
@@ -2398,6 +2604,44 @@ func (response LookupRoutedefaultJSONResponse) VisitLookupRouteResponse(w http.R
 	return err
 }
 
+type GetRuntimeSummaryRequestObject struct {
+}
+
+type GetRuntimeSummaryResponseObject interface {
+	VisitGetRuntimeSummaryResponse(w http.ResponseWriter) error
+}
+
+type GetRuntimeSummary200JSONResponse RuntimeSummaryResponse
+
+func (response GetRuntimeSummary200JSONResponse) VisitGetRuntimeSummaryResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetRuntimeSummarydefaultJSONResponse struct {
+	Body       ErrorResponse
+	StatusCode int
+}
+
+func (response GetRuntimeSummarydefaultJSONResponse) VisitGetRuntimeSummaryResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
 type ListSessionsRequestObject struct {
 	Params ListSessionsParams
 }
@@ -2517,6 +2761,7 @@ func (response GetSessiondefaultJSONResponse) VisitGetSessionResponse(w http.Res
 }
 
 type ListUsersRequestObject struct {
+	Params ListUsersParams
 }
 
 type ListUsersResponseObject interface {
@@ -3050,6 +3295,9 @@ type StrictServerInterface interface {
 	// Explain director-only routing for a known identity key.
 	// (POST /api/v1/route/lookup)
 	LookupRoute(ctx context.Context, request LookupRouteRequestObject) (LookupRouteResponseObject, error)
+	// Return repairable runtime aggregate summaries.
+	// (GET /api/v1/runtime/summary)
+	GetRuntimeSummary(ctx context.Context, request GetRuntimeSummaryRequestObject) (GetRuntimeSummaryResponseObject, error)
 	// List active frontend sessions.
 	// (GET /api/v1/sessions)
 	ListSessions(ctx context.Context, request ListSessionsRequestObject) (ListSessionsResponseObject, error)
@@ -3656,6 +3904,30 @@ func (sh *strictHandler) LookupRoute(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// GetRuntimeSummary operation middleware
+func (sh *strictHandler) GetRuntimeSummary(w http.ResponseWriter, r *http.Request) {
+	var request GetRuntimeSummaryRequestObject
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.GetRuntimeSummary(ctx, request.(GetRuntimeSummaryRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetRuntimeSummary")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetRuntimeSummaryResponseObject); ok {
+		if err := validResponse.VisitGetRuntimeSummaryResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
 // ListSessions operation middleware
 func (sh *strictHandler) ListSessions(w http.ResponseWriter, r *http.Request, params ListSessionsParams) {
 	var request ListSessionsRequestObject
@@ -3742,8 +4014,10 @@ func (sh *strictHandler) GetSession(w http.ResponseWriter, r *http.Request, sess
 }
 
 // ListUsers operation middleware
-func (sh *strictHandler) ListUsers(w http.ResponseWriter, r *http.Request) {
+func (sh *strictHandler) ListUsers(w http.ResponseWriter, r *http.Request, params ListUsersParams) {
 	var request ListUsersRequestObject
+
+	request.Params = params
 
 	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
 		return sh.ssi.ListUsers(ctx, request.(ListUsersRequestObject))

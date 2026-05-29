@@ -7,8 +7,6 @@
 
 local backend_key = KEYS[1]
 local backend_index_key = KEYS[2]
-local backend_sessions_key = KEYS[3]
-local session_index_key = KEYS[4]
 
 local backend_id = ARGV[1]
 local in_service = ARGV[2]
@@ -34,29 +32,6 @@ local function require_value(value, message)
 	end
 
 	return value
-end
-
-local function mark_indexed_sessions()
-	local marked = 0
-	local session_ids = redis.call("SMEMBERS", backend_sessions_key)
-	for _, session_id in ipairs(session_ids) do
-		local session_key = redis.call("HGET", session_index_key, session_id)
-		if session_key ~= false and session_key ~= nil and session_key ~= "" and redis.call("EXISTS", session_key) == 1 then
-			local observed = tonumber(redis.call("HGET", session_key, "control_generation") or "0")
-			if observed == nil or observed < 0 then
-				return ambiguous("session_control_generation_invalid")
-			end
-
-			redis.call("HSET", session_key,
-				"session_control_generation", observed + 1,
-				"session_control_action", "drain")
-			marked = marked + 1
-		else
-			redis.call("SREM", backend_sessions_key, session_id)
-		end
-	end
-
-	return marked
 end
 
 require_value(backend_id, "backend_id_required")
@@ -91,9 +66,6 @@ if maintenance_mode ~= nil and maintenance_mode ~= "" then
 		return ambiguous("maintenance_mode_invalid")
 	end
 	redis.call("HSET", backend_key, "maintenance_mode", maintenance_mode)
-	if maintenance_mode == "hard" then
-		marked = mark_indexed_sessions()
-	end
 end
 
 if drain_enabled == "true" then
@@ -107,7 +79,6 @@ if drain_enabled == "true" then
 		"drain_enabled", "true",
 		"drain_mode", drain_mode,
 		"drain_started_at_ms", now)
-	marked = mark_indexed_sessions()
 elseif drain_enabled == "false" then
 	redis.call("HSET", backend_key,
 		"drain_enabled", "false",

@@ -113,6 +113,42 @@ func (e MaintenanceMode) Valid() bool {
 	}
 }
 
+// Defines values for RuntimeCountSummaryAccuracy.
+const (
+	RuntimeCountSummaryAccuracyCumulative         RuntimeCountSummaryAccuracy = "cumulative"
+	RuntimeCountSummaryAccuracyEventuallyRepaired RuntimeCountSummaryAccuracy = "eventually_repaired"
+)
+
+// Valid indicates whether the value is a known member of the RuntimeCountSummaryAccuracy enum.
+func (e RuntimeCountSummaryAccuracy) Valid() bool {
+	switch e {
+	case RuntimeCountSummaryAccuracyCumulative:
+		return true
+	case RuntimeCountSummaryAccuracyEventuallyRepaired:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for RuntimeDimensionCountAccuracy.
+const (
+	RuntimeDimensionCountAccuracyCumulative         RuntimeDimensionCountAccuracy = "cumulative"
+	RuntimeDimensionCountAccuracyEventuallyRepaired RuntimeDimensionCountAccuracy = "eventually_repaired"
+)
+
+// Valid indicates whether the value is a known member of the RuntimeDimensionCountAccuracy enum.
+func (e RuntimeDimensionCountAccuracy) Valid() bool {
+	switch e {
+	case RuntimeDimensionCountAccuracyCumulative:
+		return true
+	case RuntimeDimensionCountAccuracyEventuallyRepaired:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for UserMoveRequestStrategy.
 const (
 	DrainExisting   UserMoveRequestStrategy = "drain_existing"
@@ -404,9 +440,63 @@ type RouteLookupRouting struct {
 	UsedDefaultShard bool    `json:"used_default_shard"`
 }
 
+// RuntimeBackendCapacitySummary defines model for RuntimeBackendCapacitySummary.
+type RuntimeBackendCapacitySummary struct {
+	ActiveSessions    RuntimeCountSummary `json:"active_sessions"`
+	Backend           string              `json:"backend"`
+	ReservedSessions  RuntimeCountSummary `json:"reserved_sessions"`
+	RoutingAuthority  bool                `json:"routing_authority"`
+	SummaryRepairable bool                `json:"summary_repairable"`
+}
+
+// RuntimeCountSummary defines model for RuntimeCountSummary.
+type RuntimeCountSummary struct {
+	Accuracy RuntimeCountSummaryAccuracy `json:"accuracy"`
+	Count    int                         `json:"count"`
+}
+
+// RuntimeCountSummaryAccuracy defines model for RuntimeCountSummary.Accuracy.
+type RuntimeCountSummaryAccuracy string
+
+// RuntimeDimensionCount defines model for RuntimeDimensionCount.
+type RuntimeDimensionCount struct {
+	Accuracy RuntimeDimensionCountAccuracy `json:"accuracy"`
+	Count    int                           `json:"count"`
+	Value    string                        `json:"value"`
+}
+
+// RuntimeDimensionCountAccuracy defines model for RuntimeDimensionCount.Accuracy.
+type RuntimeDimensionCountAccuracy string
+
 // RuntimeReasonRequest defines model for RuntimeReasonRequest.
 type RuntimeReasonRequest struct {
 	Reason string `json:"reason"`
+}
+
+// RuntimeRepairSummary defines model for RuntimeRepairSummary.
+type RuntimeRepairSummary struct {
+	BackendReservations RuntimeCountSummary `json:"backend_reservations"`
+	ExpiredSessions     RuntimeCountSummary `json:"expired_sessions"`
+	StaleIndexEntries   RuntimeCountSummary `json:"stale_index_entries"`
+}
+
+// RuntimeSessionAggregateSummary defines model for RuntimeSessionAggregateSummary.
+type RuntimeSessionAggregateSummary struct {
+	ByListener []RuntimeDimensionCount `json:"by_listener"`
+	ByProtocol []RuntimeDimensionCount `json:"by_protocol"`
+	ByService  []RuntimeDimensionCount `json:"by_service"`
+	ByShardTag []RuntimeDimensionCount `json:"by_shard_tag"`
+	Total      RuntimeCountSummary     `json:"total"`
+}
+
+// RuntimeSummaryResponse defines model for RuntimeSummaryResponse.
+type RuntimeSummaryResponse struct {
+	ActiveSessions   RuntimeSessionAggregateSummary  `json:"active_sessions"`
+	BackendCapacity  []RuntimeBackendCapacitySummary `json:"backend_capacity"`
+	GeneratedAt      time.Time                       `json:"generated_at"`
+	IdleAffinities   RuntimeCountSummary             `json:"idle_affinities"`
+	Repairs          RuntimeRepairSummary            `json:"repairs"`
+	RoutingAuthority bool                            `json:"routing_authority"`
 }
 
 // RuntimeWeightRequest defines model for RuntimeWeightRequest.
@@ -427,7 +517,8 @@ type SessionDetail struct {
 
 // SessionListResponse defines model for SessionListResponse.
 type SessionListResponse struct {
-	Sessions []SessionDetail `json:"sessions"`
+	NextCursor *string         `json:"next_cursor,omitempty"`
+	Sessions   []SessionDetail `json:"sessions"`
 }
 
 // StatusResponse defines model for StatusResponse.
@@ -459,7 +550,8 @@ type UserKickRequest struct {
 
 // UserListResponse defines model for UserListResponse.
 type UserListResponse struct {
-	Users []UserDetail `json:"users"`
+	NextCursor *string      `json:"next_cursor,omitempty"`
+	Users      []UserDetail `json:"users"`
 }
 
 // UserMoveRequest defines model for UserMoveRequest.
@@ -490,6 +582,12 @@ type IncludeProtected = bool
 
 // ListenerName defines model for ListenerName.
 type ListenerName = string
+
+// RuntimeReadCursor defines model for RuntimeReadCursor.
+type RuntimeReadCursor = string
+
+// RuntimeReadLimit defines model for RuntimeReadLimit.
+type RuntimeReadLimit = int
 
 // SessionID defines model for SessionID.
 type SessionID = string
@@ -538,7 +636,26 @@ type GetNonDefaultConfigParamsFormat string
 
 // ListSessionsParams defines parameters for ListSessions.
 type ListSessionsParams struct {
+	// Protocol Optional page-local protocol filter applied during bounded cursor scans.
 	Protocol *string `form:"protocol,omitempty" json:"protocol,omitempty"`
+
+	// Backend Optional backend identifier filter backed by the backend session index.
+	Backend *string `form:"backend,omitempty" json:"backend,omitempty"`
+
+	// Cursor Opaque cursor returned by a previous runtime list page.
+	Cursor *RuntimeReadCursor `form:"cursor,omitempty" json:"cursor,omitempty"`
+
+	// Limit Maximum records to return in this page.
+	Limit *RuntimeReadLimit `form:"limit,omitempty" json:"limit,omitempty"`
+}
+
+// ListUsersParams defines parameters for ListUsers.
+type ListUsersParams struct {
+	// Cursor Opaque cursor returned by a previous runtime list page.
+	Cursor *RuntimeReadCursor `form:"cursor,omitempty" json:"cursor,omitempty"`
+
+	// Limit Maximum records to return in this page.
+	Limit *RuntimeReadLimit `form:"limit,omitempty" json:"limit,omitempty"`
 }
 
 // DisableBackendMaintenanceJSONRequestBody defines body for DisableBackendMaintenance for application/json ContentType.
@@ -733,6 +850,9 @@ type ClientInterface interface {
 
 	LookupRoute(ctx context.Context, body LookupRouteJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// GetRuntimeSummary request
+	GetRuntimeSummary(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// ListSessions request
 	ListSessions(ctx context.Context, params *ListSessionsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -745,7 +865,7 @@ type ClientInterface interface {
 	GetSession(ctx context.Context, sessionID SessionID, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// ListUsers request
-	ListUsers(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+	ListUsers(ctx context.Context, params *ListUsersParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetUser request
 	GetUser(ctx context.Context, userKey UserKey, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -1125,6 +1245,18 @@ func (c *Client) LookupRoute(ctx context.Context, body LookupRouteJSONRequestBod
 	return c.Client.Do(req)
 }
 
+func (c *Client) GetRuntimeSummary(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetRuntimeSummaryRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 func (c *Client) ListSessions(ctx context.Context, params *ListSessionsParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewListSessionsRequest(c.Server, params)
 	if err != nil {
@@ -1173,8 +1305,8 @@ func (c *Client) GetSession(ctx context.Context, sessionID SessionID, reqEditors
 	return c.Client.Do(req)
 }
 
-func (c *Client) ListUsers(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewListUsersRequest(c.Server)
+func (c *Client) ListUsers(ctx context.Context, params *ListUsersParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewListUsersRequest(c.Server, params)
 	if err != nil {
 		return nil, err
 	}
@@ -2175,6 +2307,33 @@ func NewLookupRouteRequestWithBody(server string, contentType string, body io.Re
 	return req, nil
 }
 
+// NewGetRuntimeSummaryRequest generates requests for GetRuntimeSummary
+func NewGetRuntimeSummaryRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/runtime/summary")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewListSessionsRequest generates requests for ListSessions
 func NewListSessionsRequest(server string, params *ListSessionsParams) (*http.Request, error) {
 	var err error
@@ -2206,6 +2365,42 @@ func NewListSessionsRequest(server string, params *ListSessionsParams) (*http.Re
 		if params.Protocol != nil {
 
 			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "protocol", *params.Protocol, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.Backend != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "backend", *params.Backend, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.Cursor != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "cursor", *params.Cursor, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.Limit != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "limit", *params.Limit, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: ""}); err != nil {
 				return nil, err
 			} else {
 				for _, qp := range strings.Split(queryFrag, "&") {
@@ -2311,7 +2506,7 @@ func NewGetSessionRequest(server string, sessionID SessionID) (*http.Request, er
 }
 
 // NewListUsersRequest generates requests for ListUsers
-func NewListUsersRequest(server string) (*http.Request, error) {
+func NewListUsersRequest(server string, params *ListUsersParams) (*http.Request, error) {
 	var err error
 
 	serverURL, err := url.Parse(server)
@@ -2327,6 +2522,45 @@ func NewListUsersRequest(server string) (*http.Request, error) {
 	queryURL, err := serverURL.Parse(operationPath)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+		// queryValues collects non-styled parameters (passthrough, JSON)
+		// that are safe to round-trip through url.Values.Encode().
+		queryValues := queryURL.Query()
+		// rawQueryFragments collects pre-encoded query fragments from
+		// styled parameters, preserving literal commas as delimiters
+		// per the OpenAPI spec (e.g. "color=blue,black,brown").
+		var rawQueryFragments []string
+
+		if params.Cursor != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "cursor", *params.Cursor, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.Limit != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "limit", *params.Limit, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if encoded := queryValues.Encode(); encoded != "" {
+			rawQueryFragments = append(rawQueryFragments, encoded)
+		}
+		queryURL.RawQuery = strings.Join(rawQueryFragments, "&")
 	}
 
 	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
@@ -2852,6 +3086,9 @@ type ClientWithResponsesInterface interface {
 
 	LookupRouteWithResponse(ctx context.Context, body LookupRouteJSONRequestBody, reqEditors ...RequestEditorFn) (*LookupRouteResponse, error)
 
+	// GetRuntimeSummaryWithResponse request
+	GetRuntimeSummaryWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*GetRuntimeSummaryResponse, error)
+
 	// ListSessionsWithResponse request
 	ListSessionsWithResponse(ctx context.Context, params *ListSessionsParams, reqEditors ...RequestEditorFn) (*ListSessionsResponse, error)
 
@@ -2864,7 +3101,7 @@ type ClientWithResponsesInterface interface {
 	GetSessionWithResponse(ctx context.Context, sessionID SessionID, reqEditors ...RequestEditorFn) (*GetSessionResponse, error)
 
 	// ListUsersWithResponse request
-	ListUsersWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*ListUsersResponse, error)
+	ListUsersWithResponse(ctx context.Context, params *ListUsersParams, reqEditors ...RequestEditorFn) (*ListUsersResponse, error)
 
 	// GetUserWithResponse request
 	GetUserWithResponse(ctx context.Context, userKey UserKey, reqEditors ...RequestEditorFn) (*GetUserResponse, error)
@@ -3461,6 +3698,37 @@ func (r LookupRouteResponse) StatusCode() int {
 
 // ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
 func (r LookupRouteResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type GetRuntimeSummaryResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *RuntimeSummaryResponse
+	JSONDefault  *Error
+}
+
+// Status returns HTTPResponse.Status
+func (r GetRuntimeSummaryResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetRuntimeSummaryResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r GetRuntimeSummaryResponse) ContentType() string {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.Header.Get("Content-Type")
 	}
@@ -4174,6 +4442,15 @@ func (c *ClientWithResponses) LookupRouteWithResponse(ctx context.Context, body 
 	return ParseLookupRouteResponse(rsp)
 }
 
+// GetRuntimeSummaryWithResponse request returning *GetRuntimeSummaryResponse
+func (c *ClientWithResponses) GetRuntimeSummaryWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*GetRuntimeSummaryResponse, error) {
+	rsp, err := c.GetRuntimeSummary(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetRuntimeSummaryResponse(rsp)
+}
+
 // ListSessionsWithResponse request returning *ListSessionsResponse
 func (c *ClientWithResponses) ListSessionsWithResponse(ctx context.Context, params *ListSessionsParams, reqEditors ...RequestEditorFn) (*ListSessionsResponse, error) {
 	rsp, err := c.ListSessions(ctx, params, reqEditors...)
@@ -4210,8 +4487,8 @@ func (c *ClientWithResponses) GetSessionWithResponse(ctx context.Context, sessio
 }
 
 // ListUsersWithResponse request returning *ListUsersResponse
-func (c *ClientWithResponses) ListUsersWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*ListUsersResponse, error) {
-	rsp, err := c.ListUsers(ctx, reqEditors...)
+func (c *ClientWithResponses) ListUsersWithResponse(ctx context.Context, params *ListUsersParams, reqEditors ...RequestEditorFn) (*ListUsersResponse, error) {
+	rsp, err := c.ListUsers(ctx, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -4937,6 +5214,39 @@ func ParseLookupRouteResponse(rsp *http.Response) (*LookupRouteResponse, error) 
 			return nil, err
 		}
 		response.JSON400 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetRuntimeSummaryResponse parses an HTTP response from a GetRuntimeSummaryWithResponse call
+func ParseGetRuntimeSummaryResponse(rsp *http.Response) (*GetRuntimeSummaryResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetRuntimeSummaryResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest RuntimeSummaryResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
 		var dest Error

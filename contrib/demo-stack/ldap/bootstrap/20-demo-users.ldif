@@ -41,3 +41,33 @@ sn: Example
 mail: dave@example.test
 mailShard: mailstore-a
 userPassword: demo-secret
+
+dn: uid=erin,ou=people,dc=demo,dc=local
+objectClass: inetOrgPerson
+objectClass: nauthilusDirectorDemoUser
+uid: erin
+cn: Erin Example
+sn: Example
+mail: erin@example.test
+mailShard: stalwart
+userPassword: demo-secret
+
+dn: uid=frank,ou=people,dc=demo,dc=local
+objectClass: inetOrgPerson
+objectClass: nauthilusDirectorDemoUser
+uid: frank
+cn: Frank Example
+sn: Example
+mail: frank@example.test
+mailShard: stalwart
+userPassword: demo-secret
+
+dn: uid=healthcheck,ou=people,dc=demo,dc=local
+objectClass: inetOrgPerson
+objectClass: nauthilusDirectorDemoUser
+uid: healthcheck
+cn: Healthcheck Example
+sn: Example
+mail: healthcheck@example.test
+mailShard: mailstore-a
+userPassword: demo-secret

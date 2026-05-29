@@ -69,6 +69,13 @@ require_value(redis.call("HGET", state_key, "generation"), "state_generation_req
 
 local session_shard = require_value(redis.call("HGET", session_key, "shard_tag"), "session_shard_required")
 local idle_grace_ms = tonumber(require_value(redis.call("HGET", session_key, "idle_grace_ms"), "idle_grace_required"))
+local affinity_hash = require_value(redis.call("HGET", session_key, "affinity_hash"), "affinity_hash_required")
+local tenant = require_value(redis.call("HGET", session_key, "tenant"), "tenant_required")
+local account_key = require_value(redis.call("HGET", session_key, "account_key"), "account_key_required")
+local holder_kind = require_value(redis.call("HGET", session_key, "holder_kind"), "holder_kind_required")
+local protocol = require_value(redis.call("HGET", session_key, "protocol"), "protocol_required")
+local listener_name = tostring(redis.call("HGET", session_key, "listener_name") or "")
+local service_name = tostring(redis.call("HGET", session_key, "service_name") or "")
 local move_strategy = redis.call("HGET", state_key, "move_strategy") or ""
 
 if idle_grace_ms == nil or idle_grace_ms < 0 then
@@ -143,8 +150,20 @@ return {
 	"control_generation", tostring(control_generation),
 	"control_action", control_action,
 	"backend_id", tostring(redis.call("HGET", session_key, "selected_backend_id") or ""),
+	"backend_reservation_id", tostring(redis.call("HGET", session_key, "backend_reservation_id") or ""),
+	"backend_max_connections", tostring(redis.call("HGET", session_key, "backend_max_connections") or "0"),
+	"backend_counted", tostring(redis.call("HGET", session_key, "backend_counted") or "0"),
+	"session_id", session_id,
+	"affinity_hash", affinity_hash,
+	"tenant", tenant,
+	"account_key", account_key,
+	"holder_kind", holder_kind,
+	"protocol", protocol,
+	"listener_name", listener_name,
+	"service_name", service_name,
 	"active_session_count", tostring(active_count),
 	"server_time_ms", tostring(now),
 	"expires_at_ms", tostring(state_expires_at),
-	"lease_expires_at_ms", tostring(lease_expires_at)
+	"lease_expires_at_ms", tostring(lease_expires_at),
+	"idle_expires_at_ms", tostring(state_expires_at)
 }

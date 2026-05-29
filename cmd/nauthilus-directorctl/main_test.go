@@ -93,6 +93,7 @@ func TestNestedCommandsUseGeneratedClient(t *testing.T) {
 		{name: "users affinity clear", args: []string{"users", "affinity", "clear", "user-a", "--reason", "done"}, wantCalls: []string{"ClearUserAffinity"}},
 		{name: "users move", args: []string{"users", "move", "user-a", "--to-shard", "shard-b", "--strategy", "kick_existing", "--reason", "rebalance"}, wantCalls: []string{"MoveUser"}},
 		{name: "users kick", args: []string{"users", "kick", "user-a", "--reason", "abuse"}, wantCalls: []string{"KickUser"}},
+		{name: "runtime summary", args: []string{"runtime", "summary"}, wantCalls: []string{"GetRuntimeSummary"}},
 		{name: "route lookup", args: []string{"route", "lookup", "--protocol", "imap", "--user", "user-a", "--listener", "imap", "--attribute", "tier=gold"}, wantCalls: []string{"LookupRoute"}},
 		{name: "reload", args: []string{"reload"}, wantCalls: []string{"Reload"}},
 	}
@@ -180,6 +181,215 @@ func TestConfigDumpEndpointsAndProtectedFlag(t *testing.T) {
 	}
 	if !strings.Contains(stdout, "\"runtime\"") {
 		t.Fatalf("stdout = %q, want JSON config data", stdout)
+	}
+}
+
+// TestRuntimeSessionListFlagsPassPaginationParams verifies session list pagination fields.
+func TestRuntimeSessionListFlagsPassPaginationParams(t *testing.T) {
+	fake := newFakeControlClient()
+	_, stderr, code := runWithFakeClient([]string{
+		"sessions", "list",
+		"--protocol", "imap",
+		"--backend", "backend-a",
+		"--cursor", "cursor-a",
+		"--limit", "25",
+	}, fake)
+	if code != 0 {
+		t.Fatalf("sessions list returned exit code %d, want 0; stderr=%q", code, stderr)
+	}
+
+	assertSessionListPaginationParams(t, fake)
+}
+
+// TestRuntimeUserListFlagsPassPaginationParams verifies user list pagination fields.
+func TestRuntimeUserListFlagsPassPaginationParams(t *testing.T) {
+	fake := newFakeControlClient()
+	_, stderr, code := runWithFakeClient([]string{"users", "list", "--cursor", "user-cursor", "--limit", "30"}, fake)
+	if code != 0 {
+		t.Fatalf("users list returned exit code %d, want 0; stderr=%q", code, stderr)
+	}
+
+	assertUserListPaginationParams(t, fake)
+}
+
+// assertSessionListPaginationParams checks the generated session list request fields.
+func assertSessionListPaginationParams(t *testing.T, fake *fakeControlClient) {
+	t.Helper()
+
+	if fake.listSessionsParams == nil {
+		t.Fatal("ListSessions params were not recorded")
+	}
+
+	if fake.listSessionsParams.Protocol == nil || *fake.listSessionsParams.Protocol != "imap" {
+		t.Fatalf("protocol param = %#v, want imap", fake.listSessionsParams.Protocol)
+	}
+
+	if fake.listSessionsParams.Backend == nil || *fake.listSessionsParams.Backend != "backend-a" {
+		t.Fatalf("backend param = %#v, want backend-a", fake.listSessionsParams.Backend)
+	}
+
+	if fake.listSessionsParams.Cursor == nil || string(*fake.listSessionsParams.Cursor) != "cursor-a" {
+		t.Fatalf("cursor param = %#v, want cursor-a", fake.listSessionsParams.Cursor)
+	}
+
+	if fake.listSessionsParams.Limit == nil || int(*fake.listSessionsParams.Limit) != 25 {
+		t.Fatalf("limit param = %#v, want 25", fake.listSessionsParams.Limit)
+	}
+}
+
+// assertUserListPaginationParams checks the generated user list request fields.
+func assertUserListPaginationParams(t *testing.T, fake *fakeControlClient) {
+	t.Helper()
+
+	if fake.listUsersParams == nil {
+		t.Fatal("ListUsers params were not recorded")
+	}
+
+	if fake.listUsersParams.Cursor == nil || string(*fake.listUsersParams.Cursor) != "user-cursor" {
+		t.Fatalf("user cursor param = %#v, want user-cursor", fake.listUsersParams.Cursor)
+	}
+
+	if fake.listUsersParams.Limit == nil || int(*fake.listUsersParams.Limit) != 30 {
+		t.Fatalf("user limit param = %#v, want 30", fake.listUsersParams.Limit)
+	}
+}
+
+// TestRuntimeListDefaultOutputReportsNextCursor keeps first-page output explicit.
+func TestRuntimeListDefaultOutputReportsNextCursor(t *testing.T) {
+	nextCursor := "cursor-b"
+	fake := newFakeControlClient()
+	fake.listSessionPages = []generated.SessionListResponse{{
+		NextCursor: &nextCursor,
+		Sessions:   []generated.SessionDetail{sessionA()},
+	}}
+
+	stdout, stderr, code := runWithFakeClient([]string{"sessions", "list"}, fake)
+	if code != 0 {
+		t.Fatalf("sessions list returned exit code %d, want 0; stderr=%q", code, stderr)
+	}
+	if !strings.Contains(stdout, "more=true next_cursor=cursor-b") {
+		t.Fatalf("stdout = %q, want continuation cursor", stdout)
+	}
+
+	userNext := "user-cursor-b"
+	userFake := newFakeControlClient()
+	userFake.listUserPages = []generated.UserListResponse{{
+		NextCursor: &userNext,
+		Users:      []generated.UserDetail{userA()},
+	}}
+
+	stdout, stderr, code = runWithFakeClient([]string{"users", "list"}, userFake)
+	if code != 0 {
+		t.Fatalf("users list returned exit code %d, want 0; stderr=%q", code, stderr)
+	}
+	if !strings.Contains(stdout, "more=true next_cursor=user-cursor-b") {
+		t.Fatalf("stdout = %q, want user continuation cursor", stdout)
+	}
+}
+
+// TestRuntimeSummaryUsesGeneratedClient verifies summaries avoid paged session listing.
+func TestRuntimeSummaryUsesGeneratedClient(t *testing.T) {
+	fake := newFakeControlClient()
+
+	stdout, stderr, code := runWithFakeClient([]string{"runtime", "summary"}, fake)
+	if code != 0 {
+		t.Fatalf("runtime summary returned exit code %d, want 0; stderr=%q", code, stderr)
+	}
+
+	if !reflect.DeepEqual(fake.calls, []string{"GetRuntimeSummary"}) {
+		t.Fatalf("calls = %#v, want only GetRuntimeSummary", fake.calls)
+	}
+
+	for _, want := range []string{
+		"routing_authority=false active_sessions=2",
+		"active_sessions_by_protocol protocol=imap count=2",
+		"backend_capacity backend=backend-a active_sessions=2",
+		"repairs expired_sessions=3 stale_index_entries=2 backend_reservations=1",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("runtime summary stdout = %q, want %q", stdout, want)
+		}
+	}
+}
+
+// TestRuntimeListAllIteratesUntilCursorExhausted verifies explicit full walks are paginated.
+func TestRuntimeListAllIteratesUntilCursorExhausted(t *testing.T) {
+	nextCursor := "cursor-b"
+	fake := newFakeControlClient()
+	fake.listSessionPages = []generated.SessionListResponse{
+		{NextCursor: &nextCursor, Sessions: []generated.SessionDetail{sessionA()}},
+		{Sessions: []generated.SessionDetail{sessionB()}},
+	}
+
+	stdout, stderr, code := runWithFakeClient([]string{"sessions", "list", "--all"}, fake)
+	if code != 0 {
+		t.Fatalf("sessions list --all returned exit code %d, want 0; stderr=%q", code, stderr)
+	}
+	if !reflect.DeepEqual(fake.calls, []string{"ListSessions", "ListSessions"}) {
+		t.Fatalf("calls = %#v, want two ListSessions calls", fake.calls)
+	}
+	if len(fake.listSessionsHistory) != 2 || fake.listSessionsHistory[0].Cursor != nil || fake.listSessionsHistory[1].Cursor == nil {
+		t.Fatalf("session cursor history = %#v, want nil then cursor", fake.listSessionsHistory)
+	}
+	if got := string(*fake.listSessionsHistory[1].Cursor); got != nextCursor {
+		t.Fatalf("second cursor = %q, want %q", got, nextCursor)
+	}
+	if !strings.Contains(stdout, "session_id=session-a") || !strings.Contains(stdout, "session_id=session-b") {
+		t.Fatalf("stdout = %q, want both paged sessions", stdout)
+	}
+	if strings.Contains(stdout, "more=true") {
+		t.Fatalf("stdout = %q, want no continuation after --all completes", stdout)
+	}
+}
+
+// TestRuntimeUserListAllIteratesUntilCursorExhausted verifies explicit user walks are paginated.
+func TestRuntimeUserListAllIteratesUntilCursorExhausted(t *testing.T) {
+	nextCursor := "user-cursor-b"
+	fake := newFakeControlClient()
+	fake.listUserPages = []generated.UserListResponse{
+		{NextCursor: &nextCursor, Users: []generated.UserDetail{userA()}},
+		{Users: []generated.UserDetail{userB()}},
+	}
+
+	stdout, stderr, code := runWithFakeClient([]string{"users", "list", "--all"}, fake)
+	if code != 0 {
+		t.Fatalf("users list --all returned exit code %d, want 0; stderr=%q", code, stderr)
+	}
+	if !reflect.DeepEqual(fake.calls, []string{"ListUsers", "ListUsers"}) {
+		t.Fatalf("calls = %#v, want two ListUsers calls", fake.calls)
+	}
+	if len(fake.listUsersHistory) != 2 || fake.listUsersHistory[0].Cursor != nil || fake.listUsersHistory[1].Cursor == nil {
+		t.Fatalf("user cursor history = %#v, want nil then cursor", fake.listUsersHistory)
+	}
+	if got := string(*fake.listUsersHistory[1].Cursor); got != nextCursor {
+		t.Fatalf("second user cursor = %q, want %q", got, nextCursor)
+	}
+	if !strings.Contains(stdout, "user_key=user-a") || !strings.Contains(stdout, "user_key=user-b") {
+		t.Fatalf("stdout = %q, want both paged users", stdout)
+	}
+	if strings.Contains(stdout, "more=true") {
+		t.Fatalf("stdout = %q, want no continuation after --all completes", stdout)
+	}
+}
+
+// TestRuntimeListAllDetectsRepeatedCursor verifies pagination loops fail closed.
+func TestRuntimeListAllDetectsRepeatedCursor(t *testing.T) {
+	repeated := "same-cursor"
+	fake := newFakeControlClient()
+	fake.listSessionPages = []generated.SessionListResponse{
+		{NextCursor: &repeated, Sessions: []generated.SessionDetail{sessionA()}},
+		{NextCursor: &repeated, Sessions: []generated.SessionDetail{sessionB()}},
+	}
+
+	stdout, stderr, code := runWithFakeClient([]string{"sessions", "list", "--all"}, fake)
+	if code != 1 {
+		t.Fatalf("sessions list --all returned exit code %d, want 1", code)
+	}
+	if stdout != "" {
+		t.Fatalf("stdout = %q, want no partial output on repeated cursor", stdout)
+	}
+	if !strings.Contains(stderr, "repeated pagination cursor") {
+		t.Fatalf("stderr = %q, want repeated cursor error", stderr)
 	}
 }
 
@@ -474,6 +684,7 @@ func TestManpagesDocumentImplementedSurface(t *testing.T) {
 		"config dump -n",
 		"sessions kill",
 		"users affinity set",
+		"runtime summary",
 		"route lookup",
 		"reload",
 		"--address",
@@ -558,6 +769,14 @@ type fakeControlClient struct {
 	defaultConfigParams    *generated.GetDefaultConfigParams
 	nonDefaultConfigParams *generated.GetNonDefaultConfigParams
 	listSessionsParams     *generated.ListSessionsParams
+	listUsersParams        *generated.ListUsersParams
+	listSessionsHistory    []generated.ListSessionsParams
+	listUsersHistory       []generated.ListUsersParams
+	listSessionPages       []generated.SessionListResponse
+	listUserPages          []generated.UserListResponse
+	listSessionsCalls      int
+	listUsersCalls         int
+	runtimeSummary         *generated.RuntimeSummaryResponse
 	routeRequest           generated.RouteLookupRequest
 	listenerDrainRequest   generated.ListenerDrainRequest
 	listenerResumeRequest  generated.ListenerResumeRequest
@@ -654,6 +873,16 @@ func sessionA() generated.SessionDetail {
 	}
 }
 
+// sessionB returns a second stable session fixture.
+func sessionB() generated.SessionDetail {
+	session := sessionA()
+	session.Backend = "backend-b"
+	session.SessionID = "session-b"
+	session.ShardTag = "shard-b"
+
+	return session
+}
+
 // affinityA returns a stable affinity fixture.
 func affinityA() generated.UserAffinity {
 	generation := "gen-a"
@@ -672,6 +901,53 @@ func userA() generated.UserDetail {
 		ActiveSessions: 1,
 		Affinity:       &affinity,
 		UserKey:        "user-a",
+	}
+}
+
+// userB returns a second stable user fixture.
+func userB() generated.UserDetail {
+	user := userA()
+	user.UserKey = "user-b"
+
+	return user
+}
+
+// runtimeSummaryFixture returns a stable aggregate summary fixture.
+func runtimeSummaryFixture() generated.RuntimeSummaryResponse {
+	count := func(value int, accuracy generated.RuntimeCountSummaryAccuracy) generated.RuntimeCountSummary {
+		return generated.RuntimeCountSummary{Accuracy: accuracy, Count: value}
+	}
+	dimension := func(value string, total int) generated.RuntimeDimensionCount {
+		return generated.RuntimeDimensionCount{
+			Accuracy: generated.RuntimeDimensionCountAccuracyEventuallyRepaired,
+			Count:    total,
+			Value:    value,
+		}
+	}
+
+	return generated.RuntimeSummaryResponse{
+		ActiveSessions: generated.RuntimeSessionAggregateSummary{
+			Total:      count(2, generated.RuntimeCountSummaryAccuracyEventuallyRepaired),
+			ByProtocol: []generated.RuntimeDimensionCount{dimension("imap", 2)},
+			ByListener: []generated.RuntimeDimensionCount{dimension("imap", 2)},
+			ByService:  []generated.RuntimeDimensionCount{dimension("imap-login", 2)},
+			ByShardTag: []generated.RuntimeDimensionCount{dimension("shard-a", 2)},
+		},
+		BackendCapacity: []generated.RuntimeBackendCapacitySummary{{
+			ActiveSessions:    count(2, generated.RuntimeCountSummaryAccuracyEventuallyRepaired),
+			Backend:           "backend-a",
+			ReservedSessions:  count(2, generated.RuntimeCountSummaryAccuracyEventuallyRepaired),
+			RoutingAuthority:  false,
+			SummaryRepairable: true,
+		}},
+		GeneratedAt:    time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC),
+		IdleAffinities: count(1, generated.RuntimeCountSummaryAccuracyEventuallyRepaired),
+		Repairs: generated.RuntimeRepairSummary{
+			BackendReservations: count(1, generated.RuntimeCountSummaryAccuracyCumulative),
+			ExpiredSessions:     count(3, generated.RuntimeCountSummaryAccuracyCumulative),
+			StaleIndexEntries:   count(2, generated.RuntimeCountSummaryAccuracyCumulative),
+		},
+		RoutingAuthority: false,
 	}
 }
 
@@ -894,9 +1170,18 @@ func (fake *fakeControlClient) LookupRouteWithResponse(_ context.Context, body g
 func (fake *fakeControlClient) ListSessionsWithResponse(_ context.Context, params *generated.ListSessionsParams, _ ...generated.RequestEditorFn) (*generated.ListSessionsResponse, error) {
 	fake.record("ListSessions")
 	fake.listSessionsParams = params
+	if params != nil {
+		fake.listSessionsHistory = append(fake.listSessionsHistory, *params)
+	}
+	page := generated.SessionListResponse{Sessions: []generated.SessionDetail{sessionA()}}
+	if fake.listSessionsCalls < len(fake.listSessionPages) {
+		page = fake.listSessionPages[fake.listSessionsCalls]
+	}
+	fake.listSessionsCalls++
+
 	return &generated.ListSessionsResponse{
 		HTTPResponse: httpResponse(http.StatusOK),
-		JSON200:      &generated.SessionListResponse{Sessions: []generated.SessionDetail{sessionA()}},
+		JSON200:      &page,
 	}, nil
 }
 
@@ -919,9 +1204,30 @@ func (fake *fakeControlClient) GetSessionWithResponse(context.Context, generated
 }
 
 // ListUsersWithResponse records and returns user list data.
-func (fake *fakeControlClient) ListUsersWithResponse(context.Context, ...generated.RequestEditorFn) (*generated.ListUsersResponse, error) {
+func (fake *fakeControlClient) ListUsersWithResponse(_ context.Context, params *generated.ListUsersParams, _ ...generated.RequestEditorFn) (*generated.ListUsersResponse, error) {
 	fake.record("ListUsers")
-	return &generated.ListUsersResponse{HTTPResponse: httpResponse(http.StatusOK), JSON200: &generated.UserListResponse{Users: []generated.UserDetail{userA()}}}, nil
+	fake.listUsersParams = params
+	if params != nil {
+		fake.listUsersHistory = append(fake.listUsersHistory, *params)
+	}
+	page := generated.UserListResponse{Users: []generated.UserDetail{userA()}}
+	if fake.listUsersCalls < len(fake.listUserPages) {
+		page = fake.listUserPages[fake.listUsersCalls]
+	}
+	fake.listUsersCalls++
+
+	return &generated.ListUsersResponse{HTTPResponse: httpResponse(http.StatusOK), JSON200: &page}, nil
+}
+
+// GetRuntimeSummaryWithResponse records and returns aggregate runtime totals.
+func (fake *fakeControlClient) GetRuntimeSummaryWithResponse(context.Context, ...generated.RequestEditorFn) (*generated.GetRuntimeSummaryResponse, error) {
+	fake.record("GetRuntimeSummary")
+	summary := runtimeSummaryFixture()
+	if fake.runtimeSummary != nil {
+		summary = *fake.runtimeSummary
+	}
+
+	return &generated.GetRuntimeSummaryResponse{HTTPResponse: httpResponse(http.StatusOK), JSON200: &summary}, nil
 }
 
 // GetUserWithResponse records and returns user detail data.

@@ -37,6 +37,8 @@ const (
 	pathContractListenerResume     = "/api/v1/listeners/{name}/runtime/resume"
 	pathContractSession            = "/api/v1/sessions/{session_id}"
 	pathContractUserAffinity       = "/api/v1/users/{user_key}/affinity"
+	queryContractCursor            = "cursor"
+	queryContractLimit             = "limit"
 )
 
 // TestOpenAPIContractIncludesPlannedEndpointGroupSet checks the planned route inventory.
@@ -53,6 +55,7 @@ func TestOpenAPIContractIncludesPlannedEndpointGroupSet(t *testing.T) {
 		{method: http.MethodGet, path: "/api/v1/config/defaults"},
 		{method: http.MethodGet, path: "/api/v1/config/non-default"},
 		{method: http.MethodPost, path: "/api/v1/reload"},
+		{method: http.MethodGet, path: "/api/v1/runtime/summary"},
 		{method: http.MethodGet, path: pathContractListeners},
 		{method: http.MethodGet, path: pathContractListener},
 		{method: http.MethodPost, path: pathContractListenerDrain},
@@ -83,6 +86,27 @@ func TestOpenAPIContractIncludesPlannedEndpointGroupSet(t *testing.T) {
 	for _, endpoint := range planned {
 		if operation := contract.Paths.Find(endpoint.path).GetOperation(endpoint.method); operation == nil {
 			t.Fatalf("OpenAPI contract missing %s %s", endpoint.method, endpoint.path)
+		}
+	}
+}
+
+// TestOpenAPIContractIncludesRuntimeSummary checks aggregate summary semantics.
+func TestOpenAPIContractIncludesRuntimeSummary(t *testing.T) {
+	contract := loadContract(t)
+
+	operation := contract.Paths.Find("/api/v1/runtime/summary").GetOperation(http.MethodGet)
+	if operation == nil {
+		t.Fatal("OpenAPI contract missing runtime summary")
+	}
+
+	if operation.OperationID != "getRuntimeSummary" {
+		t.Fatalf("runtime summary operationId = %q, want getRuntimeSummary", operation.OperationID)
+	}
+
+	schema := contract.Components.Schemas["RuntimeSummaryResponse"].Value
+	for _, field := range []string{"active_sessions", "idle_affinities", "backend_capacity", "repairs", "routing_authority"} {
+		if _, ok := schema.Properties[field]; !ok {
+			t.Fatalf("RuntimeSummaryResponse missing %q", field)
 		}
 	}
 }
@@ -124,6 +148,32 @@ func TestOpenAPIContractIncludesListenerOperations(t *testing.T) {
 	}
 }
 
+// TestOpenAPIContractIncludesRuntimeReadPagination checks bounded list contracts.
+func TestOpenAPIContractIncludesRuntimeReadPagination(t *testing.T) {
+	contract := loadContract(t)
+
+	sessionOperation := contract.Paths.Find("/api/v1/sessions").GetOperation(http.MethodGet)
+	for _, parameter := range []string{"protocol", "backend", queryContractCursor, queryContractLimit} {
+		if !operationHasParameter(sessionOperation, parameter) {
+			t.Fatalf("GET /api/v1/sessions missing %q parameter", parameter)
+		}
+	}
+
+	userOperation := contract.Paths.Find("/api/v1/users").GetOperation(http.MethodGet)
+	for _, parameter := range []string{queryContractCursor, queryContractLimit} {
+		if !operationHasParameter(userOperation, parameter) {
+			t.Fatalf("GET /api/v1/users missing %q parameter", parameter)
+		}
+	}
+
+	for _, schemaName := range []string{"SessionListResponse", "UserListResponse"} {
+		schema := contract.Components.Schemas[schemaName].Value
+		if _, ok := schema.Properties["next_cursor"]; !ok {
+			t.Fatalf("%s missing next_cursor", schemaName)
+		}
+	}
+}
+
 // TestRouteLookupContractExcludesCredentials keeps credential-bearing fields out of the DTO.
 func TestRouteLookupContractExcludesCredentials(t *testing.T) {
 	contract := loadContract(t)
@@ -134,6 +184,21 @@ func TestRouteLookupContractExcludesCredentials(t *testing.T) {
 			t.Fatalf("RouteLookupRequest exposes credential field %q", field)
 		}
 	}
+}
+
+// operationHasParameter reports whether an operation declares one query parameter.
+func operationHasParameter(operation *openapi3.Operation, name string) bool {
+	if operation == nil {
+		return false
+	}
+
+	for _, parameter := range operation.Parameters {
+		if parameter.Value != nil && parameter.Value.Name == name {
+			return true
+		}
+	}
+
+	return false
 }
 
 // loadContract parses and validates the source OpenAPI document.

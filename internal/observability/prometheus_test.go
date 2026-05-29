@@ -166,6 +166,38 @@ func TestRedisMetricsDoNotExposeRedisKeys(t *testing.T) {
 	}
 }
 
+// TestRuntimePaginationMetricsDoNotExposeCursorsOrRuntimeKeys keeps page telemetry bounded.
+func TestRuntimePaginationMetricsDoNotExposeCursorsOrRuntimeKeys(t *testing.T) {
+	runtime := newMetricsTestRuntime(t, false)
+	cursorValue := "cursor-secret-value"
+	sessionID := "session-secret-value"
+	redisKey := "nd:v1:{aff:secret}:session:secret"
+
+	for range 100 {
+		event := newMetricEvent(t, EventRuntimePagination, map[string]string{
+			"cursor":               cursorValue,
+			fieldRedisKey:          redisKey,
+			fieldSessionID:         sessionID,
+			metricLabelOperation:   "runtime_sessions_page",
+			metricLabelResult:      "more",
+			metricLabelReasonClass: reasonClassOK,
+		}, operationLabels("runtime_sessions_page", "more", reasonClassOK))
+		event.Measurements = NewMetricMeasurements(map[string]float64{MetricMeasurementDurationSeconds: 0.001})
+		runtime.Recorder().Record(context.Background(), event)
+	}
+
+	body := gatherMetricsText(t, runtime)
+	for _, forbidden := range []string{cursorValue, sessionID, redisKey, "cursor="} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("pagination metric leaked %q:\n%s", forbidden, body)
+		}
+	}
+
+	if strings.Count(body, "runtime_sessions_page") > 20 {
+		t.Fatalf("pagination metrics grew unexpectedly after seeded records:\n%s", body)
+	}
+}
+
 // assertMetricFamilyLabelsAllowed checks every custom label on a gathered metric family.
 func assertMetricFamilyLabelsAllowed(t *testing.T, family *dto.MetricFamily) {
 	t.Helper()
@@ -246,6 +278,7 @@ func representativeMetricEvents(t *testing.T) []Event {
 		newMetricEvent(t, EventRouteLookup, nil, backendLabels(reasonClassOK, reasonClassOK)),
 		newMetricEvent(t, EventSelectorExclusion, nil, operationLabels("selector_exclusion", "excluded", "runtime_out")),
 		newMetricEvent(t, EventSessionAttach, nil, operationLabels("session_attach", reasonClassOK, reasonClassOK)),
+		measuredEvent(t, EventRuntimePagination, nil, operationLabels("runtime_sessions_page", "more", reasonClassOK), 0.001),
 		newMetricEvent(t, EventAffinityClear, nil, operationLabels("user_affinity_clear", reasonClassOK, reasonClassOK)),
 		measuredEvent(t, EventLMTPTransaction, nil, lmtpTransactionMetricLabels(reasonClassOK, reasonClassOK), 0.01),
 		newMetricEvent(t, EventLMTPRecipientRoute, nil, lmtpRecipientMetricLabels("accepted", reasonClassOK)),

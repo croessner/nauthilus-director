@@ -42,10 +42,8 @@ import (
 )
 
 const (
-	defaultReapInterval = 5 * time.Second
-	defaultReapLimit    = 100
-	protocolIMAP        = "imap"
-	protocolLMTP        = "lmtp"
+	protocolIMAP = "imap"
+	protocolLMTP = "lmtp"
 )
 
 // Options configures one production server process instance.
@@ -227,7 +225,7 @@ func provideRedisClient(cfg config.Config) (redis.UniversalClient, error) {
 
 // provideRedisStore creates the Redis-backed runtime state store.
 func provideRedisStore(client redis.UniversalClient, cfg config.Config, recorder observability.Recorder) (*state.RedisSessionStore, error) {
-	return newRedisStore(client, cfg.Storage.Redis, recorder)
+	return newRedisStore(client, cfg, recorder)
 }
 
 // provideBackendRegistry builds the immutable backend inventory.
@@ -326,21 +324,22 @@ func provideControlHandle(
 		Version:    options.Version,
 		ConfigPath: options.ConfigPath,
 		HandlerOptions: adapters.HandlerOptions{
-			Version:         options.Version,
-			ConfigPath:      options.ConfigPath,
-			Loader:          loader,
-			Snapshot:        snapshot,
-			BackendReader:   backendReader,
-			BackendMutator:  runtimectl.NewBackendService(store, localSessions, runtimectl.WithObservabilityRecorder(recorder)),
-			SessionReader:   runtimeReader,
-			SessionMutator:  runtimectl.NewSessionService(store, localSessions, runtimectl.WithObservabilityRecorder(recorder)),
-			UserReader:      runtimeReader,
-			UserMutator:     runtimectl.NewUserService(store, localSessions, runtimectl.WithObservabilityRecorder(recorder)),
-			RouteLookup:     routeLookup,
-			ListenerRuntime: listenerRuntime,
-			Reload:          safeReloadService(cfg, loader, options.ConfigPath, recorder, registry, listenerManager),
-			Metrics:         metrics,
-			Observability:   recorder,
+			Version:              options.Version,
+			ConfigPath:           options.ConfigPath,
+			Loader:               loader,
+			Snapshot:             snapshot,
+			BackendReader:        backendReader,
+			BackendMutator:       runtimectl.NewBackendService(store, localSessions, runtimectl.WithObservabilityRecorder(recorder)),
+			SessionReader:        runtimeReader,
+			SessionMutator:       runtimectl.NewSessionService(store, localSessions, runtimectl.WithObservabilityRecorder(recorder)),
+			UserReader:           runtimeReader,
+			RuntimeSummaryReader: runtimeReader,
+			UserMutator:          runtimectl.NewUserService(store, localSessions, runtimectl.WithObservabilityRecorder(recorder)),
+			RouteLookup:          routeLookup,
+			ListenerRuntime:      listenerRuntime,
+			Reload:               safeReloadService(cfg, loader, options.ConfigPath, recorder, registry, listenerManager),
+			Metrics:              metrics,
+			Observability:        recorder,
 		},
 	})
 
@@ -474,10 +473,12 @@ func reaper(
 	reaper, err := runtimectl.NewReaper(
 		runtimectl.NewSessionService(store, localSessions, runtimectl.WithObservabilityRecorder(recorder)),
 		runtimectl.ReaperConfig{
-			Interval: defaultReapInterval,
-			Limit:    defaultReapLimit,
-			Reason:   "periodic session reap",
-			Actor:    runtimectl.Actor{ID: cfg.Runtime.InstanceName, AuthMethod: "system", Authenticated: true},
+			Interval:        cfg.Runtime.State.Reaper.Interval.Std(),
+			Limit:           cfg.Runtime.State.Reaper.BatchSize,
+			MaxPassDuration: cfg.Runtime.State.Reaper.MaxPassDuration.Std(),
+			Jitter:          cfg.Runtime.State.Reaper.Jitter.Std(),
+			Reason:          "periodic session reap",
+			Actor:           runtimectl.Actor{ID: cfg.Runtime.InstanceName, AuthMethod: "system", Authenticated: true},
 		},
 	)
 	if err != nil {

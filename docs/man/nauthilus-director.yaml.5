@@ -1,7 +1,7 @@
 .\" Copyright (C) 2026 Christian Rößner
 .\"
 .\" SPDX-License-Identifier: AGPL-3.0-only
-.TH NAUTHILUS-DIRECTOR.YAML 5 "2026-05-26" "nauthilus-director" "File Formats"
+.TH NAUTHILUS-DIRECTOR.YAML 5 "2026-05-29" "nauthilus-director" "File Formats"
 .SH NAME
 nauthilus-director.yaml \- Nauthilus Director YAML configuration format
 .SH DESCRIPTION
@@ -21,6 +21,10 @@ Process identity, shutdown timing, client timeouts and listener groups.
 .TP
 .B runtime.servers.control
 The in-process control API listener, control authentication and control TLS.
+.TP
+.B runtime.state
+Bounded Redis runtime-state reaper timing, index sharding, pagination limits
+and backend reservation repair settings.
 .TP
 .B observability
 Logging, metrics, tracing and diagnostic profiles.
@@ -59,6 +63,36 @@ Backend pool protocol, selector and backend membership.
 .B director.backends
 Backend protocol, shard, address, weight, max connections, maintenance baseline,
 transport security, authentication and health checks.
+.SH RUNTIME STATE AND DEVELOPMENT RESET
+Redis runtime keys use
+.B storage.redis.schema_version
+inside the configured key prefix.
+During the current development-stage runtime-state redesign, the default schema
+version remains
+.BR 1 .
+The v1 key layout is being updated in place and is not yet a published
+production storage compatibility contract.
+.PP
+Scale knobs live under
+.BR runtime.state .
+.B runtime.state.reaper
+controls bounded expired-session and reservation repair passes.
+.B runtime.state.indexes
+sets repairable index shard counts and REST/CLI page bounds.
+.B runtime.state.backend_reservations
+sets backend capacity reservation lease and repair timing.
+These settings tune runtime behavior; Redis topology, authentication and TLS
+remain centralized under
+.BR storage.redis .
+.PP
+Old demo or development runtime keys may be allowed to expire according to
+their leases, or cleared explicitly after stopping Director processes that use
+the same Redis database.
+Clearing old runtime keys is an operator action for demo and non-production
+environments only.
+Do not silently delete active production sessions and do not claim production
+compatibility for old v1 key layouts without a separate breaking-change or
+migration decision.
 .SH LMTP LISTENERS AND BACKENDS
 LMTP listener entries use
 .B director.listeners.<name>.protocol: lmtp
@@ -76,11 +110,11 @@ with an operator-facing service name such as
 .PP
 Supported listener-specific LMTP settings live under
 .BR director.listeners.<name>.lmtp .
-The implemented surface includes SMTPUTF8 enablement, configured
+The implemented surface uses configured
 .B capabilities
 for the
 .B LHLO
-reply and peer authentication through
+reply, including SMTPUTF8, and peer authentication through
 .BR client_auth .
 Peer authentication verifies the submitting LMTP peer; it is separate from
 recipient routing and does not authenticate the mailbox recipient.

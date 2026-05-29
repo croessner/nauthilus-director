@@ -19,6 +19,14 @@ GO ?= go
 POC_DIR := poc
 E2E_SCRIPT ?= ./test/e2e/run.sh
 E2E_INTEROP_SCRIPT ?= ./test/e2e/interop/run.sh
+SCALE_SMOKE_SESSIONS ?= 1000
+SCALE_SMOKE_HEARTBEAT_SAMPLE ?= 1000
+SCALE_SMOKE_CLOSE_SAMPLE ?= 100
+SCALE_SMOKE_REAP_EXPIRED ?= 100
+SCALE_STRESS_SESSIONS ?= 100000
+SCALE_STRESS_HEARTBEAT_SAMPLE ?= 10000
+SCALE_STRESS_CLOSE_SAMPLE ?= 10000
+SCALE_STRESS_REAP_EXPIRED ?= 10000
 
 MODULE_DIRS := $(shell find . -name go.mod -not -path './poc/*' -not -path './vendor/*' -exec dirname {} \; | sort)
 
@@ -188,6 +196,39 @@ copyright-check:
 
 guardrails: docs-check copyright-check check-openapi fix vet lint test race e2e build-check
 
+scale-smoke:
+	@if [ -z "$(SCALE_REDIS_ADDR)$(SCALE_REDIS_CLUSTER_ADDRS)" ]; then \
+		echo "Set SCALE_REDIS_ADDR or SCALE_REDIS_CLUSTER_ADDRS for an explicit non-production Redis target"; \
+		exit 2; \
+	fi
+	$(GO) run -mod=vendor ./test/scale \
+		$(if $(SCALE_REDIS_ADDR),--redis-addr "$(SCALE_REDIS_ADDR)",) \
+		$(if $(SCALE_REDIS_CLUSTER_ADDRS),--redis-cluster-addrs "$(SCALE_REDIS_CLUSTER_ADDRS)",) \
+		$(if $(SCALE_REDIS_USERNAME),--redis-username "$(SCALE_REDIS_USERNAME)",) \
+		$(if $(SCALE_REDIS_PASSWORD_FILE),--redis-password-file "$(SCALE_REDIS_PASSWORD_FILE)",) \
+		$(if $(SCALE_REDIS_TLS),--tls,) \
+		--sessions "$(SCALE_SMOKE_SESSIONS)" \
+		--heartbeat-sample "$(SCALE_SMOKE_HEARTBEAT_SAMPLE)" \
+		--close-sample "$(SCALE_SMOKE_CLOSE_SAMPLE)" \
+		--reap-expired "$(SCALE_SMOKE_REAP_EXPIRED)"
+
+scale-stress:
+	@if [ -z "$(SCALE_REDIS_ADDR)$(SCALE_REDIS_CLUSTER_ADDRS)" ]; then \
+		echo "Set SCALE_REDIS_ADDR or SCALE_REDIS_CLUSTER_ADDRS for an explicit Redis sizing target"; \
+		exit 2; \
+	fi
+	$(GO) run -mod=vendor ./test/scale \
+		$(if $(SCALE_REDIS_ADDR),--redis-addr "$(SCALE_REDIS_ADDR)",) \
+		$(if $(SCALE_REDIS_CLUSTER_ADDRS),--redis-cluster-addrs "$(SCALE_REDIS_CLUSTER_ADDRS)",) \
+		$(if $(SCALE_REDIS_USERNAME),--redis-username "$(SCALE_REDIS_USERNAME)",) \
+		$(if $(SCALE_REDIS_PASSWORD_FILE),--redis-password-file "$(SCALE_REDIS_PASSWORD_FILE)",) \
+		$(if $(SCALE_REDIS_TLS),--tls,) \
+		$(if $(SCALE_ALLOW_PRODUCTION_TARGET),--allow-production-target,) \
+		--sessions "$(SCALE_STRESS_SESSIONS)" \
+		--heartbeat-sample "$(SCALE_STRESS_HEARTBEAT_SAMPLE)" \
+		--close-sample "$(SCALE_STRESS_CLOSE_SAMPLE)" \
+		--reap-expired "$(SCALE_STRESS_REAP_EXPIRED)"
+
 # Optional proof-of-concept checks
 poc-test:
 	@if [ ! -f $(POC_DIR)/go.mod ]; then \
@@ -207,4 +248,4 @@ poc-race:
 version:
 	@echo $(VERSION)
 
-.PHONY: all build install install-bin install-man uninstall uninstall-bin uninstall-man build-check clean fix vet lint-config lint test race e2e e2e-interop docs-check generate-openapi check-openapi generate-docs check-docs copyright-check guardrails poc-test poc-race version
+.PHONY: all build install install-bin install-man uninstall uninstall-bin uninstall-man build-check clean fix vet lint-config lint test race e2e e2e-interop docs-check generate-openapi check-openapi generate-docs check-docs copyright-check guardrails scale-smoke scale-stress poc-test poc-race version

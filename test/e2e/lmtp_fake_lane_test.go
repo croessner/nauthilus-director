@@ -471,7 +471,6 @@ director:
         require_client_cert: false
         min_tls_version: TLS1.2
       lmtp:
-        smtputf8: true
         client_auth:
           required: %t
           authority: default
@@ -498,7 +497,6 @@ director:
         require_client_cert: true
         min_tls_version: TLS1.2
       lmtp:
-        smtputf8: true
         client_auth:
           required: true
           authority: default

@@ -1397,11 +1397,12 @@ func (r *recordingRoutingResolver) singleRequest(t *testing.T) routing.RoutingRe
 }
 
 type recordingDeliveryStore struct {
-	mu          sync.Mutex
-	opens       []state.SessionRecord
-	attachments []state.SessionBackendAttachment
-	heartbeats  int
-	closes      []string
+	mu           sync.Mutex
+	opens        []state.SessionRecord
+	reservations []state.BackendReservationRequest
+	attachments  []state.SessionBackendAttachment
+	heartbeats   int
+	closes       []string
 }
 
 // OpenSession records a delivery hold and returns an active affinity record.
@@ -1420,6 +1421,41 @@ func (s *recordingDeliveryStore) OpenSession(_ context.Context, record state.Ses
 	}, nil
 }
 
+// ReserveBackendCapacity records backend reservation for a delivery hold.
+func (s *recordingDeliveryStore) ReserveBackendCapacity(
+	_ context.Context,
+	request state.BackendReservationRequest,
+) (state.BackendReservationRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.reservations = append(s.reservations, request)
+
+	return state.BackendReservationRecord{
+		Status:             "reserved",
+		BackendIdentifier:  request.BackendIdentifier,
+		ReservationID:      request.ReservationID,
+		BackendActiveCount: 1,
+		LeaseExpiresAt:     time.Now().Add(request.LeaseTTL),
+	}, nil
+}
+
+// ReleaseBackendReservation records reservation rollback for a delivery hold.
+func (s *recordingDeliveryStore) ReleaseBackendReservation(
+	context.Context,
+	state.BackendReservationReleaseRequest,
+) (state.BackendReservationRecord, error) {
+	return state.BackendReservationRecord{Status: "released", RepairedCount: 1}, nil
+}
+
+// ReapBackendReservations is unused by LMTP placement tests.
+func (s *recordingDeliveryStore) ReapBackendReservations(
+	context.Context,
+	state.BackendReservationReapRequest,
+) (state.BackendReservationRecord, error) {
+	return state.BackendReservationRecord{}, nil
+}
+
 // AttachSelectedBackend records selected backend attachment.
 func (s *recordingDeliveryStore) AttachSelectedBackend(_ context.Context, attachment state.SessionBackendAttachment) (state.SessionBackendRecord, error) {
 	s.mu.Lock()
@@ -1430,6 +1466,7 @@ func (s *recordingDeliveryStore) AttachSelectedBackend(_ context.Context, attach
 	return state.SessionBackendRecord{
 		Status:             "attached",
 		BackendIdentifier:  attachment.BackendIdentifier,
+		ReservationID:      attachment.ReservationID,
 		BackendActiveCount: 1,
 	}, nil
 }

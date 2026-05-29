@@ -4,6 +4,73 @@
 
 name: ${COMPOSE_PROJECT_NAME:-nauthilus-director-demo}
 
+x-nauthilus-service: &nauthilus-service
+  image: ${NAUTHILUS_IMAGE:-ghcr.io/croessner/nauthilus:v3.0.0-rc.4}
+  depends_on:
+    grpc-tls:
+      condition: service_completed_successfully
+    valkey:
+      condition: service_healthy
+    openldap:
+      condition: service_healthy
+  volumes:
+    - ./nauthilus/nauthilus.yml:/etc/nauthilus/nauthilus.yml:ro
+    - ./nauthilus/lua:/etc/nauthilus/lua:ro
+    - grpc-tls:/run/nauthilus-demo/grpc-tls:ro
+  healthcheck:
+    test: ["CMD", "/usr/app/healthcheck", "--url", "http://127.0.0.1:8080/healthz"]
+    interval: 5s
+    timeout: 5s
+    retries: 30
+
+x-stalwart-service: &stalwart-service
+  build:
+    context: ${STALWART_FDB_BUILD_CONTEXT:-https://github.com/stalwartlabs/stalwart.git#main}
+    dockerfile: Dockerfile.fdb
+  depends_on:
+    foundationdb-configure:
+      condition: service_completed_successfully
+    openldap:
+      condition: service_healthy
+    valkey:
+      condition: service_healthy
+  environment:
+    FDB_CLUSTER_FILE: /var/fdb/fdb.cluster
+    STALWART_RECOVERY_ADMIN: "admin:${STALWART_ADMIN_PASSWORD:-demo-stalwart-admin}"
+    STALWART_PUBLIC_URL: "http://localhost:8080"
+  entrypoint: ["/bin/sh", "/usr/local/bin/stalwart-entrypoint.sh"]
+  volumes:
+    - ./stalwart/config.json:/etc/stalwart/config.json:ro
+    - ./stalwart/entrypoint.sh:/usr/local/bin/stalwart-entrypoint.sh:ro
+    - foundationdb-data:/var/fdb:ro
+    - stalwart-bootstrap:/run/stalwart-bootstrap
+  healthcheck:
+    test:
+      [
+        "CMD-SHELL",
+        "grep -Eq ':0F99[[:space:]].*[[:space:]]0A[[:space:]]' /proc/net/tcp /proc/net/tcp6 && grep -Eq ':0BD0[[:space:]].*[[:space:]]0A[[:space:]]' /proc/net/tcp /proc/net/tcp6",
+      ]
+    interval: 5s
+    timeout: 5s
+    retries: 30
+  networks:
+    demo: {}
+
+x-dovecot-service: &dovecot-service
+  image: ${DOVECOT_IMAGE:-dovecot/dovecot:2.4.4}
+  depends_on:
+    openldap:
+      condition: service_healthy
+  environment:
+    DOVECOT_MASTER_PASSWORD: ${DOVECOT_MASTER_PASSWORD:-demo-master-secret}
+  volumes:
+    - ./dovecot/auth.conf:/etc/dovecot/conf.d/auth.conf:ro
+  healthcheck:
+    test: ["CMD-SHELL", "doveadm who >/dev/null 2>&1"]
+    interval: 5s
+    timeout: 5s
+    retries: 30
+
 services:
   valkey:
     image: ${VALKEY_IMAGE:-valkey/valkey:9.1.0-alpine}
@@ -52,73 +119,138 @@ services:
       timeout: 5s
       retries: 30
 
-  nauthilus:
-    image: ${NAUTHILUS_IMAGE:-ghcr.io/croessner/nauthilus:v3.0.0-rc.4}
-    depends_on:
-      grpc-tls:
-        condition: service_completed_successfully
-      valkey:
-        condition: service_healthy
-      openldap:
-        condition: service_healthy
-    volumes:
-      - ./nauthilus/nauthilus.yml:/etc/nauthilus/nauthilus.yml:ro
-      - ./nauthilus/lua:/etc/nauthilus/lua:ro
-      - grpc-tls:/run/nauthilus-demo/grpc-tls:ro
+  nauthilus-a:
+    <<: *nauthilus-service
+    environment:
+      NAUTHILUS_INSTANCE_NAME: demo-nauthilus-a
     networks:
       demo:
         aliases:
-          - nauthilus
+          - nauthilus-a
+
+  nauthilus-b:
+    <<: *nauthilus-service
+    environment:
+      NAUTHILUS_INSTANCE_NAME: demo-nauthilus-b
+    networks:
+      demo:
+        aliases:
+          - nauthilus-b
+
+  nauthilus-haproxy:
+    image: ${HAPROXY_IMAGE:-haproxy:3.2-alpine}
+    depends_on:
+      nauthilus-a:
+        condition: service_healthy
+      nauthilus-b:
+        condition: service_healthy
+    volumes:
+      - ./haproxy/nauthilus.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    networks:
+      demo:
+        aliases:
+          - nauthilus-haproxy
     healthcheck:
-      test: ["CMD", "/usr/app/healthcheck", "--url", "http://127.0.0.1:8080/healthz"]
-      interval: 5s
+      test: ["CMD", "haproxy", "-c", "-f", "/usr/local/etc/haproxy/haproxy.cfg"]
+      interval: 10s
       timeout: 5s
-      retries: 30
+      retries: 10
 
   mailstore-a:
-    image: ${DOVECOT_IMAGE:-dovecot/dovecot:2.4.4}
+    <<: *dovecot-service
     hostname: mailstore-a
-    environment:
-      USER_PASSWORD: ${DEMO_PASSWORD:-demo-secret}
     networks:
       demo:
         aliases:
           - mailstore-a
-    healthcheck:
-      test: ["CMD-SHELL", "doveadm who >/dev/null 2>&1"]
-      interval: 5s
-      timeout: 5s
-      retries: 30
 
   mailstore-b:
-    image: ${DOVECOT_IMAGE:-dovecot/dovecot:2.4.4}
+    <<: *dovecot-service
     hostname: mailstore-b
-    environment:
-      USER_PASSWORD: ${DEMO_PASSWORD:-demo-secret}
     networks:
       demo:
         aliases:
           - mailstore-b
-    healthcheck:
-      test: ["CMD-SHELL", "doveadm who >/dev/null 2>&1"]
-      interval: 5s
-      timeout: 5s
-      retries: 30
 
   mailstore-c:
-    image: ${DOVECOT_IMAGE:-dovecot/dovecot:2.4.4}
+    <<: *dovecot-service
     hostname: mailstore-c
-    environment:
-      USER_PASSWORD: ${DEMO_PASSWORD:-demo-secret}
     networks:
       demo:
         aliases:
           - mailstore-c
-    healthcheck:
-      test: ["CMD-SHELL", "doveadm who >/dev/null 2>&1"]
-      interval: 5s
-      timeout: 5s
-      retries: 30
+
+  foundationdb:
+    image: ${FOUNDATIONDB_IMAGE:-foundationdb/foundationdb:7.4.6}
+    environment:
+      FDB_CLUSTER_FILE: /var/fdb/fdb.cluster
+      FDB_NETWORKING_MODE: container
+    volumes:
+      - foundationdb-data:/var/fdb
+    networks:
+      demo:
+        aliases:
+          - foundationdb
+
+  foundationdb-configure:
+    image: ${FOUNDATIONDB_IMAGE:-foundationdb/foundationdb:7.4.6}
+    depends_on:
+      foundationdb:
+        condition: service_started
+    entrypoint: ["/bin/sh", "/usr/local/bin/configure-foundationdb.sh"]
+    environment:
+      FDB_CLUSTER_FILE: /var/fdb/fdb.cluster
+    volumes:
+      - foundationdb-data:/var/fdb
+      - ./foundationdb/configure-foundationdb.sh:/usr/local/bin/configure-foundationdb.sh:ro
+    networks:
+      demo: {}
+
+  stalwart-a:
+    <<: *stalwart-service
+    hostname: stalwart-a
+    environment:
+      STALWART_RECOVERY_ADMIN: "admin:${STALWART_ADMIN_PASSWORD:-demo-stalwart-admin}"
+      STALWART_HOSTNAME: stalwart-a.demo.local
+      STALWART_PUBLIC_URL: "http://stalwart-a:8080"
+    networks:
+      demo:
+        aliases:
+          - stalwart-a
+
+  stalwart-b:
+    <<: *stalwart-service
+    hostname: stalwart-b
+    environment:
+      STALWART_RECOVERY_ADMIN: "admin:${STALWART_ADMIN_PASSWORD:-demo-stalwart-admin}"
+      STALWART_HOSTNAME: stalwart-b.demo.local
+      STALWART_PUBLIC_URL: "http://stalwart-b:8080"
+    networks:
+      demo:
+        aliases:
+          - stalwart-b
+
+  stalwart-configure:
+    build:
+      context: ../..
+      dockerfile: contrib/demo-stack/Dockerfile.stalwart-cli
+      args:
+        STALWART_CLI_INSTALLER_URL: ${STALWART_CLI_INSTALLER_URL:-https://github.com/stalwartlabs/cli/releases/latest/download/stalwart-cli-installer.sh}
+    depends_on:
+      stalwart-a:
+        condition: service_started
+      stalwart-b:
+        condition: service_started
+    environment:
+      STALWART_ADMIN_USER: admin
+      STALWART_ADMIN_PASSWORD: ${STALWART_ADMIN_PASSWORD:-demo-stalwart-admin}
+      STALWART_PLAN: /etc/stalwart-demo/bootstrap.ndjson
+    entrypoint: ["/bin/sh", "/etc/stalwart-demo/configure.sh"]
+    volumes:
+      - ./stalwart:/etc/stalwart-demo:ro
+      - stalwart-bootstrap:/run/stalwart-bootstrap
+    networks:
+      demo: {}
 
   director-a:
     build:
@@ -126,10 +258,11 @@ services:
       dockerfile: contrib/demo-stack/Dockerfile.director
     environment:
       DIRECTOR_INSTANCE_NAME: demo-director-a
+      DOVECOT_MASTER_PASSWORD: ${DOVECOT_MASTER_PASSWORD:-demo-master-secret}
     depends_on:
       valkey:
         condition: service_healthy
-      nauthilus:
+      nauthilus-haproxy:
         condition: service_healthy
       mailstore-a:
         condition: service_healthy
@@ -137,6 +270,8 @@ services:
         condition: service_healthy
       mailstore-c:
         condition: service_healthy
+      stalwart-configure:
+        condition: service_completed_successfully
     volumes:
       - ./director/nauthilus-director.yml:/etc/nauthilus-director/nauthilus-director.yml:ro
       - grpc-tls:/run/nauthilus-demo/grpc-tls:ro
@@ -158,10 +293,11 @@ services:
       dockerfile: contrib/demo-stack/Dockerfile.director
     environment:
       DIRECTOR_INSTANCE_NAME: demo-director-b
+      DOVECOT_MASTER_PASSWORD: ${DOVECOT_MASTER_PASSWORD:-demo-master-secret}
     depends_on:
       valkey:
         condition: service_healthy
-      nauthilus:
+      nauthilus-haproxy:
         condition: service_healthy
       mailstore-a:
         condition: service_healthy
@@ -169,6 +305,8 @@ services:
         condition: service_healthy
       mailstore-c:
         condition: service_healthy
+      stalwart-configure:
+        condition: service_completed_successfully
     volumes:
       - ./director/nauthilus-director.yml:/etc/nauthilus-director/nauthilus-director.yml:ro
       - grpc-tls:/run/nauthilus-demo/grpc-tls:ro
@@ -246,3 +384,5 @@ volumes:
   openldap-data:
   openldap-accesslog:
   grpc-tls:
+  foundationdb-data:
+  stalwart-bootstrap:

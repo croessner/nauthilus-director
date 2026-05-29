@@ -3,16 +3,12 @@
 -- SPDX-License-Identifier: AGPL-3.0-only
 --
 -- Opens or refreshes one session lease while preserving an existing affinity
--- pin. The affinity state keys share one Redis Cluster hash tag; the remaining
--- keys are repairable namespace indexes.
+-- pin. All keys passed to this script share one Redis Cluster hash tag.
 
 local state_key = KEYS[1]
 local sessions_key = KEYS[2]
 local session_key = KEYS[3]
 local override_key = KEYS[4]
-local session_index_key = KEYS[5]
-local user_index_key = KEYS[6]
-local user_sessions_key = KEYS[7]
 
 local session_id = ARGV[1]
 local protocol = ARGV[2]
@@ -165,7 +161,6 @@ redis.call("HSET", session_key,
 	"session_id", session_id,
 	"state_key", state_key,
 	"sessions_key", sessions_key,
-	"user_sessions_key", user_sessions_key,
 	"affinity_hash", affinity_hash,
 	"tenant", tenant,
 	"account_key", account_key,
@@ -206,9 +201,6 @@ redis.call("HSET", state_key,
 redis.call("PEXPIREAT", state_key, state_expires_at)
 redis.call("PEXPIREAT", sessions_key, state_expires_at)
 redis.call("PEXPIREAT", session_key, lease_expires_at + session_retention_ms)
-redis.call("HSET", session_index_key, session_id, session_key)
-redis.call("SADD", user_index_key, affinity_hash)
-redis.call("SADD", user_sessions_key, session_id)
 
 if clear_override then
 	redis.call("DEL", override_key)
@@ -227,8 +219,18 @@ return {
 	"control_generation", control_generation,
 	"control_action", "none",
 	"backend_id", "",
+	"backend_counted", "0",
+	"session_id", session_id,
+	"affinity_hash", affinity_hash,
+	"tenant", tenant,
+	"account_key", account_key,
+	"holder_kind", holder_kind,
+	"protocol", protocol,
+	"listener_name", listener_name,
+	"service_name", service_name,
 	"active_session_count", tostring(active_count),
 	"server_time_ms", tostring(now),
 	"expires_at_ms", tostring(state_expires_at),
-	"lease_expires_at_ms", tostring(lease_expires_at)
+	"lease_expires_at_ms", tostring(lease_expires_at),
+	"idle_expires_at_ms", tostring(state_expires_at)
 }

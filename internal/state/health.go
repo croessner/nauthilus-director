@@ -179,7 +179,12 @@ func (s *RedisSessionStore) BackendSnapshot(ctx context.Context, backendIdentifi
 
 	s.recordRedisOperation(redisCtx, "backend_snapshot", started, nil)
 
-	override, activeSessions, err := parseRuntimeSnapshotFields(fields)
+	override, _, err := parseRuntimeSnapshotFields(fields)
+	if err != nil {
+		return backend.RuntimeSnapshot{}, err
+	}
+
+	activeSessions, err := s.backendReservationActiveCount(ctx, backendIdentifier)
 	if err != nil {
 		return backend.RuntimeSnapshot{}, err
 	}

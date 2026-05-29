@@ -56,6 +56,7 @@ const (
 	commandConfig    = "config"
 	commandSessions  = "sessions"
 	commandUsers     = "users"
+	commandRuntime   = "runtime"
 	commandRoute     = "route"
 	commandReload    = "reload"
 )
@@ -183,6 +184,8 @@ func (app application) dispatch(args []string) int {
 		return app.runSessions(args[1:])
 	case commandUsers:
 		return app.runUsers(args[1:])
+	case commandRuntime:
+		return app.runRuntime(args[1:])
 	case commandRoute:
 		return app.runRoute(args[1:])
 	case commandReload:
@@ -971,7 +974,13 @@ func (app application) runSessions(args []string) int {
 
 // runSessionsList lists active sessions.
 func (app application) runSessionsList(args []string) int {
-	line, err := parseCommandLine(args, []commandFlag{valueFlag("protocol")})
+	line, err := parseCommandLine(args, []commandFlag{
+		valueFlag("protocol"),
+		valueFlag("backend"),
+		valueFlag("cursor"),
+		valueFlag("limit"),
+		boolFlag("all"),
+	})
 	if err != nil {
 		return app.usageError("%v", err)
 	}
@@ -979,9 +988,25 @@ func (app application) runSessionsList(args []string) int {
 		return app.usageError("sessions list does not accept positional arguments")
 	}
 
+	limit, err := optionalPositiveInt(line, "limit")
+	if err != nil {
+		return app.usageError("%v", err)
+	}
+
 	var params generated.ListSessionsParams
 	if protocol := line.value("protocol"); protocol != "" {
 		params.Protocol = &protocol
+	}
+	if backend := line.value("backend"); backend != "" {
+		params.Backend = &backend
+	}
+	if cursor := line.value("cursor"); cursor != "" {
+		typedCursor := generated.RuntimeReadCursor(cursor)
+		params.Cursor = &typedCursor
+	}
+	if limit != nil {
+		typedLimit := generated.RuntimeReadLimit(*limit)
+		params.Limit = &typedLimit
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), app.options.Timeout)
@@ -992,27 +1017,48 @@ func (app application) runSessionsList(args []string) int {
 		return code
 	}
 
-	response, err := client.ListSessionsWithResponse(ctx, &params)
-	if err != nil {
-		return app.requestError("sessions list", err)
-	}
-	if response.StatusCode() != http.StatusOK {
-		return app.serverError("sessions list", response.StatusCode(), response.JSONDefault)
-	}
-	if response.JSON200 == nil {
-		return app.serverError("sessions list", http.StatusBadGateway, nil)
-	}
+	result := generated.SessionListResponse{}
+	seenCursors := make(map[string]bool)
 
-	sort.Slice(response.JSON200.Sessions, func(left int, right int) bool {
-		return response.JSON200.Sessions[left].SessionID < response.JSON200.Sessions[right].SessionID
-	})
-
-	return app.writeObject(response.JSON200, func(writer io.Writer) error {
-		for _, session := range response.JSON200.Sessions {
-			writeSessionLine(writer, session)
+	for {
+		if err := ctx.Err(); err != nil {
+			return app.requestError("sessions list", err)
 		}
-		return nil
-	})
+
+		if params.Cursor != nil {
+			seenCursors[string(*params.Cursor)] = true
+		}
+
+		response, err := client.ListSessionsWithResponse(ctx, &params)
+		if err != nil {
+			return app.requestError("sessions list", err)
+		}
+		if response.StatusCode() != http.StatusOK {
+			return app.serverError("sessions list", response.StatusCode(), response.JSONDefault)
+		}
+		if response.JSON200 == nil {
+			return app.serverError("sessions list", http.StatusBadGateway, nil)
+		}
+
+		result.Sessions = append(result.Sessions, response.JSON200.Sessions...)
+		result.NextCursor = response.JSON200.NextCursor
+		if !line.bool("all") || response.JSON200.NextCursor == nil || strings.TrimSpace(*response.JSON200.NextCursor) == "" {
+			break
+		}
+
+		nextCursor := strings.TrimSpace(*response.JSON200.NextCursor)
+		if seenCursors[nextCursor] {
+			return app.cursorLoopError("sessions list")
+		}
+		typedCursor := generated.RuntimeReadCursor(nextCursor)
+		params.Cursor = &typedCursor
+	}
+
+	if line.bool("all") {
+		result.NextCursor = nil
+	}
+
+	return app.writeSessionList(&result)
 }
 
 // runSessionsShow shows one active session.
@@ -1107,12 +1153,31 @@ func (app application) runUsers(args []string) int {
 
 // runUsersList lists users with active runtime state.
 func (app application) runUsersList(args []string) int {
-	line, err := parseCommandLine(args, nil)
+	line, err := parseCommandLine(args, []commandFlag{
+		valueFlag("cursor"),
+		valueFlag("limit"),
+		boolFlag("all"),
+	})
 	if err != nil {
 		return app.usageError("%v", err)
 	}
 	if len(line.positionals) != 0 {
 		return app.usageError("users list does not accept positional arguments")
+	}
+
+	limit, err := optionalPositiveInt(line, "limit")
+	if err != nil {
+		return app.usageError("%v", err)
+	}
+
+	var params generated.ListUsersParams
+	if cursor := line.value("cursor"); cursor != "" {
+		typedCursor := generated.RuntimeReadCursor(cursor)
+		params.Cursor = &typedCursor
+	}
+	if limit != nil {
+		typedLimit := generated.RuntimeReadLimit(*limit)
+		params.Limit = &typedLimit
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), app.options.Timeout)
@@ -1123,27 +1188,48 @@ func (app application) runUsersList(args []string) int {
 		return code
 	}
 
-	response, err := client.ListUsersWithResponse(ctx)
-	if err != nil {
-		return app.requestError("users list", err)
-	}
-	if response.StatusCode() != http.StatusOK {
-		return app.serverError("users list", response.StatusCode(), response.JSONDefault)
-	}
-	if response.JSON200 == nil {
-		return app.serverError("users list", http.StatusBadGateway, nil)
-	}
+	result := generated.UserListResponse{}
+	seenCursors := make(map[string]bool)
 
-	sort.Slice(response.JSON200.Users, func(left int, right int) bool {
-		return response.JSON200.Users[left].UserKey < response.JSON200.Users[right].UserKey
-	})
-
-	return app.writeObject(response.JSON200, func(writer io.Writer) error {
-		for _, user := range response.JSON200.Users {
-			writeUserLine(writer, user)
+	for {
+		if err := ctx.Err(); err != nil {
+			return app.requestError("users list", err)
 		}
-		return nil
-	})
+
+		if params.Cursor != nil {
+			seenCursors[string(*params.Cursor)] = true
+		}
+
+		response, err := client.ListUsersWithResponse(ctx, &params)
+		if err != nil {
+			return app.requestError("users list", err)
+		}
+		if response.StatusCode() != http.StatusOK {
+			return app.serverError("users list", response.StatusCode(), response.JSONDefault)
+		}
+		if response.JSON200 == nil {
+			return app.serverError("users list", http.StatusBadGateway, nil)
+		}
+
+		result.Users = append(result.Users, response.JSON200.Users...)
+		result.NextCursor = response.JSON200.NextCursor
+		if !line.bool("all") || response.JSON200.NextCursor == nil || strings.TrimSpace(*response.JSON200.NextCursor) == "" {
+			break
+		}
+
+		nextCursor := strings.TrimSpace(*response.JSON200.NextCursor)
+		if seenCursors[nextCursor] {
+			return app.cursorLoopError("users list")
+		}
+		typedCursor := generated.RuntimeReadCursor(nextCursor)
+		params.Cursor = &typedCursor
+	}
+
+	if line.bool("all") {
+		result.NextCursor = nil
+	}
+
+	return app.writeUserList(&result)
 }
 
 // runUsersShow shows one user's runtime state.
@@ -1422,6 +1508,52 @@ func (app application) runUsersKick(args []string) int {
 	}
 
 	return app.handleKickUserResponse(response)
+}
+
+// runRuntime dispatches runtime aggregate diagnostic commands.
+func (app application) runRuntime(args []string) int {
+	if len(args) == 0 {
+		return app.usageError("runtime requires a subcommand")
+	}
+
+	switch args[0] {
+	case "summary":
+		return app.runRuntimeSummary(args[1:])
+	default:
+		return app.usageError("unknown runtime subcommand %q", args[0])
+	}
+}
+
+// runRuntimeSummary prints repairable aggregate runtime totals.
+func (app application) runRuntimeSummary(args []string) int {
+	line, err := parseCommandLine(args, nil)
+	if err != nil {
+		return app.usageError("%v", err)
+	}
+	if len(line.positionals) != 0 {
+		return app.usageError("runtime summary does not accept positional arguments")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), app.options.Timeout)
+	defer cancel()
+
+	client, code := app.client()
+	if code != 0 {
+		return code
+	}
+
+	response, err := client.GetRuntimeSummaryWithResponse(ctx)
+	if err != nil {
+		return app.requestError("runtime summary", err)
+	}
+	if response.StatusCode() != http.StatusOK {
+		return app.serverError("runtime summary", response.StatusCode(), response.JSONDefault)
+	}
+	if response.JSON200 == nil {
+		return app.serverError("runtime summary", http.StatusBadGateway, nil)
+	}
+
+	return app.writeRuntimeSummary(response.JSON200)
 }
 
 // runRoute dispatches route diagnostic commands.
@@ -1712,6 +1844,87 @@ func (app application) writeObject(value any, writeText func(io.Writer) error) i
 	return 0
 }
 
+// writeSessionList renders a session page and advertises continuation cursors.
+func (app application) writeSessionList(response *generated.SessionListResponse) int {
+	sort.Slice(response.Sessions, func(left int, right int) bool {
+		return response.Sessions[left].SessionID < response.Sessions[right].SessionID
+	})
+
+	return app.writeObject(response, func(writer io.Writer) error {
+		for _, session := range response.Sessions {
+			writeSessionLine(writer, session)
+		}
+		writeNextCursorLine(writer, response.NextCursor)
+
+		return nil
+	})
+}
+
+// writeUserList renders a user page and advertises continuation cursors.
+func (app application) writeUserList(response *generated.UserListResponse) int {
+	sort.Slice(response.Users, func(left int, right int) bool {
+		return response.Users[left].UserKey < response.Users[right].UserKey
+	})
+
+	return app.writeObject(response, func(writer io.Writer) error {
+		for _, user := range response.Users {
+			writeUserLine(writer, user)
+		}
+		writeNextCursorLine(writer, response.NextCursor)
+
+		return nil
+	})
+}
+
+// writeRuntimeSummary renders repairable aggregate runtime totals.
+func (app application) writeRuntimeSummary(response *generated.RuntimeSummaryResponse) int {
+	return app.writeObject(response, func(writer io.Writer) error {
+		_, _ = fmt.Fprintf(
+			writer,
+			"routing_authority=%t active_sessions=%d active_accuracy=%s idle_affinities=%d idle_accuracy=%s\n",
+			response.RoutingAuthority,
+			response.ActiveSessions.Total.Count,
+			response.ActiveSessions.Total.Accuracy,
+			response.IdleAffinities.Count,
+			response.IdleAffinities.Accuracy,
+		)
+		writeRuntimeDimensionCounts(writer, "active_sessions_by_protocol", "protocol", response.ActiveSessions.ByProtocol)
+		writeRuntimeDimensionCounts(writer, "active_sessions_by_listener", "listener", response.ActiveSessions.ByListener)
+		writeRuntimeDimensionCounts(writer, "active_sessions_by_service", "service", response.ActiveSessions.ByService)
+		writeRuntimeDimensionCounts(writer, "active_sessions_by_shard", "shard_tag", response.ActiveSessions.ByShardTag)
+		for _, backend := range response.BackendCapacity {
+			_, _ = fmt.Fprintf(
+				writer,
+				"backend_capacity backend=%s active_sessions=%d active_accuracy=%s reserved_sessions=%d reserved_accuracy=%s repairable=%t routing_authority=%t\n",
+				backend.Backend,
+				backend.ActiveSessions.Count,
+				backend.ActiveSessions.Accuracy,
+				backend.ReservedSessions.Count,
+				backend.ReservedSessions.Accuracy,
+				backend.SummaryRepairable,
+				backend.RoutingAuthority,
+			)
+		}
+		_, _ = fmt.Fprintf(
+			writer,
+			"repairs expired_sessions=%d stale_index_entries=%d backend_reservations=%d accuracy=%s\n",
+			response.Repairs.ExpiredSessions.Count,
+			response.Repairs.StaleIndexEntries.Count,
+			response.Repairs.BackendReservations.Count,
+			response.Repairs.ExpiredSessions.Accuracy,
+		)
+
+		return nil
+	})
+}
+
+// writeRuntimeDimensionCounts renders one aggregate dimension list.
+func writeRuntimeDimensionCounts(writer io.Writer, prefix string, key string, counts []generated.RuntimeDimensionCount) {
+	for _, count := range counts {
+		_, _ = fmt.Fprintf(writer, "%s %s=%s count=%d accuracy=%s\n", prefix, key, count.Value, count.Count, count.Accuracy)
+	}
+}
+
 // writeJSON renders stable indented JSON.
 func (app application) writeJSON(value any) int {
 	encoder := json.NewEncoder(app.stdout)
@@ -1754,6 +1967,12 @@ func (app application) usageError(format string, args ...any) int {
 // requestError reports a failed generated-client request.
 func (app application) requestError(operation string, err error) int {
 	_, _ = fmt.Fprintf(app.stderr, "%s failed: %v\n", operation, err)
+	return 1
+}
+
+// cursorLoopError reports a repeated server cursor without looping forever.
+func (app application) cursorLoopError(operation string) int {
+	_, _ = fmt.Fprintf(app.stderr, "%s failed: repeated pagination cursor\n", operation)
 	return 1
 }
 
@@ -1948,6 +2167,22 @@ func optionalNonNegativeInt(line parsedCommandLine, name string) (*int, error) {
 	return &parsed, nil
 }
 
+// optionalPositiveInt returns a positive integer flag when set.
+func optionalPositiveInt(line parsedCommandLine, name string) (*int, error) {
+	values := line.all(name)
+	if len(values) == 0 {
+		return nil, nil
+	}
+
+	value := strings.TrimSpace(values[len(values)-1])
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed <= 0 {
+		return nil, fmt.Errorf("flag --%s must be a positive integer", name)
+	}
+
+	return &parsed, nil
+}
+
 // parseRouteAttributes converts repeated k=v flags to the generated request shape.
 func parseRouteAttributes(values []string) (*map[string][]string, error) {
 	if len(values) == 0 {
@@ -2066,6 +2301,15 @@ func writeUserLine(writer io.Writer, user generated.UserDetail) {
 		user.ActiveSessions,
 		fieldValue(affinityShard),
 	)
+}
+
+// writeNextCursorLine writes the explicit continuation hint for partial pages.
+func writeNextCursorLine(writer io.Writer, nextCursor *string) {
+	if nextCursor == nil || strings.TrimSpace(*nextCursor) == "" {
+		return
+	}
+
+	_, _ = fmt.Fprintf(writer, "more=true next_cursor=%s\n", fieldValue(strings.TrimSpace(*nextCursor)))
 }
 
 // writeAffinityLine writes one scriptable affinity text row.

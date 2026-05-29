@@ -75,6 +75,25 @@ func DefaultConfig() Config {
 					},
 				},
 			},
+			State: RuntimeStateConfig{
+				Reaper: RuntimeStateReaperConfig{
+					Interval:        NewDuration(5 * time.Second),
+					BatchSize:       100,
+					MaxPassDuration: NewDuration(2 * time.Second),
+					Jitter:          NewDuration(500 * time.Millisecond),
+				},
+				Indexes: RuntimeStateIndexesConfig{
+					SessionShards: 64,
+					UserShards:    32,
+					BackendShards: 32,
+					PageDefault:   100,
+					PageMax:       1000,
+				},
+				BackendReservations: RuntimeStateBackendReservationsConfig{
+					TTL:            NewDuration(30 * time.Minute),
+					RepairInterval: NewDuration(5 * time.Second),
+				},
+			},
 			Timeouts: RuntimeTimeouts{
 				Preauth:        NewDuration(30 * time.Second),
 				Auth:           NewDuration(10 * time.Second),
@@ -406,7 +425,6 @@ func defaultLMTPListener(serviceName string, address string, tlsMode string, cer
 			MinTLSVersion: "TLS1.2",
 		},
 		LMTP: &LMTPListenerConfig{
-			SMTPUTF8: true,
 			ClientAuth: LMTPClientAuthConfig{
 				Required:   true,
 				Authority:  "default",

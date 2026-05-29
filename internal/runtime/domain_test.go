@@ -18,6 +18,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -308,7 +309,7 @@ func TestReaperRunOnceReportsRepairCounts(t *testing.T) {
 
 	service := NewSessionService(store, nil)
 
-	reaper, err := NewReaper(service, ReaperConfig{Interval: time.Second, Limit: 10})
+	reaper, err := NewReaper(service, ReaperConfig{Interval: time.Second, Limit: 10, MaxPassDuration: time.Second})
 	if err != nil {
 		t.Fatalf("NewReaper returned error: %v", err)
 	}
@@ -324,6 +325,35 @@ func TestReaperRunOnceReportsRepairCounts(t *testing.T) {
 
 	if store.reapRequest.Limit != 10 {
 		t.Fatalf("reap limit = %d, want 10", store.reapRequest.Limit)
+	}
+
+	if store.reapRequest.MaxPassDuration != time.Second {
+		t.Fatalf("reap max pass duration = %s, want 1s", store.reapRequest.MaxPassDuration)
+	}
+}
+
+// TestReaperRunOnceRespectsMaxPassDuration verifies slow repair stops by context deadline.
+func TestReaperRunOnceRespectsMaxPassDuration(t *testing.T) {
+	service := NewSessionService(blockingSessionStateStore{}, nil)
+
+	reaper, err := NewReaper(service, ReaperConfig{
+		Interval:        time.Second,
+		Limit:           10,
+		MaxPassDuration: 25 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("NewReaper returned error: %v", err)
+	}
+
+	started := time.Now()
+
+	_, err = reaper.RunOnce(context.Background())
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("RunOnce error = %v, want deadline exceeded", err)
+	}
+
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("RunOnce elapsed %s, want prompt deadline", elapsed)
 	}
 }
 
@@ -406,6 +436,20 @@ type recordingSessionStateStore struct {
 	killRecord  state.SessionKillRecord
 	reapRecord  state.ReapRecord
 	reapRequest state.ReapRequest
+}
+
+type blockingSessionStateStore struct{}
+
+// KillSession returns an empty result because the blocking store is reap-only.
+func (blockingSessionStateStore) KillSession(context.Context, state.SessionKillRequest) (state.SessionKillRecord, error) {
+	return state.SessionKillRecord{}, nil
+}
+
+// ReapSessions blocks until the caller's pass context is cancelled.
+func (blockingSessionStateStore) ReapSessions(ctx context.Context, _ state.ReapRequest) (state.ReapRecord, error) {
+	<-ctx.Done()
+
+	return state.ReapRecord{}, ctx.Err()
 }
 
 // KillSession returns the configured session kill record.

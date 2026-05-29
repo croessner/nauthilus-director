@@ -522,6 +522,9 @@ func assertNoRouteLookupMutations(t *testing.T, store *countingRouteState) {
 		store.kickUserCalls != 0 ||
 		store.clearUserCalls != 0 ||
 		store.killSessionCalls != 0 ||
+		store.reserveBackendCalls != 0 ||
+		store.releaseBackendCalls != 0 ||
+		store.reapBackendCalls != 0 ||
 		store.setBackendCalls != 0 ||
 		store.clearBackendCalls != 0 {
 		t.Fatalf("route lookup used mutating state path: %#v", store)
@@ -544,6 +547,9 @@ type countingRouteState struct {
 	kickUserCalls        int
 	clearUserCalls       int
 	killSessionCalls     int
+	reserveBackendCalls  int
+	releaseBackendCalls  int
+	reapBackendCalls     int
 	setBackendCalls      int
 	clearBackendCalls    int
 }
@@ -673,6 +679,27 @@ func (s *countingRouteState) KillSession(context.Context, state.SessionKillReque
 	s.killSessionCalls++
 
 	return state.SessionKillRecord{}, nil
+}
+
+// ReserveBackendCapacity records an unexpected backend reservation mutation path.
+func (s *countingRouteState) ReserveBackendCapacity(context.Context, state.BackendReservationRequest) (state.BackendReservationRecord, error) {
+	s.reserveBackendCalls++
+
+	return state.BackendReservationRecord{}, nil
+}
+
+// ReleaseBackendReservation records an unexpected backend reservation release path.
+func (s *countingRouteState) ReleaseBackendReservation(context.Context, state.BackendReservationReleaseRequest) (state.BackendReservationRecord, error) {
+	s.releaseBackendCalls++
+
+	return state.BackendReservationRecord{}, nil
+}
+
+// ReapBackendReservations records an unexpected backend reservation reap path.
+func (s *countingRouteState) ReapBackendReservations(context.Context, state.BackendReservationReapRequest) (state.BackendReservationRecord, error) {
+	s.reapBackendCalls++
+
+	return state.BackendReservationRecord{}, nil
 }
 
 // SetBackendRuntime records an unexpected backend runtime mutation path.

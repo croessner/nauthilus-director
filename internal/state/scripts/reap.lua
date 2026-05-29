@@ -2,10 +2,13 @@
 --
 -- SPDX-License-Identifier: AGPL-3.0-only
 --
--- Repairs expired session leases, active affinity counts, backend counts and
--- repairable listing indexes using Redis server time.
+-- Repairs due session leases, active affinity counts and repairable listing
+-- indexes using Redis server time. Backend capacity release is returned as an
+-- idempotent follow-up delta because backend reservation keys live in another
+-- Redis Cluster slot.
 
 local session_index_key = KEYS[1]
+local session_due_index_key = KEYS[2]
 
 local limit = tonumber(ARGV[1])
 
@@ -18,75 +21,68 @@ local function now_ms()
 	return (tonumber(now[1]) * 1000) + math.floor(tonumber(now[2]) / 1000)
 end
 
-local function decrement_backend(session_key)
-	local counted = redis.call("HGET", session_key, "backend_counted")
-	if counted ~= "1" then
-		return 0
-	end
-
-	local backend_key = redis.call("HGET", session_key, "backend_runtime_key")
-	if backend_key == false or backend_key == nil or backend_key == "" then
-		return ambiguous("backend_key_required")
-	end
-
-	local current = tonumber(redis.call("HGET", backend_key, "active_session_count") or "0")
-	if current == nil or current < 0 then
-		return ambiguous("backend_count_invalid")
-	end
-
-	if current > 0 then
-		redis.call("HINCRBY", backend_key, "active_session_count", -1)
-	else
-		redis.call("HSET", backend_key, "active_session_count", 0)
-	end
-
-	return 1
-end
-
-if limit == nil or limit < 0 then
+if limit == nil or limit <= 0 then
 	return ambiguous("limit_invalid")
 end
 
 local now = now_ms()
-local entries = redis.call("HGETALL", session_index_key)
+local due_sessions = redis.call("ZRANGEBYSCORE", session_due_index_key, "-inf", now, "LIMIT", 0, limit)
 local scanned = 0
 local expired = 0
 local repaired_backends = 0
+local stale_index_entries = 0
+local reservation_releases = {}
+local aggregate_removals = {}
+local idle_affinities = {}
 
-for index = 1, #entries, 2 do
-	if limit > 0 and scanned >= limit then
-		break
-	end
-
-	local session_id = entries[index]
-	local session_key = entries[index + 1]
+for _, session_id in ipairs(due_sessions) do
 	scanned = scanned + 1
 
-	if session_key == false or session_key == nil or session_key == "" or redis.call("EXISTS", session_key) == 0 then
+	local session_key = redis.call("HGET", session_index_key, session_id)
+	if session_key == false or session_key == nil or session_key == "" then
+		redis.call("ZREM", session_due_index_key, session_id)
 		redis.call("HDEL", session_index_key, session_id)
+		stale_index_entries = stale_index_entries + 1
+	elseif redis.call("EXISTS", session_key) == 0 then
+		redis.call("ZREM", session_due_index_key, session_id)
+		redis.call("HDEL", session_index_key, session_id)
+		stale_index_entries = stale_index_entries + 1
 	else
 		local lease_expires_at = tonumber(redis.call("HGET", session_key, "lease_expires_at_ms") or "0")
 		if lease_expires_at == nil then
 			return ambiguous("lease_invalid")
 		end
 
-		local sessions_key = redis.call("HGET", session_key, "sessions_key")
-		local state_key = redis.call("HGET", session_key, "state_key")
-		if sessions_key == false or sessions_key == nil or sessions_key == "" then
-			return ambiguous("sessions_key_required")
-		end
-		if state_key == false or state_key == nil or state_key == "" then
-			return ambiguous("state_key_required")
-		end
+		if lease_expires_at > now then
+			redis.call("ZADD", session_due_index_key, lease_expires_at, session_id)
+		else
+			local sessions_key = redis.call("HGET", session_key, "sessions_key")
+			local state_key = redis.call("HGET", session_key, "state_key")
+			if sessions_key == false or sessions_key == nil or sessions_key == "" then
+				return ambiguous("sessions_key_required")
+			end
+			if state_key == false or state_key == nil or state_key == "" then
+				return ambiguous("state_key_required")
+			end
 
-		redis.call("ZREMRANGEBYSCORE", sessions_key, "-inf", now)
-		local score = tonumber(redis.call("ZSCORE", sessions_key, session_id) or "0")
-		if score == nil then
-			return ambiguous("session_score_invalid")
-		end
+			local idle_grace_ms = tonumber(redis.call("HGET", state_key, "idle_grace_ms") or redis.call("HGET", session_key, "idle_grace_ms") or "0")
+			if idle_grace_ms == nil or idle_grace_ms < 0 then
+				idle_grace_ms = 0
+			end
 
-		if lease_expires_at <= now or score <= now then
-			repaired_backends = repaired_backends + decrement_backend(session_key)
+			local holder_kind = tostring(redis.call("HGET", session_key, "holder_kind") or "session")
+			local affinity_hash = redis.call("HGET", session_key, "affinity_hash")
+			local counted = redis.call("HGET", session_key, "backend_counted")
+			local backend_id = redis.call("HGET", session_key, "selected_backend_id")
+			local reservation_id = redis.call("HGET", session_key, "backend_reservation_id")
+			if counted == "1" and backend_id ~= false and backend_id ~= nil and backend_id ~= "" and reservation_id ~= false and reservation_id ~= nil and reservation_id ~= "" then
+				repaired_backends = repaired_backends + 1
+				table.insert(reservation_releases, backend_id .. "\t" .. reservation_id)
+			end
+
+			if holder_kind == "session" then
+				table.insert(aggregate_removals, session_id)
+			end
 
 			local backend_sessions_key = redis.call("HGET", session_key, "backend_sessions_key")
 			if backend_sessions_key ~= false and backend_sessions_key ~= nil and backend_sessions_key ~= "" then
@@ -99,16 +95,12 @@ for index = 1, #entries, 2 do
 			end
 
 			redis.call("ZREM", sessions_key, session_id)
+			redis.call("ZREM", session_due_index_key, session_id)
 			redis.call("HDEL", session_index_key, session_id)
 			redis.call("DEL", session_key)
 
 			local active_count = redis.call("ZCARD", sessions_key)
 			if redis.call("EXISTS", state_key) == 1 then
-				local idle_grace_ms = tonumber(redis.call("HGET", state_key, "idle_grace_ms") or redis.call("HGET", session_key, "idle_grace_ms") or "0")
-				if idle_grace_ms == nil or idle_grace_ms < 0 then
-					idle_grace_ms = 0
-				end
-
 				if active_count == 0 and idle_grace_ms == 0 then
 					redis.call("DEL", state_key)
 					redis.call("DEL", sessions_key)
@@ -117,6 +109,8 @@ for index = 1, #entries, 2 do
 					if active_count > 0 then
 						local top = redis.call("ZREVRANGE", sessions_key, 0, 0, "WITHSCORES")
 						expires_at = tonumber(top[2]) or now
+					elseif affinity_hash ~= false and affinity_hash ~= nil and affinity_hash ~= "" and idle_grace_ms > 0 then
+						table.insert(idle_affinities, affinity_hash .. "\t" .. tostring(expires_at))
 					end
 					redis.call("HSET", state_key,
 						"active_session_count", active_count,
@@ -136,6 +130,10 @@ return {
 	"status", "reaped",
 	"scanned_sessions", tostring(scanned),
 	"expired_sessions", tostring(expired),
+	"stale_index_entries", tostring(stale_index_entries),
 	"repaired_backends", tostring(repaired_backends),
+	"reservation_releases", table.concat(reservation_releases, "\n"),
+	"aggregate_removals", table.concat(aggregate_removals, "\n"),
+	"idle_affinities", table.concat(idle_affinities, "\n"),
 	"server_time_ms", tostring(now)
 }

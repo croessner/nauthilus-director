@@ -118,6 +118,24 @@ func validateRuntime(runtime RuntimeConfig, problems *[]string) {
 	requirePositiveInt("runtime.clients.http.max_connections_per_host", runtime.Clients.HTTP.MaxConnectionsPerHost, problems)
 	requirePositiveInt("runtime.clients.http.max_idle_connections", runtime.Clients.HTTP.MaxIdleConnections, problems)
 	requirePositiveInt("runtime.clients.http.max_idle_connections_per_host", runtime.Clients.HTTP.MaxIdleConnectionsPerHost, problems)
+	requirePositiveDuration("runtime.state.reaper.interval", runtime.State.Reaper.Interval, problems)
+	requirePositiveInt("runtime.state.reaper.batch_size", runtime.State.Reaper.BatchSize, problems)
+	requirePositiveDuration("runtime.state.reaper.max_pass_duration", runtime.State.Reaper.MaxPassDuration, problems)
+	requireNonNegativeDuration("runtime.state.reaper.jitter", runtime.State.Reaper.Jitter, problems)
+	requirePositiveInt("runtime.state.indexes.session_shards", runtime.State.Indexes.SessionShards, problems)
+	requirePositiveInt("runtime.state.indexes.user_shards", runtime.State.Indexes.UserShards, problems)
+	requirePositiveInt("runtime.state.indexes.backend_shards", runtime.State.Indexes.BackendShards, problems)
+	requirePositiveInt("runtime.state.indexes.page_default", runtime.State.Indexes.PageDefault, problems)
+	requirePositiveInt("runtime.state.indexes.page_max", runtime.State.Indexes.PageMax, problems)
+	if runtime.State.Indexes.PageDefault > runtime.State.Indexes.PageMax {
+		addProblem(problems, "runtime.state.indexes.page_default must not exceed runtime.state.indexes.page_max")
+	}
+	requirePositiveDuration("runtime.state.backend_reservations.ttl", runtime.State.BackendReservations.TTL, problems)
+	requirePositiveDuration(
+		"runtime.state.backend_reservations.repair_interval",
+		runtime.State.BackendReservations.RepairInterval,
+		problems,
+	)
 }
 
 // validateRedis keeps Redis centralized and checks each supported topology.
@@ -465,9 +483,7 @@ func validateLMTPCapabilities(path string, listener ListenerConfig, lmtp LMTPLis
 	for _, capability := range lmtp.Capabilities {
 		switch {
 		case capability == "SMTPUTF8":
-			if !lmtp.SMTPUTF8 {
-				addProblem(problems, path+" advertises SMTPUTF8 while smtputf8 is false")
-			}
+			continue
 		case capability == "STARTTLS":
 			if listener.TLS.Mode != "starttls" {
 				addProblem(problems, path+" advertises STARTTLS for non-starttls listener TLS mode")
@@ -737,6 +753,13 @@ func validBackendReplayMechanism(mechanism string) bool {
 func requirePositiveDuration(path string, value Duration, problems *[]string) {
 	if value <= 0 {
 		addProblem(problems, path+" must be greater than zero")
+	}
+}
+
+// requireNonNegativeDuration records a path-specific error for negative durations.
+func requireNonNegativeDuration(path string, value Duration, problems *[]string) {
+	if value < 0 {
+		addProblem(problems, path+" must not be negative")
 	}
 }
 
