@@ -201,7 +201,7 @@ auth:
         enabled: false
 
       http:
-        endpoint: "http://nauthilus:8080/api/v1/auth/json"
+        endpoint: "http://nauthilus-haproxy:8080/api/v1/auth/json"
         content_type: application/json
         basic_auth:
           username: director
@@ -210,13 +210,13 @@ auth:
           enabled: false
 
       grpc:
-        # This is the Nauthilus gRPC authority listener inside the Compose
-        # network. The listener itself is enabled in nauthilus/nauthilus.yml.
-        address: "nauthilus:50051"
+        # This is the internal HAProxy frontend for the two Nauthilus gRPC
+        # authority listeners inside the Compose network.
+        address: "nauthilus-haproxy:50051"
 
         # The authority value is used as the gRPC :authority override. Keeping
-        # it aligned with the service DNS name also matches the demo TLS
-        # certificate subjectAltName.
+        # it aligned with the demo Nauthilus certificate subjectAltName keeps
+        # HAProxy in TCP passthrough mode without terminating gRPC TLS.
         authority: nauthilus
 
         caller_auth:
@@ -404,6 +404,8 @@ director:
         - mailstore-a-imap
         - mailstore-b-imap
         - mailstore-c-imap
+        - stalwart-a-imap
+        - stalwart-b-imap
 
     lmtp-default:
       protocol: lmtp
@@ -412,14 +414,17 @@ director:
         - mailstore-a-lmtp
         - mailstore-b-lmtp
         - mailstore-c-lmtp
+        - stalwart-a-lmtp
+        - stalwart-b-lmtp
 
 
   # Backend definitions
   # -------------------
   #
-  # Each Dovecot container exposes one IMAP endpoint and one LMTP endpoint.
-  # shard_tag is the stable logical shard name returned by Nauthilus. The
-  # concrete backend identifiers remain Director-owned implementation details.
+  # Each Dovecot or Stalwart container exposes one IMAP endpoint and one LMTP
+  # endpoint. shard_tag is the stable logical shard name returned by Nauthilus.
+  # The concrete backend identifiers remain Director-owned implementation
+  # details.
   backends:
     mailstore-a-imap:
       protocol: imap
@@ -512,14 +517,13 @@ director:
         insecure_skip_verify: true
 
       auth:
-        mode: credential_replay
+        # This shard intentionally exercises Dovecot master-user auth instead
+        # of replaying the frontend credential to the backend.
+        mode: master_user
 
-        # These optional auth blocks are present to show the full backend-auth
-        # shape in one backend entry. They are inactive while mode is
-        # credential_replay.
         master_user:
-          username: ""
-          password_file: ""
+          username: nauthilus-director
+          password_file: "${DOVECOT_MASTER_PASSWORD}"
           user_format: "{user}*{master_user}"
           mechanism: plain
 
@@ -543,6 +547,81 @@ director:
       health_check:
         enabled: true
         deep_check: true
+        username: healthcheck@example.test
+        password_file: demo-secret
+
+    stalwart-a-imap:
+      protocol: imap
+      shard_tag: stalwart
+      address: "stalwart-a:3993"
+      weight: 100
+      max_connections: 1000
+      maintenance: disabled
+
+      tls:
+        mode: implicit
+        ca_file: ""
+        cert: ""
+        key: ""
+        server_name: ""
+        min_tls_version: TLS1.2
+
+        # Stalwart generates demo-local TLS material. The demo keeps backend
+        # verification disabled while still requiring encrypted backend IMAP.
+        insecure_skip_verify: true
+
+      auth:
+        # Nauthilus validates frontend credentials. The Director then replays
+        # the accepted credential to the Stalwart LDAP-backed account.
+        mode: credential_replay
+        credential_replay:
+          require_backend_tls: false
+          preserve_mechanism: false
+          allowed_mechanisms:
+            - plain
+            - login
+
+      health_check:
+        # Stalwart provisions LDAP-backed accounts into the shared store on
+        # successful login. Disable Director backend health for this demo shard
+        # and prove LDAP auth with the smoke users instead.
+        enabled: false
+        deep_check: false
+        username: healthcheck@example.test
+        password_file: demo-secret
+
+    stalwart-b-imap:
+      protocol: imap
+      shard_tag: stalwart
+      address: "stalwart-b:3993"
+      weight: 100
+      max_connections: 1000
+      maintenance: disabled
+
+      tls:
+        mode: implicit
+        ca_file: ""
+        cert: ""
+        key: ""
+        server_name: ""
+        min_tls_version: TLS1.2
+        insecure_skip_verify: true
+
+      auth:
+        mode: credential_replay
+        credential_replay:
+          require_backend_tls: false
+          preserve_mechanism: false
+          allowed_mechanisms:
+            - plain
+            - login
+
+      health_check:
+        # Stalwart provisions LDAP-backed accounts into the shared store on
+        # successful login. Disable Director backend health for this demo shard
+        # and prove LDAP auth with the smoke users instead.
+        enabled: false
+        deep_check: false
         username: healthcheck@example.test
         password_file: demo-secret
 
@@ -624,8 +703,8 @@ director:
       auth:
         mode: none
 
-        # As with mailstore-c-imap, the inactive auth blocks document the
-        # available backend-auth shape without changing demo behavior.
+        # The inactive auth blocks document the available backend-auth shape
+        # without changing demo LMTP behavior.
         master_user:
           username: ""
           password_file: ""
@@ -652,5 +731,69 @@ director:
       health_check:
         enabled: true
         deep_check: true
+        username: healthcheck@example.test
+        password_file: demo-secret
+
+    stalwart-a-lmtp:
+      protocol: lmtp
+      shard_tag: stalwart
+      address: "stalwart-a:3024"
+      weight: 100
+      max_connections: 1000
+      maintenance: disabled
+
+      tls:
+        mode: implicit
+        ca_file: ""
+        cert: ""
+        key: ""
+        server_name: ""
+        min_tls_version: TLS1.2
+
+        # Stalwart demo certificates are self-signed. Verification is skipped
+        # for local interop while keeping the backend delivery hop encrypted.
+        insecure_skip_verify: true
+
+      auth:
+        # The demo Stalwart LMTP listener accepts local delivery to accounts
+        # resolved from OpenLDAP; frontend recipient authorization remains
+        # Director/Nauthilus-owned.
+        mode: none
+
+      health_check:
+        # Stalwart recipient checks can provision directory accounts. Disable
+        # Director backend health for this demo shard and exercise delivery
+        # with smoke mail.
+        enabled: false
+        deep_check: false
+        username: healthcheck@example.test
+        password_file: demo-secret
+
+    stalwart-b-lmtp:
+      protocol: lmtp
+      shard_tag: stalwart
+      address: "stalwart-b:3024"
+      weight: 100
+      max_connections: 1000
+      maintenance: disabled
+
+      tls:
+        mode: implicit
+        ca_file: ""
+        cert: ""
+        key: ""
+        server_name: ""
+        min_tls_version: TLS1.2
+        insecure_skip_verify: true
+
+      auth:
+        mode: none
+
+      health_check:
+        # Stalwart recipient checks can provision directory accounts. Disable
+        # Director backend health for this demo shard and exercise delivery
+        # with smoke mail.
+        enabled: false
+        deep_check: false
         username: healthcheck@example.test
         password_file: demo-secret

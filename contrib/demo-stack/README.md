@@ -5,15 +5,105 @@ This stack is a runnable integration playground for the production Director path
 ## Topology
 
 - HAProxy publishes SMTP, IMAP, IMAPS and LMTPS on host ports.
-- SMTP goes to Postfix first. Postfix relays mail back through HAProxy over LMTPS to the two Director instances.
+- SMTP is handled by HAProxy and Postfix. Postfix relays accepted mail back through HAProxy over LMTPS to the two Director instances.
 - IMAP, IMAPS and LMTPS traffic from HAProxy to the Directors uses the PROXY protocol.
 - The Directors own backend selection, health handling, affinity and metrics.
-- Nauthilus is intentionally lean in this stack: LDAP/cache identity, LDAP-backed `mailShard` routing facts and a small Lua environment hook only.
-- The Directors authenticate against Nauthilus through the TLS-protected gRPC AuthService.
-- Three Dovecot 2.4 containers provide IMAPS and LMTPS backend shards.
-- OpenLDAP contains four demo users. Nauthilus uses LDAP with cache in front.
+- Nauthilus is intentionally lean in this stack: LDAP/cache identity, OpenLDAP-released `mailShard` routing facts and a small Lua environment hook only.
+- An internal HAProxy balances Director authority traffic across two Nauthilus instances.
+- The Directors authenticate through that internal HAProxy to the TLS-protected Nauthilus gRPC AuthService.
+- Three Dovecot 2.4 containers provide IMAPS and LMTPS backend shards. All three use OpenLDAP for passdb/userdb lookups.
+- `mailstore-c-imap` is intentionally wired with Director `master_user` backend auth; the other Dovecot IMAP shards use credential replay.
+- A FoundationDB-backed Stalwart pair provides an additional `stalwart` backend shard through demo IMAPS and LMTPS listeners.
+- The Stalwart instances share FoundationDB for data, blobs and search, and use the demo Valkey service for short-lived in-memory state and cluster coordination.
+- Stalwart is configured from the command line: `stalwart-configure` waits for both instances, applies `stalwart/bootstrap.ndjson` through `stalwart-cli`, and then enables the built-in user role for LDAP-backed accounts. No GUI is required or exposed on the host.
+- OpenLDAP contains six demo users plus an internal health-check account. Nauthilus, Dovecot and Stalwart all use it as their identity source.
 
-The current production Director supports IMAP and LMTP listeners. Direct SMTP-to-Director ingress is therefore not part of this demo yet; SMTP is represented by the HAProxy-to-Postfix-to-LMTPS path until SMTP listener support is added.
+```mermaid
+flowchart LR
+    client["Mail client / smoke scripts"]
+
+    subgraph ingress["Public ingress"]
+        haproxy["haproxy<br/>SMTP, IMAP, IMAPS, LMTPS"]
+        postfix["postfix<br/>SMTP relay"]
+    end
+
+    subgraph directors["Director instances"]
+        directorA["director-a"]
+        directorB["director-b"]
+    end
+
+    subgraph authority["Nauthilus authority"]
+        nauthilusProxy["nauthilus-haproxy<br/>gRPC and HTTP"]
+        nauthilusA["nauthilus-a"]
+        nauthilusB["nauthilus-b"]
+        openldap["openldap<br/>users and mailShard"]
+    end
+
+    subgraph dovecot["Dovecot shards"]
+        mailstoreA["mailstore-a<br/>mailShard mailstore-a"]
+        mailstoreB["mailstore-b<br/>mailShard mailstore-b"]
+        mailstoreC["mailstore-c<br/>mailShard mailstore-c<br/>master-user backend auth"]
+    end
+
+    subgraph stalwart["Stalwart shard"]
+        stalwartA["stalwart-a<br/>IMAPS and LMTPS"]
+        stalwartB["stalwart-b<br/>IMAPS and LMTPS"]
+        foundationdb["foundationdb<br/>shared data, blob and search store"]
+        fdbConfigure["foundationdb-configure"]
+        stalwartConfigure["stalwart-configure<br/>stalwart-cli apply / update"]
+    end
+
+    valkey["valkey<br/>Director runtime state<br/>Nauthilus cache<br/>Stalwart coordination"]
+    grpcTls["grpc-tls<br/>demo gRPC CA"]
+
+    client -->|"SMTP :2525"| haproxy
+    client -->|"IMAP :8143 / IMAPS :8993"| haproxy
+    haproxy -->|"SMTP"| postfix
+    postfix -->|"LMTPS relay via haproxy :2465"| haproxy
+    haproxy -->|"PROXY protocol IMAP, IMAPS, LMTPS"| directorA
+    haproxy -->|"PROXY protocol IMAP, IMAPS, LMTPS"| directorB
+
+    directorA -->|"AuthService gRPC TLS"| nauthilusProxy
+    directorB -->|"AuthService gRPC TLS"| nauthilusProxy
+    nauthilusProxy --> nauthilusA
+    nauthilusProxy --> nauthilusB
+    nauthilusA -->|"LDAP lookup"| openldap
+    nauthilusB -->|"LDAP lookup"| openldap
+
+    directorA -->|"runtime sessions, affinity, health"| valkey
+    directorB -->|"runtime sessions, affinity, health"| valkey
+    nauthilusA -->|"cache"| valkey
+    nauthilusB -->|"cache"| valkey
+
+    directorA -->|"IMAP / LMTP backend pools"| mailstoreA
+    directorA -->|"IMAP / LMTP backend pools"| mailstoreB
+    directorA -->|"IMAP / LMTP backend pools"| mailstoreC
+    directorB -->|"IMAP / LMTP backend pools"| mailstoreA
+    directorB -->|"IMAP / LMTP backend pools"| mailstoreB
+    directorB -->|"IMAP / LMTP backend pools"| mailstoreC
+    mailstoreA -->|"LDAP passdb / userdb"| openldap
+    mailstoreB -->|"LDAP passdb / userdb"| openldap
+    mailstoreC -->|"LDAP passdb / userdb"| openldap
+
+    directorA -->|"stalwart mailShard"| stalwartA
+    directorA -->|"stalwart mailShard"| stalwartB
+    directorB -->|"stalwart mailShard"| stalwartA
+    directorB -->|"stalwart mailShard"| stalwartB
+    stalwartA -->|"LDAP directory auth"| openldap
+    stalwartB -->|"LDAP directory auth"| openldap
+    stalwartA --> foundationdb
+    stalwartB --> foundationdb
+    stalwartA -->|"in-memory state and coordination"| valkey
+    stalwartB -->|"in-memory state and coordination"| valkey
+    fdbConfigure --> foundationdb
+    stalwartConfigure --> stalwartA
+    stalwartConfigure --> stalwartB
+
+    grpcTls -.->|"server cert and CA"| nauthilusA
+    grpcTls -.->|"server cert and CA"| nauthilusB
+    grpcTls -.->|"CA trust"| directorA
+    grpcTls -.->|"CA trust"| directorB
+```
 
 ## Demo Users
 
@@ -25,6 +115,10 @@ All users use the password `demo-secret`.
 | `bob@example.test` | `mailstore-b` |
 | `carol@example.test` | `mailstore-c` |
 | `dave@example.test` | `mailstore-a` |
+| `erin@example.test` | `stalwart` |
+| `frank@example.test` | `stalwart` |
+
+`healthcheck@example.test` is an internal backend health-check identity and is not meant for client smoke tests.
 
 ## Run
 
@@ -33,6 +127,28 @@ cd contrib/demo-stack
 cp .env.example .env
 docker compose up --build -d
 ```
+
+The default Stalwart Docker image does not include FoundationDB support. The
+demo therefore builds the Stalwart containers from the upstream
+`Dockerfile.fdb` build context named by `STALWART_FDB_BUILD_CONTEXT` in `.env`.
+The first `docker compose up --build -d` can take a long time, especially on
+older machines, because this compiles the FoundationDB-enabled Stalwart image.
+That first build can look quiet for several minutes. Later starts reuse the
+Docker build cache unless the Stalwart build context or Dockerfile changes.
+
+The official Dovecot image ships with a static test passdb. This demo replaces
+that with `dovecot/auth.conf`, which binds Dovecot to OpenLDAP for user
+authentication and LMTP recipient lookup. `mailstore-c-imap` uses the Director
+master user `nauthilus-director` with `DOVECOT_MASTER_PASSWORD`; `mailstore-a`
+and `mailstore-b` keep the credential-replay path.
+
+The Stalwart LMTPS listener is used only as an internal backend in this demo.
+Its bootstrap plan allows unauthenticated internal LMTP delivery on that
+listener and disables spam filtering there, while IMAPS authentication still
+uses OpenLDAP. Director-side Stalwart backend health checks are intentionally
+disabled because generic IMAP probes would not be a clean availability proof for
+LDAP-backed demo accounts; container health plus the send/fetch smoke tests
+cover that shard.
 
 Useful host ports:
 
@@ -54,7 +170,15 @@ Useful host ports:
 ```
 
 The scripts also accept the other demo users. To keep the demo simple, frontend and backend TLS certificates are self-signed and the test fetcher disables certificate verification.
-The stack also generates an internal demo CA for Director-to-Nauthilus gRPC TLS in the `grpc-tls` volume.
+The stack also generates an internal demo CA for Director-to-Nauthilus gRPC TLS in the `grpc-tls` volume. HAProxy passes gRPC TLS through to the selected Nauthilus instance.
+
+The Stalwart pair is initialized from the command line by a one-shot Compose service. The same plan configures Stalwart storage to use the shared FoundationDB cluster file mounted at `/var/fdb/fdb.cluster`:
+
+```bash
+docker compose run --rm stalwart-configure
+```
+
+Normally `docker compose up --build -d` runs that service before the Directors start. The included FoundationDB service is a single-node demo store; production-like HA would use a real multi-process or multi-host FoundationDB deployment while keeping the same Stalwart cluster-file contract. If you change the LDAP schema, LDAP bootstrap data, generated FoundationDB cluster file or Stalwart bootstrap plan after the first run, recreate the demo volumes with `docker compose down -v` before starting the stack again.
 
 ## Runtime State Reset
 
@@ -70,13 +194,11 @@ docker compose up -d director-a director-b
 
 `docker compose down -v` also recreates demo-only state when you want a completely clean lab. Do not use these reset commands against a Redis database that carries active production sessions.
 
-If you change the LDAP schema or bootstrap data after the first run, recreate the demo volumes with `docker compose down -v` before starting the stack again.
-
 ## Inspect
 
 ```bash
 docker compose ps
-docker compose logs -f director-a director-b
+docker compose logs -f foundationdb foundationdb-configure director-a director-b nauthilus-a nauthilus-b nauthilus-haproxy stalwart-a stalwart-b stalwart-configure
 docker compose exec director-a nauthilus-directorctl --address http://127.0.0.1:9090 status
 ```
 

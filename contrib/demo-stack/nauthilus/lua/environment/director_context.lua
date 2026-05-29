@@ -9,6 +9,9 @@ local shard_by_user = {
     ["bob@example.test"] = "mailstore-b",
     ["carol@example.test"] = "mailstore-c",
     ["dave@example.test"] = "mailstore-a",
+    ["erin@example.test"] = "stalwart",
+    ["frank@example.test"] = "stalwart",
+    ["healthcheck@example.test"] = "mailstore-a",
 }
 
 local function normalize(value)

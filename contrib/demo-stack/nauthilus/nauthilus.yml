@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 
 runtime:
-  instance_name: nauthilus-director-demo
+  instance_name: "${NAUTHILUS_INSTANCE_NAME}"
   servers:
     http:
       address: "0.0.0.0:8080"

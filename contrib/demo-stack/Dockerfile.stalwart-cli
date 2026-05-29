@@ -1,0 +1,19 @@
+# syntax=docker/dockerfile:1.7
+#
+# Copyright (C) 2026 Christian Rößner
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
+ARG ALPINE_IMAGE=alpine:3.23
+
+FROM ${ALPINE_IMAGE}
+
+ARG STALWART_CLI_INSTALLER_URL=https://github.com/stalwartlabs/cli/releases/latest/download/stalwart-cli-installer.sh
+
+ENV PATH="/root/.local/bin:/root/.cargo/bin:/usr/local/bin:${PATH}"
+
+RUN apk add --no-cache ca-certificates curl tar xz \
+    && curl --proto '=https' --tlsv1.2 -LsSf "${STALWART_CLI_INSTALLER_URL}" | sh \
+    && stalwart-cli --version
+
+CMD ["stalwart-cli", "--help"]
