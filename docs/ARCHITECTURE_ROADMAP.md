@@ -1155,7 +1155,8 @@ The follow-up million-scale runtime-state pass is complete within the M2/M3
 scope. Runtime reads are cursor-paginated, reaping is due-time bounded, backend
 capacity uses Redis Cluster-safe reservations, aggregate summaries avoid full
 session listing and the optional Redis/Redis Cluster scale harness is documented
-outside normal guardrails.
+outside normal guardrails. The detailed completion evidence lives in
+`docs/specs/implementation/M2_M3_RUNTIME_STATE_MILLION_SCALE_CHANGE_SPEC.md`.
 
 - OpenAPI-first workflow
 - generated REST server boundary
