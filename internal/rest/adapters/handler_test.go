@@ -208,6 +208,60 @@ func TestRuntimeErrorsMapToStableStatuses(t *testing.T) {
 	}
 }
 
+// TestRuntimeListHandlersMapPaginationClientErrors verifies list cursors and limits fail as client errors.
+func TestRuntimeListHandlersMapPaginationClientErrors(t *testing.T) {
+	reader := &recordingRuntimeReadService{}
+	handler := NewHandler(HandlerOptions{
+		Version:       testHandlerVersion,
+		SessionReader: reader,
+		UserReader:    reader,
+	})
+
+	badCursor := generated.RuntimeReadCursor("invalid")
+
+	sessionResponse, err := handler.ListSessions(context.Background(), generated.ListSessionsRequestObject{
+		Params: generated.ListSessionsParams{Cursor: &badCursor},
+	})
+	if err != nil {
+		t.Fatalf("ListSessions returned error: %v", err)
+	}
+
+	sessionProblem, ok := sessionResponse.(generated.ListSessionsdefaultJSONResponse)
+	if !ok {
+		t.Fatalf("ListSessions response = %T, want problem", sessionResponse)
+	}
+
+	if sessionProblem.StatusCode != http.StatusBadRequest {
+		t.Fatalf("session status = %d, want 400", sessionProblem.StatusCode)
+	}
+
+	if reader.sessionRequest.Cursor != "invalid" {
+		t.Fatalf("session cursor = %q, want invalid", reader.sessionRequest.Cursor)
+	}
+
+	limit := generated.RuntimeReadLimit(1001)
+
+	userResponse, err := handler.ListUsers(context.Background(), generated.ListUsersRequestObject{
+		Params: generated.ListUsersParams{Limit: &limit},
+	})
+	if err != nil {
+		t.Fatalf("ListUsers returned error: %v", err)
+	}
+
+	userProblem, ok := userResponse.(generated.ListUsersdefaultJSONResponse)
+	if !ok {
+		t.Fatalf("ListUsers response = %T, want problem", userResponse)
+	}
+
+	if userProblem.StatusCode != http.StatusBadRequest {
+		t.Fatalf("user status = %d, want 400", userProblem.StatusCode)
+	}
+
+	if reader.userRequest.Limit != 1001 {
+		t.Fatalf("user limit = %d, want 1001", reader.userRequest.Limit)
+	}
+}
+
 // TestListListenersMapsRuntimeDetails verifies listener inventory uses generated DTOs.
 func TestListListenersMapsRuntimeDetails(t *testing.T) {
 	listenerRuntime := &recordingListenerRuntime{
@@ -474,6 +528,52 @@ func (r *recordingRouteLookup) Lookup(_ context.Context, request runtime.RouteLo
 		SelectedBackend: "mailstore-a-imap",
 		ReasonClass:     "initial_placement",
 	}, nil
+}
+
+// recordingRuntimeReadService captures paginated read requests.
+type recordingRuntimeReadService struct {
+	sessionRequest runtime.SessionListRequest
+	userRequest    runtime.UserListRequest
+}
+
+// ListSessions records session list requests and rejects invalid test cursors.
+func (r *recordingRuntimeReadService) ListSessions(_ context.Context, request runtime.SessionListRequest) (runtime.SessionListResult, error) {
+	r.sessionRequest = request
+	if request.Cursor != "" {
+		return runtime.SessionListResult{}, newRuntimeError(runtime.ErrorKindInvalidRequest, "session_read", "cursor invalid")
+	}
+
+	return runtime.SessionListResult{}, nil
+}
+
+// GetSession is unused by pagination handler tests.
+func (r *recordingRuntimeReadService) GetSession(context.Context, string) (runtime.SessionRuntimeState, error) {
+	return runtime.SessionRuntimeState{}, newRuntimeError(runtime.ErrorKindNotFound, "session", "session not found")
+}
+
+// ListUserSessions is unused by pagination handler tests.
+func (r *recordingRuntimeReadService) ListUserSessions(context.Context, runtime.UserKey) ([]runtime.SessionRuntimeState, error) {
+	return nil, nil
+}
+
+// ListUsers records user list requests and rejects excessive test limits.
+func (r *recordingRuntimeReadService) ListUsers(_ context.Context, request runtime.UserListRequest) (runtime.UserListResult, error) {
+	r.userRequest = request
+	if request.Limit > 1000 {
+		return runtime.UserListResult{}, newRuntimeError(runtime.ErrorKindInvalidRequest, "user_read", "limit must not exceed 1000")
+	}
+
+	return runtime.UserListResult{}, nil
+}
+
+// GetUser is unused by pagination handler tests.
+func (r *recordingRuntimeReadService) GetUser(context.Context, runtime.UserKey) (runtime.UserRuntimeState, error) {
+	return runtime.UserRuntimeState{}, newRuntimeError(runtime.ErrorKindNotFound, "user", "user not found")
+}
+
+// GetUserAffinity is unused by pagination handler tests.
+func (r *recordingRuntimeReadService) GetUserAffinity(context.Context, runtime.UserKey) (runtime.UserRuntimeState, error) {
+	return runtime.UserRuntimeState{}, newRuntimeError(runtime.ErrorKindNotFound, "user_affinity", "user affinity not found")
 }
 
 // recordingProtectedAudit records protected config audit events.

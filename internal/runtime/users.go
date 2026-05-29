@@ -64,6 +64,18 @@ type UserRuntimeState struct {
 	UpdatedAt          time.Time
 }
 
+// UserListRequest describes one bounded runtime user read.
+type UserListRequest struct {
+	Cursor string
+	Limit  int
+}
+
+// UserListResult contains one bounded runtime user page.
+type UserListResult struct {
+	Users      []UserRuntimeState
+	NextCursor string
+}
+
 // MoveUserRequest asks runtime state to move one affinity key.
 type MoveUserRequest struct {
 	Key                UserKey

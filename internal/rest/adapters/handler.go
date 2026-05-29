@@ -69,7 +69,7 @@ type BackendMutator interface {
 
 // SessionReader exposes runtime session state to REST adapters.
 type SessionReader interface {
-	ListSessions(ctx context.Context, protocol string) ([]runtime.SessionRuntimeState, error)
+	ListSessions(ctx context.Context, request runtime.SessionListRequest) (runtime.SessionListResult, error)
 	GetSession(ctx context.Context, sessionID string) (runtime.SessionRuntimeState, error)
 	ListUserSessions(ctx context.Context, key runtime.UserKey) ([]runtime.SessionRuntimeState, error)
 }
@@ -81,7 +81,7 @@ type SessionMutator interface {
 
 // UserReader exposes user runtime state to REST adapters.
 type UserReader interface {
-	ListUsers(ctx context.Context) ([]runtime.UserRuntimeState, error)
+	ListUsers(ctx context.Context, request runtime.UserListRequest) (runtime.UserListResult, error)
 	GetUser(ctx context.Context, key runtime.UserKey) (runtime.UserRuntimeState, error)
 	GetUserAffinity(ctx context.Context, key runtime.UserKey) (runtime.UserRuntimeState, error)
 }
@@ -543,12 +543,20 @@ func (h *Handler) LookupRoute(ctx context.Context, request generated.LookupRoute
 
 // ListSessions returns active frontend sessions.
 func (h *Handler) ListSessions(ctx context.Context, request generated.ListSessionsRequestObject) (generated.ListSessionsResponseObject, error) {
-	sessions, err := h.sessionReader.ListSessions(ctx, pointerString(request.Params.Protocol))
+	result, err := h.sessionReader.ListSessions(ctx, runtime.SessionListRequest{
+		Protocol:          pointerString(request.Params.Protocol),
+		BackendIdentifier: pointerString(request.Params.Backend),
+		Cursor:            pointerGeneratedString(request.Params.Cursor),
+		Limit:             pointerGeneratedInt(request.Params.Limit),
+	})
 	if err != nil {
 		return generated.ListSessionsdefaultJSONResponse{StatusCode: statusForError(err), Body: h.problemFromError("ListSessions", err)}, nil
 	}
 
-	return generated.ListSessions200JSONResponse{Sessions: sessionDetails(sessions)}, nil
+	return generated.ListSessions200JSONResponse{
+		NextCursor: nonEmptyStringPointer(result.NextCursor),
+		Sessions:   sessionDetails(result.Sessions),
+	}, nil
 }
 
 // DeleteSession marks one frontend session for termination.
@@ -580,13 +588,19 @@ func (h *Handler) GetSession(ctx context.Context, request generated.GetSessionRe
 }
 
 // ListUsers returns users with runtime state.
-func (h *Handler) ListUsers(ctx context.Context, _ generated.ListUsersRequestObject) (generated.ListUsersResponseObject, error) {
-	users, err := h.userReader.ListUsers(ctx)
+func (h *Handler) ListUsers(ctx context.Context, request generated.ListUsersRequestObject) (generated.ListUsersResponseObject, error) {
+	result, err := h.userReader.ListUsers(ctx, runtime.UserListRequest{
+		Cursor: pointerGeneratedString(request.Params.Cursor),
+		Limit:  pointerGeneratedInt(request.Params.Limit),
+	})
 	if err != nil {
 		return generated.ListUsersdefaultJSONResponse{StatusCode: statusForError(err), Body: h.problemFromError("ListUsers", err)}, nil
 	}
 
-	return generated.ListUsers200JSONResponse{Users: userDetails(users)}, nil
+	return generated.ListUsers200JSONResponse{
+		NextCursor: nonEmptyStringPointer(result.NextCursor),
+		Users:      userDetails(result.Users),
+	}, nil
 }
 
 // GetUser returns one user runtime state.
@@ -1563,6 +1577,34 @@ func pointerString(value *string) string {
 	return *value
 }
 
+// pointerGeneratedString unwraps optional generated string aliases.
+func pointerGeneratedString[T ~string](value *T) string {
+	if value == nil {
+		return ""
+	}
+
+	return string(*value)
+}
+
+// pointerGeneratedInt unwraps optional generated integer aliases.
+func pointerGeneratedInt[T ~int](value *T) int {
+	if value == nil {
+		return 0
+	}
+
+	return int(*value)
+}
+
+// nonEmptyStringPointer returns nil when optional response text is absent.
+func nonEmptyStringPointer(value string) *string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+
+	return &value
+}
+
 // pointerBool unwraps optional generated boolean fields.
 func pointerBool(value *bool) bool {
 	return value != nil && *value
@@ -1649,8 +1691,8 @@ func includeProtectedFromNonDefaultParams(params generated.GetNonDefaultConfigPa
 type emptyRuntimeReader struct{}
 
 // ListSessions returns no sessions when no runtime state reader is assembled.
-func (emptyRuntimeReader) ListSessions(context.Context, string) ([]runtime.SessionRuntimeState, error) {
-	return nil, nil
+func (emptyRuntimeReader) ListSessions(context.Context, runtime.SessionListRequest) (runtime.SessionListResult, error) {
+	return runtime.SessionListResult{}, nil
 }
 
 // GetSession reports an absent session when no runtime state reader is assembled.
@@ -1664,8 +1706,8 @@ func (emptyRuntimeReader) ListUserSessions(context.Context, runtime.UserKey) ([]
 }
 
 // ListUsers returns no users when no runtime state reader is assembled.
-func (emptyRuntimeReader) ListUsers(context.Context) ([]runtime.UserRuntimeState, error) {
-	return nil, nil
+func (emptyRuntimeReader) ListUsers(context.Context, runtime.UserListRequest) (runtime.UserListResult, error) {
+	return runtime.UserListResult{}, nil
 }
 
 // GetUser reports an absent user when no runtime state reader is assembled.

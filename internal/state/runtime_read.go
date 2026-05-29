@@ -64,6 +64,12 @@ type RuntimeUserPage struct {
 	NextCursor string
 }
 
+// RuntimeReadPageLimits reports the configured bounded read defaults.
+type RuntimeReadPageLimits struct {
+	Default int
+	Max     int
+}
+
 type runtimeReadCursor struct {
 	Version     int    `json:"v"`
 	Family      string `json:"f"`
@@ -158,6 +164,14 @@ func (s *RedisSessionStore) ListRuntimeSessionsPage(ctx context.Context, request
 	}
 
 	return RuntimeSessionPage{Records: records}, nil
+}
+
+// RuntimeReadPageLimits returns normalized page limits used by runtime indexes.
+func (s *RedisSessionStore) RuntimeReadPageLimits() RuntimeReadPageLimits {
+	return RuntimeReadPageLimits{
+		Default: s.defaultRuntimeIndexPageLimit(),
+		Max:     s.runtimeIndexPageMax(),
+	}
 }
 
 // GetRuntimeSession returns one active session from the Redis session index.
@@ -527,16 +541,22 @@ func (s *RedisSessionStore) runtimeReadLimit(limit int) int {
 		limit = s.defaultRuntimeIndexPageLimit()
 	}
 
-	maximum := 1000
-	if s != nil && s.indexPageMax > 0 {
-		maximum = s.indexPageMax
-	}
+	maximum := s.runtimeIndexPageMax()
 
 	if limit > maximum {
 		return maximum
 	}
 
 	return limit
+}
+
+// runtimeIndexPageMax returns the configured hard control-read bound.
+func (s *RedisSessionStore) runtimeIndexPageMax() int {
+	if s == nil || s.indexPageMax <= 0 {
+		return 1000
+	}
+
+	return s.indexPageMax
 }
 
 // encodeRuntimeReadCursor serializes bounded position data without raw identifiers.

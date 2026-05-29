@@ -37,6 +37,8 @@ const (
 	pathContractListenerResume     = "/api/v1/listeners/{name}/runtime/resume"
 	pathContractSession            = "/api/v1/sessions/{session_id}"
 	pathContractUserAffinity       = "/api/v1/users/{user_key}/affinity"
+	queryContractCursor            = "cursor"
+	queryContractLimit             = "limit"
 )
 
 // TestOpenAPIContractIncludesPlannedEndpointGroupSet checks the planned route inventory.
@@ -124,6 +126,32 @@ func TestOpenAPIContractIncludesListenerOperations(t *testing.T) {
 	}
 }
 
+// TestOpenAPIContractIncludesRuntimeReadPagination checks bounded list contracts.
+func TestOpenAPIContractIncludesRuntimeReadPagination(t *testing.T) {
+	contract := loadContract(t)
+
+	sessionOperation := contract.Paths.Find("/api/v1/sessions").GetOperation(http.MethodGet)
+	for _, parameter := range []string{"protocol", "backend", queryContractCursor, queryContractLimit} {
+		if !operationHasParameter(sessionOperation, parameter) {
+			t.Fatalf("GET /api/v1/sessions missing %q parameter", parameter)
+		}
+	}
+
+	userOperation := contract.Paths.Find("/api/v1/users").GetOperation(http.MethodGet)
+	for _, parameter := range []string{queryContractCursor, queryContractLimit} {
+		if !operationHasParameter(userOperation, parameter) {
+			t.Fatalf("GET /api/v1/users missing %q parameter", parameter)
+		}
+	}
+
+	for _, schemaName := range []string{"SessionListResponse", "UserListResponse"} {
+		schema := contract.Components.Schemas[schemaName].Value
+		if _, ok := schema.Properties["next_cursor"]; !ok {
+			t.Fatalf("%s missing next_cursor", schemaName)
+		}
+	}
+}
+
 // TestRouteLookupContractExcludesCredentials keeps credential-bearing fields out of the DTO.
 func TestRouteLookupContractExcludesCredentials(t *testing.T) {
 	contract := loadContract(t)
@@ -134,6 +162,21 @@ func TestRouteLookupContractExcludesCredentials(t *testing.T) {
 			t.Fatalf("RouteLookupRequest exposes credential field %q", field)
 		}
 	}
+}
+
+// operationHasParameter reports whether an operation declares one query parameter.
+func operationHasParameter(operation *openapi3.Operation, name string) bool {
+	if operation == nil {
+		return false
+	}
+
+	for _, parameter := range operation.Parameters {
+		if parameter.Value != nil && parameter.Value.Name == name {
+			return true
+		}
+	}
+
+	return false
 }
 
 // loadContract parses and validates the source OpenAPI document.

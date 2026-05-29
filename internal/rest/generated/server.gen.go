@@ -427,7 +427,8 @@ type SessionDetail struct {
 
 // SessionListResponse defines model for SessionListResponse.
 type SessionListResponse struct {
-	Sessions []SessionDetail `json:"sessions"`
+	NextCursor *string         `json:"next_cursor,omitempty"`
+	Sessions   []SessionDetail `json:"sessions"`
 }
 
 // StatusResponse defines model for StatusResponse.
@@ -459,7 +460,8 @@ type UserKickRequest struct {
 
 // UserListResponse defines model for UserListResponse.
 type UserListResponse struct {
-	Users []UserDetail `json:"users"`
+	NextCursor *string      `json:"next_cursor,omitempty"`
+	Users      []UserDetail `json:"users"`
 }
 
 // UserMoveRequest defines model for UserMoveRequest.
@@ -490,6 +492,12 @@ type IncludeProtected = bool
 
 // ListenerName defines model for ListenerName.
 type ListenerName = string
+
+// RuntimeReadCursor defines model for RuntimeReadCursor.
+type RuntimeReadCursor = string
+
+// RuntimeReadLimit defines model for RuntimeReadLimit.
+type RuntimeReadLimit = int
 
 // SessionID defines model for SessionID.
 type SessionID = string
@@ -538,7 +546,26 @@ type GetNonDefaultConfigParamsFormat string
 
 // ListSessionsParams defines parameters for ListSessions.
 type ListSessionsParams struct {
+	// Protocol Optional page-local protocol filter applied during bounded cursor scans.
 	Protocol *string `form:"protocol,omitempty" json:"protocol,omitempty"`
+
+	// Backend Optional backend identifier filter backed by the backend session index.
+	Backend *string `form:"backend,omitempty" json:"backend,omitempty"`
+
+	// Cursor Opaque cursor returned by a previous runtime list page.
+	Cursor *RuntimeReadCursor `form:"cursor,omitempty" json:"cursor,omitempty"`
+
+	// Limit Maximum records to return in this page.
+	Limit *RuntimeReadLimit `form:"limit,omitempty" json:"limit,omitempty"`
+}
+
+// ListUsersParams defines parameters for ListUsers.
+type ListUsersParams struct {
+	// Cursor Opaque cursor returned by a previous runtime list page.
+	Cursor *RuntimeReadCursor `form:"cursor,omitempty" json:"cursor,omitempty"`
+
+	// Limit Maximum records to return in this page.
+	Limit *RuntimeReadLimit `form:"limit,omitempty" json:"limit,omitempty"`
 }
 
 // DisableBackendMaintenanceJSONRequestBody defines body for DisableBackendMaintenance for application/json ContentType.
@@ -653,7 +680,7 @@ type ServerInterface interface {
 	GetSession(w http.ResponseWriter, r *http.Request, sessionID SessionID)
 	// List users with runtime state.
 	// (GET /api/v1/users)
-	ListUsers(w http.ResponseWriter, r *http.Request)
+	ListUsers(w http.ResponseWriter, r *http.Request, params ListUsersParams)
 	// Show user runtime state.
 	// (GET /api/v1/users/{user_key})
 	GetUser(w http.ResponseWriter, r *http.Request, userKey UserKey)
@@ -1200,6 +1227,45 @@ func (siw *ServerInterfaceWrapper) ListSessions(w http.ResponseWriter, r *http.R
 		return
 	}
 
+	// ------------- Optional query parameter "backend" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "backend", r.URL.Query(), &params.Backend, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "backend"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "backend", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "cursor" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "cursor", r.URL.Query(), &params.Cursor, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "cursor"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "cursor", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "limit" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "limit", r.URL.Query(), &params.Limit, runtime.BindQueryParameterOptions{Type: "integer", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "limit"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "limit", Err: err})
+		}
+		return
+	}
+
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.ListSessions(w, r, params)
 	}))
@@ -1266,8 +1332,40 @@ func (siw *ServerInterfaceWrapper) GetSession(w http.ResponseWriter, r *http.Req
 // ListUsers operation middleware
 func (siw *ServerInterfaceWrapper) ListUsers(w http.ResponseWriter, r *http.Request) {
 
+	var err error
+	_ = err
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params ListUsersParams
+
+	// ------------- Optional query parameter "cursor" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "cursor", r.URL.Query(), &params.Cursor, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "cursor"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "cursor", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "limit" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "limit", r.URL.Query(), &params.Limit, runtime.BindQueryParameterOptions{Type: "integer", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "limit"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "limit", Err: err})
+		}
+		return
+	}
+
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		siw.Handler.ListUsers(w, r)
+		siw.Handler.ListUsers(w, r, params)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -2517,6 +2615,7 @@ func (response GetSessiondefaultJSONResponse) VisitGetSessionResponse(w http.Res
 }
 
 type ListUsersRequestObject struct {
+	Params ListUsersParams
 }
 
 type ListUsersResponseObject interface {
@@ -3742,8 +3841,10 @@ func (sh *strictHandler) GetSession(w http.ResponseWriter, r *http.Request, sess
 }
 
 // ListUsers operation middleware
-func (sh *strictHandler) ListUsers(w http.ResponseWriter, r *http.Request) {
+func (sh *strictHandler) ListUsers(w http.ResponseWriter, r *http.Request, params ListUsersParams) {
 	var request ListUsersRequestObject
+
+	request.Params = params
 
 	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
 		return sh.ssi.ListUsers(ctx, request.(ListUsersRequestObject))

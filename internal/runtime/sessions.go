@@ -62,6 +62,20 @@ type SessionRuntimeState struct {
 	Status            SessionStatus
 }
 
+// SessionListRequest describes one bounded runtime session read.
+type SessionListRequest struct {
+	Protocol          string
+	BackendIdentifier string
+	Cursor            string
+	Limit             int
+}
+
+// SessionListResult contains one bounded runtime session page.
+type SessionListResult struct {
+	Sessions   []SessionRuntimeState
+	NextCursor string
+}
+
 // KillSessionRequest asks runtime state to mark one session for closure.
 type KillSessionRequest struct {
 	SessionID          string

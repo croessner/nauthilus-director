@@ -183,6 +183,160 @@ func TestConfigDumpEndpointsAndProtectedFlag(t *testing.T) {
 	}
 }
 
+// TestRuntimeSessionListFlagsPassPaginationParams verifies session list pagination fields.
+func TestRuntimeSessionListFlagsPassPaginationParams(t *testing.T) {
+	fake := newFakeControlClient()
+	_, stderr, code := runWithFakeClient([]string{
+		"sessions", "list",
+		"--protocol", "imap",
+		"--backend", "backend-a",
+		"--cursor", "cursor-a",
+		"--limit", "25",
+	}, fake)
+	if code != 0 {
+		t.Fatalf("sessions list returned exit code %d, want 0; stderr=%q", code, stderr)
+	}
+
+	assertSessionListPaginationParams(t, fake)
+}
+
+// TestRuntimeUserListFlagsPassPaginationParams verifies user list pagination fields.
+func TestRuntimeUserListFlagsPassPaginationParams(t *testing.T) {
+	fake := newFakeControlClient()
+	_, stderr, code := runWithFakeClient([]string{"users", "list", "--cursor", "user-cursor", "--limit", "30"}, fake)
+	if code != 0 {
+		t.Fatalf("users list returned exit code %d, want 0; stderr=%q", code, stderr)
+	}
+
+	assertUserListPaginationParams(t, fake)
+}
+
+// assertSessionListPaginationParams checks the generated session list request fields.
+func assertSessionListPaginationParams(t *testing.T, fake *fakeControlClient) {
+	t.Helper()
+
+	if fake.listSessionsParams == nil {
+		t.Fatal("ListSessions params were not recorded")
+	}
+
+	if fake.listSessionsParams.Protocol == nil || *fake.listSessionsParams.Protocol != "imap" {
+		t.Fatalf("protocol param = %#v, want imap", fake.listSessionsParams.Protocol)
+	}
+
+	if fake.listSessionsParams.Backend == nil || *fake.listSessionsParams.Backend != "backend-a" {
+		t.Fatalf("backend param = %#v, want backend-a", fake.listSessionsParams.Backend)
+	}
+
+	if fake.listSessionsParams.Cursor == nil || string(*fake.listSessionsParams.Cursor) != "cursor-a" {
+		t.Fatalf("cursor param = %#v, want cursor-a", fake.listSessionsParams.Cursor)
+	}
+
+	if fake.listSessionsParams.Limit == nil || int(*fake.listSessionsParams.Limit) != 25 {
+		t.Fatalf("limit param = %#v, want 25", fake.listSessionsParams.Limit)
+	}
+}
+
+// assertUserListPaginationParams checks the generated user list request fields.
+func assertUserListPaginationParams(t *testing.T, fake *fakeControlClient) {
+	t.Helper()
+
+	if fake.listUsersParams == nil {
+		t.Fatal("ListUsers params were not recorded")
+	}
+
+	if fake.listUsersParams.Cursor == nil || string(*fake.listUsersParams.Cursor) != "user-cursor" {
+		t.Fatalf("user cursor param = %#v, want user-cursor", fake.listUsersParams.Cursor)
+	}
+
+	if fake.listUsersParams.Limit == nil || int(*fake.listUsersParams.Limit) != 30 {
+		t.Fatalf("user limit param = %#v, want 30", fake.listUsersParams.Limit)
+	}
+}
+
+// TestRuntimeListDefaultOutputReportsNextCursor keeps first-page output explicit.
+func TestRuntimeListDefaultOutputReportsNextCursor(t *testing.T) {
+	nextCursor := "cursor-b"
+	fake := newFakeControlClient()
+	fake.listSessionPages = []generated.SessionListResponse{{
+		NextCursor: &nextCursor,
+		Sessions:   []generated.SessionDetail{sessionA()},
+	}}
+
+	stdout, stderr, code := runWithFakeClient([]string{"sessions", "list"}, fake)
+	if code != 0 {
+		t.Fatalf("sessions list returned exit code %d, want 0; stderr=%q", code, stderr)
+	}
+	if !strings.Contains(stdout, "more=true next_cursor=cursor-b") {
+		t.Fatalf("stdout = %q, want continuation cursor", stdout)
+	}
+
+	userNext := "user-cursor-b"
+	userFake := newFakeControlClient()
+	userFake.listUserPages = []generated.UserListResponse{{
+		NextCursor: &userNext,
+		Users:      []generated.UserDetail{userA()},
+	}}
+
+	stdout, stderr, code = runWithFakeClient([]string{"users", "list"}, userFake)
+	if code != 0 {
+		t.Fatalf("users list returned exit code %d, want 0; stderr=%q", code, stderr)
+	}
+	if !strings.Contains(stdout, "more=true next_cursor=user-cursor-b") {
+		t.Fatalf("stdout = %q, want user continuation cursor", stdout)
+	}
+}
+
+// TestRuntimeListAllIteratesUntilCursorExhausted verifies explicit full walks are paginated.
+func TestRuntimeListAllIteratesUntilCursorExhausted(t *testing.T) {
+	nextCursor := "cursor-b"
+	fake := newFakeControlClient()
+	fake.listSessionPages = []generated.SessionListResponse{
+		{NextCursor: &nextCursor, Sessions: []generated.SessionDetail{sessionA()}},
+		{Sessions: []generated.SessionDetail{sessionB()}},
+	}
+
+	stdout, stderr, code := runWithFakeClient([]string{"sessions", "list", "--all"}, fake)
+	if code != 0 {
+		t.Fatalf("sessions list --all returned exit code %d, want 0; stderr=%q", code, stderr)
+	}
+	if !reflect.DeepEqual(fake.calls, []string{"ListSessions", "ListSessions"}) {
+		t.Fatalf("calls = %#v, want two ListSessions calls", fake.calls)
+	}
+	if len(fake.listSessionsHistory) != 2 || fake.listSessionsHistory[0].Cursor != nil || fake.listSessionsHistory[1].Cursor == nil {
+		t.Fatalf("session cursor history = %#v, want nil then cursor", fake.listSessionsHistory)
+	}
+	if got := string(*fake.listSessionsHistory[1].Cursor); got != nextCursor {
+		t.Fatalf("second cursor = %q, want %q", got, nextCursor)
+	}
+	if !strings.Contains(stdout, "session_id=session-a") || !strings.Contains(stdout, "session_id=session-b") {
+		t.Fatalf("stdout = %q, want both paged sessions", stdout)
+	}
+	if strings.Contains(stdout, "more=true") {
+		t.Fatalf("stdout = %q, want no continuation after --all completes", stdout)
+	}
+}
+
+// TestRuntimeListAllDetectsRepeatedCursor verifies pagination loops fail closed.
+func TestRuntimeListAllDetectsRepeatedCursor(t *testing.T) {
+	repeated := "same-cursor"
+	fake := newFakeControlClient()
+	fake.listSessionPages = []generated.SessionListResponse{
+		{NextCursor: &repeated, Sessions: []generated.SessionDetail{sessionA()}},
+		{NextCursor: &repeated, Sessions: []generated.SessionDetail{sessionB()}},
+	}
+
+	stdout, stderr, code := runWithFakeClient([]string{"sessions", "list", "--all"}, fake)
+	if code != 1 {
+		t.Fatalf("sessions list --all returned exit code %d, want 1", code)
+	}
+	if stdout != "" {
+		t.Fatalf("stdout = %q, want no partial output on repeated cursor", stdout)
+	}
+	if !strings.Contains(stderr, "repeated pagination cursor") {
+		t.Fatalf("stderr = %q, want repeated cursor error", stderr)
+	}
+}
+
 // TestProtectedConfigForbiddenDoesNotPrintPartialOutput keeps denied protected dumps closed.
 func TestProtectedConfigForbiddenDoesNotPrintPartialOutput(t *testing.T) {
 	fake := newFakeControlClient()
@@ -558,6 +712,13 @@ type fakeControlClient struct {
 	defaultConfigParams    *generated.GetDefaultConfigParams
 	nonDefaultConfigParams *generated.GetNonDefaultConfigParams
 	listSessionsParams     *generated.ListSessionsParams
+	listUsersParams        *generated.ListUsersParams
+	listSessionsHistory    []generated.ListSessionsParams
+	listUsersHistory       []generated.ListUsersParams
+	listSessionPages       []generated.SessionListResponse
+	listUserPages          []generated.UserListResponse
+	listSessionsCalls      int
+	listUsersCalls         int
 	routeRequest           generated.RouteLookupRequest
 	listenerDrainRequest   generated.ListenerDrainRequest
 	listenerResumeRequest  generated.ListenerResumeRequest
@@ -652,6 +813,16 @@ func sessionA() generated.SessionDetail {
 		ShardTag:  "shard-a",
 		UserKey:   "user-a",
 	}
+}
+
+// sessionB returns a second stable session fixture.
+func sessionB() generated.SessionDetail {
+	session := sessionA()
+	session.Backend = "backend-b"
+	session.SessionID = "session-b"
+	session.ShardTag = "shard-b"
+
+	return session
 }
 
 // affinityA returns a stable affinity fixture.
@@ -894,9 +1065,18 @@ func (fake *fakeControlClient) LookupRouteWithResponse(_ context.Context, body g
 func (fake *fakeControlClient) ListSessionsWithResponse(_ context.Context, params *generated.ListSessionsParams, _ ...generated.RequestEditorFn) (*generated.ListSessionsResponse, error) {
 	fake.record("ListSessions")
 	fake.listSessionsParams = params
+	if params != nil {
+		fake.listSessionsHistory = append(fake.listSessionsHistory, *params)
+	}
+	page := generated.SessionListResponse{Sessions: []generated.SessionDetail{sessionA()}}
+	if fake.listSessionsCalls < len(fake.listSessionPages) {
+		page = fake.listSessionPages[fake.listSessionsCalls]
+	}
+	fake.listSessionsCalls++
+
 	return &generated.ListSessionsResponse{
 		HTTPResponse: httpResponse(http.StatusOK),
-		JSON200:      &generated.SessionListResponse{Sessions: []generated.SessionDetail{sessionA()}},
+		JSON200:      &page,
 	}, nil
 }
 
@@ -919,9 +1099,19 @@ func (fake *fakeControlClient) GetSessionWithResponse(context.Context, generated
 }
 
 // ListUsersWithResponse records and returns user list data.
-func (fake *fakeControlClient) ListUsersWithResponse(context.Context, ...generated.RequestEditorFn) (*generated.ListUsersResponse, error) {
+func (fake *fakeControlClient) ListUsersWithResponse(_ context.Context, params *generated.ListUsersParams, _ ...generated.RequestEditorFn) (*generated.ListUsersResponse, error) {
 	fake.record("ListUsers")
-	return &generated.ListUsersResponse{HTTPResponse: httpResponse(http.StatusOK), JSON200: &generated.UserListResponse{Users: []generated.UserDetail{userA()}}}, nil
+	fake.listUsersParams = params
+	if params != nil {
+		fake.listUsersHistory = append(fake.listUsersHistory, *params)
+	}
+	page := generated.UserListResponse{Users: []generated.UserDetail{userA()}}
+	if fake.listUsersCalls < len(fake.listUserPages) {
+		page = fake.listUserPages[fake.listUsersCalls]
+	}
+	fake.listUsersCalls++
+
+	return &generated.ListUsersResponse{HTTPResponse: httpResponse(http.StatusOK), JSON200: &page}, nil
 }
 
 // GetUserWithResponse records and returns user detail data.

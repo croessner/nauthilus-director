@@ -146,8 +146,23 @@ the command fails clearly and prints no partial config output.
 Select config document serialization.
 YAML is the default.
 .TP
-.B sessions list --protocol imap
-List active sessions, optionally filtered by protocol.
+.BI "sessions list [--protocol " protocol "] [--backend " identifier "] [--limit " n "] [--cursor " token "] [--all]"
+List active sessions, optionally filtered by protocol or backend.
+The command reads one bounded page by default.
+If more records are available, text output prints
+.B more=true
+with the opaque
+.B next_cursor
+value.
+Use
+.B --cursor
+to continue from that value, or
+.B --all
+to explicitly iterate pages until no cursor remains.
+The default page size is
+.B 100
+and the hard maximum is
+.B 1000 .
 .TP
 .BI "sessions show " session-id
 Show one active session.
@@ -155,8 +170,22 @@ Show one active session.
 .BI "sessions kill " session-id " --reason " text
 Terminate one active session.
 .TP
-.B users list
+.BI "users list [--limit " n "] [--cursor " token "] [--all]"
 List users with runtime state.
+The command reads one bounded page by default and prints
+.B more=true
+with an opaque
+.B next_cursor
+when another page may exist.
+Use
+.B --cursor
+to continue from that value, or
+.B --all
+to explicitly iterate pages.
+The default page size is
+.B 100
+and the hard maximum is
+.B 1000 .
 .TP
 .BI "users show " user-key
 Show one user's runtime state.

@@ -18,6 +18,13 @@ package runtime
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/croessner/nauthilus-director/internal/state"
@@ -28,17 +35,40 @@ const (
 	operationUserRead    = "user_read"
 )
 
+const (
+	defaultRuntimeReadPageLimit = 100
+	maxRuntimeReadPageLimit     = 1000
+)
+
+const (
+	publicRuntimeCursorVersion        = 1
+	publicRuntimeCursorFamilySessions = "sessions"
+	publicRuntimeCursorFamilyUsers    = "users"
+	publicRuntimeCursorMACKeyBytes    = 32
+)
+
+var publicRuntimeCursorMACKey = newPublicRuntimeCursorMACKey()
+
 // RedisRuntimeReader adapts Redis state read models to REST runtime readers.
 type RedisRuntimeReader struct {
 	store redisRuntimeReadStore
 }
 
 type redisRuntimeReadStore interface {
-	ListRuntimeSessions(ctx context.Context, protocol string) ([]state.RuntimeSessionRecord, error)
+	ListRuntimeSessionsPage(ctx context.Context, request state.RuntimeSessionPageRequest) (state.RuntimeSessionPage, error)
+	ListRuntimeSessionsForBackendPage(ctx context.Context, backendIdentifier string, request state.RuntimeSessionPageRequest) (state.RuntimeSessionPage, error)
 	GetRuntimeSession(ctx context.Context, sessionID string) (state.RuntimeSessionRecord, bool, error)
 	ListRuntimeSessionsForUser(ctx context.Context, key state.AffinityKey) ([]state.RuntimeSessionRecord, error)
-	ListRuntimeUsers(ctx context.Context) ([]state.RuntimeUserReadRecord, error)
+	ListRuntimeUsersPage(ctx context.Context, request state.RuntimeUserPageRequest) (state.RuntimeUserPage, error)
 	GetRuntimeUser(ctx context.Context, key state.AffinityKey) (state.RuntimeUserReadRecord, bool, error)
+	RuntimeReadPageLimits() state.RuntimeReadPageLimits
+}
+
+type publicRuntimeReadCursor struct {
+	Version     int    `json:"v"`
+	Family      string `json:"f"`
+	ScopeDigest string `json:"q"`
+	StateCursor string `json:"s"`
 }
 
 // NewRedisRuntimeReader creates a runtime reader over Redis-backed state.
@@ -47,22 +77,55 @@ func NewRedisRuntimeReader(store redisRuntimeReadStore) *RedisRuntimeReader {
 }
 
 // ListSessions returns active sessions visible through Redis runtime state.
-func (r *RedisRuntimeReader) ListSessions(ctx context.Context, protocol string) ([]SessionRuntimeState, error) {
+func (r *RedisRuntimeReader) ListSessions(ctx context.Context, request SessionListRequest) (SessionListResult, error) {
 	if r == nil || r.store == nil {
-		return nil, newRuntimeError(ErrorKindUnavailable, operationSessionRead, "session reader unavailable")
+		return SessionListResult{}, newRuntimeError(ErrorKindUnavailable, operationSessionRead, "session reader unavailable")
 	}
 
-	records, err := r.store.ListRuntimeSessions(ctx, protocol)
+	limit, err := normalizeRuntimeReadLimit(request.Limit, r.store.RuntimeReadPageLimits(), operationSessionRead)
 	if err != nil {
-		return nil, err
+		return SessionListResult{}, err
 	}
 
-	sessions := make([]SessionRuntimeState, 0, len(records))
-	for _, record := range records {
+	request.Protocol = strings.ToLower(strings.TrimSpace(request.Protocol))
+	request.BackendIdentifier = strings.TrimSpace(request.BackendIdentifier)
+	scope := sessionRuntimeCursorScope(request)
+
+	stateCursor, err := decodePublicRuntimeReadCursor(request.Cursor, publicRuntimeCursorFamilySessions, scope, operationSessionRead)
+	if err != nil {
+		return SessionListResult{}, err
+	}
+
+	pageRequest := state.RuntimeSessionPageRequest{
+		Protocol: request.Protocol,
+		Limit:    limit,
+		Cursor:   stateCursor,
+	}
+
+	var page state.RuntimeSessionPage
+	if request.BackendIdentifier != "" {
+		page, err = r.store.ListRuntimeSessionsForBackendPage(ctx, request.BackendIdentifier, pageRequest)
+	} else {
+		page, err = r.store.ListRuntimeSessionsPage(ctx, pageRequest)
+	}
+
+	if err != nil {
+		return SessionListResult{}, err
+	}
+
+	sessions := make([]SessionRuntimeState, 0, len(page.Records))
+	for _, record := range page.Records {
 		sessions = append(sessions, sessionRuntimeStateFromRedis(record))
 	}
 
-	return sessions, nil
+	sort.Slice(sessions, func(left int, right int) bool {
+		return sessions[left].SessionID < sessions[right].SessionID
+	})
+
+	return SessionListResult{
+		Sessions:   sessions,
+		NextCursor: encodePublicRuntimeReadCursor(publicRuntimeCursorFamilySessions, scope, page.NextCursor),
+	}, nil
 }
 
 // GetSession returns one active session visible through Redis runtime state.
@@ -105,22 +168,48 @@ func (r *RedisRuntimeReader) ListUserSessions(ctx context.Context, key UserKey) 
 }
 
 // ListUsers returns users with currently visible Redis runtime state.
-func (r *RedisRuntimeReader) ListUsers(ctx context.Context) ([]UserRuntimeState, error) {
+func (r *RedisRuntimeReader) ListUsers(ctx context.Context, request UserListRequest) (UserListResult, error) {
 	if r == nil || r.store == nil {
-		return nil, newRuntimeError(ErrorKindUnavailable, operationUserRead, "user reader unavailable")
+		return UserListResult{}, newRuntimeError(ErrorKindUnavailable, operationUserRead, "user reader unavailable")
 	}
 
-	records, err := r.store.ListRuntimeUsers(ctx)
+	limit, err := normalizeRuntimeReadLimit(request.Limit, r.store.RuntimeReadPageLimits(), operationUserRead)
 	if err != nil {
-		return nil, err
+		return UserListResult{}, err
 	}
 
-	users := make([]UserRuntimeState, 0, len(records))
-	for _, record := range records {
+	scope := userRuntimeCursorScope()
+
+	stateCursor, err := decodePublicRuntimeReadCursor(request.Cursor, publicRuntimeCursorFamilyUsers, scope, operationUserRead)
+	if err != nil {
+		return UserListResult{}, err
+	}
+
+	page, err := r.store.ListRuntimeUsersPage(ctx, state.RuntimeUserPageRequest{
+		Limit:  limit,
+		Cursor: stateCursor,
+	})
+	if err != nil {
+		return UserListResult{}, err
+	}
+
+	users := make([]UserRuntimeState, 0, len(page.Records))
+	for _, record := range page.Records {
 		users = append(users, userRuntimeStateFromRedisRead(record))
 	}
 
-	return users, nil
+	sort.Slice(users, func(left int, right int) bool {
+		if users[left].Key.Tenant == users[right].Key.Tenant {
+			return users[left].Key.UserHash < users[right].Key.UserHash
+		}
+
+		return users[left].Key.Tenant < users[right].Key.Tenant
+	})
+
+	return UserListResult{
+		Users:      users,
+		NextCursor: encodePublicRuntimeReadCursor(publicRuntimeCursorFamilyUsers, scope, page.NextCursor),
+	}, nil
 }
 
 // GetUser returns one user's current affinity view.
@@ -191,4 +280,156 @@ func sessionStatusFromRedis(value string) SessionStatus {
 	default:
 		return SessionStatusActive
 	}
+}
+
+// normalizeRuntimeReadLimit applies default and hard maximum page sizes.
+func normalizeRuntimeReadLimit(limit int, configured state.RuntimeReadPageLimits, operation string) (int, error) {
+	if configured.Default <= 0 {
+		configured.Default = defaultRuntimeReadPageLimit
+	}
+
+	if configured.Max <= 0 {
+		configured.Max = maxRuntimeReadPageLimit
+	}
+
+	if configured.Default > configured.Max {
+		configured.Default = configured.Max
+	}
+
+	switch {
+	case limit < 0:
+		return 0, newRuntimeError(ErrorKindInvalidRequest, operation, "limit must be greater than zero")
+	case limit == 0:
+		return configured.Default, nil
+	case limit > configured.Max:
+		return 0, newRuntimeError(ErrorKindInvalidRequest, operation, fmt.Sprintf("limit must not exceed %d", configured.Max))
+	default:
+		return limit, nil
+	}
+}
+
+// sessionRuntimeCursorScope creates a query-shape digest without raw filter values.
+func sessionRuntimeCursorScope(request SessionListRequest) string {
+	return runtimeCursorScope(
+		publicRuntimeCursorFamilySessions,
+		strings.ToLower(strings.TrimSpace(request.Protocol)),
+		strings.TrimSpace(request.BackendIdentifier),
+	)
+}
+
+// userRuntimeCursorScope creates the cursor scope for runtime user lists.
+func userRuntimeCursorScope() string {
+	return runtimeCursorScope(publicRuntimeCursorFamilyUsers)
+}
+
+// runtimeCursorScope hashes request shape so cursors cannot cross filters.
+func runtimeCursorScope(parts ...string) string {
+	hash := sha256.New()
+	for _, part := range parts {
+		hash.Write([]byte(part))
+		hash.Write([]byte{0})
+	}
+
+	return base64.RawURLEncoding.EncodeToString(hash.Sum(nil))
+}
+
+// encodePublicRuntimeReadCursor wraps an internal state cursor for REST clients.
+func encodePublicRuntimeReadCursor(family string, scope string, stateCursor string) string {
+	if strings.TrimSpace(stateCursor) == "" {
+		return ""
+	}
+
+	payload, err := json.Marshal(publicRuntimeReadCursor{
+		Version:     publicRuntimeCursorVersion,
+		Family:      family,
+		ScopeDigest: scope,
+		StateCursor: stateCursor,
+	})
+	if err != nil {
+		return ""
+	}
+
+	mac := hmac.New(sha256.New, publicRuntimeCursorMACKey)
+	mac.Write(payload)
+
+	return base64.RawURLEncoding.EncodeToString(payload) + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+}
+
+// decodePublicRuntimeReadCursor verifies a public cursor and returns state position data.
+func decodePublicRuntimeReadCursor(raw string, family string, scope string, operation string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", nil
+	}
+
+	payload, actualMAC, err := decodePublicRuntimeCursorParts(raw)
+	if err != nil {
+		return "", invalidRuntimeCursor(operation)
+	}
+
+	if !publicRuntimeCursorMACValid(payload, actualMAC) {
+		return "", invalidRuntimeCursor(operation)
+	}
+
+	var cursor publicRuntimeReadCursor
+	if err := json.Unmarshal(payload, &cursor); err != nil {
+		return "", invalidRuntimeCursor(operation)
+	}
+
+	if !cursor.validFor(family, scope) {
+		return "", invalidRuntimeCursor(operation)
+	}
+
+	return cursor.StateCursor, nil
+}
+
+// decodePublicRuntimeCursorParts decodes public cursor payload and MAC sections.
+func decodePublicRuntimeCursorParts(raw string) ([]byte, []byte, error) {
+	payloadText, macText, ok := strings.Cut(raw, ".")
+	if !ok || payloadText == "" || macText == "" {
+		return nil, nil, invalidRuntimeCursor("")
+	}
+
+	payload, err := base64.RawURLEncoding.DecodeString(payloadText)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	actualMAC, err := base64.RawURLEncoding.DecodeString(macText)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return payload, actualMAC, nil
+}
+
+// publicRuntimeCursorMACValid verifies the cursor integrity tag.
+func publicRuntimeCursorMACValid(payload []byte, actualMAC []byte) bool {
+	expectedMAC := hmac.New(sha256.New, publicRuntimeCursorMACKey)
+	expectedMAC.Write(payload)
+
+	return hmac.Equal(actualMAC, expectedMAC.Sum(nil))
+}
+
+// validFor checks cursor version, family, scope and state payload presence.
+func (c publicRuntimeReadCursor) validFor(family string, scope string) bool {
+	return c.Version == publicRuntimeCursorVersion &&
+		c.Family == family &&
+		c.ScopeDigest == scope &&
+		strings.TrimSpace(c.StateCursor) != ""
+}
+
+// invalidRuntimeCursor returns the stable client error for malformed cursors.
+func invalidRuntimeCursor(operation string) error {
+	return newRuntimeError(ErrorKindInvalidRequest, operation, "cursor invalid")
+}
+
+// newPublicRuntimeCursorMACKey creates the process-local cursor integrity key.
+func newPublicRuntimeCursorMACKey() []byte {
+	key := make([]byte, publicRuntimeCursorMACKeyBytes)
+	if _, err := rand.Read(key); err != nil {
+		panic(fmt.Sprintf("runtime cursor integrity key unavailable: %v", err))
+	}
+
+	return key
 }

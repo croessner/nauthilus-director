@@ -1432,15 +1432,19 @@ func (s *trackingSessionStore) CloseSession(ctx context.Context, key state.Affin
 	return record, nil
 }
 
-// ListSessions returns active sessions visible through the REST control API.
-func (s *trackingSessionStore) ListSessions(_ context.Context, protocol string) ([]runtimectl.SessionRuntimeState, error) {
+// ListSessions returns one bounded active-session page for the REST control API.
+func (s *trackingSessionStore) ListSessions(_ context.Context, request runtimectl.SessionListRequest) (runtimectl.SessionListResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	protocol = strings.ToLower(strings.TrimSpace(protocol))
+	protocol := strings.ToLower(strings.TrimSpace(request.Protocol))
+	backendID := strings.TrimSpace(request.BackendIdentifier)
 	sessions := make([]runtimectl.SessionRuntimeState, 0, len(s.sessions))
 	for _, session := range s.sessions {
 		if protocol != "" && session.Protocol != protocol {
+			continue
+		}
+		if backendID != "" && session.BackendIdentifier != backendID {
 			continue
 		}
 		sessions = append(sessions, session.Normalize())
@@ -1450,7 +1454,21 @@ func (s *trackingSessionStore) ListSessions(_ context.Context, protocol string) 
 		return sessions[left].SessionID < sessions[right].SessionID
 	})
 
-	return sessions, nil
+	start, limit, err := trackingListWindow(request.Cursor, request.Limit)
+	if err != nil {
+		return runtimectl.SessionListResult{}, err
+	}
+
+	if start > len(sessions) {
+		start = len(sessions)
+	}
+	end := min(start+limit, len(sessions))
+	nextCursor := ""
+	if end < len(sessions) {
+		nextCursor = strconv.Itoa(end)
+	}
+
+	return runtimectl.SessionListResult{Sessions: sessions[start:end], NextCursor: nextCursor}, nil
 }
 
 // GetSession returns one active REST-visible session.
@@ -1483,8 +1501,8 @@ func (s *trackingSessionStore) ListUserSessions(_ context.Context, key runtimect
 	return sessions, nil
 }
 
-// ListUsers returns users that currently have REST-visible sessions.
-func (s *trackingSessionStore) ListUsers(context.Context) ([]runtimectl.UserRuntimeState, error) {
+// ListUsers returns one bounded user page for the REST control API.
+func (s *trackingSessionStore) ListUsers(_ context.Context, request runtimectl.UserListRequest) (runtimectl.UserListResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -1503,7 +1521,47 @@ func (s *trackingSessionStore) ListUsers(context.Context) ([]runtimectl.UserRunt
 		result = append(result, user)
 	}
 
-	return result, nil
+	sort.Slice(result, func(left int, right int) bool {
+		return result[left].Key.UserHash < result[right].Key.UserHash
+	})
+
+	start, limit, err := trackingListWindow(request.Cursor, request.Limit)
+	if err != nil {
+		return runtimectl.UserListResult{}, err
+	}
+
+	if start > len(result) {
+		start = len(result)
+	}
+	end := min(start+limit, len(result))
+	nextCursor := ""
+	if end < len(result) {
+		nextCursor = strconv.Itoa(end)
+	}
+
+	return runtimectl.UserListResult{Users: result[start:end], NextCursor: nextCursor}, nil
+}
+
+// trackingListWindow converts fake REST cursors into bounded slice windows.
+func trackingListWindow(cursor string, requestedLimit int) (int, int, error) {
+	limit := requestedLimit
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > 1000 {
+		return 0, 0, &runtimectl.Error{Kind: runtimectl.ErrorKindInvalidRequest, Operation: "list", Message: "limit must not exceed 1000"}
+	}
+
+	start := 0
+	if strings.TrimSpace(cursor) != "" {
+		parsed, err := strconv.Atoi(strings.TrimSpace(cursor))
+		if err != nil || parsed < 0 {
+			return 0, 0, &runtimectl.Error{Kind: runtimectl.ErrorKindInvalidRequest, Operation: "list", Message: "cursor invalid"}
+		}
+		start = parsed
+	}
+
+	return start, limit, nil
 }
 
 // GetUser returns one active user view from REST-visible sessions.

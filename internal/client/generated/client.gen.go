@@ -427,7 +427,8 @@ type SessionDetail struct {
 
 // SessionListResponse defines model for SessionListResponse.
 type SessionListResponse struct {
-	Sessions []SessionDetail `json:"sessions"`
+	NextCursor *string         `json:"next_cursor,omitempty"`
+	Sessions   []SessionDetail `json:"sessions"`
 }
 
 // StatusResponse defines model for StatusResponse.
@@ -459,7 +460,8 @@ type UserKickRequest struct {
 
 // UserListResponse defines model for UserListResponse.
 type UserListResponse struct {
-	Users []UserDetail `json:"users"`
+	NextCursor *string      `json:"next_cursor,omitempty"`
+	Users      []UserDetail `json:"users"`
 }
 
 // UserMoveRequest defines model for UserMoveRequest.
@@ -490,6 +492,12 @@ type IncludeProtected = bool
 
 // ListenerName defines model for ListenerName.
 type ListenerName = string
+
+// RuntimeReadCursor defines model for RuntimeReadCursor.
+type RuntimeReadCursor = string
+
+// RuntimeReadLimit defines model for RuntimeReadLimit.
+type RuntimeReadLimit = int
 
 // SessionID defines model for SessionID.
 type SessionID = string
@@ -538,7 +546,26 @@ type GetNonDefaultConfigParamsFormat string
 
 // ListSessionsParams defines parameters for ListSessions.
 type ListSessionsParams struct {
+	// Protocol Optional page-local protocol filter applied during bounded cursor scans.
 	Protocol *string `form:"protocol,omitempty" json:"protocol,omitempty"`
+
+	// Backend Optional backend identifier filter backed by the backend session index.
+	Backend *string `form:"backend,omitempty" json:"backend,omitempty"`
+
+	// Cursor Opaque cursor returned by a previous runtime list page.
+	Cursor *RuntimeReadCursor `form:"cursor,omitempty" json:"cursor,omitempty"`
+
+	// Limit Maximum records to return in this page.
+	Limit *RuntimeReadLimit `form:"limit,omitempty" json:"limit,omitempty"`
+}
+
+// ListUsersParams defines parameters for ListUsers.
+type ListUsersParams struct {
+	// Cursor Opaque cursor returned by a previous runtime list page.
+	Cursor *RuntimeReadCursor `form:"cursor,omitempty" json:"cursor,omitempty"`
+
+	// Limit Maximum records to return in this page.
+	Limit *RuntimeReadLimit `form:"limit,omitempty" json:"limit,omitempty"`
 }
 
 // DisableBackendMaintenanceJSONRequestBody defines body for DisableBackendMaintenance for application/json ContentType.
@@ -745,7 +772,7 @@ type ClientInterface interface {
 	GetSession(ctx context.Context, sessionID SessionID, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// ListUsers request
-	ListUsers(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+	ListUsers(ctx context.Context, params *ListUsersParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetUser request
 	GetUser(ctx context.Context, userKey UserKey, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -1173,8 +1200,8 @@ func (c *Client) GetSession(ctx context.Context, sessionID SessionID, reqEditors
 	return c.Client.Do(req)
 }
 
-func (c *Client) ListUsers(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewListUsersRequest(c.Server)
+func (c *Client) ListUsers(ctx context.Context, params *ListUsersParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewListUsersRequest(c.Server, params)
 	if err != nil {
 		return nil, err
 	}
@@ -2215,6 +2242,42 @@ func NewListSessionsRequest(server string, params *ListSessionsParams) (*http.Re
 
 		}
 
+		if params.Backend != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "backend", *params.Backend, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.Cursor != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "cursor", *params.Cursor, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.Limit != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "limit", *params.Limit, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
 		if encoded := queryValues.Encode(); encoded != "" {
 			rawQueryFragments = append(rawQueryFragments, encoded)
 		}
@@ -2311,7 +2374,7 @@ func NewGetSessionRequest(server string, sessionID SessionID) (*http.Request, er
 }
 
 // NewListUsersRequest generates requests for ListUsers
-func NewListUsersRequest(server string) (*http.Request, error) {
+func NewListUsersRequest(server string, params *ListUsersParams) (*http.Request, error) {
 	var err error
 
 	serverURL, err := url.Parse(server)
@@ -2327,6 +2390,45 @@ func NewListUsersRequest(server string) (*http.Request, error) {
 	queryURL, err := serverURL.Parse(operationPath)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+		// queryValues collects non-styled parameters (passthrough, JSON)
+		// that are safe to round-trip through url.Values.Encode().
+		queryValues := queryURL.Query()
+		// rawQueryFragments collects pre-encoded query fragments from
+		// styled parameters, preserving literal commas as delimiters
+		// per the OpenAPI spec (e.g. "color=blue,black,brown").
+		var rawQueryFragments []string
+
+		if params.Cursor != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "cursor", *params.Cursor, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.Limit != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "limit", *params.Limit, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if encoded := queryValues.Encode(); encoded != "" {
+			rawQueryFragments = append(rawQueryFragments, encoded)
+		}
+		queryURL.RawQuery = strings.Join(rawQueryFragments, "&")
 	}
 
 	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
@@ -2864,7 +2966,7 @@ type ClientWithResponsesInterface interface {
 	GetSessionWithResponse(ctx context.Context, sessionID SessionID, reqEditors ...RequestEditorFn) (*GetSessionResponse, error)
 
 	// ListUsersWithResponse request
-	ListUsersWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*ListUsersResponse, error)
+	ListUsersWithResponse(ctx context.Context, params *ListUsersParams, reqEditors ...RequestEditorFn) (*ListUsersResponse, error)
 
 	// GetUserWithResponse request
 	GetUserWithResponse(ctx context.Context, userKey UserKey, reqEditors ...RequestEditorFn) (*GetUserResponse, error)
@@ -4210,8 +4312,8 @@ func (c *ClientWithResponses) GetSessionWithResponse(ctx context.Context, sessio
 }
 
 // ListUsersWithResponse request returning *ListUsersResponse
-func (c *ClientWithResponses) ListUsersWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*ListUsersResponse, error) {
-	rsp, err := c.ListUsers(ctx, reqEditors...)
+func (c *ClientWithResponses) ListUsersWithResponse(ctx context.Context, params *ListUsersParams, reqEditors ...RequestEditorFn) (*ListUsersResponse, error) {
+	rsp, err := c.ListUsers(ctx, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
