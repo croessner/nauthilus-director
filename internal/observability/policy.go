@@ -82,9 +82,12 @@ const (
 
 	reasonClassOK                     = "ok"
 	reasonClassAuth                   = "auth"
+	reasonClassBackendPinApplied      = "backend_pin_applied"
+	reasonClassBackendPinMismatch     = "backend_pin_mismatch"
 	reasonClassBackendStatus          = "backend_status"
 	reasonClassBDAT                   = "bdat"
 	reasonClassData                   = "data"
+	reasonClassOperatorBackendPin     = "operator_backend_pin"
 	reasonClassOther                  = "other"
 	reasonClassParser                 = "parser"
 	reasonClassRouting                = "routing"
@@ -186,6 +189,13 @@ var allowedReasonClasses = map[string]struct{}{
 	reasonClassAuth:                   {},
 	"attach_retry":                    {},
 	"backend_auth_failed":             {},
+	"backend_pin_absent":              {},
+	reasonClassBackendPinApplied:      {},
+	"backend_pin_clear":               {},
+	"backend_pin_excluded":            {},
+	reasonClassBackendPinMismatch:     {},
+	"backend_pin_read_failed":         {},
+	"backend_pin_set":                 {},
 	"backend_closed":                  {},
 	"backend_connect":                 {},
 	reasonClassBackendStatus:          {},
@@ -219,6 +229,7 @@ var allowedReasonClasses = map[string]struct{}{
 	"no_backend":                      {},
 	"not_found":                       {},
 	reasonClassOK:                     {},
+	reasonClassOperatorBackendPin:     {},
 	reasonClassOther:                  {},
 	reasonClassParser:                 {},
 	"protocol":                        {},

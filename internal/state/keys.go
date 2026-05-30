@@ -44,10 +44,11 @@ type KeyBuilder struct {
 
 // AffinityKeys contains the per-affinity Redis key group.
 type AffinityKeys struct {
-	HashTag  string
-	State    string
-	Sessions string
-	Override string
+	HashTag    string
+	State      string
+	Sessions   string
+	Override   string
+	BackendPin string
 }
 
 // BackendReservationKeys contains the Redis key group for one backend slot.
@@ -62,6 +63,7 @@ const (
 	affinityKeyState         = "state"
 	affinityKeySessions      = "sessions"
 	affinityKeyOverride      = "override"
+	affinityKeyBackendPin    = "backend_pin"
 
 	defaultSessionIndexShards = 64
 	defaultUserIndexShards    = 32
@@ -117,10 +119,11 @@ func (b KeyBuilder) AffinityKeys(tenant string, normalizedAccount string) (Affin
 	base := b.affinityBase(hashTag)
 
 	return AffinityKeys{
-		HashTag:  hashTag,
-		State:    base + ":state",
-		Sessions: base + ":sessions",
-		Override: base + ":override",
+		HashTag:    hashTag,
+		State:      base + ":state",
+		Sessions:   base + ":sessions",
+		Override:   base + ":override",
+		BackendPin: base + ":backend_pin",
 	}, nil
 }
 
@@ -606,7 +609,7 @@ func (b KeyBuilder) backendReservationOwnedHashTag(operation string, key string)
 // affinityKeySuffixAllowed reports whether a key suffix belongs to one affinity.
 func affinityKeySuffixAllowed(suffix string) bool {
 	switch suffix {
-	case affinityKeyState, affinityKeySessions, affinityKeyOverride:
+	case affinityKeyState, affinityKeySessions, affinityKeyOverride, affinityKeyBackendPin:
 		return true
 	default:
 		return strings.HasPrefix(suffix, affinityKeySessionPrefix) && strings.TrimPrefix(suffix, affinityKeySessionPrefix) != ""

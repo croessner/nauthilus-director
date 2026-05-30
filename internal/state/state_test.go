@@ -35,6 +35,7 @@ import (
 
 const (
 	testAttachSessionID  = "attach-session"
+	testBackendPool      = "primary"
 	testBackendIMAP      = "mailstore-a-imap"
 	testBackendLMTP      = "mailstore-a-lmtp"
 	testKickSessionID    = "kick-session"
@@ -55,6 +56,7 @@ const (
 	testTenantDefault    = "default"
 	testClearStatus      = "cleared"
 	testListenerIMAPS    = "imaps"
+	testMissingStatus    = "missing"
 	testShardA           = "mailstore-a"
 	testShardB           = "mailstore-b"
 	testShardC           = "mailstore-c"
@@ -196,9 +198,10 @@ func TestKeyBuilderCreatesClusterHashTaggedAffinityKeys(t *testing.T) {
 	}
 
 	for name, key := range map[string]string{
-		"state":    keys.State,
-		"sessions": keys.Sessions,
-		"override": keys.Override,
+		affinityKeyState:      keys.State,
+		affinityKeySessions:   keys.Sessions,
+		affinityKeyOverride:   keys.Override,
+		affinityKeyBackendPin: keys.BackendPin,
 	} {
 		if !strings.Contains(key, keys.HashTag) {
 			t.Fatalf("%s key %q does not contain hash tag %q", name, key, keys.HashTag)
@@ -220,10 +223,11 @@ func TestKeyBuilderCreatesClusterHashTaggedAffinityKeys(t *testing.T) {
 
 	firstTag := redisHashTag(t, keys.State)
 	for name, key := range map[string]string{
-		"state":    keys.State,
-		"sessions": keys.Sessions,
-		"override": keys.Override,
-		"session":  sessionKey,
+		affinityKeyState:      keys.State,
+		affinityKeySessions:   keys.Sessions,
+		affinityKeyOverride:   keys.Override,
+		affinityKeyBackendPin: keys.BackendPin,
+		"session":             sessionKey,
 	} {
 		if got := redisHashTag(t, key); got != firstTag {
 			t.Fatalf("%s key hash tag = %q, want %q", name, got, firstTag)
@@ -274,6 +278,9 @@ func TestPerAffinityScriptWrappersUseAffinityOwnedKeys(t *testing.T) {
 		{operation: scriptMove, keys: store.moveUserScriptKeys(affinityKeys)},
 		{operation: scriptKick, keys: store.kickUserScriptKeys(affinityKeys)},
 		{operation: scriptClear, keys: store.clearUserAffinityScriptKeys(affinityKeys)},
+		{operation: scriptBackendPinSet, keys: store.backendPinSetScriptKeys(affinityKeys)},
+		{operation: scriptBackendPinGet, keys: store.backendPinGetScriptKeys(affinityKeys)},
+		{operation: scriptBackendPinClear, keys: store.backendPinClearScriptKeys(affinityKeys)},
 	} {
 		assertAffinityOwnedScriptKeys(t, store, item.operation, item.keys)
 	}
@@ -381,7 +388,7 @@ func TestKeyBuilderDoesNotRequireRawUsernameInKeys(t *testing.T) {
 		t.Fatalf("AffinityKeys returned error: %v", err)
 	}
 
-	for _, key := range []string{keys.State, keys.Sessions, keys.Override} {
+	for _, key := range []string{keys.State, keys.Sessions, keys.Override, keys.BackendPin} {
 		if strings.Contains(key, rawAccount) || strings.Contains(key, strings.ToLower(rawAccount)) {
 			t.Fatalf("key %q leaked raw account %q", key, rawAccount)
 		}
@@ -566,6 +573,9 @@ func TestScriptLoaderTracksSHAAndMissingScripts(t *testing.T) {
 		scriptAttach,
 		scriptBackendReap,
 		scriptBackendRelease,
+		scriptBackendPinClear,
+		scriptBackendPinGet,
+		scriptBackendPinSet,
 		scriptBackendReserve,
 		scriptBackendRuntimeClear,
 		scriptBackendRuntimeSet,
@@ -2018,6 +2028,290 @@ func TestRedisDrainExistingMoveAllowsAuditedSplit(t *testing.T) {
 	}
 }
 
+// TestRedisBackendPinSetGetClearScripts verifies the backend-pin Redis read model.
+func TestRedisBackendPinSetGetClearScripts(t *testing.T) {
+	store, client, builder := redisIntegrationStore(t)
+	key := AffinityKey{Tenant: "blue", AccountKey: "backend-pin@example.test"}
+	sessionID := "backend-pin-session"
+
+	cleanupAffinity(t, client, builder, key, sessionID)
+	cleanupBackend(t, client, builder, testBackendIMAP)
+
+	assertAbsentBackendPin(t, store, key)
+	openAttachedSession(t, store, key, sessionID, testBackendIMAP)
+
+	pinned := setBackendPinForTest(t, store, key, testShardB, moveStrategyNewSessionsOnly, "commission backend")
+	assertBackendPinRecord(t, pinned, key, testBackendIMAP, testShardB, moveStrategyNewSessionsOnly, 1)
+	assertStoredBackendPinHash(t, client, builder, key)
+	assertHeartbeatAction(t, store, key, sessionID, ControlActionNone)
+
+	read := getBackendPinForTest(t, store, key)
+	assertBackendPinRecord(t, read, key, testBackendIMAP, testShardB, moveStrategyNewSessionsOnly, 1)
+	clearBackendPinForTest(t, store, key)
+	assertBackendPinClearPreservedAffinity(t, store, client, builder, key, sessionID)
+}
+
+// assertAbsentBackendPin verifies an absent backend pin uses the public read model.
+func assertAbsentBackendPin(t *testing.T, store *RedisSessionStore, key AffinityKey) {
+	t.Helper()
+
+	absent, err := store.GetUserBackendPin(context.Background(), UserBackendPinGetRequest{Key: key})
+	if err != nil {
+		t.Fatalf("GetUserBackendPin absent returned error: %v", err)
+	}
+
+	if absent.Present || absent.Status != testMissingStatus || absent.Key != key {
+		t.Fatalf("absent backend pin = %#v, want missing key state", absent)
+	}
+}
+
+// setBackendPinForTest writes a standard backend-pin fixture.
+func setBackendPinForTest(
+	t *testing.T,
+	store *RedisSessionStore,
+	key AffinityKey,
+	shard string,
+	strategy string,
+	reason string,
+) UserBackendPinRecord {
+	t.Helper()
+
+	pinned, err := store.SetUserBackendPin(context.Background(), UserBackendPinSetRequest{
+		Key:               key,
+		BackendIdentifier: testBackendIMAP,
+		Protocol:          testProtocolIMAP,
+		BackendPool:       testBackendPool,
+		ShardTag:          shard,
+		Strategy:          strategy,
+		Reason:            reason,
+		Actor:             testOperatorActor,
+	})
+	if err != nil {
+		t.Fatalf("SetUserBackendPin returned error: %v", err)
+	}
+
+	return pinned
+}
+
+// getBackendPinForTest reads one backend-pin fixture.
+func getBackendPinForTest(t *testing.T, store *RedisSessionStore, key AffinityKey) UserBackendPinRecord {
+	t.Helper()
+
+	read, err := store.GetUserBackendPin(context.Background(), UserBackendPinGetRequest{Key: key})
+	if err != nil {
+		t.Fatalf("GetUserBackendPin present returned error: %v", err)
+	}
+
+	return read
+}
+
+// clearBackendPinForTest removes one backend-pin fixture.
+func clearBackendPinForTest(t *testing.T, store *RedisSessionStore, key AffinityKey) UserBackendPinRecord {
+	t.Helper()
+
+	cleared, err := store.ClearUserBackendPin(context.Background(), UserBackendPinClearRequest{
+		Key:    key,
+		Reason: "commissioning complete",
+		Actor:  testOperatorActor,
+	})
+	if err != nil {
+		t.Fatalf("ClearUserBackendPin returned error: %v", err)
+	}
+
+	if cleared.Present || cleared.Status != testClearStatus || cleared.BackendIdentifier != testBackendIMAP {
+		t.Fatalf("cleared backend pin = %#v, want concrete target metadata", cleared)
+	}
+
+	return cleared
+}
+
+// assertBackendPinClearPreservedAffinity verifies clear does not disturb active shard state.
+func assertBackendPinClearPreservedAffinity(
+	t *testing.T,
+	store *RedisSessionStore,
+	client *redis.Client,
+	builder KeyBuilder,
+	key AffinityKey,
+	sessionID string,
+) {
+	t.Helper()
+
+	keys, err := builder.AffinityKeys(key.Tenant, key.AccountKey)
+	if err != nil {
+		t.Fatalf("AffinityKeys returned error: %v", err)
+	}
+
+	if exists := client.Exists(context.Background(), keys.BackendPin).Val(); exists != 0 {
+		t.Fatalf("backend pin key still exists after clear: %d", exists)
+	}
+
+	affinity, err := store.LookupAffinity(context.Background(), key)
+	if err != nil {
+		t.Fatalf("LookupAffinity after backend pin clear returned error: %v", err)
+	}
+
+	if !affinity.Present || affinity.ActiveSessionCount != 1 || affinity.ShardTag != testShardA {
+		t.Fatalf("affinity after backend pin clear = %#v, want active shard preserved", affinity)
+	}
+
+	assertHeartbeatAction(t, store, key, sessionID, ControlActionNone)
+}
+
+// TestRedisBackendPinStrategiesControlExistingSessions verifies strategy side effects.
+func TestRedisBackendPinStrategiesControlExistingSessions(t *testing.T) {
+	for _, testCase := range []struct {
+		name              string
+		strategy          string
+		wantControlAction ControlAction
+		wantShard         string
+	}{
+		{name: "new sessions only", strategy: moveStrategyNewSessionsOnly, wantControlAction: ControlActionNone, wantShard: testShardA},
+		{name: "drain existing", strategy: moveStrategyDrainExisting, wantControlAction: ControlActionNone, wantShard: testShardA},
+		{name: "kick existing", strategy: moveStrategyKickExisting, wantControlAction: ControlActionMoveGenerationChanged, wantShard: testShardC},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			store, client, builder := redisIntegrationStore(t)
+			key := AffinityKey{Tenant: "blue", AccountKey: "backend-pin-" + strings.ReplaceAll(testCase.name, " ", "-")}
+			sessionID := "backend-pin-strategy-session"
+
+			cleanupAffinity(t, client, builder, key, sessionID)
+			cleanupBackend(t, client, builder, testBackendIMAP)
+			openAttachedSession(t, store, key, sessionID, testBackendIMAP)
+
+			pinned := setBackendPinForTest(t, store, key, testShardC, testCase.strategy, "commission strategy")
+			if pinned.Generation == "" || pinned.ActiveSessionCount != 1 {
+				t.Fatalf("pin generation/count = %#v", pinned)
+			}
+
+			heartbeat, err := store.HeartbeatSession(context.Background(), key, sessionID, time.Second)
+			if err != nil {
+				t.Fatalf("HeartbeatSession returned error: %v", err)
+			}
+
+			if heartbeat.ControlAction != testCase.wantControlAction {
+				t.Fatalf("heartbeat action = %q, want %q", heartbeat.ControlAction, testCase.wantControlAction)
+			}
+
+			affinity, err := store.LookupAffinity(context.Background(), key)
+			if err != nil {
+				t.Fatalf("LookupAffinity returned error: %v", err)
+			}
+
+			if affinity.ShardTag != testCase.wantShard {
+				t.Fatalf("affinity shard = %q, want %q", affinity.ShardTag, testCase.wantShard)
+			}
+
+			if testCase.strategy != moveStrategyKickExisting {
+				assertDeferredBackendPinOpenUsesActiveShard(t, store, key, sessionID+"-second")
+			}
+		})
+	}
+}
+
+// assertDeferredBackendPinOpenUsesActiveShard verifies active placement wins over deferred backend pins.
+func assertDeferredBackendPinOpenUsesActiveShard(t *testing.T, store *RedisSessionStore, key AffinityKey, sessionID string) {
+	t.Helper()
+
+	second := testSessionRecord(key, sessionID)
+	second.ShardTag = testShardC
+
+	secondAffinity, err := store.OpenSession(context.Background(), second)
+	if err != nil {
+		t.Fatalf("OpenSession with deferred backend pin returned error: %v", err)
+	}
+
+	if secondAffinity.ShardTag != testShardA {
+		t.Fatalf("deferred backend-pin session shard = %q, want active shard %q", secondAffinity.ShardTag, testShardA)
+	}
+
+	if _, err := store.CloseSession(context.Background(), key, sessionID); err != nil {
+		t.Fatalf("CloseSession second returned error: %v", err)
+	}
+}
+
+// TestBackendPinScriptPayloadFailsClosed verifies malformed pin script output is rejected.
+func TestBackendPinScriptPayloadFailsClosed(t *testing.T) {
+	key := AffinityKey{Tenant: testTenantDefault, AccountKey: "hash"}
+
+	_, err := parseUserBackendPinRecord(key, []any{
+		scriptFieldStatus, "found",
+		scriptFieldPresent, "1",
+		scriptFieldTenant, key.Tenant,
+		scriptFieldAccountKey, key.AccountKey,
+		scriptFieldProtocol, testProtocolIMAP,
+		scriptFieldBackendPool, testBackendPool,
+		scriptFieldShardTag, testShardA,
+		scriptFieldStrategy, moveStrategyNewSessionsOnly,
+		scriptFieldGeneration, "1",
+		scriptFieldActiveSessionCount, "0",
+		scriptFieldServerTimeMS, "1000",
+	})
+	if !IsRedisErrorKind(err, RedisErrorKindAmbiguousState) {
+		t.Fatalf("parseUserBackendPinRecord error = %v, want ambiguous_state", err)
+	}
+}
+
+// assertBackendPinRecord verifies the bounded backend-pin state fields.
+func assertBackendPinRecord(
+	t *testing.T,
+	record UserBackendPinRecord,
+	key AffinityKey,
+	backendID string,
+	shard string,
+	strategy string,
+	activeCount int,
+) {
+	t.Helper()
+
+	if !record.Present ||
+		record.Key != key ||
+		record.BackendIdentifier != backendID ||
+		record.Protocol != testProtocolIMAP ||
+		record.BackendPool != testBackendPool ||
+		record.ShardTag != shard ||
+		record.Strategy != strategy ||
+		record.Generation == "" ||
+		record.ActiveSessionCount != activeCount ||
+		record.ServerTime.IsZero() {
+		t.Fatalf("backend pin record = %#v", record)
+	}
+}
+
+// assertStoredBackendPinHash verifies Redis stores only bounded pin metadata.
+func assertStoredBackendPinHash(t *testing.T, client *redis.Client, builder KeyBuilder, key AffinityKey) {
+	t.Helper()
+
+	keys, err := builder.AffinityKeys(key.Tenant, key.AccountKey)
+	if err != nil {
+		t.Fatalf("AffinityKeys returned error: %v", err)
+	}
+
+	if !strings.Contains(keys.BackendPin, keys.HashTag) {
+		t.Fatalf("backend pin key = %q, want hash tag %q", keys.BackendPin, keys.HashTag)
+	}
+
+	fields := client.HGetAll(context.Background(), keys.BackendPin).Val()
+	for name, want := range map[string]string{
+		scriptFieldTenant:      key.Tenant,
+		scriptFieldAccountKey:  key.AccountKey,
+		scriptFieldBackendID:   testBackendIMAP,
+		scriptFieldProtocol:    testProtocolIMAP,
+		scriptFieldBackendPool: testBackendPool,
+		scriptFieldShardTag:    testShardB,
+		scriptFieldStrategy:    moveStrategyNewSessionsOnly,
+	} {
+		if got := fields[name]; got != want {
+			t.Fatalf("backend pin field %s = %q, want %q in %#v", name, got, want, fields)
+		}
+	}
+
+	for _, forbidden := range []string{"address", "password", "token", "private_key"} {
+		if _, ok := fields[forbidden]; ok {
+			t.Fatalf("backend pin stored forbidden field %q: %#v", forbidden, fields)
+		}
+	}
+}
+
 // assertDrainExistingOverride verifies the audited override fields for a drain split.
 func assertDrainExistingOverride(t *testing.T, client *redis.Client, builder KeyBuilder, key AffinityKey) {
 	t.Helper()
@@ -2265,7 +2559,7 @@ func TestRedisCloseReleasesAffinityWithoutGrace(t *testing.T) {
 		t.Fatalf("LookupAffinity returned error: %v", err)
 	}
 
-	if lookup.Present || lookup.Status != "missing" {
+	if lookup.Present || lookup.Status != testMissingStatus {
 		t.Fatalf("lookup after release = %#v, want missing", lookup)
 	}
 }
@@ -2437,7 +2731,7 @@ func cleanupAffinity(t *testing.T, client *redis.Client, builder KeyBuilder, key
 		t.Fatalf("AffinityKeys returned error: %v", err)
 	}
 
-	redisKeys := []string{keys.State, keys.Sessions, keys.Override}
+	redisKeys := []string{keys.State, keys.Sessions, keys.Override, keys.BackendPin}
 
 	userSessionIndexes, err := builder.UserSessionIndexShardKeys(key.Tenant, key.AccountKey)
 	if err != nil {

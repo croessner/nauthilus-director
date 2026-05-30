@@ -616,6 +616,63 @@ paths:
                 $ref: "#/components/schemas/AcceptedResponse"
         default:
           $ref: "#/components/responses/Error"
+  /api/v1/users/{user_key}/backend-pin:
+    parameters:
+      - $ref: "#/components/parameters/UserKey"
+    get:
+      operationId: getUserBackendPin
+      tags:
+        - users
+      summary: Show backend pin for one user key.
+      responses:
+        "200":
+          description: User backend pin.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserBackendPin"
+        default:
+          $ref: "#/components/responses/Error"
+    put:
+      operationId: setUserBackendPin
+      tags:
+        - users
+      summary: Set backend pin for one user key.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UserBackendPinRequest"
+      responses:
+        "202":
+          description: Backend pin update was accepted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AcceptedResponse"
+        default:
+          $ref: "#/components/responses/Error"
+    delete:
+      operationId: clearUserBackendPin
+      tags:
+        - users
+      summary: Clear backend pin for one user key.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UserBackendPinClearRequest"
+      responses:
+        "202":
+          description: Backend pin clear was accepted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AcceptedResponse"
+        default:
+          $ref: "#/components/responses/Error"
   /api/v1/users/{user_key}/move:
     parameters:
       - $ref: "#/components/parameters/UserKey"
@@ -1052,6 +1109,7 @@ components:
         - maintenance
         - shard_tag
         - routing
+        - backend_pin
         - backends
         - affected_by
         - fail_closed
@@ -1072,6 +1130,8 @@ components:
           $ref: "#/components/schemas/RouteLookupRouting"
         affinity:
           $ref: "#/components/schemas/RouteLookupAffinity"
+        backend_pin:
+          $ref: "#/components/schemas/RouteLookupBackendPin"
         backends:
           type: array
           items:
@@ -1264,6 +1324,28 @@ components:
         active_sessions:
           type: integer
           minimum: 0
+    RouteLookupBackendPin:
+      type: object
+      additionalProperties: false
+      required:
+        - present
+        - applied
+        - reason
+      properties:
+        present:
+          type: boolean
+        backend:
+          type: string
+        protocol:
+          type: string
+        backend_pool:
+          type: string
+        shard_tag:
+          type: string
+        applied:
+          type: boolean
+        reason:
+          type: string
     RouteLookupBackendSummary:
       type: object
       additionalProperties: false
@@ -1474,6 +1556,58 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/UserDetail"
+    UserBackendPin:
+      type: object
+      additionalProperties: false
+      required:
+        - present
+        - user_key
+      properties:
+        present:
+          type: boolean
+        user_key:
+          type: string
+          minLength: 1
+        backend:
+          type: string
+        protocol:
+          type: string
+        backend_pool:
+          type: string
+        shard_tag:
+          type: string
+        strategy:
+          $ref: "#/components/schemas/UserMoveRequestStrategy"
+        generation:
+          type: string
+        active_session_count:
+          type: integer
+          minimum: 0
+    UserBackendPinRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - backend
+        - strategy
+        - reason
+      properties:
+        backend:
+          type: string
+          minLength: 1
+        strategy:
+          $ref: "#/components/schemas/UserMoveRequestStrategy"
+        reason:
+          type: string
+          minLength: 1
+    UserBackendPinClearRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - reason
+      properties:
+        reason:
+          type: string
+          minLength: 1
     UserMoveRequest:
       type: object
       additionalProperties: false
@@ -1486,14 +1620,16 @@ components:
           type: string
           minLength: 1
         strategy:
-          type: string
-          enum:
-            - new_sessions_only
-            - kick_existing
-            - drain_existing
+          $ref: "#/components/schemas/UserMoveRequestStrategy"
         reason:
           type: string
           minLength: 1
+    UserMoveRequestStrategy:
+      type: string
+      enum:
+        - new_sessions_only
+        - kick_existing
+        - drain_existing
     VersionResponse:
       type: object
       additionalProperties: false

@@ -451,7 +451,7 @@ func (m *prometheusRuntime) recordRuntimeMetric(event Event) {
 	case EventRedisOperation:
 		m.recordRedis(event)
 	case EventSessionReap, EventSessionKill, EventUserMove, EventUserKick, EventSelectorExclusion, EventSessionAttach,
-		EventListenerInventory, EventListenerDrain, EventListenerResume, EventListenerOperationFailure:
+		EventUserBackendPin, EventListenerInventory, EventListenerDrain, EventListenerResume, EventListenerOperationFailure:
 		m.recordRuntimeOperation(event)
 	case EventRuntimePagination:
 		m.recordRuntimeOperation(event)

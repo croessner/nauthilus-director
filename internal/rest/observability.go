@@ -45,11 +45,13 @@ const (
 	restRouteRouteLookup        = "/api/v1/route/lookup"
 	restRouteSession            = "/api/v1/sessions/{session_id}"
 	restRouteUserAffinity       = "/api/v1/users/{user_key}/affinity"
+	restRouteUserBackendPin     = "/api/v1/users/{user_key}/backend-pin"
 )
 
 var restRouteTemplates = map[string]string{
 	"ClearBackendRuntime":       "/api/v1/backends/{identifier}/runtime",
 	"ClearUserAffinity":         restRouteUserAffinity,
+	"ClearUserBackendPin":       restRouteUserBackendPin,
 	"DeleteSession":             restRouteSession,
 	"DisableBackendMaintenance": restRouteBackendMaintenance,
 	"DrainBackend":              "/api/v1/backends/{identifier}/runtime/drain",
@@ -67,6 +69,7 @@ var restRouteTemplates = map[string]string{
 	"GetSession":                restRouteSession,
 	"GetUser":                   "/api/v1/users/{user_key}",
 	"GetUserAffinity":           restRouteUserAffinity,
+	"GetUserBackendPin":         restRouteUserBackendPin,
 	"GetUserSessions":           "/api/v1/users/{user_key}/sessions",
 	"GetVersion":                "/api/v1/version",
 	"KickUser":                  "/api/v1/users/{user_key}/kick",
@@ -82,6 +85,7 @@ var restRouteTemplates = map[string]string{
 	"ResumeListener":            "/api/v1/listeners/{name}/runtime/resume",
 	"SetBackendWeight":          "/api/v1/backends/{identifier}/runtime/weight",
 	"SetUserAffinity":           restRouteUserAffinity,
+	"SetUserBackendPin":         restRouteUserBackendPin,
 }
 
 // traceRESTRequests wraps generated operations with a normalized REST span.

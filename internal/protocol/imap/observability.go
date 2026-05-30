@@ -46,6 +46,7 @@ const (
 	reasonCanceled        = "canceled"
 	reasonCredentialInput = "credential_input"
 	reasonLiteral         = "literal"
+	reasonOperatorPin     = "operator_backend_pin"
 	reasonProtocol        = "protocol"
 	reasonState           = "state_failed"
 	reasonUnsupported     = "unsupported"

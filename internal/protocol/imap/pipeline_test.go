@@ -227,6 +227,134 @@ func TestAuthenticatedPathBuildsRoutingAndPlacement(t *testing.T) {
 	assertAuthenticatedPipelineCalls(t, authenticator, router, store, selector)
 }
 
+// TestAuthenticatedPathPassesApplicableOperatorBackendPin verifies IMAP pin scoping.
+func TestAuthenticatedPathPassesApplicableOperatorBackendPin(t *testing.T) {
+	authenticator := &recordingAuthenticator{
+		result: nauthilus.AuthResult{
+			Decision: nauthilus.DecisionAuthenticated,
+			Account:  "alice@example.test",
+		},
+	}
+	router := &recordingRoutingResolver{
+		result: routing.RoutingResult{
+			AccountKey:    "alice@example.test",
+			Tenant:        defaultTenantName,
+			ShardTag:      "mailstore-a",
+			RoutingSource: routing.SourceAuthAttribute,
+		},
+	}
+	store := &recordingSessionStore{
+		backendPin: state.UserBackendPinRecord{
+			Present:           true,
+			BackendIdentifier: "mailstore-c-imap",
+			Protocol:          protocolIMAP,
+			BackendPool:       "imap-default",
+			ShardTag:          "mailstore-c",
+		},
+	}
+	selector := &recordingBackendSelector{result: backend.SelectionResult{Backend: backend.Backend{Identifier: "mailstore-c-imap"}}}
+	harness := startTestSession(t, pipelineSessionConfig(authenticator, router, store, selector))
+
+	harness.expectLine(t, greetingLine)
+	harness.write(t, `A001 LOGIN "alice@example.test" "secret-password"`+"\r\n")
+	harness.expectLine(t, "A001 OK Authentication completed\r\n")
+
+	if store.backendPinCalls != 1 {
+		t.Fatalf("backend pin reads = %d, want 1", store.backendPinCalls)
+	}
+
+	if store.record.ShardTag != "mailstore-c" {
+		t.Fatalf("session open shard = %q, want backend pin shard", store.record.ShardTag)
+	}
+
+	if selector.request.OperatorBackendIdentifier != "mailstore-c-imap" {
+		t.Fatalf("operator backend pin = %q, want mailstore-c-imap", selector.request.OperatorBackendIdentifier)
+	}
+
+	if store.reserveCalls != 1 || store.attachCalls != 1 || store.attachment.BackendIdentifier != "mailstore-c-imap" {
+		t.Fatalf("reservation/attachment = %d/%d %#v, want pinned backend accounted", store.reserveCalls, store.attachCalls, store.attachment)
+	}
+}
+
+// TestAuthenticatedPathKeepsActiveBackendSeparateFromOperatorPin verifies active pins win.
+func TestAuthenticatedPathKeepsActiveBackendSeparateFromOperatorPin(t *testing.T) {
+	authenticator := &recordingAuthenticator{result: nauthilus.AuthResult{Decision: nauthilus.DecisionAuthenticated, Account: "alice@example.test"}}
+	router := &recordingRoutingResolver{
+		result: routing.RoutingResult{
+			AccountKey: "alice@example.test",
+			Tenant:     defaultTenantName,
+			ShardTag:   "mailstore-a",
+		},
+	}
+	store := &recordingSessionStore{
+		result: state.AffinityRecord{
+			Present:           true,
+			Status:            affinityStatusReused,
+			ShardTag:          "mailstore-b",
+			BackendIdentifier: "mailstore-b-imap",
+		},
+		backendPin: state.UserBackendPinRecord{
+			Present:           true,
+			BackendIdentifier: "mailstore-c-imap",
+			Protocol:          protocolIMAP,
+			BackendPool:       "imap-default",
+			ShardTag:          "mailstore-c",
+		},
+	}
+	selector := &recordingBackendSelector{result: backend.SelectionResult{Backend: backend.Backend{Identifier: "mailstore-b-imap"}}}
+	harness := startTestSession(t, pipelineSessionConfig(authenticator, router, store, selector))
+
+	harness.expectLine(t, greetingLine)
+	harness.write(t, `A001 LOGIN "alice@example.test" "secret-password"`+"\r\n")
+	harness.expectLine(t, "A001 OK Authentication completed\r\n")
+
+	if selector.request.PinnedBackendIdentifier != "mailstore-b-imap" {
+		t.Fatalf("active backend pin = %q, want mailstore-b-imap", selector.request.PinnedBackendIdentifier)
+	}
+
+	if selector.request.OperatorBackendIdentifier != "" {
+		t.Fatalf("operator backend pin = %q, want inactive while active backend is present", selector.request.OperatorBackendIdentifier)
+	}
+}
+
+// TestAuthenticatedPathDefersOperatorPinDuringActiveAffinity verifies deferred pin strategies keep stickiness.
+func TestAuthenticatedPathDefersOperatorPinDuringActiveAffinity(t *testing.T) {
+	authenticator := &recordingAuthenticator{result: nauthilus.AuthResult{Decision: nauthilus.DecisionAuthenticated, Account: "alice@example.test"}}
+	router := &recordingRoutingResolver{
+		result: routing.RoutingResult{
+			AccountKey: "alice@example.test",
+			Tenant:     defaultTenantName,
+			ShardTag:   "mailstore-a",
+		},
+	}
+	store := &recordingSessionStore{
+		result: state.AffinityRecord{
+			Present:            true,
+			Status:             affinityStatusReused,
+			ShardTag:           "mailstore-a",
+			ActiveSessionCount: 2,
+		},
+		backendPin: state.UserBackendPinRecord{
+			Present:           true,
+			BackendIdentifier: "mailstore-c-imap",
+			Protocol:          protocolIMAP,
+			BackendPool:       "imap-default",
+			ShardTag:          "mailstore-a",
+			Strategy:          "drain_existing",
+		},
+	}
+	selector := &recordingBackendSelector{result: backend.SelectionResult{Backend: backend.Backend{Identifier: "mailstore-a-imap"}}}
+	harness := startTestSession(t, pipelineSessionConfig(authenticator, router, store, selector))
+
+	harness.expectLine(t, greetingLine)
+	harness.write(t, `A001 LOGIN "alice@example.test" "secret-password"`+"\r\n")
+	harness.expectLine(t, "A001 OK Authentication completed\r\n")
+
+	if selector.request.OperatorBackendIdentifier != "" {
+		t.Fatalf("operator backend pin = %q, want deferred during active affinity", selector.request.OperatorBackendIdentifier)
+	}
+}
+
 // TestReplaySecretsAreClearedBeforeProxyMode verifies credential replay does not enter long-lived state.
 func TestReplaySecretsAreClearedBeforeProxyMode(t *testing.T) {
 	credentials := plainCredentialsForBackendTest(t)
@@ -648,15 +776,18 @@ type recordingSessionStore struct {
 	closeCalls      int
 	reserveCalls    int
 	releaseCalls    int
+	backendPinCalls int
 	record          state.SessionRecord
 	attachment      state.SessionBackendAttachment
 	reservation     state.BackendReservationRequest
 	result          state.AffinityRecord
 	attachResult    state.SessionBackendRecord
 	heartbeatResult state.AffinityRecord
+	backendPin      state.UserBackendPinRecord
 	err             error
 	attachErr       error
 	heartbeatErr    error
+	backendPinErr   error
 }
 
 // OpenSession records the session-open request and returns the configured affinity.
@@ -668,6 +799,19 @@ func (s *recordingSessionStore) OpenSession(_ context.Context, record state.Sess
 	}
 
 	return s.result, s.err
+}
+
+// GetUserBackendPin records a read-only backend-pin lookup for placement tests.
+func (s *recordingSessionStore) GetUserBackendPin(
+	_ context.Context,
+	request state.UserBackendPinGetRequest,
+) (state.UserBackendPinRecord, error) {
+	s.backendPinCalls++
+	if s.backendPin.Key == (state.AffinityKey{}) {
+		s.backendPin.Key = request.Key
+	}
+
+	return s.backendPin, s.backendPinErr
 }
 
 // ReserveBackendCapacity records backend reservation before selected-backend attach.

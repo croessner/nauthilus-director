@@ -30,9 +30,11 @@ const (
 	runtimeObservationOperationBackendEffective = "backend_effective_state"
 	runtimeObservationOperationSelectorExclude  = "selector_exclusion"
 
-	runtimeObservationReasonBackendRuntime = "backend_runtime"
-	runtimeObservationReasonCleared        = "cleared"
-	runtimeObservationReasonOther          = "other"
+	runtimeObservationReasonBackendRuntime  = "backend_runtime"
+	runtimeObservationReasonBackendPinClear = "backend_pin_clear"
+	runtimeObservationReasonBackendPinSet   = "backend_pin_set"
+	runtimeObservationReasonCleared         = "cleared"
+	runtimeObservationReasonOther           = "other"
 
 	runtimeObservationResultEligible   = "eligible"
 	runtimeObservationResultExcluded   = "excluded"
@@ -60,6 +62,7 @@ const (
 	runtimeObservationFieldServerTime        = "server_time_available"
 	runtimeObservationFieldService           = "service"
 	runtimeObservationFieldShardTag          = "shard_tag"
+	runtimeObservationFieldUserHash          = "user_hash"
 )
 
 // ServiceOption customizes runtime control services.

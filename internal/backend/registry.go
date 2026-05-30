@@ -45,6 +45,14 @@ type Backend struct {
 	Health          HealthConfig
 }
 
+// PlacementFacts contains the bounded backend identity used by runtime overrides.
+type PlacementFacts struct {
+	BackendIdentifier string
+	Protocol          string
+	BackendPool       string
+	EffectiveShard    string
+}
+
 // TLSConfig describes the transport security policy for one backend connection.
 type TLSConfig struct {
 	Mode               string
@@ -108,6 +116,16 @@ type Pool struct {
 	Protocol string
 	Selector string
 	Backends []string
+}
+
+// PlacementFacts returns secret-free backend identity for runtime state.
+func (b Backend) PlacementFacts() PlacementFacts {
+	return PlacementFacts{
+		BackendIdentifier: strings.TrimSpace(b.Identifier),
+		Protocol:          normalizeProtocol(b.Protocol),
+		BackendPool:       strings.TrimSpace(b.BackendPool),
+		EffectiveShard:    strings.TrimSpace(b.ShardTag),
+	}
 }
 
 // Registry exposes backend entries without owning selection policy.

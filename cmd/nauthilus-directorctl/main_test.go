@@ -90,6 +90,30 @@ func TestHelpOutputListsCommands(t *testing.T) {
 			t.Fatalf("nested help missing %q:\n%s", want, drainHelp)
 		}
 	}
+
+	var backendPinOut, backendPinErr bytes.Buffer
+	code = run([]string{"users", "backend-pin", "--help"}, &backendPinOut, &backendPinErr)
+	if code != 0 {
+		t.Fatalf("backend-pin help exit code %d, want 0; stderr=%q", code, backendPinErr.String())
+	}
+	backendPinHelp := backendPinOut.String()
+	for _, want := range []string{"show", "set", "clear", "Inspect and control user backend pins"} {
+		if !strings.Contains(backendPinHelp, want) {
+			t.Fatalf("backend-pin help missing %q:\n%s", want, backendPinHelp)
+		}
+	}
+
+	var backendPinSetOut, backendPinSetErr bytes.Buffer
+	code = run([]string{"users", "backend-pin", "set", "--help"}, &backendPinSetOut, &backendPinSetErr)
+	if code != 0 {
+		t.Fatalf("backend-pin set help exit code %d, want 0; stderr=%q", code, backendPinSetErr.String())
+	}
+	backendPinSetHelp := backendPinSetOut.String()
+	for _, want := range []string{"--backend", "--strategy", "--reason"} {
+		if !strings.Contains(backendPinSetHelp, want) {
+			t.Fatalf("backend-pin set help missing %q:\n%s", want, backendPinSetHelp)
+		}
+	}
 }
 
 // TestLongOptionsRequireDoubleDash rejects long options written with one dash.
@@ -156,6 +180,9 @@ func TestNestedCommandsUseGeneratedClient(t *testing.T) {
 		{name: "users affinity show", args: []string{"users", "affinity", "show", "user-a"}, wantCalls: []string{"GetUserAffinity"}},
 		{name: "users affinity set", args: []string{"users", "affinity", "set", "user-a", "--shard", "shard-b", "--reason", "move"}, wantCalls: []string{"SetUserAffinity"}},
 		{name: "users affinity clear", args: []string{"users", "affinity", "clear", "user-a", "--reason", "done"}, wantCalls: []string{"ClearUserAffinity"}},
+		{name: "users backend-pin show", args: []string{"users", "backend-pin", "show", "user-a"}, wantCalls: []string{"GetUserBackendPin"}},
+		{name: "users backend-pin set", args: []string{"users", "backend-pin", "set", "user-a", "--backend", "backend-a", "--strategy", "kick_existing", "--reason", "commission"}, wantCalls: []string{"SetUserBackendPin"}},
+		{name: "users backend-pin clear", args: []string{"users", "backend-pin", "clear", "user-a", "--reason", "done"}, wantCalls: []string{"ClearUserBackendPin"}},
 		{name: "users move", args: []string{"users", "move", "user-a", "--to-shard", "shard-b", "--strategy", "kick_existing", "--reason", "rebalance"}, wantCalls: []string{"MoveUser"}},
 		{name: "users kick", args: []string{"users", "kick", "user-a", "--reason", "abuse"}, wantCalls: []string{"KickUser"}},
 		{name: "runtime summary", args: []string{"runtime", "summary"}, wantCalls: []string{"GetRuntimeSummary"}},
@@ -192,6 +219,8 @@ func TestMutatingCommandsRequireReason(t *testing.T) {
 		{"sessions", "kill", "session-a"},
 		{"users", "affinity", "set", "user-a", "--shard", "shard-a"},
 		{"users", "affinity", "clear", "user-a"},
+		{"users", "backend-pin", "set", "user-a", "--backend", "backend-a", "--strategy", "kick_existing"},
+		{"users", "backend-pin", "clear", "user-a"},
 		{"users", "move", "user-a", "--to-shard", "shard-b", "--strategy", "kick_existing"},
 		{"users", "kick", "user-a"},
 	}
@@ -208,6 +237,89 @@ func TestMutatingCommandsRequireReason(t *testing.T) {
 			}
 			if !strings.Contains(stderr, "--reason") {
 				t.Fatalf("stderr = %q, want reason guidance", stderr)
+			}
+		})
+	}
+}
+
+// TestBackendPinRequestsUseGeneratedDTOs verifies backend-pin requests stay on the generated client boundary.
+func TestBackendPinRequestsUseGeneratedDTOs(t *testing.T) {
+	setFake := newFakeControlClient()
+	stdout, stderr, code := runWithFakeClient([]string{
+		"users", "backend-pin", "set", "user-a",
+		"--backend", "backend-a",
+		"--strategy", "kick_existing",
+		"--reason", "commission",
+	}, setFake)
+	if code != 0 {
+		t.Fatalf("backend-pin set returned exit code %d, want 0; stdout=%q stderr=%q", code, stdout, stderr)
+	}
+	if !reflect.DeepEqual(setFake.calls, []string{"SetUserBackendPin"}) {
+		t.Fatalf("calls = %#v, want SetUserBackendPin", setFake.calls)
+	}
+	if setFake.setBackendPinUserKey != generated.UserKey("user-a") {
+		t.Fatalf("set user key = %q, want user-a", setFake.setBackendPinUserKey)
+	}
+	if setFake.setBackendPinRequest.Backend != "backend-a" {
+		t.Fatalf("backend = %q, want backend-a", setFake.setBackendPinRequest.Backend)
+	}
+	if setFake.setBackendPinRequest.Strategy != generated.KickExisting {
+		t.Fatalf("strategy = %q, want kick_existing", setFake.setBackendPinRequest.Strategy)
+	}
+	if setFake.setBackendPinRequest.Reason != "commission" {
+		t.Fatalf("reason = %q, want commission", setFake.setBackendPinRequest.Reason)
+	}
+
+	clearFake := newFakeControlClient()
+	stdout, stderr, code = runWithFakeClient([]string{"users", "backend-pin", "clear", "user-a", "--reason", "done"}, clearFake)
+	if code != 0 {
+		t.Fatalf("backend-pin clear returned exit code %d, want 0; stdout=%q stderr=%q", code, stdout, stderr)
+	}
+	if !reflect.DeepEqual(clearFake.calls, []string{"ClearUserBackendPin"}) {
+		t.Fatalf("calls = %#v, want ClearUserBackendPin", clearFake.calls)
+	}
+	if clearFake.clearBackendPinUserKey != generated.UserKey("user-a") {
+		t.Fatalf("clear user key = %q, want user-a", clearFake.clearBackendPinUserKey)
+	}
+	if clearFake.clearBackendPinRequest.Reason != "done" {
+		t.Fatalf("clear reason = %q, want done", clearFake.clearBackendPinRequest.Reason)
+	}
+}
+
+// TestBackendPinUsageValidationKeepsRequestsLocal rejects malformed backend-pin commands before transport.
+func TestBackendPinUsageValidationKeepsRequestsLocal(t *testing.T) {
+	tests := []struct {
+		name       string
+		args       []string
+		wantStderr string
+	}{
+		{name: "show missing user", args: []string{"users", "backend-pin", "show"}, wantStderr: "exactly one user key"},
+		{name: "show empty user", args: []string{"users", "backend-pin", "show", ""}, wantStderr: "non-empty user key"},
+		{name: "set missing user", args: []string{"users", "backend-pin", "set", "--backend", "backend-a", "--strategy", "kick_existing", "--reason", "commission"}, wantStderr: "exactly one user key"},
+		{name: "set missing backend", args: []string{"users", "backend-pin", "set", "user-a", "--strategy", "kick_existing", "--reason", "commission"}, wantStderr: "--backend"},
+		{name: "set empty backend", args: []string{"users", "backend-pin", "set", "user-a", "--backend", "", "--strategy", "kick_existing", "--reason", "commission"}, wantStderr: "--backend"},
+		{name: "set missing reason", args: []string{"users", "backend-pin", "set", "user-a", "--backend", "backend-a", "--strategy", "kick_existing"}, wantStderr: "--reason"},
+		{name: "set unsupported strategy", args: []string{"users", "backend-pin", "set", "user-a", "--backend", "backend-a", "--strategy", "later", "--reason", "commission"}, wantStderr: "new_sessions_only"},
+		{name: "clear missing user", args: []string{"users", "backend-pin", "clear", "--reason", "done"}, wantStderr: "exactly one user key"},
+		{name: "clear empty user", args: []string{"users", "backend-pin", "clear", "", "--reason", "done"}, wantStderr: "non-empty user key"},
+		{name: "clear missing reason", args: []string{"users", "backend-pin", "clear", "user-a"}, wantStderr: "--reason"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fake := newFakeControlClient()
+			stdout, stderr, code := runWithFakeClient(test.args, fake)
+			if code != 2 {
+				t.Fatalf("run returned exit code %d, want 2; stderr=%q", code, stderr)
+			}
+			if stdout != "" {
+				t.Fatalf("stdout = %q, want empty output", stdout)
+			}
+			if !strings.Contains(stderr, test.wantStderr) {
+				t.Fatalf("stderr = %q, want %q", stderr, test.wantStderr)
+			}
+			if len(fake.calls) != 0 {
+				t.Fatalf("calls = %#v, want none", fake.calls)
 			}
 		})
 	}
@@ -711,6 +823,50 @@ func TestTextAndJSONOutputDeterministic(t *testing.T) {
 	if stdout != wantListenerJSON {
 		t.Fatalf("listener JSON output = %q, want %q", stdout, wantListenerJSON)
 	}
+
+	absentPinFake := newFakeControlClient()
+	stdout, stderr, code = runWithFakeClient([]string{"users", "backend-pin", "show", "user-a"}, absentPinFake)
+	if code != 0 {
+		t.Fatalf("absent backend-pin command returned exit code %d, want 0; stderr=%q", code, stderr)
+	}
+	wantAbsentPinText := "user_key=user-a present=false backend=\"\" protocol=\"\" backend_pool=\"\" shard_tag=\"\" strategy=\"\" generation=\"\" active_session_count=\"\"\n"
+	if stdout != wantAbsentPinText {
+		t.Fatalf("absent backend-pin text output = %q, want %q", stdout, wantAbsentPinText)
+	}
+
+	presentPinFake := newFakeControlClient()
+	pin := backendPinA()
+	presentPinFake.backendPinResponse = &pin
+	stdout, stderr, code = runWithFakeClient([]string{"users", "backend-pin", "show", "user-a"}, presentPinFake)
+	if code != 0 {
+		t.Fatalf("present backend-pin command returned exit code %d, want 0; stderr=%q", code, stderr)
+	}
+	wantPresentPinText := "user_key=user-a present=true backend=backend-a protocol=imap backend_pool=imap-default shard_tag=shard-a strategy=kick_existing generation=pin-gen-a active_session_count=2\n"
+	if stdout != wantPresentPinText {
+		t.Fatalf("present backend-pin text output = %q, want %q", stdout, wantPresentPinText)
+	}
+
+	jsonPinFake := newFakeControlClient()
+	pin = backendPinA()
+	jsonPinFake.backendPinResponse = &pin
+	stdout, stderr, code = runWithFakeClient([]string{"--output", "json", "users", "backend-pin", "show", "user-a"}, jsonPinFake)
+	if code != 0 {
+		t.Fatalf("backend-pin json command returned exit code %d, want 0; stderr=%q", code, stderr)
+	}
+	wantPinJSON := "{\n" +
+		"  \"active_session_count\": 2,\n" +
+		"  \"backend\": \"backend-a\",\n" +
+		"  \"backend_pool\": \"imap-default\",\n" +
+		"  \"generation\": \"pin-gen-a\",\n" +
+		"  \"present\": true,\n" +
+		"  \"protocol\": \"imap\",\n" +
+		"  \"shard_tag\": \"shard-a\",\n" +
+		"  \"strategy\": \"kick_existing\",\n" +
+		"  \"user_key\": \"user-a\"\n" +
+		"}\n"
+	if stdout != wantPinJSON {
+		t.Fatalf("backend-pin JSON output = %q, want %q", stdout, wantPinJSON)
+	}
 }
 
 // TestUsageErrorsDoNotPrintSecrets verifies rejected route facts do not echo secret values.
@@ -749,6 +905,8 @@ func TestManpagesDocumentImplementedSurface(t *testing.T) {
 		"config dump -n",
 		"sessions kill",
 		"users affinity set",
+		"users backend-pin set",
+		"commissioning",
 		"runtime summary",
 		"route lookup",
 		"reload",
@@ -845,6 +1003,11 @@ type fakeControlClient struct {
 	routeRequest           generated.RouteLookupRequest
 	listenerDrainRequest   generated.ListenerDrainRequest
 	listenerResumeRequest  generated.ListenerResumeRequest
+	backendPinResponse     *generated.UserBackendPin
+	setBackendPinUserKey   generated.UserKey
+	setBackendPinRequest   generated.UserBackendPinRequest
+	clearBackendPinUserKey generated.UserKey
+	clearBackendPinRequest generated.UserBackendPinClearRequest
 	defaultConfigStatus    int
 	defaultConfigProblem   *generated.ErrorResponse
 	getBackendStatus       int
@@ -956,6 +1119,29 @@ func affinityA() generated.UserAffinity {
 		Generation:     &generation,
 		ShardTag:       "shard-a",
 		UserKey:        "user-a",
+	}
+}
+
+// backendPinA returns a stable present backend-pin fixture.
+func backendPinA() generated.UserBackendPin {
+	activeSessionCount := 2
+	backend := "backend-a"
+	backendPool := "imap-default"
+	generation := "pin-gen-a"
+	protocol := "imap"
+	shardTag := "shard-a"
+	strategy := generated.KickExisting
+
+	return generated.UserBackendPin{
+		ActiveSessionCount: &activeSessionCount,
+		Backend:            &backend,
+		BackendPool:        &backendPool,
+		Generation:         &generation,
+		Present:            true,
+		Protocol:           &protocol,
+		ShardTag:           &shardTag,
+		Strategy:           &strategy,
+		UserKey:            "user-a",
 	}
 }
 
@@ -1222,6 +1408,11 @@ func (fake *fakeControlClient) LookupRouteWithResponse(_ context.Context, body g
 	return &generated.LookupRouteResponse{
 		HTTPResponse: httpResponse(http.StatusOK),
 		JSON200: &generated.RouteLookupResponse{
+			BackendPin: generated.RouteLookupBackendPin{
+				Applied: false,
+				Present: false,
+				Reason:  "backend_pin_absent",
+			},
 			Healthy:           true,
 			Reason:            "selected",
 			RoutingGeneration: &generation,
@@ -1329,6 +1520,48 @@ func (fake *fakeControlClient) SetUserAffinityWithBodyWithResponse(context.Conte
 func (fake *fakeControlClient) SetUserAffinityWithResponse(context.Context, generated.UserKey, generated.SetUserAffinityJSONRequestBody, ...generated.RequestEditorFn) (*generated.SetUserAffinityResponse, error) {
 	fake.record("SetUserAffinity")
 	return &generated.SetUserAffinityResponse{HTTPResponse: httpResponse(http.StatusAccepted), JSON202: acceptedResponse()}, nil
+}
+
+// ClearUserBackendPinWithBodyWithResponse records unsupported raw-body usage.
+func (fake *fakeControlClient) ClearUserBackendPinWithBodyWithResponse(context.Context, generated.UserKey, string, io.Reader, ...generated.RequestEditorFn) (*generated.ClearUserBackendPinResponse, error) {
+	fake.record("ClearUserBackendPinWithBody")
+	return nil, nil
+}
+
+// ClearUserBackendPinWithResponse records and returns an accepted response.
+func (fake *fakeControlClient) ClearUserBackendPinWithResponse(_ context.Context, userKey generated.UserKey, body generated.ClearUserBackendPinJSONRequestBody, _ ...generated.RequestEditorFn) (*generated.ClearUserBackendPinResponse, error) {
+	fake.record("ClearUserBackendPin")
+	fake.clearBackendPinUserKey = userKey
+	fake.clearBackendPinRequest = body
+	return &generated.ClearUserBackendPinResponse{HTTPResponse: httpResponse(http.StatusAccepted), JSON202: acceptedResponse()}, nil
+}
+
+// GetUserBackendPinWithResponse records and returns backend-pin state.
+func (fake *fakeControlClient) GetUserBackendPinWithResponse(_ context.Context, userKey generated.UserKey, _ ...generated.RequestEditorFn) (*generated.GetUserBackendPinResponse, error) {
+	fake.record("GetUserBackendPin")
+	pin := generated.UserBackendPin{Present: false, UserKey: string(userKey)}
+	if fake.backendPinResponse != nil {
+		pin = *fake.backendPinResponse
+	}
+
+	return &generated.GetUserBackendPinResponse{
+		HTTPResponse: httpResponse(http.StatusOK),
+		JSON200:      &pin,
+	}, nil
+}
+
+// SetUserBackendPinWithBodyWithResponse records unsupported raw-body usage.
+func (fake *fakeControlClient) SetUserBackendPinWithBodyWithResponse(context.Context, generated.UserKey, string, io.Reader, ...generated.RequestEditorFn) (*generated.SetUserBackendPinResponse, error) {
+	fake.record("SetUserBackendPinWithBody")
+	return nil, nil
+}
+
+// SetUserBackendPinWithResponse records and returns an accepted response.
+func (fake *fakeControlClient) SetUserBackendPinWithResponse(_ context.Context, userKey generated.UserKey, body generated.SetUserBackendPinJSONRequestBody, _ ...generated.RequestEditorFn) (*generated.SetUserBackendPinResponse, error) {
+	fake.record("SetUserBackendPin")
+	fake.setBackendPinUserKey = userKey
+	fake.setBackendPinRequest = body
+	return &generated.SetUserBackendPinResponse{HTTPResponse: httpResponse(http.StatusAccepted), JSON202: acceptedResponse()}, nil
 }
 
 // KickUserWithBodyWithResponse records unsupported raw-body usage.

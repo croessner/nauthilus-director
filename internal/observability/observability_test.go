@@ -323,6 +323,7 @@ func TestRuntimeEventVocabularyCoversControlSurface(t *testing.T) {
 		EventSessionKill:                 false,
 		EventUserMove:                    false,
 		EventUserKick:                    false,
+		EventUserBackendPin:              false,
 		EventAffinityClear:               false,
 		EventRouteLookup:                 false,
 		EventReload:                      false,
@@ -355,6 +356,9 @@ func TestRuntimeEventVocabularyCoversControlSurface(t *testing.T) {
 func TestReasonClassNormalizationKeepsMetricValuesBounded(t *testing.T) {
 	tests := map[string]string{
 		testReasonClassRuntimeOut:                  testReasonClassRuntimeOut,
+		reasonClassBackendPinApplied:               reasonClassBackendPinApplied,
+		"backend pin mismatch":                     reasonClassBackendPinMismatch,
+		reasonClassOperatorBackendPin:              reasonClassOperatorBackendPin,
 		reasonClassAuth:                            reasonClassAuth,
 		reasonClassBackendStatus:                   reasonClassBackendStatus,
 		reasonClassBDAT:                            reasonClassBDAT,

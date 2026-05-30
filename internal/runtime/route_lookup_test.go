@@ -35,6 +35,7 @@ const (
 	routeLookupAttributeShard = "mailShard"
 	routeLookupAttributeToken = "token"
 	routeLookupBackendA       = "mailstore-a-imap"
+	routeLookupBackendALMTP   = "mailstore-a-lmtp"
 	routeLookupBackendB       = "mailstore-b-imap"
 	routeLookupCanonicalLMTP  = "canonical@example.test"
 	routeLookupDefaultPool    = "imap-default"
@@ -171,6 +172,219 @@ func TestRouteLookupResponseOmitsSecretBearingAttributeValues(t *testing.T) {
 	assertNoRouteLookupMutations(t, store)
 }
 
+// TestRouteLookupReportsAbsentBackendPinContext verifies absent pin diagnostics.
+func TestRouteLookupReportsAbsentBackendPinContext(t *testing.T) {
+	store := &countingRouteState{}
+	service := newRouteLookupTestService(t, store, false)
+
+	response, err := service.Lookup(context.Background(), RouteLookupRequest{
+		Protocol:   routeLookupProtocol,
+		AccountKey: routeLookupAccount,
+		Attributes: map[string][]string{
+			routeLookupAttributeShard: {routeLookupShardA},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Lookup returned error: %v", err)
+	}
+
+	if response.BackendPin.Present || response.BackendPin.Applied || response.BackendPin.ReasonClass != routeLookupBackendPinAbsent {
+		t.Fatalf("backend pin = %#v, want absent context", response.BackendPin)
+	}
+
+	if store.backendPinGetCalls != 1 {
+		t.Fatalf("backend pin reads = %d, want 1", store.backendPinGetCalls)
+	}
+
+	assertNoRouteLookupMutations(t, store)
+}
+
+// TestRouteLookupReportsAppliedBackendPinContext verifies matching pins constrain selection.
+func TestRouteLookupReportsAppliedBackendPinContext(t *testing.T) {
+	store := &countingRouteState{
+		backendPin: state.UserBackendPinRecord{
+			Present:           true,
+			BackendIdentifier: routeLookupBackendA,
+			Protocol:          routeLookupProtocol,
+			BackendPool:       routeLookupDefaultPool,
+			ShardTag:          routeLookupShardA,
+			Generation:        "pin-1",
+		},
+	}
+	service := newRouteLookupTestService(t, store, false)
+
+	response, err := service.Lookup(context.Background(), RouteLookupRequest{
+		Protocol:   routeLookupProtocol,
+		AccountKey: routeLookupAccount,
+		Attributes: map[string][]string{
+			routeLookupAttributeShard: {routeLookupShardA},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Lookup returned error: %v", err)
+	}
+
+	if response.SelectedBackend != routeLookupBackendA || response.ReasonClass != routeLookupReasonOperatorPin {
+		t.Fatalf("selected backend = %q reason = %q, want pinned backend", response.SelectedBackend, response.ReasonClass)
+	}
+
+	if !response.BackendPin.Present || !response.BackendPin.Applied || response.BackendPin.ReasonClass != routeLookupBackendPinApplied {
+		t.Fatalf("backend pin = %#v, want applied context", response.BackendPin)
+	}
+
+	assertNoRouteLookupMutations(t, store)
+}
+
+// TestRouteLookupDefersBackendPinDuringActiveAffinity verifies deferred strategies stay diagnostic.
+func TestRouteLookupDefersBackendPinDuringActiveAffinity(t *testing.T) {
+	store := &countingRouteState{
+		affinity: state.AffinityRecord{
+			Present:            true,
+			Status:             "found",
+			ShardTag:           routeLookupShardA,
+			ActiveSessionCount: 1,
+		},
+		backendPin: state.UserBackendPinRecord{
+			Present:           true,
+			BackendIdentifier: routeLookupBackendA,
+			Protocol:          routeLookupProtocol,
+			BackendPool:       routeLookupDefaultPool,
+			ShardTag:          routeLookupShardA,
+			Strategy:          string(MoveStrategyDrainExisting),
+			Generation:        "pin-active",
+		},
+	}
+	service := newRouteLookupTestService(t, store, false)
+
+	response, err := service.Lookup(context.Background(), RouteLookupRequest{
+		Protocol:        routeLookupProtocol,
+		AccountKey:      routeLookupAccount,
+		IncludeAffinity: true,
+		Attributes: map[string][]string{
+			routeLookupAttributeShard: {routeLookupShardA},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Lookup returned error: %v", err)
+	}
+
+	if response.BackendPin.Applied || response.BackendPin.ReasonClass != routeLookupIdentityActiveAffinity {
+		t.Fatalf("backend pin = %#v, want active-affinity diagnostic deferral", response.BackendPin)
+	}
+
+	if response.ReasonClass == routeLookupReasonOperatorPin {
+		t.Fatalf("route reason = %q, want normal active-affinity selection", response.ReasonClass)
+	}
+
+	assertNoRouteLookupMutations(t, store)
+}
+
+// TestRouteLookupReportsBackendPinScopeMismatch verifies non-matching pins stay diagnostic.
+func TestRouteLookupReportsBackendPinScopeMismatch(t *testing.T) {
+	store := &countingRouteState{
+		backendPin: state.UserBackendPinRecord{
+			Present:           true,
+			BackendIdentifier: routeLookupBackendALMTP,
+			Protocol:          routeLookupProtocolLMTP,
+			BackendPool:       routeLookupPoolLMTP,
+			ShardTag:          routeLookupShardA,
+			Generation:        "pin-2",
+		},
+	}
+	service := newRouteLookupTestService(t, store, false)
+
+	response, err := service.Lookup(context.Background(), RouteLookupRequest{
+		Protocol:   routeLookupProtocol,
+		AccountKey: routeLookupAccount,
+		Attributes: map[string][]string{
+			routeLookupAttributeShard: {routeLookupShardA},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Lookup returned error: %v", err)
+	}
+
+	if !response.BackendPin.Present || response.BackendPin.Applied || response.BackendPin.ReasonClass != routeLookupBackendPinMismatch {
+		t.Fatalf("backend pin = %#v, want mismatch context", response.BackendPin)
+	}
+
+	assertNoRouteLookupMutations(t, store)
+}
+
+// TestRouteLookupReportsBackendPinExclusion verifies unusable pin reasons are bounded.
+func TestRouteLookupReportsBackendPinExclusion(t *testing.T) {
+	store := &countingRouteState{
+		backendPin: state.UserBackendPinRecord{
+			Present:           true,
+			BackendIdentifier: routeLookupBackendA,
+			Protocol:          routeLookupProtocol,
+			BackendPool:       routeLookupDefaultPool,
+			ShardTag:          routeLookupShardA,
+			Generation:        "pin-3",
+		},
+		snapshots: map[string]backend.RuntimeSnapshot{
+			routeLookupBackendA: {
+				RuntimeOverride: backend.RuntimeOverride{
+					InService: new(false),
+				},
+			},
+		},
+	}
+	service := newRouteLookupTestService(t, store, false)
+
+	response, err := service.Lookup(context.Background(), RouteLookupRequest{
+		Protocol:   routeLookupProtocol,
+		AccountKey: routeLookupAccount,
+		Attributes: map[string][]string{
+			routeLookupAttributeShard: {routeLookupShardA},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Lookup returned error: %v", err)
+	}
+
+	if !response.FailClosed || response.BackendPin.Applied || response.BackendPin.ReasonClass != string(backend.EffectiveExclusionRuntimeOut) {
+		t.Fatalf("response = %#v, want fail-closed runtime_out pin exclusion", response)
+	}
+
+	assertNoRouteLookupMutations(t, store)
+}
+
+// TestRouteLookupRecordsBackendPinReadFailure verifies failed pin reads are observable.
+func TestRouteLookupRecordsBackendPinReadFailure(t *testing.T) {
+	store := &countingRouteState{
+		backendPinErr: newRuntimeError(ErrorKindUnavailable, operationUserBackendPinGet, "pin read unavailable"),
+	}
+	recorder := &recordingRuntimeObservation{}
+	service := newRouteLookupTestService(t, store, false, recorder)
+
+	_, err := service.Lookup(context.Background(), RouteLookupRequest{
+		Protocol:   routeLookupProtocol,
+		AccountKey: routeLookupAccount,
+		Attributes: map[string][]string{
+			routeLookupAttributeShard: {routeLookupShardA},
+		},
+	})
+	if err == nil {
+		t.Fatal("Lookup returned nil error, want backend-pin read failure")
+	}
+
+	event, ok := recorder.last(observability.EventUserBackendPin)
+	if !ok {
+		t.Fatalf("backend-pin read failure observation missing: %#v", recorder.events)
+	}
+
+	if got := event.MetricLabels["operation"]; got != operationUserBackendPinGet {
+		t.Fatalf("operation = %q, want %q", got, operationUserBackendPinGet)
+	}
+
+	if got := event.MetricLabels["reason_class"]; got != routeLookupBackendPinReadFailed {
+		t.Fatalf("reason class = %q, want %q", got, routeLookupBackendPinReadFailed)
+	}
+
+	assertNoRouteLookupMutations(t, store)
+}
+
 // TestRouteLookupObservationIncludesDuration verifies diagnostic lookup latency is measured.
 func TestRouteLookupObservationIncludesDuration(t *testing.T) {
 	store := &countingRouteState{}
@@ -240,8 +454,8 @@ func TestRouteLookupResolvesLMTPRecipientWithoutMutations(t *testing.T) {
 		t.Fatalf("routing = %#v, want resolved account and tenant", response.Routing)
 	}
 
-	if response.SelectedBackend != "mailstore-a-lmtp" {
-		t.Fatalf("selected backend = %q, want mailstore-a-lmtp", response.SelectedBackend)
+	if response.SelectedBackend != routeLookupBackendALMTP {
+		t.Fatalf("selected backend = %q, want %s", response.SelectedBackend, routeLookupBackendALMTP)
 	}
 
 	assertNoRouteLookupMutations(t, store)
@@ -379,10 +593,11 @@ func newRouteLookupTestService(t *testing.T, store *countingRouteState, enforceH
 	}
 
 	options := RouteLookupServiceOptions{
-		Resolver:     mustRouteLookupTestResolver(t),
-		Selector:     selector,
-		BackendRead:  reader,
-		AffinityRead: store,
+		Resolver:       mustRouteLookupTestResolver(t),
+		Selector:       selector,
+		BackendRead:    reader,
+		AffinityRead:   store,
+		BackendPinRead: store,
 		ListenerContexts: []RouteLookupListenerContext{
 			{
 				Name:        routeLookupListener,
@@ -442,10 +657,11 @@ func newLMTPRouteLookupTestService(t *testing.T, store *countingRouteState, iden
 	}
 
 	service, err := NewRouteLookupService(RouteLookupServiceOptions{
-		Resolver:     mustRouteLookupTestResolver(t),
-		Selector:     selector,
-		BackendRead:  reader,
-		AffinityRead: store,
+		Resolver:       mustRouteLookupTestResolver(t),
+		Selector:       selector,
+		BackendRead:    reader,
+		AffinityRead:   store,
+		BackendPinRead: store,
 		ListenerContexts: []RouteLookupListenerContext{
 			{
 				Name:        routeLookupProtocolLMTP,
@@ -533,11 +749,14 @@ func assertNoRouteLookupMutations(t *testing.T, store *countingRouteState) {
 
 // countingRouteState records route lookup reads and forbidden mutation attempts.
 type countingRouteState struct {
-	snapshots map[string]backend.RuntimeSnapshot
-	affinity  state.AffinityRecord
+	snapshots     map[string]backend.RuntimeSnapshot
+	affinity      state.AffinityRecord
+	backendPin    state.UserBackendPinRecord
+	backendPinErr error
 
 	backendSnapshotCalls int
 	lookupAffinityCalls  int
+	backendPinGetCalls   int
 	openSessionCalls     int
 	attachBackendCalls   int
 	heartbeatCalls       int
@@ -601,6 +820,18 @@ func (r *recordingRuntimeObservation) last(name string) (observability.Event, bo
 	return observability.Event{}, false
 }
 
+// eventsByName returns recorded events with the supplied name.
+func (r *recordingRuntimeObservation) eventsByName(name string) []observability.Event {
+	events := make([]observability.Event, 0)
+	for _, event := range r.events {
+		if event.Name == name {
+			events = append(events, event)
+		}
+	}
+
+	return events
+}
+
 // BackendSnapshot records a read-only backend runtime state lookup.
 func (s *countingRouteState) BackendSnapshot(_ context.Context, backendIdentifier string) (backend.RuntimeSnapshot, error) {
 	s.backendSnapshotCalls++
@@ -616,6 +847,21 @@ func (s *countingRouteState) LookupAffinity(_ context.Context, _ state.AffinityK
 	s.lookupAffinityCalls++
 
 	return s.affinity, nil
+}
+
+// GetUserBackendPin records a read-only backend-pin lookup.
+func (s *countingRouteState) GetUserBackendPin(_ context.Context, request state.UserBackendPinGetRequest) (state.UserBackendPinRecord, error) {
+	s.backendPinGetCalls++
+	if s.backendPinErr != nil {
+		return state.UserBackendPinRecord{}, s.backendPinErr
+	}
+
+	pin := s.backendPin
+	if pin.Key == (state.AffinityKey{}) {
+		pin.Key = request.Key
+	}
+
+	return pin, nil
 }
 
 // OpenSession records an unexpected session-open mutation path.

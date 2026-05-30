@@ -97,6 +97,7 @@ local clear_override = false
 
 local override_target = redis.call("HGET", override_key, "target_shard")
 local override_strategy = redis.call("HGET", override_key, "strategy")
+local override_backend_pin = redis.call("HGET", override_key, "backend_pin")
 
 if state_exists == 0 then
 	if redis.call("ZCARD", sessions_key) > 0 then
@@ -127,7 +128,7 @@ else
 	status = "reused"
 
 	if override_target ~= false and override_target ~= nil and override_target ~= "" then
-		if override_strategy == "drain_existing" then
+		if override_strategy == "drain_existing" and override_backend_pin ~= "1" then
 			shard = override_target
 			status = "drain_override"
 		elseif prior_active_count == 0 then

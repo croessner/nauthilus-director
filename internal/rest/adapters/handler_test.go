@@ -34,12 +34,22 @@ import (
 )
 
 const (
-	testBackendIdentifier = "mailstore-a-imap"
-	testConfigView        = configViewDefaults
-	testHandlerVersion    = "test"
-	testListenerBound     = "127.0.0.1:2143"
-	testListenerName      = "imap"
-	testListenerReason    = "node maintenance"
+	testBackendIdentifier   = "mailstore-a-imap"
+	testBackendPinOperation = "user_backend_pin_set"
+	testBackendPinPool      = "imap-default"
+	testBackendPinApplied   = "backend_pin_applied"
+	testBackendPinReason    = "commission backend"
+	testBackendPinShard     = "mailstore-a"
+	testBackendPinTenant    = "tenant-a"
+	testBackendPinUserKey   = "tenant-a:alice-hash"
+	testBackendPinUserHash  = "alice-hash"
+	testBackendPinProtocol  = "imap"
+	testConfigView          = configViewDefaults
+	testHandlerVersion      = "test"
+	testListenerBound       = "127.0.0.1:2143"
+	testListenerName        = "imap"
+	testListenerReason      = "node maintenance"
+	testPinnedBackend       = "mailstore-c-imap"
 )
 
 // TestLookupRouteUsesInjectedSideEffectFreeDomainService verifies route lookup is no longer a stub.
@@ -47,7 +57,7 @@ func TestLookupRouteUsesInjectedSideEffectFreeDomainService(t *testing.T) {
 	lookup := &recordingRouteLookup{}
 	handler := NewHandler(HandlerOptions{Version: testHandlerVersion, RouteLookup: lookup})
 
-	userKey := "alice-hash"
+	userKey := testBackendPinUserHash
 	body := generated.LookupRouteJSONRequestBody{
 		Protocol: "imap",
 		UserKey:  &userKey,
@@ -62,8 +72,13 @@ func TestLookupRouteUsesInjectedSideEffectFreeDomainService(t *testing.T) {
 		t.Fatalf("route lookup calls = %d, want 1", lookup.calls)
 	}
 
-	if _, ok := response.(generated.LookupRoute200JSONResponse); !ok {
+	routeResponse, ok := response.(generated.LookupRoute200JSONResponse)
+	if !ok {
 		t.Fatalf("LookupRoute response = %T, want 200 response", response)
+	}
+
+	if !routeResponse.BackendPin.Present || !routeResponse.BackendPin.Applied || routeResponse.BackendPin.Reason != testBackendPinApplied {
+		t.Fatalf("backend pin = %#v, want applied diagnostics", routeResponse.BackendPin)
 	}
 }
 
@@ -205,6 +220,287 @@ func TestRuntimeErrorsMapToStableStatuses(t *testing.T) {
 	err := &runtime.Error{Kind: runtime.ErrorKindConflict, Operation: "test", Message: "state conflict"}
 	if got := statusForError(err); got != 409 {
 		t.Fatalf("statusForError = %d, want 409", got)
+	}
+}
+
+// TestGetUserBackendPinMapsAbsentDTO verifies absent read DTO mapping.
+func TestGetUserBackendPinMapsAbsentDTO(t *testing.T) {
+	service := &recordingUserBackendPinService{
+		readResult: runtime.UserBackendPinReadResult{
+			Pin: runtime.UserBackendPin{Present: false},
+		},
+	}
+	handler := NewHandler(HandlerOptions{
+		Version:              testHandlerVersion,
+		UserBackendPinReader: service,
+	})
+
+	response, err := handler.GetUserBackendPin(context.Background(), generated.GetUserBackendPinRequestObject{UserKey: testBackendPinUserHash})
+	if err != nil {
+		t.Fatalf("GetUserBackendPin returned error: %v", err)
+	}
+
+	pin, ok := response.(generated.GetUserBackendPin200JSONResponse)
+	if !ok {
+		t.Fatalf("GetUserBackendPin response = %T, want 200 backend pin", response)
+	}
+
+	if service.readCalls != 1 {
+		t.Fatalf("read calls = %d, want 1", service.readCalls)
+	}
+
+	if service.readRequest.Key != (runtime.UserKey{Tenant: defaultTenant, UserHash: testBackendPinUserHash}) {
+		t.Fatalf("read key = %#v, want parsed default tenant key", service.readRequest.Key)
+	}
+
+	if pin.Present || pin.UserKey != testBackendPinUserHash || pin.Backend != nil || pin.Strategy != nil {
+		t.Fatalf("absent pin DTO = %#v, want only present=false and user key", pin)
+	}
+}
+
+// TestGetUserBackendPinMapsPresentDTO verifies present read DTO mapping.
+func TestGetUserBackendPinMapsPresentDTO(t *testing.T) {
+	service := &recordingUserBackendPinService{
+		readResult: runtime.UserBackendPinReadResult{
+			Pin: runtime.UserBackendPin{
+				Present:            true,
+				Key:                runtime.UserKey{Tenant: testBackendPinTenant, UserHash: testBackendPinUserHash},
+				BackendIdentifier:  testPinnedBackend,
+				Protocol:           testBackendPinProtocol,
+				BackendPool:        testBackendPinPool,
+				EffectiveShard:     testBackendPinShard,
+				Strategy:           runtime.MoveStrategyKickExisting,
+				Generation:         "42",
+				ActiveSessionCount: 3,
+			},
+		},
+	}
+	handler := NewHandler(HandlerOptions{
+		Version:              testHandlerVersion,
+		UserBackendPinReader: service,
+	})
+
+	response, err := handler.GetUserBackendPin(context.Background(), generated.GetUserBackendPinRequestObject{UserKey: testBackendPinUserKey})
+	if err != nil {
+		t.Fatalf("GetUserBackendPin returned error: %v", err)
+	}
+
+	pin, ok := response.(generated.GetUserBackendPin200JSONResponse)
+	if !ok {
+		t.Fatalf("GetUserBackendPin response = %T, want 200 backend pin", response)
+	}
+
+	if !pin.Present {
+		t.Fatalf("present = false, want true for %#v", pin)
+	}
+
+	if pin.UserKey != testBackendPinUserKey {
+		t.Fatalf("user key = %q, want %q", pin.UserKey, testBackendPinUserKey)
+	}
+
+	assertStringPtrValue(t, "backend", pin.Backend, testPinnedBackend)
+	assertStringPtrValue(t, "protocol", pin.Protocol, testBackendPinProtocol)
+	assertStringPtrValue(t, "backend pool", pin.BackendPool, testBackendPinPool)
+	assertStringPtrValue(t, "shard tag", pin.ShardTag, testBackendPinShard)
+	assertStringPtrValue(t, "generation", pin.Generation, "42")
+	assertBackendPinStrategy(t, pin.Strategy, generated.KickExisting)
+	assertIntPtrValue(t, "active session count", pin.ActiveSessionCount, 3)
+}
+
+// TestDefaultBackendPinReaderReturnsAbsent verifies unassembled servers stay deterministic.
+func TestDefaultBackendPinReaderReturnsAbsent(t *testing.T) {
+	handler := NewHandler(HandlerOptions{Version: testHandlerVersion})
+
+	response, err := handler.GetUserBackendPin(context.Background(), generated.GetUserBackendPinRequestObject{UserKey: testBackendPinUserHash})
+	if err != nil {
+		t.Fatalf("GetUserBackendPin returned error: %v", err)
+	}
+
+	pin, ok := response.(generated.GetUserBackendPin200JSONResponse)
+	if !ok {
+		t.Fatalf("GetUserBackendPin response = %T, want 200 backend pin", response)
+	}
+
+	if pin.Present || pin.UserKey != testBackendPinUserHash {
+		t.Fatalf("default pin DTO = %#v, want absent pin for request key", pin)
+	}
+}
+
+// TestSetUserBackendPinMapsGeneratedRequest verifies REST input stays at the adapter edge.
+func TestSetUserBackendPinMapsGeneratedRequest(t *testing.T) {
+	service := &recordingUserBackendPinService{}
+	handler := NewHandler(HandlerOptions{
+		Version:               testHandlerVersion,
+		UserBackendPinMutator: service,
+		UserBackendPinReader:  service,
+	})
+
+	body := generated.SetUserBackendPinJSONRequestBody{
+		Backend:  " " + testPinnedBackend + " ",
+		Reason:   " " + testBackendPinReason + " ",
+		Strategy: generated.KickExisting,
+	}
+
+	response, err := handler.SetUserBackendPin(context.Background(), generated.SetUserBackendPinRequestObject{
+		UserKey: testBackendPinUserKey,
+		Body:    &body,
+	})
+	if err != nil {
+		t.Fatalf("SetUserBackendPin returned error: %v", err)
+	}
+
+	if _, ok := response.(generated.SetUserBackendPin202JSONResponse); !ok {
+		t.Fatalf("SetUserBackendPin response = %T, want 202 accepted", response)
+	}
+
+	if service.setCalls != 1 {
+		t.Fatalf("set calls = %d, want 1", service.setCalls)
+	}
+
+	wantKey := runtime.UserKey{Tenant: testBackendPinTenant, UserHash: testBackendPinUserHash}
+	if service.setRequest.Key != wantKey ||
+		service.setRequest.BackendIdentifier != testPinnedBackend ||
+		service.setRequest.Strategy != runtime.MoveStrategyKickExisting ||
+		service.setRequest.Reason != testBackendPinReason {
+		t.Fatalf("set request = %#v, want trimmed runtime request", service.setRequest)
+	}
+}
+
+// TestClearUserBackendPinRequiresReasonAndCallsRuntime verifies clear validation and mutation flow.
+func TestClearUserBackendPinRequiresReasonAndCallsRuntime(t *testing.T) {
+	service := &recordingUserBackendPinService{}
+	handler := NewHandler(HandlerOptions{
+		Version:               testHandlerVersion,
+		UserBackendPinMutator: service,
+		UserBackendPinReader:  service,
+	})
+
+	emptyBody := generated.ClearUserBackendPinJSONRequestBody{Reason: "   "}
+
+	emptyResponse, err := handler.ClearUserBackendPin(context.Background(), generated.ClearUserBackendPinRequestObject{
+		UserKey: testBackendPinUserHash,
+		Body:    &emptyBody,
+	})
+	if err != nil {
+		t.Fatalf("ClearUserBackendPin empty reason returned error: %v", err)
+	}
+
+	assertBackendPinProblemStatus(t, emptyResponse, http.StatusBadRequest)
+
+	if service.clearCalls != 0 {
+		t.Fatalf("clear calls = %d, want 0 for invalid reason", service.clearCalls)
+	}
+
+	body := generated.ClearUserBackendPinJSONRequestBody{Reason: " " + testBackendPinReason + " "}
+
+	response, err := handler.ClearUserBackendPin(context.Background(), generated.ClearUserBackendPinRequestObject{
+		UserKey: testBackendPinUserHash,
+		Body:    &body,
+	})
+	if err != nil {
+		t.Fatalf("ClearUserBackendPin returned error: %v", err)
+	}
+
+	if _, ok := response.(generated.ClearUserBackendPin202JSONResponse); !ok {
+		t.Fatalf("ClearUserBackendPin response = %T, want 202 accepted", response)
+	}
+
+	if service.clearCalls != 1 {
+		t.Fatalf("clear calls = %d, want 1", service.clearCalls)
+	}
+
+	if service.clearRequest.Key != (runtime.UserKey{Tenant: defaultTenant, UserHash: testBackendPinUserHash}) ||
+		service.clearRequest.Reason != testBackendPinReason {
+		t.Fatalf("clear request = %#v, want parsed key and trimmed reason", service.clearRequest)
+	}
+}
+
+// TestBackendPinRequestValidationMapsToBadRequest verifies missing bodies and empty reasons.
+func TestBackendPinRequestValidationMapsToBadRequest(t *testing.T) {
+	handler := NewHandler(HandlerOptions{
+		Version:               testHandlerVersion,
+		UserBackendPinMutator: &recordingUserBackendPinService{},
+	})
+
+	setMissing, err := handler.SetUserBackendPin(context.Background(), generated.SetUserBackendPinRequestObject{UserKey: testBackendPinUserHash})
+	if err != nil {
+		t.Fatalf("SetUserBackendPin missing body returned error: %v", err)
+	}
+
+	assertBackendPinProblemStatus(t, setMissing, http.StatusBadRequest)
+
+	setBody := generated.SetUserBackendPinJSONRequestBody{
+		Backend:  testPinnedBackend,
+		Reason:   "",
+		Strategy: generated.NewSessionsOnly,
+	}
+
+	setEmptyReason, err := handler.SetUserBackendPin(context.Background(), generated.SetUserBackendPinRequestObject{
+		UserKey: testBackendPinUserHash,
+		Body:    &setBody,
+	})
+	if err != nil {
+		t.Fatalf("SetUserBackendPin empty reason returned error: %v", err)
+	}
+
+	assertBackendPinProblemStatus(t, setEmptyReason, http.StatusBadRequest)
+
+	clearMissing, err := handler.ClearUserBackendPin(context.Background(), generated.ClearUserBackendPinRequestObject{UserKey: testBackendPinUserHash})
+	if err != nil {
+		t.Fatalf("ClearUserBackendPin missing body returned error: %v", err)
+	}
+
+	assertBackendPinProblemStatus(t, clearMissing, http.StatusBadRequest)
+}
+
+// TestBackendPinRuntimeErrorsMapToStableStatuses verifies generated problems remain deterministic.
+func TestBackendPinRuntimeErrorsMapToStableStatuses(t *testing.T) {
+	testCases := []struct {
+		name   string
+		err    error
+		status int
+	}{
+		{
+			name:   "unknown backend",
+			err:    &runtime.Error{Kind: runtime.ErrorKindNotFound, Operation: testBackendPinOperation, Message: "backend not found"},
+			status: http.StatusNotFound,
+		},
+		{
+			name:   "state conflict",
+			err:    &runtime.Error{Kind: runtime.ErrorKindConflict, Operation: testBackendPinOperation, Message: "state conflict"},
+			status: http.StatusConflict,
+		},
+		{
+			name:   "runtime unavailable",
+			err:    &runtime.Error{Kind: runtime.ErrorKindUnavailable, Operation: testBackendPinOperation, Message: "redis unavailable"},
+			status: http.StatusServiceUnavailable,
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			service := &recordingUserBackendPinService{setErr: testCase.err}
+			handler := NewHandler(HandlerOptions{
+				Version:               testHandlerVersion,
+				UserBackendPinMutator: service,
+			})
+
+			body := generated.SetUserBackendPinJSONRequestBody{
+				Backend:  testPinnedBackend,
+				Reason:   testBackendPinReason,
+				Strategy: generated.NewSessionsOnly,
+			}
+
+			response, err := handler.SetUserBackendPin(context.Background(), generated.SetUserBackendPinRequestObject{
+				UserKey: testBackendPinUserHash,
+				Body:    &body,
+			})
+			if err != nil {
+				t.Fatalf("SetUserBackendPin returned error: %v", err)
+			}
+
+			assertBackendPinProblemStatus(t, response, testCase.status)
+		})
 	}
 }
 
@@ -566,9 +862,136 @@ func (r *recordingRouteLookup) Lookup(_ context.Context, request runtime.RouteLo
 		Routing: runtime.RouteLookupRoutingState{
 			EffectiveShard: "default",
 		},
+		BackendPin: runtime.RouteLookupBackendPinState{
+			Present:        true,
+			BackendID:      testPinnedBackend,
+			Protocol:       testBackendPinProtocol,
+			BackendPool:    testBackendPinPool,
+			EffectiveShard: testBackendPinShard,
+			Applied:        true,
+			ReasonClass:    testBackendPinApplied,
+		},
 		SelectedBackend: "mailstore-a-imap",
 		ReasonClass:     "initial_placement",
 	}, nil
+}
+
+// recordingUserBackendPinService captures backend-pin runtime requests.
+type recordingUserBackendPinService struct {
+	readCalls    int
+	readRequest  runtime.GetUserBackendPinRequest
+	readResult   runtime.UserBackendPinReadResult
+	readErr      error
+	setCalls     int
+	setRequest   runtime.SetUserBackendPinRequest
+	setResult    runtime.UserBackendPinMutationResult
+	setErr       error
+	clearCalls   int
+	clearRequest runtime.ClearUserBackendPinRequest
+	clearResult  runtime.UserBackendPinMutationResult
+	clearErr     error
+}
+
+// GetUserBackendPin records one backend-pin read request.
+func (r *recordingUserBackendPinService) GetUserBackendPin(_ context.Context, request runtime.GetUserBackendPinRequest) (runtime.UserBackendPinReadResult, error) {
+	r.readCalls++
+
+	r.readRequest = request
+	if r.readErr != nil {
+		return runtime.UserBackendPinReadResult{}, r.readErr
+	}
+
+	return r.readResult, nil
+}
+
+// SetUserBackendPin records one backend-pin set request.
+func (r *recordingUserBackendPinService) SetUserBackendPin(_ context.Context, request runtime.SetUserBackendPinRequest) (runtime.UserBackendPinMutationResult, error) {
+	r.setCalls++
+
+	r.setRequest = request
+	if r.setErr != nil {
+		return runtime.UserBackendPinMutationResult{}, r.setErr
+	}
+
+	return r.setResult, nil
+}
+
+// ClearUserBackendPin records one backend-pin clear request.
+func (r *recordingUserBackendPinService) ClearUserBackendPin(_ context.Context, request runtime.ClearUserBackendPinRequest) (runtime.UserBackendPinMutationResult, error) {
+	r.clearCalls++
+
+	r.clearRequest = request
+	if r.clearErr != nil {
+		return runtime.UserBackendPinMutationResult{}, r.clearErr
+	}
+
+	return r.clearResult, nil
+}
+
+// assertBackendPinProblemStatus checks backend-pin generated problem responses.
+func assertBackendPinProblemStatus(t *testing.T, response any, want int) {
+	t.Helper()
+
+	var got int
+
+	switch typed := response.(type) {
+	case generated.ClearUserBackendPindefaultJSONResponse:
+		got = typed.StatusCode
+	case generated.GetUserBackendPindefaultJSONResponse:
+		got = typed.StatusCode
+	case generated.SetUserBackendPindefaultJSONResponse:
+		got = typed.StatusCode
+	default:
+		t.Fatalf("response = %T, want backend-pin problem", response)
+	}
+
+	if got != want {
+		t.Fatalf("status = %d, want %d", got, want)
+	}
+}
+
+// assertStringPtrValue checks generated optional string fields.
+func assertStringPtrValue(t *testing.T, name string, value *string, want string) {
+	t.Helper()
+
+	if stringPtrValue(value) != want {
+		t.Fatalf("%s = %q, want %q", name, stringPtrValue(value), want)
+	}
+}
+
+// assertBackendPinStrategy checks generated optional strategy fields.
+func assertBackendPinStrategy(t *testing.T, value *generated.UserMoveRequestStrategy, want generated.UserMoveRequestStrategy) {
+	t.Helper()
+
+	if value == nil {
+		t.Fatalf("strategy = nil, want %s", want)
+	}
+
+	if *value != want {
+		t.Fatalf("strategy = %s, want %s", *value, want)
+	}
+}
+
+// assertIntPtrValue checks generated optional integer fields.
+func assertIntPtrValue(t *testing.T, name string, value *int, want int) {
+	t.Helper()
+
+	if value == nil {
+		t.Fatalf("%s = nil, want %d", name, want)
+	}
+
+	if *value != want {
+		t.Fatalf("%s = %d, want %d", name, *value, want)
+	}
+}
+
+// stringPtrValue unwraps generated optional strings for assertions.
+func stringPtrValue(value *string) string {
+	if value == nil {
+		return ""
+	}
+
+	return *value
 }
 
 // recordingRuntimeReadService captures paginated read requests.

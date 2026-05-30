@@ -65,12 +65,15 @@ const (
 	e2eAccount          = "alice@example.test"
 	e2eBackendAID       = "mailstore-a-imap"
 	e2eBackendBID       = "mailstore-b-imap"
+	e2eBackendCID       = "mailstore-c-imap"
 	e2eBackendPool      = "imap-default"
 	e2eListenerName     = "imap"
 	e2ePassword         = "e2e-secret-password"
 	e2eProtocol         = "imap"
 	e2eProcessKeyPrefix = "nauthilus-director-e2e-process"
 	e2eService          = "imap"
+	e2ePinnedAccountKey = "pin-account-key-e2e"
+	e2ePinnedLogin      = "pin-login@example.test"
 	e2eShardTagB        = "mailstore-b"
 	e2eShardTag         = "mailstore-a"
 	e2eTenant           = "default"
@@ -212,6 +215,141 @@ func TestServerBinaryControlRESTCLIParity(t *testing.T) {
 	output := runDirectorctl(t, ctl, controlURL, "backends", "show", e2eBackendAID)
 	if !strings.Contains(output, "in_service=true") {
 		t.Fatalf("CLI backend state after REST in = %q", output)
+	}
+}
+
+// TestServerBinaryBackendPinPublicIMAPFlow proves backend pinning through real process boundaries.
+func TestServerBinaryBackendPinPublicIMAPFlow(t *testing.T) {
+	binary := e2eServerBinary(t)
+	ctl := buildDirectorctl(t)
+	redisFixture := startValkeySessionStore(t)
+	authority := startFakeHTTPAuthority(t, map[string][]string{
+		"account":   {e2ePinnedAccountKey},
+		"tenant":    {e2eTenant},
+		"mailShard": {e2eShardTag},
+	})
+	backendA := startFakeIMAPBackend(t, fakeBackendOptions{})
+	backendB := startFakeIMAPBackend(t, fakeBackendOptions{})
+	backendC := startFakeIMAPBackend(t, fakeBackendOptions{})
+	directorAddress := loopbackAddress(t)
+	controlAddress := loopbackAddress(t)
+	controlURL := "http://" + controlAddress
+	configPath := writeBackendPinProcessConfig(t, processConfigOptions{
+		RedisAddress:    redisFixture.addr,
+		AuthorityURL:    authority.URL(),
+		DirectorAddress: directorAddress,
+		ControlAddress:  controlAddress,
+		ControlEnabled:  true,
+		BackendAuth:     masterUserBackendAuth(),
+	}, []processBackendDefinition{
+		{Identifier: e2eBackendAID, Address: backendA.Address(), Shard: e2eShardTag, Weight: 100},
+		{Identifier: e2eBackendBID, Address: backendB.Address(), Shard: e2eShardTag, Weight: 100},
+		{Identifier: e2eBackendCID, Address: backendC.Address(), Shard: e2eShardTag, Weight: 0},
+	})
+	process := startDirectorProcess(t, binary, configPath)
+
+	waitForDirectorGreeting(t, directorAddress, process)
+	waitForControlReady(t, controlURL, process)
+
+	backends := map[string]*fakeIMAPBackend{
+		e2eBackendAID: backendA,
+		e2eBackendBID: backendB,
+		e2eBackendCID: backendC,
+	}
+
+	unrelated := lookupRoute(t, controlURL, "unrelated-account-key-e2e", false)
+	if unrelated.FailClosed || unrelated.SelectedBackend == e2eBackendCID || !routeHasBackendExclusion(unrelated, e2eBackendCID, "weight_zero") {
+		t.Fatalf("unrelated route = %#v, want normal backend and weight-zero exclusion", unrelated)
+	}
+
+	activeClient, activeReader := loginIMAP(t, directorAddress, e2ePinnedLogin)
+	activeBackend := waitForRESTSessionCount(t, controlURL, 1)[0].Backend
+	if activeBackend == e2eBackendCID {
+		t.Fatalf("normal login selected weight-zero backend %q", activeBackend)
+	}
+	expectBackendProxy(t, activeClient, activeReader, backends[activeBackend], "A002")
+
+	runDirectorctl(t, ctl, controlURL, "users", "backend-pin", "set", e2ePinnedAccountKey,
+		"--backend", e2eBackendCID,
+		"--strategy", "new_sessions_only",
+		"--reason", "e2e new sessions only")
+	expectBackendProxy(t, activeClient, activeReader, backends[activeBackend], "A003")
+
+	runDirectorctl(t, ctl, controlURL, "users", "backend-pin", "set", e2ePinnedAccountKey,
+		"--backend", e2eBackendCID,
+		"--strategy", "drain_existing",
+		"--reason", "e2e drain existing")
+	expectBackendProxy(t, activeClient, activeReader, backends[activeBackend], "A004")
+
+	activeRoute := lookupRoute(t, controlURL, e2ePinnedAccountKey, true)
+	if !activeRoute.BackendPin.Present || activeRoute.BackendPin.Applied || activeRoute.BackendPin.Reason != "active_affinity" {
+		t.Fatalf("active-affinity backend-pin route = %#v, want diagnostic pin without forced move", activeRoute.BackendPin)
+	}
+
+	runDirectorctl(t, ctl, controlURL, "users", "backend-pin", "set", e2ePinnedAccountKey,
+		"--backend", e2eBackendCID,
+		"--strategy", "kick_existing",
+		"--reason", "e2e kick existing")
+	expectSessionClosed(t, activeClient, activeReader)
+	waitForRESTSessionCount(t, controlURL, 0)
+
+	showPin := runDirectorctl(t, ctl, controlURL, "users", "backend-pin", "show", e2ePinnedAccountKey)
+	assertCLIOutputFields(t, showPin, "present=true", "backend="+e2eBackendCID, "strategy=kick_existing")
+
+	beforeLookup := len(waitForRESTSessionCount(t, controlURL, 0))
+	pinnedRoute := lookupRoute(t, controlURL, e2ePinnedAccountKey, true)
+	assertBackendPinRoute(t, pinnedRoute, e2eBackendCID)
+	afterLookup := len(waitForRESTSessionCount(t, controlURL, 0))
+	if beforeLookup != afterLookup {
+		t.Fatalf("route lookup changed session count from %d to %d", beforeLookup, afterLookup)
+	}
+
+	pinnedClient, pinnedReader := loginIMAP(t, directorAddress, e2ePinnedLogin)
+	expectBackendProxy(t, pinnedClient, pinnedReader, backendC, "B002")
+
+	runDirectorctl(t, ctl, controlURL, "users", "backend-pin", "clear", e2ePinnedAccountKey, "--reason", "e2e clear weight zero")
+	expectBackendProxy(t, pinnedClient, pinnedReader, backendC, "B003")
+	_ = pinnedClient.Close()
+	waitForRESTSessionCount(t, controlURL, 0)
+	runDirectorctl(t, ctl, controlURL, "users", "affinity", "clear", e2ePinnedAccountKey, "--reason", "e2e clear inactive affinity")
+
+	clearedRoute := lookupRoute(t, controlURL, e2ePinnedAccountKey, true)
+	if clearedRoute.BackendPin.Present || clearedRoute.SelectedBackend == e2eBackendCID {
+		t.Fatalf("cleared route = %#v, want absent pin and normal placement", clearedRoute)
+	}
+
+	runDirectorctl(t, ctl, controlURL, "users", "backend-pin", "set", e2ePinnedAccountKey,
+		"--backend", e2eBackendAID,
+		"--strategy", "kick_existing",
+		"--reason", "e2e normal backend pin")
+	normalPinRoute := lookupRoute(t, controlURL, e2ePinnedAccountKey, true)
+	assertBackendPinRoute(t, normalPinRoute, e2eBackendAID)
+	normalPinClient, normalPinReader := loginIMAP(t, directorAddress, e2ePinnedLogin)
+	expectBackendProxy(t, normalPinClient, normalPinReader, backendA, "C002")
+	runDirectorctl(t, ctl, controlURL, "users", "backend-pin", "clear", e2ePinnedAccountKey, "--reason", "e2e clear normal backend pin")
+	_ = normalPinClient.Close()
+	waitForRESTSessionCount(t, controlURL, 0)
+	runDirectorctl(t, ctl, controlURL, "users", "affinity", "clear", e2ePinnedAccountKey, "--reason", "e2e clear normal affinity")
+
+	runDirectorctl(t, ctl, controlURL, "backends", "out", e2eBackendCID, "--reason", "e2e fail closed")
+	runDirectorctl(t, ctl, controlURL, "users", "backend-pin", "set", e2ePinnedAccountKey,
+		"--backend", e2eBackendCID,
+		"--strategy", "kick_existing",
+		"--reason", "e2e fail closed pin")
+	failClosed := lookupRoute(t, controlURL, e2ePinnedAccountKey, true)
+	if !failClosed.FailClosed || failClosed.SelectedBackend != "" || failClosed.BackendPin.Applied || failClosed.BackendPin.Reason != "runtime_out" {
+		t.Fatalf("fail-closed route = %#v, want runtime_out without selected backend", failClosed)
+	}
+	expectIMAPLoginUnavailable(t, directorAddress, e2ePinnedLogin)
+	waitForRESTSessionCount(t, controlURL, 0)
+	runDirectorctl(t, ctl, controlURL, "backends", "in", e2eBackendCID, "--reason", "e2e fail closed restore")
+	runDirectorctl(t, ctl, controlURL, "users", "backend-pin", "clear", e2ePinnedAccountKey, "--reason", "e2e clear failed pin")
+	runDirectorctl(t, ctl, controlURL, "users", "affinity", "clear", e2ePinnedAccountKey, "--reason", "e2e clear failed affinity")
+
+	output := process.output.String()
+	assertNoSecretText(t, output)
+	if strings.Contains(output, e2ePinnedLogin) {
+		t.Fatalf("process output leaked raw login name: %s", output)
 	}
 }
 
@@ -781,6 +919,13 @@ type processConfigOptions struct {
 	BackendAuth     backend.AuthConfig
 }
 
+type processBackendDefinition struct {
+	Identifier string
+	Address    string
+	Shard      string
+	Weight     int
+}
+
 // e2eServerBinary returns the real server binary built by the E2E runner.
 func e2eServerBinary(t *testing.T) string {
 	t.Helper()
@@ -997,6 +1142,196 @@ director:
 	}
 
 	return path
+}
+
+// writeBackendPinProcessConfig writes a real-process config with one IMAP pool and explicit backend weights.
+func writeBackendPinProcessConfig(t *testing.T, options processConfigOptions, backends []processBackendDefinition) string {
+	t.Helper()
+
+	if len(backends) == 0 {
+		t.Fatal("backend-pin process config requires backends")
+	}
+
+	backendTLS := options.BackendTLS
+	if strings.TrimSpace(backendTLS.Mode) == "" {
+		backendTLS = config.BackendTLSConfig{Mode: "plaintext", MinTLSVersion: "TLS1.2"}
+	}
+
+	backendAuth := options.BackendAuth
+	if strings.TrimSpace(backendAuth.Mode) == "" {
+		backendAuth = masterUserBackendAuth()
+	}
+
+	controlAddress := options.ControlAddress
+	if controlAddress == "" {
+		controlAddress = "127.0.0.1:0"
+	}
+	listenerCertPath, listenerKeyPath, _ := writeTestCertificate(t)
+	backends = sortedProcessBackends(backends)
+
+	content := fmt.Sprintf(`patch:
+  - op: remove
+    path: director.listeners
+    value: [imaps, lmtp, lmtps]
+  - op: remove
+    path: director.backend_pools
+    value: [lmtp-default]
+  - op: remove
+    path: director.backends
+    value: [mailstore-a-lmtp, mailstore-b-lmtp]
+runtime:
+  instance_name: "e2e-director"
+  process:
+    shutdown_timeout: 2s
+  servers:
+    control:
+      enabled: %t
+      address: %q
+  timeouts:
+    preauth: 2s
+    auth: 2s
+    nauthilus: 2s
+    backend_connect: 2s
+    proxy_idle: 2s
+storage:
+  redis:
+    protocol: 2
+    key_prefix: %q
+    standalone:
+      address: %q
+    auth:
+      username: ""
+      password_file: ""
+    tls:
+      enabled: false
+auth:
+  authorities:
+    default:
+      http:
+        endpoint: %q
+        basic_auth:
+          password_file: "unused"
+director:
+  listeners:
+    imap:
+      address: %q
+      tls:
+        mode: starttls
+        cert: %q
+        key: %q
+      imap:
+        capabilities: [IMAP4rev1, ID, SASL-IR, STARTTLS, AUTH=PLAIN]
+        auth_mechanisms: [plain]
+  backend_pools:
+    imap-default:
+      protocol: imap
+      selector: rendezvous_hash
+      backends: [%s]
+  backends:
+%s`, options.ControlEnabled,
+		controlAddress,
+		e2eProcessKeyPrefix,
+		options.RedisAddress,
+		options.AuthorityURL,
+		options.DirectorAddress,
+		listenerCertPath,
+		listenerKeyPath,
+		quotedYAMLStrings(processBackendIdentifiers(backends)),
+		processBackendConfigYAML(backends, backendTLS, backendAuth),
+	)
+
+	path := filepath.Join(t.TempDir(), "nauthilus-director.yml")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write backend-pin process config: %v", err)
+	}
+
+	return path
+}
+
+// sortedProcessBackends returns backend definitions by identifier for stable YAML.
+func sortedProcessBackends(backends []processBackendDefinition) []processBackendDefinition {
+	sorted := append([]processBackendDefinition(nil), backends...)
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].Identifier < sorted[j].Identifier
+	})
+
+	return sorted
+}
+
+// processBackendIdentifiers returns sorted backend identifiers for a YAML pool list.
+func processBackendIdentifiers(backends []processBackendDefinition) []string {
+	identifiers := make([]string, 0, len(backends))
+	for _, configured := range backends {
+		identifiers = append(identifiers, configured.Identifier)
+	}
+
+	return identifiers
+}
+
+// processBackendConfigYAML renders backend definitions for the real-process fixture.
+func processBackendConfigYAML(
+	backends []processBackendDefinition,
+	backendTLS config.BackendTLSConfig,
+	backendAuth backend.AuthConfig,
+) string {
+	var builder strings.Builder
+	for _, configured := range backends {
+		shard := strings.TrimSpace(configured.Shard)
+		if shard == "" {
+			shard = e2eShardTag
+		}
+
+		fmt.Fprintf(&builder, `    %s:
+      protocol: imap
+      address: %q
+      shard_tag: %q
+      weight: %d
+      max_connections: 100
+      maintenance: disabled
+      tls:
+        mode: %q
+        ca_file: %q
+        cert: %q
+        key: %q
+        server_name: %q
+        min_tls_version: %q
+        insecure_skip_verify: %t
+      auth:
+        mode: %q
+        master_user:
+          username: %q
+          password_file: %q
+          user_format: %q
+          mechanism: %q
+        credential_replay:
+          require_backend_tls: %t
+          preserve_mechanism: %t
+          allowed_mechanisms: [%s]
+      health_check:
+        enabled: false
+`, configured.Identifier,
+			configured.Address,
+			shard,
+			configured.Weight,
+			backendTLS.Mode,
+			backendTLS.CAFile,
+			backendTLS.Cert,
+			backendTLS.Key.Value(),
+			backendTLS.ServerName,
+			backendTLS.MinTLSVersion,
+			backendTLS.InsecureSkipVerify,
+			backendAuth.Mode,
+			backendAuth.MasterUser.Username,
+			backendAuth.MasterUser.Password.Value(),
+			backendAuth.MasterUser.UserFormat,
+			backendAuth.MasterUser.Mechanism,
+			backendAuth.CredentialReplay.RequireBackendTLS,
+			backendAuth.CredentialReplay.PreserveMechanism,
+			quotedYAMLStrings(backendAuth.CredentialReplay.AllowedMechanisms),
+		)
+	}
+
+	return builder.String()
 }
 
 // processRuntimeStore creates a Redis store using the real-process key prefix.
@@ -1945,6 +2280,21 @@ func routeHasBackendExclusion(response generated.RouteLookupResponse, backendID 
 	return false
 }
 
+// assertBackendPinRoute checks that route lookup applied a concrete operator backend pin.
+func assertBackendPinRoute(t *testing.T, response generated.RouteLookupResponse, backendID string) {
+	t.Helper()
+
+	if response.FailClosed ||
+		response.SelectedBackend != backendID ||
+		response.Reason != "operator_backend_pin" ||
+		!response.BackendPin.Present ||
+		!response.BackendPin.Applied ||
+		response.BackendPin.Backend == nil ||
+		*response.BackendPin.Backend != backendID {
+		t.Fatalf("backend-pin route = %#v, want applied pin to %q", response, backendID)
+	}
+}
+
 // getBackendDetail reads one backend through the public REST boundary.
 func getBackendDetail(t *testing.T, baseURL string, backendID string) generated.BackendDetail {
 	t.Helper()
@@ -1968,6 +2318,26 @@ func getSessionListPage(t *testing.T, baseURL string, limit string, cursor strin
 	requestJSON(t, http.MethodGet, baseURL+"/api/v1/sessions?"+values.Encode(), nil, http.StatusOK, &response)
 
 	return response
+}
+
+// waitForRESTSessionCount waits until the public REST session list has the expected size.
+func waitForRESTSessionCount(t *testing.T, baseURL string, count int) []generated.SessionDetail {
+	t.Helper()
+
+	deadline := time.Now().Add(3 * time.Second)
+	var sessions []generated.SessionDetail
+	for time.Now().Before(deadline) {
+		page := getSessionListPage(t, baseURL, "50", "")
+		sessions = page.Sessions
+		if len(sessions) == count {
+			return sessions
+		}
+
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	t.Fatalf("REST session count did not become %d; sessions=%#v", count, sessions)
+	return nil
 }
 
 // nextCursorFromCLI extracts the continuation cursor from text-mode CLI output.
@@ -2166,6 +2536,19 @@ func loginIMAP(t *testing.T, address string, account string) (net.Conn, *bufio.R
 	expectLine(t, reader, "A001 OK Authentication completed\r\n")
 
 	return client, reader
+}
+
+// expectIMAPLoginUnavailable verifies a public login fails closed before proxy mode.
+func expectIMAPLoginUnavailable(t *testing.T, address string, account string) {
+	t.Helper()
+
+	client := dialPlain(t, address)
+	defer func() { _ = client.Close() }()
+
+	reader := bufio.NewReader(client)
+	expectLine(t, reader, "* OK nauthilus-director IMAP session ready\r\n")
+	writeLine(t, client, `A001 LOGIN "`+account+`" "`+e2ePassword+`"`)
+	expectLine(t, reader, "A001 NO [UNAVAILABLE] Authentication service temporarily unavailable\r\n")
 }
 
 // expectBackendProxy sends one NOOP and verifies the expected fake backend observed it.

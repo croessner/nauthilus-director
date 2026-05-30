@@ -19,17 +19,22 @@ package runtime
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/croessner/nauthilus-director/internal/backend"
+	"github.com/croessner/nauthilus-director/internal/config"
 	"github.com/croessner/nauthilus-director/internal/observability"
 	"github.com/croessner/nauthilus-director/internal/state"
 )
 
 const (
 	runtimeTestBackendIdentifier = "backend-a"
+	runtimeTestBackendPinReason  = "commission backend"
+	runtimeTestMoveReason        = "move user"
+	runtimeTestPinnedStatus      = "pinned"
 	runtimeTestSessionA          = "session-a"
 	runtimeTestSessionB          = "session-b"
 	runtimeTestSessionC          = "session-c"
@@ -157,6 +162,303 @@ func TestUserAndSessionRuntimeRequestsRejectEmptyReasons(t *testing.T) {
 			},
 		},
 	})
+}
+
+// TestUserBackendPinSetRejectsEmptyUserKey verifies pinning needs a normalized affinity key.
+func TestUserBackendPinSetRejectsEmptyUserKey(t *testing.T) {
+	err := SetUserBackendPinRequest{
+		Key:               UserKey{Tenant: runtimeTestTenant},
+		BackendIdentifier: routeLookupBackendA,
+		Strategy:          MoveStrategyNewSessionsOnly,
+		Reason:            runtimeTestBackendPinReason,
+	}.Validate()
+	if !IsErrorKind(err, ErrorKindInvalidRequest) {
+		t.Fatalf("Validate error = %v, want invalid_request", err)
+	}
+}
+
+// TestUserBackendPinSetRejectsEmptyBackendIdentifier verifies pins require a concrete backend.
+func TestUserBackendPinSetRejectsEmptyBackendIdentifier(t *testing.T) {
+	err := SetUserBackendPinRequest{
+		Key:      UserKey{Tenant: runtimeTestTenant, UserHash: runtimeTestUserHash},
+		Strategy: MoveStrategyNewSessionsOnly,
+		Reason:   runtimeTestBackendPinReason,
+	}.Validate()
+	if !IsErrorKind(err, ErrorKindInvalidRequest) {
+		t.Fatalf("Validate error = %v, want invalid_request", err)
+	}
+}
+
+// TestUserBackendPinSetRejectsMissingReason verifies mutating pin requests remain auditable.
+func TestUserBackendPinSetRejectsMissingReason(t *testing.T) {
+	err := SetUserBackendPinRequest{
+		Key:               UserKey{Tenant: runtimeTestTenant, UserHash: runtimeTestUserHash},
+		BackendIdentifier: routeLookupBackendA,
+		Strategy:          MoveStrategyNewSessionsOnly,
+	}.Validate()
+	if !IsErrorKind(err, ErrorKindInvalidRequest) {
+		t.Fatalf("Validate error = %v, want invalid_request", err)
+	}
+}
+
+// TestUserBackendPinSetRejectsUnsupportedStrategy verifies pin moves share the move vocabulary.
+func TestUserBackendPinSetRejectsUnsupportedStrategy(t *testing.T) {
+	err := SetUserBackendPinRequest{
+		Key:               UserKey{Tenant: runtimeTestTenant, UserHash: runtimeTestUserHash},
+		BackendIdentifier: routeLookupBackendA,
+		Strategy:          MoveStrategy("teleport_existing"),
+		Reason:            runtimeTestBackendPinReason,
+	}.Validate()
+	if !IsErrorKind(err, ErrorKindInvalidRequest) {
+		t.Fatalf("Validate error = %v, want invalid_request", err)
+	}
+}
+
+// TestUserBackendPinClearRejectsMissingReason verifies pin clear requests remain auditable.
+func TestUserBackendPinClearRejectsMissingReason(t *testing.T) {
+	err := ClearUserBackendPinRequest{
+		Key: UserKey{Tenant: runtimeTestTenant, UserHash: runtimeTestUserHash},
+	}.Validate()
+	if !IsErrorKind(err, ErrorKindInvalidRequest) {
+		t.Fatalf("Validate error = %v, want invalid_request", err)
+	}
+}
+
+// TestUserBackendPinDerivesTargetFromRegistry verifies operator target facts are not trusted input.
+func TestUserBackendPinDerivesTargetFromRegistry(t *testing.T) {
+	registry, err := backend.NewStaticRegistry(config.DefaultConfig().Director)
+	if err != nil {
+		t.Fatalf("NewStaticRegistry returned error: %v", err)
+	}
+
+	store := &recordingBackendPinStateStore{
+		setRecord: state.UserBackendPinRecord{
+			Status:             runtimeTestPinnedStatus,
+			Generation:         "19",
+			ActiveSessionCount: 2,
+			ServerTime:         time.Unix(100, 0),
+		},
+	}
+	service := NewUserBackendPinService(store, registry)
+
+	result, err := service.SetUserBackendPin(context.Background(), SetUserBackendPinRequest{
+		Key:               UserKey{Tenant: " " + runtimeTestTenant + " ", UserHash: " " + runtimeTestUserHash + " "},
+		BackendIdentifier: " " + routeLookupBackendA + " ",
+		Strategy:          MoveStrategyKickExisting,
+		Reason:            runtimeTestBackendPinReason,
+	})
+	if err != nil {
+		t.Fatalf("SetUserBackendPin returned error: %v", err)
+	}
+
+	if !store.setCalled {
+		t.Fatal("SetUserBackendPin did not call the state boundary")
+	}
+
+	if store.setRequest.BackendIdentifier != routeLookupBackendA ||
+		store.setRequest.Protocol != routeLookupProtocol ||
+		store.setRequest.BackendPool != routeLookupDefaultPool ||
+		store.setRequest.ShardTag != routeLookupShardA {
+		t.Fatalf("derived state request = %#v", store.setRequest)
+	}
+
+	if store.setRequest.Key.Tenant != runtimeTestTenant || store.setRequest.Key.AccountKey != runtimeTestUserHash {
+		t.Fatalf("normalized user key = %#v", store.setRequest.Key)
+	}
+
+	if result.Target.EffectiveShard != routeLookupShardA || result.Pin.EffectiveShard != routeLookupShardA {
+		t.Fatalf("target/result shard = %#v %#v", result.Target, result.Pin)
+	}
+}
+
+// TestUserBackendPinUnknownBackendMapsToRuntimeNotFound verifies REST-ready classification.
+func TestUserBackendPinUnknownBackendMapsToRuntimeNotFound(t *testing.T) {
+	registry, err := backend.NewStaticRegistry(config.DefaultConfig().Director)
+	if err != nil {
+		t.Fatalf("NewStaticRegistry returned error: %v", err)
+	}
+
+	store := &recordingBackendPinStateStore{}
+	service := NewUserBackendPinService(store, registry)
+
+	_, err = service.SetUserBackendPin(context.Background(), SetUserBackendPinRequest{
+		Key:               UserKey{Tenant: runtimeTestTenant, UserHash: runtimeTestUserHash},
+		BackendIdentifier: "missing-backend",
+		Strategy:          MoveStrategyNewSessionsOnly,
+		Reason:            runtimeTestBackendPinReason,
+	})
+	if !IsErrorKind(err, ErrorKindNotFound) {
+		t.Fatalf("SetUserBackendPin error = %v, want not_found", err)
+	}
+
+	if store.setCalled {
+		t.Fatal("unknown backend should not reach the state boundary")
+	}
+}
+
+// TestUserBackendPinAuditMetadataIsBounded verifies pin audit carries safe target facts.
+func TestUserBackendPinAuditMetadataIsBounded(t *testing.T) {
+	registry, err := backend.NewStaticRegistry(config.DefaultConfig().Director)
+	if err != nil {
+		t.Fatalf("NewStaticRegistry returned error: %v", err)
+	}
+
+	store := &recordingBackendPinStateStore{
+		setRecord: state.UserBackendPinRecord{
+			Status:             runtimeTestPinnedStatus,
+			Generation:         "41",
+			ActiveSessionCount: 3,
+			ServerTime:         time.Unix(200, 0),
+		},
+	}
+	service := NewUserBackendPinService(store, registry)
+	actor := Actor{ID: "operator-a", AuthMethod: "mtls", Authenticated: true}
+
+	result, err := service.SetUserBackendPin(context.Background(), SetUserBackendPinRequest{
+		Key:               UserKey{Tenant: runtimeTestTenant, UserHash: runtimeTestUserHash},
+		BackendIdentifier: routeLookupBackendA,
+		Strategy:          MoveStrategyKickExisting,
+		Reason:            runtimeTestBackendPinReason,
+		Actor:             actor,
+	})
+	if err != nil {
+		t.Fatalf("SetUserBackendPin returned error: %v", err)
+	}
+
+	assertBackendPinAuditBase(t, result.Audit, actor)
+	assertBackendPinAuditFields(t, result.Audit.SafeFields())
+}
+
+// TestUserBackendPinOperationsRecordBoundedObservability verifies pin mutations emit safe events.
+func TestUserBackendPinOperationsRecordBoundedObservability(t *testing.T) {
+	service, recorder := newBackendPinObservationService(t)
+
+	_, err := service.SetUserBackendPin(context.Background(), SetUserBackendPinRequest{
+		Key:               UserKey{Tenant: runtimeTestTenant, UserHash: runtimeTestUserHash},
+		BackendIdentifier: routeLookupBackendA,
+		Strategy:          MoveStrategyKickExisting,
+		Reason:            runtimeTestBackendPinReason,
+	})
+	if err != nil {
+		t.Fatalf("SetUserBackendPin returned error: %v", err)
+	}
+
+	_, err = service.ClearUserBackendPin(context.Background(), ClearUserBackendPinRequest{
+		Key:    UserKey{Tenant: runtimeTestTenant, UserHash: runtimeTestUserHash},
+		Reason: runtimeTestBackendPinReason,
+	})
+	if err != nil {
+		t.Fatalf("ClearUserBackendPin returned error: %v", err)
+	}
+
+	events := recorder.eventsByName(observability.EventUserBackendPin)
+	if len(events) != 2 {
+		t.Fatalf("backend-pin events = %#v, want set and clear", recorder.events)
+	}
+
+	assertBackendPinObservation(t, events[0], operationUserBackendPinSet, runtimeObservationReasonBackendPinSet)
+	assertBackendPinObservation(t, events[1], operationUserBackendPinClear, runtimeObservationReasonBackendPinClear)
+
+	rendered := strings.Join(eventValues(events), "\n")
+	if strings.Contains(rendered, runtimeTestBackendPinReason) || strings.Contains(rendered, runtimeTestUserHash) {
+		t.Fatalf("backend-pin observation leaked reason or user hash: %s", rendered)
+	}
+}
+
+// newBackendPinObservationService builds a backend-pin service with recording dependencies.
+func newBackendPinObservationService(t *testing.T) (*UserBackendPinService, *recordingRuntimeObservation) {
+	t.Helper()
+
+	registry, err := backend.NewStaticRegistry(config.DefaultConfig().Director)
+	if err != nil {
+		t.Fatalf("NewStaticRegistry returned error: %v", err)
+	}
+
+	store := &recordingBackendPinStateStore{
+		setRecord:   backendPinObservationRecord(runtimeTestPinnedStatus, "43", 300),
+		clearRecord: backendPinObservationRecord(runtimeObservationReasonCleared, "44", 301),
+	}
+	recorder := &recordingRuntimeObservation{}
+
+	return NewUserBackendPinService(store, registry, WithObservabilityRecorder(recorder)), recorder
+}
+
+// backendPinObservationRecord returns a bounded fixture for observability assertions.
+func backendPinObservationRecord(status string, generation string, unixSecond int64) state.UserBackendPinRecord {
+	return state.UserBackendPinRecord{
+		Status:             status,
+		Generation:         generation,
+		BackendIdentifier:  routeLookupBackendA,
+		Protocol:           routeLookupProtocol,
+		BackendPool:        routeLookupDefaultPool,
+		ShardTag:           routeLookupShardA,
+		Strategy:           string(MoveStrategyKickExisting),
+		ActiveSessionCount: 1,
+		ServerTime:         time.Unix(unixSecond, 0),
+	}
+}
+
+// TestUserBackendPinClearAuditMetadataIncludesActor verifies clear audits carry operator context.
+func TestUserBackendPinClearAuditMetadataIncludesActor(t *testing.T) {
+	store := &recordingBackendPinStateStore{
+		clearRecord: state.UserBackendPinRecord{
+			Status:            runtimeObservationReasonCleared,
+			Key:               state.AffinityKey{Tenant: runtimeTestTenant, AccountKey: runtimeTestUserHash},
+			BackendIdentifier: routeLookupBackendA,
+			Protocol:          routeLookupProtocol,
+			BackendPool:       routeLookupDefaultPool,
+			ShardTag:          routeLookupShardA,
+			Strategy:          string(MoveStrategyDrainExisting),
+			Generation:        "42",
+			ServerTime:        time.Unix(300, 0),
+		},
+	}
+	service := NewUserBackendPinService(store, nil)
+	actor := Actor{ID: "operator-b", Authenticated: true}
+
+	result, err := service.ClearUserBackendPin(context.Background(), ClearUserBackendPinRequest{
+		Key:    UserKey{Tenant: runtimeTestTenant, UserHash: runtimeTestUserHash},
+		Reason: "commissioning complete",
+		Actor:  actor,
+	})
+	if err != nil {
+		t.Fatalf("ClearUserBackendPin returned error: %v", err)
+	}
+
+	if result.Audit.Operation != AuditOperationUserBackendPinClear ||
+		result.Audit.Actor.ID != actor.ID ||
+		result.Audit.Generation != "42" ||
+		result.Audit.BackendIdentifier != routeLookupBackendA {
+		t.Fatalf("clear audit metadata = %#v", result.Audit)
+	}
+}
+
+// TestExistingUserMoveValidationRemainsShardOnly verifies move stays separate from backend pinning.
+func TestExistingUserMoveValidationRemainsShardOnly(t *testing.T) {
+	userKey := UserKey{Tenant: runtimeTestTenant, UserHash: runtimeTestUserHash}
+	if err := (MoveUserRequest{
+		Key:         userKey,
+		TargetShard: routeLookupShardA,
+		Strategy:    MoveStrategyNewSessionsOnly,
+		Reason:      runtimeTestMoveReason,
+	}).Validate(); err != nil {
+		t.Fatalf("MoveUserRequest validation changed: %v", err)
+	}
+
+	if err := (MoveUserRequest{
+		Key:      userKey,
+		Strategy: MoveStrategyNewSessionsOnly,
+		Reason:   runtimeTestMoveReason,
+	}).Validate(); !IsErrorKind(err, ErrorKindInvalidRequest) {
+		t.Fatalf("MoveUserRequest without target shard error = %v, want invalid_request", err)
+	}
+
+	moveType := reflect.TypeFor[MoveUserRequest]()
+	for _, field := range []string{"ToBackend", "ToBackendIdentifier", "BackendIdentifier"} {
+		if _, ok := moveType.FieldByName(field); ok {
+			t.Fatalf("MoveUserRequest gained backend field %s", field)
+		}
+	}
 }
 
 // TestUserKickClosesEveryLocalSessionForAffinity verifies local acceleration is user-scoped.
@@ -370,6 +672,75 @@ func assertInvalidRuntimeRequests(t *testing.T, testCases []runtimeValidationCas
 	}
 }
 
+// assertBackendPinAuditBase checks core backend-pin audit fields.
+func assertBackendPinAuditBase(t *testing.T, audit AuditMetadata, actor Actor) {
+	t.Helper()
+
+	if audit.Operation != AuditOperationUserBackendPinSet ||
+		audit.Reason != runtimeTestBackendPinReason ||
+		audit.Actor.ID != actor.ID ||
+		audit.Generation != "41" {
+		t.Fatalf("audit metadata = %#v", audit)
+	}
+
+	if audit.BackendIdentifier != routeLookupBackendA {
+		t.Fatalf("audit backend identifier = %q", audit.BackendIdentifier)
+	}
+}
+
+// assertBackendPinAuditFields checks bounded backend facts without secrets.
+func assertBackendPinAuditFields(t *testing.T, fields map[string]string) {
+	t.Helper()
+
+	if fields[auditFieldBackendIdentifier] != routeLookupBackendA ||
+		fields[auditFieldProtocol] != routeLookupProtocol ||
+		fields[auditFieldBackendPool] != routeLookupDefaultPool ||
+		fields[auditFieldEffectiveShard] != routeLookupShardA ||
+		fields[auditFieldStrategy] != string(MoveStrategyKickExisting) {
+		t.Fatalf("audit fields = %#v", fields)
+	}
+
+	for _, forbidden := range []string{"address", "password", "token", "private_key"} {
+		if _, ok := fields[forbidden]; ok {
+			t.Fatalf("audit fields included forbidden backend metadata %q: %#v", forbidden, fields)
+		}
+	}
+}
+
+// assertBackendPinObservation verifies operation and bounded reason labels.
+func assertBackendPinObservation(t *testing.T, event observability.Event, operation string, reason string) {
+	t.Helper()
+
+	if event.MetricLabels["operation"] != operation {
+		t.Fatalf("operation = %q, want %q", event.MetricLabels["operation"], operation)
+	}
+
+	if event.MetricLabels["reason_class"] != reason {
+		t.Fatalf("reason class = %q, want %q", event.MetricLabels["reason_class"], reason)
+	}
+
+	if event.MetricLabels["result"] != runtimeObservationResultOK {
+		t.Fatalf("result = %q, want ok", event.MetricLabels["result"])
+	}
+}
+
+// eventValues returns log and label values for leakage checks.
+func eventValues(events []observability.Event) []string {
+	values := make([]string, 0)
+
+	for _, event := range events {
+		for _, value := range event.LogFields {
+			values = append(values, value)
+		}
+
+		for _, value := range event.MetricLabels {
+			values = append(values, value)
+		}
+	}
+
+	return values
+}
+
 // mapValues returns map values for compact leak checks.
 func mapValues(values map[string]string) []string {
 	out := make([]string, 0, len(values))
@@ -429,6 +800,51 @@ func (s *recordingUserStateStore) ClearUserAffinity(
 	context.Context,
 	state.UserClearRequest,
 ) (state.UserRuntimeRecord, error) {
+	return s.clearRecord, nil
+}
+
+type recordingBackendPinStateStore struct {
+	setRecord    state.UserBackendPinRecord
+	getRecord    state.UserBackendPinRecord
+	clearRecord  state.UserBackendPinRecord
+	setRequest   state.UserBackendPinSetRequest
+	getRequest   state.UserBackendPinGetRequest
+	clearRequest state.UserBackendPinClearRequest
+	setCalled    bool
+	getCalled    bool
+	clearCalled  bool
+}
+
+// SetUserBackendPin records and returns the configured backend-pin mutation.
+func (s *recordingBackendPinStateStore) SetUserBackendPin(
+	_ context.Context,
+	request state.UserBackendPinSetRequest,
+) (state.UserBackendPinRecord, error) {
+	s.setCalled = true
+	s.setRequest = request
+
+	return s.setRecord, nil
+}
+
+// GetUserBackendPin records and returns the configured backend-pin read.
+func (s *recordingBackendPinStateStore) GetUserBackendPin(
+	_ context.Context,
+	request state.UserBackendPinGetRequest,
+) (state.UserBackendPinRecord, error) {
+	s.getCalled = true
+	s.getRequest = request
+
+	return s.getRecord, nil
+}
+
+// ClearUserBackendPin records and returns the configured backend-pin clear.
+func (s *recordingBackendPinStateStore) ClearUserBackendPin(
+	_ context.Context,
+	request state.UserBackendPinClearRequest,
+) (state.UserBackendPinRecord, error) {
+	s.clearCalled = true
+	s.clearRequest = request
+
 	return s.clearRecord, nil
 }
 

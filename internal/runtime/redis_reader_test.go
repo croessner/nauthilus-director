@@ -18,6 +18,7 @@ package runtime
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"strings"
 	"testing"
@@ -315,9 +316,17 @@ func assertSessionListResult(t *testing.T, result SessionListResult, wantFirst s
 
 // tamperRuntimeCursor changes one byte while keeping a non-empty cursor string.
 func tamperRuntimeCursor(cursor string) string {
-	if before, ok := strings.CutSuffix(cursor, "A"); ok {
-		return before + "B"
+	payloadText, macText, ok := strings.Cut(cursor, ".")
+	if !ok {
+		return cursor + "A"
 	}
 
-	return cursor[:len(cursor)-1] + "A"
+	payload, err := base64.RawURLEncoding.DecodeString(payloadText)
+	if err != nil || len(payload) == 0 {
+		return cursor + "A"
+	}
+
+	payload[0] ^= 0x01
+
+	return base64.RawURLEncoding.EncodeToString(payload) + "." + macText
 }

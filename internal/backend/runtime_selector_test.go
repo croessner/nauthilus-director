@@ -153,6 +153,213 @@ func TestRuntimeWeightZeroExcludesInitialPlacementButAllowsActivePins(t *testing
 	}
 }
 
+// TestRuntimeSelectorOperatorBackendPinChoosesExactTarget verifies targeted placement.
+func TestRuntimeSelectorOperatorBackendPinChoosesExactTarget(t *testing.T) {
+	for _, testCase := range []struct {
+		name      string
+		snapshots fakeSnapshots
+	}{
+		{name: "weight 100"},
+		{name: "weight zero", snapshots: fakeSnapshots{
+			testBackendIDB: {RuntimeOverride: RuntimeOverride{Weight: new(0)}},
+		}},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			selector := mustRuntimeSelector(t, sameShardBackendsConfig(), testCase.snapshots, runtimeSelectionPolicy(true))
+			request := operatorBackendPinRequest()
+
+			result, err := selector.Select(context.Background(), request)
+			if err != nil {
+				t.Fatalf("Select returned error: %v", err)
+			}
+
+			if result.Backend.Identifier != testBackendIDB {
+				t.Fatalf("selected backend = %q, want operator target %q", result.Backend.Identifier, testBackendIDB)
+			}
+
+			if result.Reason != selectionReasonOperatorBackendPin {
+				t.Fatalf("selection reason = %q, want %s", result.Reason, selectionReasonOperatorBackendPin)
+			}
+		})
+	}
+}
+
+type operatorBackendPinRejectionCase struct {
+	name      string
+	cfg       config.Config
+	snapshots fakeSnapshots
+	policy    SelectionPolicy
+	now       time.Time
+	wantKind  ErrorKind
+}
+
+// TestRuntimeSelectorOperatorBackendPinRejectsUnsafeTargets verifies only weight_zero is bypassed.
+func TestRuntimeSelectorOperatorBackendPinRejectsUnsafeTargets(t *testing.T) {
+	now := time.Date(2026, 5, 30, 12, 0, 0, 0, time.UTC)
+
+	for _, testCase := range operatorBackendPinRejectionCases(now) {
+		t.Run(testCase.name, func(t *testing.T) {
+			cfg := testCase.cfg
+			if cfg.Director.Backends == nil {
+				cfg = sameShardBackendsConfig()
+			}
+
+			selector := mustRuntimeSelector(t, cfg, testCase.snapshots, testCase.policy)
+			if !testCase.now.IsZero() {
+				selector.WithClock(func() time.Time { return testCase.now })
+			}
+
+			_, err := selector.Select(context.Background(), operatorBackendPinRequest())
+			if !IsErrorKind(err, testCase.wantKind) {
+				t.Fatalf("Select error = %v, want %s", err, testCase.wantKind)
+			}
+		})
+	}
+}
+
+// operatorBackendPinRejectionCases enumerates non-weight exclusions for pin tests.
+func operatorBackendPinRejectionCases(now time.Time) []operatorBackendPinRejectionCase {
+	testCases := operatorBackendPinStaticRejectionCases()
+	testCases = append(testCases, operatorBackendPinRuntimeRejectionCases()...)
+	testCases = append(testCases, operatorBackendPinHealthRejectionCases(now)...)
+
+	return testCases
+}
+
+// operatorBackendPinStaticRejectionCases returns config-only rejection cases.
+func operatorBackendPinStaticRejectionCases() []operatorBackendPinRejectionCase {
+	return []operatorBackendPinRejectionCase{
+		{
+			name:     "static hard maintenance",
+			cfg:      operatorPinConfig(string(MaintenanceModeHard), 100),
+			policy:   runtimeSelectionPolicy(true),
+			wantKind: ErrorKindNoBackend,
+		},
+		{
+			name:     "static soft maintenance",
+			cfg:      operatorPinConfig(string(MaintenanceModeSoft), 100),
+			policy:   runtimeSelectionPolicy(true),
+			wantKind: ErrorKindNoBackend,
+		},
+	}
+}
+
+// operatorBackendPinRuntimeRejectionCases returns mutable-state rejection cases.
+func operatorBackendPinRuntimeRejectionCases() []operatorBackendPinRejectionCase {
+	return []operatorBackendPinRejectionCase{
+		{
+			name: "runtime hard maintenance",
+			snapshots: fakeSnapshots{
+				testBackendIDB: {RuntimeOverride: RuntimeOverride{Maintenance: &MaintenanceState{Mode: MaintenanceModeHard}}},
+			},
+			policy:   runtimeSelectionPolicy(true),
+			wantKind: ErrorKindNoBackend,
+		},
+		{
+			name: "runtime soft maintenance",
+			snapshots: fakeSnapshots{
+				testBackendIDB: {RuntimeOverride: RuntimeOverride{Maintenance: &MaintenanceState{Mode: MaintenanceModeSoft}}},
+			},
+			policy:   runtimeSelectionPolicy(true),
+			wantKind: ErrorKindNoBackend,
+		},
+		{
+			name: "runtime out",
+			snapshots: fakeSnapshots{
+				testBackendIDB: {RuntimeOverride: RuntimeOverride{InService: new(false)}},
+			},
+			policy:   runtimeSelectionPolicy(true),
+			wantKind: ErrorKindNoBackend,
+		},
+		{
+			name: "runtime drain",
+			snapshots: fakeSnapshots{
+				testBackendIDB: {RuntimeOverride: RuntimeOverride{Drain: &DrainState{Enabled: true, Mode: DrainModeSoft}}},
+			},
+			policy:   runtimeSelectionPolicy(true),
+			wantKind: ErrorKindNoBackend,
+		},
+	}
+}
+
+// operatorBackendPinHealthRejectionCases returns health and capacity rejection cases.
+func operatorBackendPinHealthRejectionCases(now time.Time) []operatorBackendPinRejectionCase {
+	return []operatorBackendPinRejectionCase{
+		{
+			name: "failed health",
+			snapshots: fakeSnapshots{
+				testBackendIDB: {Health: HealthState{Enabled: true, Status: HealthStatusUnhealthy, ExpiresAt: now.Add(time.Minute)}},
+			},
+			policy:   healthRuntimeSelectionPolicy(true),
+			now:      now,
+			wantKind: ErrorKindNoBackend,
+		},
+		{
+			name: "stale health",
+			snapshots: fakeSnapshots{
+				testBackendIDB: {Health: HealthState{Enabled: true, Status: HealthStatusHealthy, CheckedAt: now.Add(-time.Minute), ExpiresAt: now.Add(-time.Second)}},
+			},
+			policy:   healthRuntimeSelectionPolicy(true),
+			now:      now,
+			wantKind: ErrorKindNoBackend,
+		},
+		{
+			name: "max connections",
+			snapshots: fakeSnapshots{
+				testBackendIDB: {ActiveSessions: 1000},
+			},
+			policy:   runtimeSelectionPolicy(true),
+			wantKind: ErrorKindNoBackend,
+		},
+		{
+			name: "ambiguous runtime state",
+			snapshots: fakeSnapshots{
+				testBackendIDB: {RuntimeOverride: RuntimeOverride{Drain: &DrainState{Enabled: true, Mode: "invalid"}}},
+			},
+			policy:   runtimeSelectionPolicy(true),
+			wantKind: ErrorKindAmbiguous,
+		},
+	}
+}
+
+// TestRuntimeSelectorOperatorBackendPinValidatesScope verifies stale pin facts fail closed.
+func TestRuntimeSelectorOperatorBackendPinValidatesScope(t *testing.T) {
+	for _, testCase := range []struct {
+		name   string
+		mutate func(*SelectionRequest)
+	}{
+		{
+			name: "shard mismatch",
+			mutate: func(request *SelectionRequest) {
+				request.ShardTag = "mailstore-other"
+			},
+		},
+		{
+			name: "protocol mismatch",
+			mutate: func(request *SelectionRequest) {
+				request.Protocol = testProtocolLMTP
+			},
+		},
+		{
+			name: "backend pool mismatch",
+			mutate: func(request *SelectionRequest) {
+				request.BackendPool = testPoolLMTP
+			},
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			selector := mustRuntimeSelector(t, sameShardBackendsConfig(), nil, runtimeSelectionPolicy(true))
+			request := operatorBackendPinRequest()
+			testCase.mutate(&request)
+
+			_, err := selector.Select(context.Background(), request)
+			if !IsErrorKind(err, ErrorKindNoBackend) {
+				t.Fatalf("Select error = %v, want no_backend", err)
+			}
+		})
+	}
+}
+
 // TestRuntimeSelectorMaxConnectionsExcludesFullBackend verifies Redis counts feed eligibility.
 func TestRuntimeSelectorMaxConnectionsExcludesFullBackend(t *testing.T) {
 	backendConfig := singleBackendConfig(string(MaintenanceModeDisabled), 100)
@@ -592,10 +799,37 @@ func runtimeSelectionPolicy(softPins bool) SelectionPolicy {
 	}
 }
 
+// healthRuntimeSelectionPolicy creates a runtime selection policy with health enforced.
+func healthRuntimeSelectionPolicy(softPins bool) SelectionPolicy {
+	policy := runtimeSelectionPolicy(softPins)
+	policy.EffectiveBackend.EnforceHealth = true
+
+	return policy
+}
+
 // healthEffectivePolicy creates a runtime-enabled policy with health enforcement.
 func healthEffectivePolicy(softPins bool) EffectiveBackendPolicy {
 	policy := runtimeEffectivePolicy(softPins)
 	policy.EnforceHealth = true
 
 	return policy
+}
+
+// operatorBackendPinRequest returns a complete IMAP request targeting backend B.
+func operatorBackendPinRequest() SelectionRequest {
+	request := defaultSelectionRequest(testAccountKey)
+	request.OperatorBackendIdentifier = testBackendIDB
+
+	return request
+}
+
+// operatorPinConfig returns two same-shard backends with target backend B customized.
+func operatorPinConfig(mode string, weight int) config.Config {
+	cfg := sameShardBackendsConfig()
+	target := cfg.Director.Backends[testBackendIDB]
+	target.Maintenance = mode
+	target.Weight = weight
+	cfg.Director.Backends[testBackendIDB] = target
+
+	return cfg
 }

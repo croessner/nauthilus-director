@@ -370,6 +370,17 @@ type RouteLookupBackendExclusion struct {
 	Source string `json:"source"`
 }
 
+// RouteLookupBackendPin defines model for RouteLookupBackendPin.
+type RouteLookupBackendPin struct {
+	Applied     bool    `json:"applied"`
+	Backend     *string `json:"backend,omitempty"`
+	BackendPool *string `json:"backend_pool,omitempty"`
+	Present     bool    `json:"present"`
+	Protocol    *string `json:"protocol,omitempty"`
+	Reason      string  `json:"reason"`
+	ShardTag    *string `json:"shard_tag,omitempty"`
+}
+
 // RouteLookupBackendSummary defines model for RouteLookupBackendSummary.
 type RouteLookupBackendSummary struct {
 	AllowsActivePins  bool                          `json:"allows_active_pins"`
@@ -419,6 +430,7 @@ type RouteLookupRequest struct {
 type RouteLookupResponse struct {
 	AffectedBy         RouteLookupEffects             `json:"affected_by"`
 	Affinity           *RouteLookupAffinity           `json:"affinity,omitempty"`
+	BackendPin         RouteLookupBackendPin          `json:"backend_pin"`
 	Backends           []RouteLookupBackendSummary    `json:"backends"`
 	FailClosed         bool                           `json:"fail_closed"`
 	Healthy            bool                           `json:"healthy"`
@@ -536,6 +548,31 @@ type UserAffinity struct {
 	UserKey        string     `json:"user_key"`
 }
 
+// UserBackendPin defines model for UserBackendPin.
+type UserBackendPin struct {
+	ActiveSessionCount *int                     `json:"active_session_count,omitempty"`
+	Backend            *string                  `json:"backend,omitempty"`
+	BackendPool        *string                  `json:"backend_pool,omitempty"`
+	Generation         *string                  `json:"generation,omitempty"`
+	Present            bool                     `json:"present"`
+	Protocol           *string                  `json:"protocol,omitempty"`
+	ShardTag           *string                  `json:"shard_tag,omitempty"`
+	Strategy           *UserMoveRequestStrategy `json:"strategy,omitempty"`
+	UserKey            string                   `json:"user_key"`
+}
+
+// UserBackendPinClearRequest defines model for UserBackendPinClearRequest.
+type UserBackendPinClearRequest struct {
+	Reason string `json:"reason"`
+}
+
+// UserBackendPinRequest defines model for UserBackendPinRequest.
+type UserBackendPinRequest struct {
+	Backend  string                  `json:"backend"`
+	Reason   string                  `json:"reason"`
+	Strategy UserMoveRequestStrategy `json:"strategy"`
+}
+
 // UserDetail defines model for UserDetail.
 type UserDetail struct {
 	ActiveSessions int           `json:"active_sessions"`
@@ -561,7 +598,7 @@ type UserMoveRequest struct {
 	ToShard  string                  `json:"to_shard"`
 }
 
-// UserMoveRequestStrategy defines model for UserMoveRequest.Strategy.
+// UserMoveRequestStrategy defines model for UserMoveRequestStrategy.
 type UserMoveRequestStrategy string
 
 // VersionResponse defines model for VersionResponse.
@@ -697,6 +734,12 @@ type ClearUserAffinityJSONRequestBody = RuntimeReasonRequest
 // SetUserAffinityJSONRequestBody defines body for SetUserAffinity for application/json ContentType.
 type SetUserAffinityJSONRequestBody = AffinityUpdateRequest
 
+// ClearUserBackendPinJSONRequestBody defines body for ClearUserBackendPin for application/json ContentType.
+type ClearUserBackendPinJSONRequestBody = UserBackendPinClearRequest
+
+// SetUserBackendPinJSONRequestBody defines body for SetUserBackendPin for application/json ContentType.
+type SetUserBackendPinJSONRequestBody = UserBackendPinRequest
+
 // KickUserJSONRequestBody defines body for KickUser for application/json ContentType.
 type KickUserJSONRequestBody = UserKickRequest
 
@@ -786,6 +829,15 @@ type ServerInterface interface {
 	// Set active affinity for one user key.
 	// (PUT /api/v1/users/{user_key}/affinity)
 	SetUserAffinity(w http.ResponseWriter, r *http.Request, userKey UserKey)
+	// Clear backend pin for one user key.
+	// (DELETE /api/v1/users/{user_key}/backend-pin)
+	ClearUserBackendPin(w http.ResponseWriter, r *http.Request, userKey UserKey)
+	// Show backend pin for one user key.
+	// (GET /api/v1/users/{user_key}/backend-pin)
+	GetUserBackendPin(w http.ResponseWriter, r *http.Request, userKey UserKey)
+	// Set backend pin for one user key.
+	// (PUT /api/v1/users/{user_key}/backend-pin)
+	SetUserBackendPin(w http.ResponseWriter, r *http.Request, userKey UserKey)
 	// Terminate active sessions for one user key.
 	// (POST /api/v1/users/{user_key}/kick)
 	KickUser(w http.ResponseWriter, r *http.Request, userKey UserKey)
@@ -1586,6 +1638,84 @@ func (siw *ServerInterfaceWrapper) SetUserAffinity(w http.ResponseWriter, r *htt
 	handler.ServeHTTP(w, r)
 }
 
+// ClearUserBackendPin operation middleware
+func (siw *ServerInterfaceWrapper) ClearUserBackendPin(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "user_key" -------------
+	var userKey UserKey
+
+	err = runtime.BindStyledParameterWithOptions("simple", "user_key", r.PathValue("user_key"), &userKey, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "user_key", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ClearUserBackendPin(w, r, userKey)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetUserBackendPin operation middleware
+func (siw *ServerInterfaceWrapper) GetUserBackendPin(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "user_key" -------------
+	var userKey UserKey
+
+	err = runtime.BindStyledParameterWithOptions("simple", "user_key", r.PathValue("user_key"), &userKey, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "user_key", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetUserBackendPin(w, r, userKey)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// SetUserBackendPin operation middleware
+func (siw *ServerInterfaceWrapper) SetUserBackendPin(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "user_key" -------------
+	var userKey UserKey
+
+	err = runtime.BindStyledParameterWithOptions("simple", "user_key", r.PathValue("user_key"), &userKey, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "user_key", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.SetUserBackendPin(w, r, userKey)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // KickUser operation middleware
 func (siw *ServerInterfaceWrapper) KickUser(w http.ResponseWriter, r *http.Request) {
 
@@ -1867,6 +1997,9 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc(http.MethodDelete+" "+options.BaseURL+"/api/v1/users/{user_key}/affinity", wrapper.ClearUserAffinity)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/users/{user_key}/affinity", wrapper.GetUserAffinity)
 	m.HandleFunc(http.MethodPut+" "+options.BaseURL+"/api/v1/users/{user_key}/affinity", wrapper.SetUserAffinity)
+	m.HandleFunc(http.MethodDelete+" "+options.BaseURL+"/api/v1/users/{user_key}/backend-pin", wrapper.ClearUserBackendPin)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/users/{user_key}/backend-pin", wrapper.GetUserBackendPin)
+	m.HandleFunc(http.MethodPut+" "+options.BaseURL+"/api/v1/users/{user_key}/backend-pin", wrapper.SetUserBackendPin)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/api/v1/users/{user_key}/kick", wrapper.KickUser)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/api/v1/users/{user_key}/move", wrapper.MoveUser)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/users/{user_key}/sessions", wrapper.GetUserSessions)
@@ -2957,6 +3090,125 @@ func (response SetUserAffinitydefaultJSONResponse) VisitSetUserAffinityResponse(
 	return err
 }
 
+type ClearUserBackendPinRequestObject struct {
+	UserKey UserKey `json:"user_key"`
+	Body    *ClearUserBackendPinJSONRequestBody
+}
+
+type ClearUserBackendPinResponseObject interface {
+	VisitClearUserBackendPinResponse(w http.ResponseWriter) error
+}
+
+type ClearUserBackendPin202JSONResponse AcceptedResponse
+
+func (response ClearUserBackendPin202JSONResponse) VisitClearUserBackendPinResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(202)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ClearUserBackendPindefaultJSONResponse struct {
+	Body       ErrorResponse
+	StatusCode int
+}
+
+func (response ClearUserBackendPindefaultJSONResponse) VisitClearUserBackendPinResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetUserBackendPinRequestObject struct {
+	UserKey UserKey `json:"user_key"`
+}
+
+type GetUserBackendPinResponseObject interface {
+	VisitGetUserBackendPinResponse(w http.ResponseWriter) error
+}
+
+type GetUserBackendPin200JSONResponse UserBackendPin
+
+func (response GetUserBackendPin200JSONResponse) VisitGetUserBackendPinResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetUserBackendPindefaultJSONResponse struct {
+	Body       ErrorResponse
+	StatusCode int
+}
+
+func (response GetUserBackendPindefaultJSONResponse) VisitGetUserBackendPinResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type SetUserBackendPinRequestObject struct {
+	UserKey UserKey `json:"user_key"`
+	Body    *SetUserBackendPinJSONRequestBody
+}
+
+type SetUserBackendPinResponseObject interface {
+	VisitSetUserBackendPinResponse(w http.ResponseWriter) error
+}
+
+type SetUserBackendPin202JSONResponse AcceptedResponse
+
+func (response SetUserBackendPin202JSONResponse) VisitSetUserBackendPinResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(202)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type SetUserBackendPindefaultJSONResponse struct {
+	Body       ErrorResponse
+	StatusCode int
+}
+
+func (response SetUserBackendPindefaultJSONResponse) VisitSetUserBackendPinResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
 type KickUserRequestObject struct {
 	UserKey UserKey `json:"user_key"`
 	Body    *KickUserJSONRequestBody
@@ -3322,6 +3574,15 @@ type StrictServerInterface interface {
 	// Set active affinity for one user key.
 	// (PUT /api/v1/users/{user_key}/affinity)
 	SetUserAffinity(ctx context.Context, request SetUserAffinityRequestObject) (SetUserAffinityResponseObject, error)
+	// Clear backend pin for one user key.
+	// (DELETE /api/v1/users/{user_key}/backend-pin)
+	ClearUserBackendPin(ctx context.Context, request ClearUserBackendPinRequestObject) (ClearUserBackendPinResponseObject, error)
+	// Show backend pin for one user key.
+	// (GET /api/v1/users/{user_key}/backend-pin)
+	GetUserBackendPin(ctx context.Context, request GetUserBackendPinRequestObject) (GetUserBackendPinResponseObject, error)
+	// Set backend pin for one user key.
+	// (PUT /api/v1/users/{user_key}/backend-pin)
+	SetUserBackendPin(ctx context.Context, request SetUserBackendPinRequestObject) (SetUserBackendPinResponseObject, error)
 	// Terminate active sessions for one user key.
 	// (POST /api/v1/users/{user_key}/kick)
 	KickUser(ctx context.Context, request KickUserRequestObject) (KickUserResponseObject, error)
@@ -4150,6 +4411,98 @@ func (sh *strictHandler) SetUserAffinity(w http.ResponseWriter, r *http.Request,
 		sh.options.ResponseErrorHandlerFunc(w, r, err)
 	} else if validResponse, ok := response.(SetUserAffinityResponseObject); ok {
 		if err := validResponse.VisitSetUserAffinityResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// ClearUserBackendPin operation middleware
+func (sh *strictHandler) ClearUserBackendPin(w http.ResponseWriter, r *http.Request, userKey UserKey) {
+	var request ClearUserBackendPinRequestObject
+
+	request.UserKey = userKey
+
+	var body ClearUserBackendPinJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.ClearUserBackendPin(ctx, request.(ClearUserBackendPinRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ClearUserBackendPin")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ClearUserBackendPinResponseObject); ok {
+		if err := validResponse.VisitClearUserBackendPinResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// GetUserBackendPin operation middleware
+func (sh *strictHandler) GetUserBackendPin(w http.ResponseWriter, r *http.Request, userKey UserKey) {
+	var request GetUserBackendPinRequestObject
+
+	request.UserKey = userKey
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.GetUserBackendPin(ctx, request.(GetUserBackendPinRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetUserBackendPin")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetUserBackendPinResponseObject); ok {
+		if err := validResponse.VisitGetUserBackendPinResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// SetUserBackendPin operation middleware
+func (sh *strictHandler) SetUserBackendPin(w http.ResponseWriter, r *http.Request, userKey UserKey) {
+	var request SetUserBackendPinRequestObject
+
+	request.UserKey = userKey
+
+	var body SetUserBackendPinJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.SetUserBackendPin(ctx, request.(SetUserBackendPinRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "SetUserBackendPin")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(SetUserBackendPinResponseObject); ok {
+		if err := validResponse.VisitSetUserBackendPinResponse(w); err != nil {
 			sh.options.ResponseErrorHandlerFunc(w, r, err)
 		}
 	} else if response != nil {

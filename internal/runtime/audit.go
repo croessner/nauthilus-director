@@ -101,6 +101,10 @@ const (
 	AuditOperationSessionReap AuditOperation = "session_reap"
 	// AuditOperationUserAffinityClear records a user affinity clear mutation.
 	AuditOperationUserAffinityClear AuditOperation = "user_affinity_clear"
+	// AuditOperationUserBackendPinClear records a user backend-pin clear mutation.
+	AuditOperationUserBackendPinClear AuditOperation = "user_backend_pin_clear"
+	// AuditOperationUserBackendPinSet records a user backend-pin mutation.
+	AuditOperationUserBackendPinSet AuditOperation = "user_backend_pin_set"
 	// AuditOperationUserKick records a user kick mutation.
 	AuditOperationUserKick AuditOperation = "user_kick"
 	// AuditOperationUserMove records a user move mutation.
@@ -110,7 +114,10 @@ const (
 const (
 	auditFieldActiveSessionCount = "active_session_count"
 	auditFieldAllowActiveClear   = "allow_active_clear"
+	auditFieldBackendIdentifier  = "backend_identifier"
+	auditFieldBackendPool        = "backend_pool"
 	auditFieldControlAction      = "control_action"
+	auditFieldEffectiveShard     = "effective_shard"
 	auditFieldExpiredSessions    = "expired_sessions"
 	auditFieldListenerDrainMode  = "listener_drain_mode"
 	auditFieldListenerGrace      = "listener_grace_seconds"
@@ -121,6 +128,7 @@ const (
 	auditFieldStatus             = "status"
 	auditFieldStrategy           = "strategy"
 	auditFieldTargetShard        = "target_shard"
+	auditFieldProtocol           = "protocol"
 	auditValueFalse              = "false"
 	auditValueTrue               = "true"
 )

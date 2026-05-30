@@ -86,6 +86,11 @@ type UserReader interface {
 	GetUserAffinity(ctx context.Context, key runtime.UserKey) (runtime.UserRuntimeState, error)
 }
 
+// UserBackendPinReader exposes user backend-pin state to REST adapters.
+type UserBackendPinReader interface {
+	GetUserBackendPin(ctx context.Context, request runtime.GetUserBackendPinRequest) (runtime.UserBackendPinReadResult, error)
+}
+
 // RuntimeSummaryReader exposes aggregate runtime summaries to REST adapters.
 type RuntimeSummaryReader interface {
 	RuntimeSummary(ctx context.Context) (runtime.Summary, error)
@@ -96,6 +101,12 @@ type UserMutator interface {
 	MoveUser(ctx context.Context, request runtime.MoveUserRequest) (runtime.UserMutationResult, error)
 	KickUser(ctx context.Context, request runtime.KickUserRequest) (runtime.UserMutationResult, error)
 	ClearUserAffinity(ctx context.Context, request runtime.ClearUserAffinityRequest) (runtime.UserMutationResult, error)
+}
+
+// UserBackendPinMutator exposes user backend-pin mutations to REST adapters.
+type UserBackendPinMutator interface {
+	SetUserBackendPin(ctx context.Context, request runtime.SetUserBackendPinRequest) (runtime.UserBackendPinMutationResult, error)
+	ClearUserBackendPin(ctx context.Context, request runtime.ClearUserBackendPinRequest) (runtime.UserBackendPinMutationResult, error)
 }
 
 // RouteLookupService exposes side-effect-free route diagnostics to REST adapters.
@@ -158,8 +169,10 @@ type HandlerOptions struct {
 	SessionReader             SessionReader
 	SessionMutator            SessionMutator
 	UserReader                UserReader
+	UserBackendPinReader      UserBackendPinReader
 	RuntimeSummaryReader      RuntimeSummaryReader
 	UserMutator               UserMutator
+	UserBackendPinMutator     UserBackendPinMutator
 	RouteLookup               RouteLookupService
 	ListenerRuntime           ListenerRuntimeService
 	Reload                    ReloadService
@@ -180,8 +193,10 @@ type Handler struct {
 	sessionReader             SessionReader
 	sessionMutator            SessionMutator
 	userReader                UserReader
+	userBackendPinReader      UserBackendPinReader
 	runtimeSummaryReader      RuntimeSummaryReader
 	userMutator               UserMutator
+	userBackendPinMutator     UserBackendPinMutator
 	routeLookup               RouteLookupService
 	listenerRuntime           ListenerRuntimeService
 	reload                    ReloadService
@@ -204,8 +219,10 @@ func NewHandler(options HandlerOptions) *Handler {
 		sessionReader:             options.SessionReader,
 		sessionMutator:            options.SessionMutator,
 		userReader:                options.UserReader,
+		userBackendPinReader:      options.UserBackendPinReader,
 		runtimeSummaryReader:      options.RuntimeSummaryReader,
 		userMutator:               options.UserMutator,
+		userBackendPinMutator:     options.UserBackendPinMutator,
 		routeLookup:               options.RouteLookup,
 		listenerRuntime:           options.ListenerRuntime,
 		reload:                    options.Reload,
@@ -683,6 +700,86 @@ func (h *Handler) SetUserAffinity(ctx context.Context, request generated.SetUser
 	return generated.SetUserAffinity202JSONResponse(accepted()), nil
 }
 
+// ClearUserBackendPin removes one concrete user backend pin with an audit reason.
+func (h *Handler) ClearUserBackendPin(ctx context.Context, request generated.ClearUserBackendPinRequestObject) (generated.ClearUserBackendPinResponseObject, error) {
+	if request.Body == nil {
+		return generated.ClearUserBackendPindefaultJSONResponse{StatusCode: http.StatusBadRequest, Body: h.problem(http.StatusBadRequest, "invalid_request", "request body is required", "ClearUserBackendPin")}, nil
+	}
+
+	reason := strings.TrimSpace(request.Body.Reason)
+	if reason == "" {
+		return generated.ClearUserBackendPindefaultJSONResponse{StatusCode: http.StatusBadRequest, Body: h.problem(http.StatusBadRequest, "invalid_request", "reason required", "ClearUserBackendPin")}, nil
+	}
+
+	if h.userBackendPinMutator == nil {
+		return generated.ClearUserBackendPindefaultJSONResponse{StatusCode: http.StatusServiceUnavailable, Body: h.runtimeUnavailable("ClearUserBackendPin")}, nil
+	}
+
+	if _, err := h.userBackendPinMutator.ClearUserBackendPin(ctx, runtime.ClearUserBackendPinRequest{
+		Key:    parseUserKey(request.UserKey),
+		Reason: reason,
+		Actor:  actorFromContext(ctx),
+	}); err != nil {
+		return generated.ClearUserBackendPindefaultJSONResponse{StatusCode: statusForError(err), Body: h.problemFromError("ClearUserBackendPin", err)}, nil
+	}
+
+	return generated.ClearUserBackendPin202JSONResponse(accepted()), nil
+}
+
+// GetUserBackendPin returns one deterministic backend-pin read model.
+func (h *Handler) GetUserBackendPin(ctx context.Context, request generated.GetUserBackendPinRequestObject) (generated.GetUserBackendPinResponseObject, error) {
+	key := parseUserKey(request.UserKey)
+
+	if h.userBackendPinReader == nil {
+		return generated.GetUserBackendPindefaultJSONResponse{StatusCode: http.StatusServiceUnavailable, Body: h.runtimeUnavailable("GetUserBackendPin")}, nil
+	}
+
+	result, err := h.userBackendPinReader.GetUserBackendPin(ctx, runtime.GetUserBackendPinRequest{Key: key})
+	if err != nil {
+		return generated.GetUserBackendPindefaultJSONResponse{StatusCode: statusForError(err), Body: h.problemFromError("GetUserBackendPin", err)}, nil
+	}
+
+	return generated.GetUserBackendPin200JSONResponse(userBackendPin(result.Pin, key)), nil
+}
+
+// SetUserBackendPin stores one concrete backend pin through the runtime domain.
+func (h *Handler) SetUserBackendPin(ctx context.Context, request generated.SetUserBackendPinRequestObject) (generated.SetUserBackendPinResponseObject, error) {
+	if request.Body == nil {
+		return generated.SetUserBackendPindefaultJSONResponse{StatusCode: http.StatusBadRequest, Body: h.problem(http.StatusBadRequest, "invalid_request", "request body is required", "SetUserBackendPin")}, nil
+	}
+
+	backendIdentifier := strings.TrimSpace(request.Body.Backend)
+	if backendIdentifier == "" {
+		return generated.SetUserBackendPindefaultJSONResponse{StatusCode: http.StatusBadRequest, Body: h.problem(http.StatusBadRequest, "invalid_request", "backend required", "SetUserBackendPin")}, nil
+	}
+
+	reason := strings.TrimSpace(request.Body.Reason)
+	if reason == "" {
+		return generated.SetUserBackendPindefaultJSONResponse{StatusCode: http.StatusBadRequest, Body: h.problem(http.StatusBadRequest, "invalid_request", "reason required", "SetUserBackendPin")}, nil
+	}
+
+	strategy := generated.UserMoveRequestStrategy(strings.TrimSpace(string(request.Body.Strategy)))
+	if !strategy.Valid() {
+		return generated.SetUserBackendPindefaultJSONResponse{StatusCode: http.StatusBadRequest, Body: h.problem(http.StatusBadRequest, "invalid_request", "unsupported move strategy", "SetUserBackendPin")}, nil
+	}
+
+	if h.userBackendPinMutator == nil {
+		return generated.SetUserBackendPindefaultJSONResponse{StatusCode: http.StatusServiceUnavailable, Body: h.runtimeUnavailable("SetUserBackendPin")}, nil
+	}
+
+	if _, err := h.userBackendPinMutator.SetUserBackendPin(ctx, runtime.SetUserBackendPinRequest{
+		Key:               parseUserKey(request.UserKey),
+		BackendIdentifier: backendIdentifier,
+		Strategy:          runtime.MoveStrategy(strategy),
+		Reason:            reason,
+		Actor:             actorFromContext(ctx),
+	}); err != nil {
+		return generated.SetUserBackendPindefaultJSONResponse{StatusCode: statusForError(err), Body: h.problemFromError("SetUserBackendPin", err)}, nil
+	}
+
+	return generated.SetUserBackendPin202JSONResponse(accepted()), nil
+}
+
 // KickUser marks a user's active sessions for closure.
 func (h *Handler) KickUser(ctx context.Context, request generated.KickUserRequestObject) (generated.KickUserResponseObject, error) {
 	if request.Body == nil {
@@ -982,6 +1079,10 @@ func withDefaultHandlerOptions(options HandlerOptions) HandlerOptions {
 
 	if options.UserReader == nil {
 		options.UserReader = emptyRuntimeReader{}
+	}
+
+	if options.UserBackendPinReader == nil {
+		options.UserBackendPinReader = emptyRuntimeReader{}
 	}
 
 	if options.RuntimeSummaryReader == nil {
@@ -1313,6 +1414,7 @@ func routeLookupResponse(result runtime.RouteLookupResponse) generated.RouteLook
 			RuntimeOverride: result.Effects.RuntimeOverride,
 		},
 		Affinity:   routeLookupAffinity(result.Affinity),
+		BackendPin: routeLookupBackendPin(result.BackendPin),
 		Backends:   routeLookupBackends(result.Backends),
 		FailClosed: result.FailClosed,
 		Healthy:    healthy,
@@ -1334,6 +1436,19 @@ func routeLookupResponse(result runtime.RouteLookupResponse) generated.RouteLook
 		RoutingGeneration: generationPtr,
 		SelectedBackend:   result.SelectedBackend,
 		ShardTag:          result.Routing.EffectiveShard,
+	}
+}
+
+// routeLookupBackendPin adapts operator backend-pin diagnostics into generated DTOs.
+func routeLookupBackendPin(pin runtime.RouteLookupBackendPinState) generated.RouteLookupBackendPin {
+	return generated.RouteLookupBackendPin{
+		Applied:     pin.Applied,
+		Backend:     stringPtrIfNotEmpty(pin.BackendID),
+		BackendPool: stringPtrIfNotEmpty(pin.BackendPool),
+		Present:     pin.Present,
+		Protocol:    stringPtrIfNotEmpty(pin.Protocol),
+		Reason:      pin.ReasonClass,
+		ShardTag:    stringPtrIfNotEmpty(pin.EffectiveShard),
 	}
 }
 
@@ -1526,6 +1641,38 @@ func userAffinity(user runtime.UserRuntimeState) generated.UserAffinity {
 		ShardTag:       user.ActiveShard,
 		UserKey:        formatUserKey(user.Key),
 	}
+}
+
+// userBackendPin adapts runtime backend-pin state into the generated REST DTO.
+func userBackendPin(pin runtime.UserBackendPin, fallbackKey runtime.UserKey) generated.UserBackendPin {
+	key := pin.Key.Normalize()
+	if key.Tenant == "" || key.UserHash == "" {
+		key = fallbackKey.Normalize()
+	}
+
+	detail := generated.UserBackendPin{
+		Present: pin.Present,
+		UserKey: formatUserKey(key),
+	}
+
+	if !pin.Present {
+		return detail
+	}
+
+	activeSessionCount := pin.ActiveSessionCount
+	detail.ActiveSessionCount = &activeSessionCount
+	detail.Backend = stringPtrIfNotEmpty(pin.BackendIdentifier)
+	detail.BackendPool = stringPtrIfNotEmpty(pin.BackendPool)
+	detail.Generation = stringPtrIfNotEmpty(pin.Generation)
+	detail.Protocol = stringPtrIfNotEmpty(pin.Protocol)
+	detail.ShardTag = stringPtrIfNotEmpty(pin.EffectiveShard)
+
+	if strategy := strings.TrimSpace(string(pin.Strategy)); strategy != "" {
+		value := generated.UserMoveRequestStrategy(strategy)
+		detail.Strategy = &value
+	}
+
+	return detail
 }
 
 // statusForError maps domain error classes to stable REST status codes.
@@ -1805,6 +1952,16 @@ func (emptyRuntimeReader) GetUser(context.Context, runtime.UserKey) (runtime.Use
 // GetUserAffinity reports absent affinity when no runtime state reader is assembled.
 func (emptyRuntimeReader) GetUserAffinity(context.Context, runtime.UserKey) (runtime.UserRuntimeState, error) {
 	return runtime.UserRuntimeState{}, newRuntimeError(runtime.ErrorKindNotFound, "user_affinity", "user affinity not found")
+}
+
+// GetUserBackendPin reports absent backend-pin state when no runtime reader is assembled.
+func (emptyRuntimeReader) GetUserBackendPin(_ context.Context, request runtime.GetUserBackendPinRequest) (runtime.UserBackendPinReadResult, error) {
+	return runtime.UserBackendPinReadResult{
+		Pin: runtime.UserBackendPin{
+			Present: false,
+			Key:     request.Key.Normalize(),
+		},
+	}, nil
 }
 
 // RuntimeSummary returns empty aggregate totals when no runtime reader is assembled.

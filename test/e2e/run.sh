@@ -46,7 +46,7 @@ printf 'ok e2e: required fake-service and interoperability scaffold files exist\
 NAUTHILUS_DIRECTOR_E2E_SERVER_BINARY="$tmpdir/nauthilus-director" \
 	"$go_cmd" test -mod=vendor -count=1 ./test/e2e
 
-printf 'ok e2e: fake Nauthilus HTTP/gRPC authority, real server binary, fake IMAP and LMTP backends, listener drain/resume, DATA/BDAT, TLS, route lookup and observability checks passed\n'
+printf 'ok e2e: fake Nauthilus HTTP/gRPC authority, real server binary, fake IMAP and LMTP backends, backend pinning, listener drain/resume, DATA/BDAT, TLS, route lookup and observability checks passed\n'
 
 "$go_cmd" run -mod=vendor ./cmd/nauthilus-director --version >"$tmpdir/nauthilus-director.version"
 "$go_cmd" run -mod=vendor ./cmd/nauthilus-directorctl --version >"$tmpdir/nauthilus-directorctl.version"

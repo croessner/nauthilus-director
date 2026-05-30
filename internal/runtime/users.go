@@ -18,19 +18,24 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"maps"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/croessner/nauthilus-director/internal/backend"
 	"github.com/croessner/nauthilus-director/internal/observability"
 	"github.com/croessner/nauthilus-director/internal/state"
 )
 
 const (
-	operationUserAffinityClear = "user_affinity_clear"
-	operationUserKick          = "user_kick"
-	operationUserMove          = "user_move"
+	operationUserAffinityClear   = "user_affinity_clear"
+	operationUserBackendPinSet   = "user_backend_pin_set"
+	operationUserBackendPinGet   = "user_backend_pin_get"
+	operationUserBackendPinClear = "user_backend_pin_clear"
+	operationUserKick            = "user_kick"
+	operationUserMove            = "user_move"
 )
 
 // MoveStrategy describes how a user move treats existing sessions.
@@ -61,6 +66,28 @@ type UserRuntimeState struct {
 	KickGeneration     string
 	MoveGeneration     string
 	Generation         string
+	UpdatedAt          time.Time
+}
+
+// UserBackendPinTarget describes the registry-derived backend facts for a pin.
+type UserBackendPinTarget struct {
+	BackendIdentifier string
+	Protocol          string
+	BackendPool       string
+	EffectiveShard    string
+}
+
+// UserBackendPin describes one user-scoped concrete backend runtime override.
+type UserBackendPin struct {
+	Present            bool
+	Key                UserKey
+	BackendIdentifier  string
+	Protocol           string
+	BackendPool        string
+	EffectiveShard     string
+	Strategy           MoveStrategy
+	Generation         string
+	ActiveSessionCount int
 	UpdatedAt          time.Time
 }
 
@@ -103,10 +130,45 @@ type ClearUserAffinityRequest struct {
 	ExpectedGeneration string
 }
 
+// SetUserBackendPinRequest asks runtime state to pin one affinity key to one backend.
+type SetUserBackendPinRequest struct {
+	Key                UserKey
+	BackendIdentifier  string
+	Strategy           MoveStrategy
+	Reason             string
+	Actor              Actor
+	ExpectedGeneration string
+}
+
+// GetUserBackendPinRequest asks runtime state for one affinity key backend pin.
+type GetUserBackendPinRequest struct {
+	Key UserKey
+}
+
+// ClearUserBackendPinRequest asks runtime state to clear one backend pin.
+type ClearUserBackendPinRequest struct {
+	Key                UserKey
+	Reason             string
+	Actor              Actor
+	ExpectedGeneration string
+}
+
 // UserMutationResult describes a runtime user mutation outcome.
 type UserMutationResult struct {
 	State UserRuntimeState
 	Audit AuditMetadata
+}
+
+// UserBackendPinReadResult describes a backend-pin read outcome.
+type UserBackendPinReadResult struct {
+	Pin UserBackendPin
+}
+
+// UserBackendPinMutationResult describes a backend-pin mutation outcome.
+type UserBackendPinMutationResult struct {
+	Pin    UserBackendPin
+	Target UserBackendPinTarget
+	Audit  AuditMetadata
 }
 
 // UserStateStore persists Redis-backed user runtime operations.
@@ -116,10 +178,24 @@ type UserStateStore interface {
 	ClearUserAffinity(ctx context.Context, request state.UserClearRequest) (state.UserRuntimeRecord, error)
 }
 
+// UserBackendPinStateStore persists Redis-backed backend-pin operations.
+type UserBackendPinStateStore interface {
+	SetUserBackendPin(ctx context.Context, request state.UserBackendPinSetRequest) (state.UserBackendPinRecord, error)
+	GetUserBackendPin(ctx context.Context, request state.UserBackendPinGetRequest) (state.UserBackendPinRecord, error)
+	ClearUserBackendPin(ctx context.Context, request state.UserBackendPinClearRequest) (state.UserBackendPinRecord, error)
+}
+
 // UserService coordinates user runtime operations with local session acceleration.
 type UserService struct {
 	store    UserStateStore
 	local    *LocalSessionRegistry
+	recorder observability.Recorder
+}
+
+// UserBackendPinService coordinates user backend-pin runtime operations.
+type UserBackendPinService struct {
+	store    UserBackendPinStateStore
+	registry backend.Registry
 	recorder observability.Recorder
 }
 
@@ -128,6 +204,156 @@ func NewUserService(store UserStateStore, local *LocalSessionRegistry, options .
 	applied := applyServiceOptions(options)
 
 	return &UserService{store: store, local: local, recorder: applied.recorder}
+}
+
+// NewUserBackendPinService creates the runtime backend-pin operation service.
+func NewUserBackendPinService(
+	store UserBackendPinStateStore,
+	registry backend.Registry,
+	options ...ServiceOption,
+) *UserBackendPinService {
+	applied := applyServiceOptions(options)
+
+	return &UserBackendPinService{store: store, registry: registry, recorder: applied.recorder}
+}
+
+// SetUserBackendPin derives target facts and records one concrete backend pin.
+func (s *UserBackendPinService) SetUserBackendPin(
+	ctx context.Context,
+	request SetUserBackendPinRequest,
+) (UserBackendPinMutationResult, error) {
+	request.Key = request.Key.Normalize()
+	request.BackendIdentifier = strings.TrimSpace(request.BackendIdentifier)
+	request.Strategy = MoveStrategy(strings.TrimSpace(string(request.Strategy)))
+
+	if err := request.Validate(); err != nil {
+		return UserBackendPinMutationResult{}, err
+	}
+
+	if s == nil {
+		return UserBackendPinMutationResult{}, newRuntimeError(ErrorKindInvalidRequest, operationUserBackendPinSet, "backend pin service required")
+	}
+
+	target, err := s.resolveBackendPinTarget(ctx, request.BackendIdentifier, operationUserBackendPinSet)
+	if err != nil {
+		return UserBackendPinMutationResult{}, err
+	}
+
+	if s.store == nil {
+		return UserBackendPinMutationResult{}, newRuntimeError(ErrorKindInvalidRequest, operationUserBackendPinSet, "backend pin store required")
+	}
+
+	record, err := s.store.SetUserBackendPin(ctx, backendPinSetStoreRequest(request, target))
+	if err != nil {
+		s.recordBackendPinOperation(ctx, operationUserBackendPinSet, runtimeObservationResultFailure, runtimeObservationReasonBackendPinSet, state.UserBackendPinRecord{
+			Key:               request.Key.affinityKey(),
+			BackendIdentifier: target.BackendIdentifier,
+			Protocol:          target.Protocol,
+			BackendPool:       target.BackendPool,
+			ShardTag:          target.EffectiveShard,
+			Strategy:          string(request.Strategy),
+		})
+
+		return UserBackendPinMutationResult{}, err
+	}
+
+	record = backendPinRecordWithTarget(record, request.Key, target, request.Strategy)
+
+	audit, err := userBackendPinAuditMetadata(AuditOperationUserBackendPinSet, request.Reason, request.Actor, record)
+	if err != nil {
+		return UserBackendPinMutationResult{}, err
+	}
+
+	s.recordBackendPinOperation(ctx, operationUserBackendPinSet, runtimeObservationResultOK, runtimeObservationReasonBackendPinSet, record)
+
+	return UserBackendPinMutationResult{
+		Pin:    userBackendPinFromRecord(record),
+		Target: target,
+		Audit:  audit,
+	}, nil
+}
+
+// backendPinSetStoreRequest maps validated operator input into store shape.
+func backendPinSetStoreRequest(request SetUserBackendPinRequest, target UserBackendPinTarget) state.UserBackendPinSetRequest {
+	return state.UserBackendPinSetRequest{
+		Key:               request.Key.affinityKey(),
+		BackendIdentifier: target.BackendIdentifier,
+		Protocol:          target.Protocol,
+		BackendPool:       target.BackendPool,
+		ShardTag:          target.EffectiveShard,
+		Strategy:          string(request.Strategy),
+		Reason:            request.Reason,
+		Actor:             actorAuditValue(request.Actor),
+	}
+}
+
+// GetUserBackendPin reads one backend pin without mutating runtime state.
+func (s *UserBackendPinService) GetUserBackendPin(
+	ctx context.Context,
+	request GetUserBackendPinRequest,
+) (UserBackendPinReadResult, error) {
+	request.Key = request.Key.Normalize()
+	if err := request.Validate(); err != nil {
+		return UserBackendPinReadResult{}, err
+	}
+
+	if s == nil || s.store == nil {
+		return UserBackendPinReadResult{}, newRuntimeError(ErrorKindInvalidRequest, operationUserBackendPinGet, "backend pin store required")
+	}
+
+	record, err := s.store.GetUserBackendPin(ctx, state.UserBackendPinGetRequest{
+		Key: request.Key.affinityKey(),
+	})
+	if err != nil {
+		s.recordBackendPinOperation(ctx, operationUserBackendPinGet, runtimeObservationResultFailure, "backend_pin_read_failed", state.UserBackendPinRecord{Key: request.Key.affinityKey()})
+
+		return UserBackendPinReadResult{}, err
+	}
+
+	record = backendPinRecordWithKey(record, request.Key)
+
+	return UserBackendPinReadResult{Pin: userBackendPinFromRecord(record)}, nil
+}
+
+// ClearUserBackendPin removes the concrete backend override without closing sessions.
+func (s *UserBackendPinService) ClearUserBackendPin(
+	ctx context.Context,
+	request ClearUserBackendPinRequest,
+) (UserBackendPinMutationResult, error) {
+	request.Key = request.Key.Normalize()
+	if err := request.Validate(); err != nil {
+		return UserBackendPinMutationResult{}, err
+	}
+
+	if s == nil || s.store == nil {
+		return UserBackendPinMutationResult{}, newRuntimeError(ErrorKindInvalidRequest, operationUserBackendPinClear, "backend pin store required")
+	}
+
+	record, err := s.store.ClearUserBackendPin(ctx, state.UserBackendPinClearRequest{
+		Key:    request.Key.affinityKey(),
+		Reason: request.Reason,
+		Actor:  actorAuditValue(request.Actor),
+	})
+	if err != nil {
+		s.recordBackendPinOperation(ctx, operationUserBackendPinClear, runtimeObservationResultFailure, runtimeObservationReasonBackendPinClear, state.UserBackendPinRecord{Key: request.Key.affinityKey()})
+
+		return UserBackendPinMutationResult{}, err
+	}
+
+	record = backendPinRecordWithKey(record, request.Key)
+
+	audit, err := userBackendPinAuditMetadata(AuditOperationUserBackendPinClear, request.Reason, request.Actor, record)
+	if err != nil {
+		return UserBackendPinMutationResult{}, err
+	}
+
+	s.recordBackendPinOperation(ctx, operationUserBackendPinClear, runtimeObservationResultOK, runtimeObservationReasonBackendPinClear, record)
+
+	return UserBackendPinMutationResult{
+		Pin:    userBackendPinFromRecord(record),
+		Target: backendPinTargetFromRecord(record),
+		Audit:  audit,
+	}, nil
 }
 
 // MoveUser records a placement move and locally closes streams for kick-existing moves.
@@ -256,7 +482,7 @@ func (s *UserService) ClearUserAffinity(ctx context.Context, request ClearUserAf
 		return UserMutationResult{}, err
 	}
 
-	s.recordUserOperation(ctx, observability.EventAffinityClear, operationUserAffinityClear, runtimeObservationResultOK, "cleared", record, map[string]string{
+	s.recordUserOperation(ctx, observability.EventAffinityClear, operationUserAffinityClear, runtimeObservationResultOK, runtimeObservationReasonCleared, record, map[string]string{
 		auditFieldAllowActiveClear: boolAuditValue(request.AllowActiveClear),
 	})
 
@@ -298,6 +524,58 @@ func (r ClearUserAffinityRequest) Validate() error {
 	return requireReason(operationUserAffinityClear, r.Reason)
 }
 
+// Validate checks the backend-pin set request before registry or state access.
+func (r SetUserBackendPinRequest) Validate() error {
+	if err := r.Key.Validate(operationUserBackendPinSet); err != nil {
+		return err
+	}
+
+	if strings.TrimSpace(r.BackendIdentifier) == "" {
+		return newRuntimeError(ErrorKindInvalidRequest, operationUserBackendPinSet, "backend identifier required")
+	}
+
+	if !validMoveStrategy(r.Strategy) {
+		return newRuntimeError(ErrorKindInvalidRequest, operationUserBackendPinSet, "unsupported move strategy")
+	}
+
+	return requireReason(operationUserBackendPinSet, r.Reason)
+}
+
+// Validate checks the backend-pin read request before state access.
+func (r GetUserBackendPinRequest) Validate() error {
+	return r.Key.Validate(operationUserBackendPinGet)
+}
+
+// Validate checks the backend-pin clear request before state access.
+func (r ClearUserBackendPinRequest) Validate() error {
+	if err := r.Key.Validate(operationUserBackendPinClear); err != nil {
+		return err
+	}
+
+	return requireReason(operationUserBackendPinClear, r.Reason)
+}
+
+// Validate checks derived backend-pin target facts before persistence.
+func (t UserBackendPinTarget) Validate(operation string) error {
+	if strings.TrimSpace(t.BackendIdentifier) == "" {
+		return newRuntimeError(ErrorKindUnavailable, operation, "backend target identifier required")
+	}
+
+	if strings.TrimSpace(t.Protocol) == "" {
+		return newRuntimeError(ErrorKindUnavailable, operation, "backend target protocol required")
+	}
+
+	if strings.TrimSpace(t.BackendPool) == "" {
+		return newRuntimeError(ErrorKindUnavailable, operation, "backend target pool required")
+	}
+
+	if strings.TrimSpace(t.EffectiveShard) == "" {
+		return newRuntimeError(ErrorKindUnavailable, operation, "backend target shard required")
+	}
+
+	return nil
+}
+
 // Validate checks that the user key is suitable for Redis-backed runtime state.
 func (k UserKey) Validate(operation string) error {
 	if strings.TrimSpace(k.Tenant) == "" {
@@ -331,6 +609,134 @@ func validMoveStrategy(strategy MoveStrategy) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+// resolveBackendPinTarget resolves operator input through the configured registry.
+func (s *UserBackendPinService) resolveBackendPinTarget(
+	ctx context.Context,
+	identifier string,
+	operation string,
+) (UserBackendPinTarget, error) {
+	if s == nil || s.registry == nil {
+		return UserBackendPinTarget{}, newRuntimeError(ErrorKindUnavailable, operation, "backend registry required")
+	}
+
+	entry, err := s.registry.Lookup(ctx, identifier)
+	if err != nil {
+		return UserBackendPinTarget{}, runtimeErrorFromBackendRegistry(operation, err)
+	}
+
+	target := userBackendPinTargetFromFacts(entry.PlacementFacts())
+	if err := target.Validate(operation); err != nil {
+		return UserBackendPinTarget{}, err
+	}
+
+	return target, nil
+}
+
+// runtimeErrorFromBackendRegistry maps registry failures into runtime control classes.
+func runtimeErrorFromBackendRegistry(operation string, err error) error {
+	if err == nil {
+		return nil
+	}
+
+	var backendErr *backend.Error
+	if !errors.As(err, &backendErr) {
+		return newRuntimeError(ErrorKindUnavailable, operation, "backend registry unavailable")
+	}
+
+	switch backendErr.Kind {
+	case backend.ErrorKindInvalidRequest:
+		return newRuntimeError(ErrorKindInvalidRequest, operation, backendErr.Message)
+	case backend.ErrorKindNoBackend:
+		return newRuntimeError(ErrorKindNotFound, operation, "backend not found")
+	case backend.ErrorKindAmbiguous, backend.ErrorKindConfig:
+		return newRuntimeError(ErrorKindUnavailable, operation, backendErr.Message)
+	default:
+		return newRuntimeError(ErrorKindUnavailable, operation, "backend registry unavailable")
+	}
+}
+
+// userBackendPinTargetFromFacts adapts registry facts into runtime pin metadata.
+func userBackendPinTargetFromFacts(facts backend.PlacementFacts) UserBackendPinTarget {
+	return UserBackendPinTarget{
+		BackendIdentifier: strings.TrimSpace(facts.BackendIdentifier),
+		Protocol:          strings.TrimSpace(facts.Protocol),
+		BackendPool:       strings.TrimSpace(facts.BackendPool),
+		EffectiveShard:    strings.TrimSpace(facts.EffectiveShard),
+	}
+}
+
+// backendPinRecordWithTarget preserves registry-derived facts in mutation output.
+func backendPinRecordWithTarget(
+	record state.UserBackendPinRecord,
+	key UserKey,
+	target UserBackendPinTarget,
+	strategy MoveStrategy,
+) state.UserBackendPinRecord {
+	record = backendPinRecordWithKey(record, key)
+	record.Present = true
+
+	if strings.TrimSpace(record.BackendIdentifier) == "" {
+		record.BackendIdentifier = target.BackendIdentifier
+	}
+
+	if strings.TrimSpace(record.Protocol) == "" {
+		record.Protocol = target.Protocol
+	}
+
+	if strings.TrimSpace(record.BackendPool) == "" {
+		record.BackendPool = target.BackendPool
+	}
+
+	if strings.TrimSpace(record.ShardTag) == "" {
+		record.ShardTag = target.EffectiveShard
+	}
+
+	if strings.TrimSpace(record.Strategy) == "" {
+		record.Strategy = string(strategy)
+	}
+
+	return record
+}
+
+// backendPinRecordWithKey preserves the requested affinity key in sparse records.
+func backendPinRecordWithKey(record state.UserBackendPinRecord, key UserKey) state.UserBackendPinRecord {
+	if strings.TrimSpace(record.Key.Tenant) == "" {
+		record.Key.Tenant = key.Tenant
+	}
+
+	if strings.TrimSpace(record.Key.AccountKey) == "" {
+		record.Key.AccountKey = key.UserHash
+	}
+
+	return record
+}
+
+// userBackendPinFromRecord maps state output into runtime backend-pin state.
+func userBackendPinFromRecord(record state.UserBackendPinRecord) UserBackendPin {
+	return UserBackendPin{
+		Present:            record.Present,
+		Key:                UserKey{Tenant: record.Key.Tenant, UserHash: record.Key.AccountKey}.Normalize(),
+		BackendIdentifier:  strings.TrimSpace(record.BackendIdentifier),
+		Protocol:           strings.TrimSpace(record.Protocol),
+		BackendPool:        strings.TrimSpace(record.BackendPool),
+		EffectiveShard:     strings.TrimSpace(record.ShardTag),
+		Strategy:           MoveStrategy(strings.TrimSpace(record.Strategy)),
+		Generation:         strings.TrimSpace(record.Generation),
+		ActiveSessionCount: record.ActiveSessionCount,
+		UpdatedAt:          record.ServerTime,
+	}
+}
+
+// backendPinTargetFromRecord returns bounded target metadata from a stored pin.
+func backendPinTargetFromRecord(record state.UserBackendPinRecord) UserBackendPinTarget {
+	return UserBackendPinTarget{
+		BackendIdentifier: strings.TrimSpace(record.BackendIdentifier),
+		Protocol:          strings.TrimSpace(record.Protocol),
+		BackendPool:       strings.TrimSpace(record.BackendPool),
+		EffectiveShard:    strings.TrimSpace(record.ShardTag),
 	}
 }
 
@@ -378,6 +784,46 @@ func userAuditMetadata(
 	})
 }
 
+// userBackendPinAuditMetadata creates secret-safe audit metadata for backend pins.
+func userBackendPinAuditMetadata(
+	operation AuditOperation,
+	reason string,
+	actor Actor,
+	record state.UserBackendPinRecord,
+) (AuditMetadata, error) {
+	return NewAuditMetadata(AuditInput{
+		Operation:         operation,
+		Reason:            reason,
+		Actor:             actor,
+		Generation:        record.Generation,
+		ServerTime:        record.ServerTime,
+		BackendIdentifier: record.BackendIdentifier,
+		UserHash:          record.Key.AccountKey,
+		Fields:            backendPinAuditFields(record),
+	})
+}
+
+// backendPinAuditFields returns bounded backend-pin context without transport secrets.
+func backendPinAuditFields(record state.UserBackendPinRecord) map[string]string {
+	fields := map[string]string{
+		auditFieldActiveSessionCount: strconv.Itoa(record.ActiveSessionCount),
+		auditFieldBackendIdentifier:  strings.TrimSpace(record.BackendIdentifier),
+		auditFieldBackendPool:        strings.TrimSpace(record.BackendPool),
+		auditFieldEffectiveShard:     strings.TrimSpace(record.ShardTag),
+		auditFieldProtocol:           strings.TrimSpace(record.Protocol),
+		auditFieldStatus:             strings.TrimSpace(record.Status),
+		auditFieldStrategy:           strings.TrimSpace(record.Strategy),
+	}
+
+	for key, value := range fields {
+		if value == "" {
+			delete(fields, key)
+		}
+	}
+
+	return fields
+}
+
 // boolAuditValue serializes booleans for audit metadata.
 func boolAuditValue(value bool) string {
 	if value {
@@ -408,9 +854,37 @@ func (s *UserService) recordUserOperation(
 		runtimeObservationFieldRuntimeGeneration: record.Generation,
 		runtimeObservationFieldRuntimeStatus:     record.Status,
 		runtimeObservationFieldShardTag:          record.ShardTag,
-		"user_hash":                              record.Key.AccountKey,
+		runtimeObservationFieldUserHash:          record.Key.AccountKey,
 	}
 	maps.Copy(eventFields, fields)
 
 	recordRuntimeObservation(ctx, s.recorder, event, observability.TraceBoundaryRESTRequest, operation, result, reasonClass, eventFields, nil)
+}
+
+// recordBackendPinOperation emits one secret-safe backend-pin runtime observation.
+func (s *UserBackendPinService) recordBackendPinOperation(
+	ctx context.Context,
+	operation string,
+	result string,
+	reasonClass string,
+	record state.UserBackendPinRecord,
+) {
+	if s == nil {
+		return
+	}
+
+	eventFields := map[string]string{
+		runtimeObservationFieldActiveSessions:    strconv.Itoa(record.ActiveSessionCount),
+		runtimeObservationFieldBackendID:         strings.TrimSpace(record.BackendIdentifier),
+		runtimeObservationFieldBackendPool:       strings.TrimSpace(record.BackendPool),
+		runtimeObservationFieldProtocol:          strings.TrimSpace(record.Protocol),
+		runtimeObservationFieldRuntimeGeneration: strings.TrimSpace(record.Generation),
+		runtimeObservationFieldRuntimeStatus:     strings.TrimSpace(record.Status),
+		runtimeObservationFieldServerTime:        boolAuditValue(!record.ServerTime.IsZero()),
+		runtimeObservationFieldShardTag:          strings.TrimSpace(record.ShardTag),
+		auditFieldStrategy:                       strings.TrimSpace(record.Strategy),
+		runtimeObservationFieldUserHash:          strings.TrimSpace(record.Key.AccountKey),
+	}
+
+	recordRuntimeObservation(ctx, s.recorder, observability.EventUserBackendPin, observability.TraceBoundaryRESTRequest, operation, result, reasonClass, eventFields, nil)
 }

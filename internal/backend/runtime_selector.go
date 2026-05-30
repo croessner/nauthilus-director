@@ -59,6 +59,9 @@ func (s *RuntimeSelector) Explain(ctx context.Context, request SelectionRequest)
 	}
 
 	request = s.normalizeSelectionRequest(request)
+	if err := validateOperatorBackendPinTarget(ctx, s.registry, "runtime_selector", request); err != nil {
+		return SelectionExplanation{Request: request}, err
+	}
 
 	effective, candidateCount, err := s.explanationCandidates(ctx, request)
 	if err != nil {
@@ -68,6 +71,13 @@ func (s *RuntimeSelector) Explain(ctx context.Context, request SelectionRequest)
 	explanation := SelectionExplanation{
 		Request:           request,
 		EffectiveBackends: effective,
+	}
+
+	if request.OperatorBackendIdentifier != "" {
+		result, err := selectOperatorBackendPin("runtime_selector", request, effective)
+		explanation.Result = result
+
+		return explanation, err
 	}
 
 	if request.ActiveAffinity && request.PinnedBackendIdentifier != "" {
@@ -147,6 +157,9 @@ func (s *RuntimeSelector) Select(ctx context.Context, request SelectionRequest) 
 // RetryAfterAttachFailure selects another eligible backend in the same effective shard.
 func (s *RuntimeSelector) RetryAfterAttachFailure(ctx context.Context, request SelectionRequest, failedBackend string) (SelectionResult, error) {
 	request = s.normalizeSelectionRequest(request)
+	if request.OperatorBackendIdentifier != "" {
+		return SelectionResult{}, newBackendError(ErrorKindNoBackend, "runtime_selector", "operator backend pin retry disabled", nil)
+	}
 
 	candidates, err := s.registry.BackendsForShard(ctx, RegistryRequest{
 		Protocol:    request.Protocol,

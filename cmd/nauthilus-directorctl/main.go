@@ -362,6 +362,7 @@ func newUsersCommand(stdout io.Writer, stderr io.Writer) *cobra.Command {
 		RunE:  cobraHandler(stdout, stderr, application.runUsersSessions),
 	})
 	command.AddCommand(newUserAffinityCommand(stdout, stderr))
+	command.AddCommand(newUserBackendPinCommand(stdout, stderr))
 	move := &cobra.Command{
 		Use:   "move <user-key>",
 		Short: "Move future user placement",
@@ -397,6 +398,32 @@ func newUserAffinityCommand(stdout io.Writer, stderr io.Writer) *cobra.Command {
 	set.Flags().String("reason", "", "auditable reason")
 	command.AddCommand(set)
 	command.AddCommand(runtimeReasonCommand("clear <user-key>", "Clear inactive user affinity", stdout, stderr, application.runUsersAffinityClear))
+
+	return command
+}
+
+// newUserBackendPinCommand builds user backend-pin commands.
+func newUserBackendPinCommand(stdout io.Writer, stderr io.Writer) *cobra.Command {
+	command := &cobra.Command{
+		Use:   "backend-pin",
+		Short: "Inspect and control user backend pins",
+		RunE:  cobraHandler(stdout, stderr, application.runUsersBackendPin),
+	}
+	command.AddCommand(&cobra.Command{
+		Use:   "show <user-key>",
+		Short: "Show the backend pin for one user",
+		RunE:  cobraHandler(stdout, stderr, application.runUsersBackendPinShow),
+	})
+	set := &cobra.Command{
+		Use:   "set <user-key>",
+		Short: "Set a backend pin for one user",
+		RunE:  cobraHandler(stdout, stderr, application.runUsersBackendPinSet, "backend", "strategy", "reason"),
+	}
+	set.Flags().String("backend", "", "target backend identifier")
+	set.Flags().String("strategy", "", "pin strategy")
+	set.Flags().String("reason", "", "auditable reason")
+	command.AddCommand(set)
+	command.AddCommand(runtimeReasonCommand("clear <user-key>", "Clear the backend pin for one user", stdout, stderr, application.runUsersBackendPinClear))
 
 	return command
 }
@@ -1585,6 +1612,8 @@ func (app application) runUsers(args []string) int {
 		return app.runUsersSessions(args[1:])
 	case "affinity":
 		return app.runUsersAffinity(args[1:])
+	case "backend-pin":
+		return app.runUsersBackendPin(args[1:])
 	case "move":
 		return app.runUsersMove(args[1:])
 	case "kick":
@@ -1872,6 +1901,165 @@ func (app application) runUsersAffinityClear(args []string) int {
 	}
 
 	return app.handleClearUserAffinityResponse(response)
+}
+
+// runUsersBackendPin dispatches user backend-pin commands.
+func (app application) runUsersBackendPin(args []string) int {
+	if len(args) == 0 {
+		return app.usageError("users backend-pin requires a subcommand")
+	}
+
+	switch args[0] {
+	case "show":
+		return app.runUsersBackendPinShow(args[1:])
+	case "set":
+		return app.runUsersBackendPinSet(args[1:])
+	case "clear":
+		return app.runUsersBackendPinClear(args[1:])
+	default:
+		return app.usageError("unknown users backend-pin subcommand %q", args[0])
+	}
+}
+
+// runUsersBackendPinShow shows the backend pin for one user.
+func (app application) runUsersBackendPinShow(args []string) int {
+	userKey, code := app.userKeyArg(args, "users backend-pin show")
+	if code != 0 {
+		return code
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), app.options.Timeout)
+	defer cancel()
+
+	client, code := app.client()
+	if code != 0 {
+		return code
+	}
+
+	response, err := client.GetUserBackendPinWithResponse(ctx, generated.UserKey(userKey))
+	if err != nil {
+		return app.requestError("users backend-pin show", err)
+	}
+	if response.StatusCode() != http.StatusOK {
+		return app.serverError("users backend-pin show", response.StatusCode(), response.JSONDefault)
+	}
+	if response.JSON200 == nil {
+		return app.serverError("users backend-pin show", http.StatusBadGateway, nil)
+	}
+
+	return app.writeObject(response.JSON200, func(writer io.Writer) error {
+		writeBackendPinLine(writer, *response.JSON200)
+		return nil
+	})
+}
+
+// runUsersBackendPinSet pins future placements to one concrete backend.
+func (app application) runUsersBackendPinSet(args []string) int {
+	line, err := parseCommandLine(args, []commandFlag{
+		valueFlag("backend"),
+		valueFlag("strategy"),
+		valueFlag("reason"),
+	})
+	if err != nil {
+		return app.usageError("%v", err)
+	}
+	userKey, code := app.userKeyFromLine(line, "users backend-pin set")
+	if code != 0 {
+		return code
+	}
+
+	reason, ok := requiredValue(line, "reason")
+	if !ok {
+		return app.usageError("users backend-pin set requires --reason")
+	}
+	backend, ok := requiredValue(line, "backend")
+	if !ok {
+		return app.usageError("users backend-pin set requires --backend")
+	}
+	strategy := generated.UserMoveRequestStrategy(line.value("strategy"))
+	if !strategy.Valid() {
+		return app.usageError("backend-pin strategy must be new_sessions_only, kick_existing or drain_existing")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), app.options.Timeout)
+	defer cancel()
+
+	client, code := app.client()
+	if code != 0 {
+		return code
+	}
+
+	body := generated.SetUserBackendPinJSONRequestBody{
+		Backend:  backend,
+		Reason:   reason,
+		Strategy: strategy,
+	}
+	response, err := client.SetUserBackendPinWithResponse(ctx, generated.UserKey(userKey), body)
+	if err != nil {
+		return app.requestError("users backend-pin set", err)
+	}
+
+	return app.handleSetUserBackendPinResponse(response)
+}
+
+// runUsersBackendPinClear clears one user's concrete backend pin.
+func (app application) runUsersBackendPinClear(args []string) int {
+	line, err := parseCommandLine(args, []commandFlag{valueFlag("reason")})
+	if err != nil {
+		return app.usageError("%v", err)
+	}
+	userKey, code := app.userKeyFromLine(line, "users backend-pin clear")
+	if code != 0 {
+		return code
+	}
+
+	reason, ok := requiredValue(line, "reason")
+	if !ok {
+		return app.usageError("users backend-pin clear requires --reason")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), app.options.Timeout)
+	defer cancel()
+
+	client, code := app.client()
+	if code != 0 {
+		return code
+	}
+
+	response, err := client.ClearUserBackendPinWithResponse(
+		ctx,
+		generated.UserKey(userKey),
+		generated.ClearUserBackendPinJSONRequestBody{Reason: reason},
+	)
+	if err != nil {
+		return app.requestError("users backend-pin clear", err)
+	}
+
+	return app.handleClearUserBackendPinResponse(response)
+}
+
+// userKeyArg parses one non-empty user key.
+func (app application) userKeyArg(args []string, operation string) (string, int) {
+	line, err := parseCommandLine(args, nil)
+	if err != nil {
+		return "", app.usageError("%v", err)
+	}
+
+	return app.userKeyFromLine(line, operation)
+}
+
+// userKeyFromLine returns the single non-empty user key from a parsed command.
+func (app application) userKeyFromLine(line parsedCommandLine, operation string) (string, int) {
+	if len(line.positionals) != 1 {
+		return "", app.usageError("%s requires exactly one user key", operation)
+	}
+
+	userKey := strings.TrimSpace(line.positionals[0])
+	if userKey == "" {
+		return "", app.usageError("%s requires a non-empty user key", operation)
+	}
+
+	return userKey, 0
 }
 
 // runUsersMove changes future user placement according to the selected strategy.
@@ -2234,6 +2422,22 @@ func (app application) handleClearUserAffinityResponse(response *generated.Clear
 func (app application) handleSetUserAffinityResponse(response *generated.SetUserAffinityResponse) int {
 	if response.StatusCode() != http.StatusAccepted {
 		return app.serverError("users affinity set", response.StatusCode(), response.JSONDefault)
+	}
+	return app.writeAccepted(response.JSON202)
+}
+
+// handleClearUserBackendPinResponse renders a backend-pin clear response.
+func (app application) handleClearUserBackendPinResponse(response *generated.ClearUserBackendPinResponse) int {
+	if response.StatusCode() != http.StatusAccepted {
+		return app.serverError("users backend-pin clear", response.StatusCode(), response.JSONDefault)
+	}
+	return app.writeAccepted(response.JSON202)
+}
+
+// handleSetUserBackendPinResponse renders a backend-pin set response.
+func (app application) handleSetUserBackendPinResponse(response *generated.SetUserBackendPinResponse) int {
+	if response.StatusCode() != http.StatusAccepted {
+		return app.serverError("users backend-pin set", response.StatusCode(), response.JSONDefault)
 	}
 	return app.writeAccepted(response.JSON202)
 }
@@ -2746,6 +2950,46 @@ func writeUserLine(writer io.Writer, user generated.UserDetail) {
 	)
 }
 
+// writeBackendPinLine writes one scriptable backend-pin text row.
+func writeBackendPinLine(writer io.Writer, pin generated.UserBackendPin) {
+	backend := stringPointerValue(pin.Backend)
+	protocol := stringPointerValue(pin.Protocol)
+	backendPool := stringPointerValue(pin.BackendPool)
+	shardTag := stringPointerValue(pin.ShardTag)
+	strategy := ""
+	if pin.Strategy != nil {
+		strategy = string(*pin.Strategy)
+	}
+	generation := stringPointerValue(pin.Generation)
+	activeSessionCount := ""
+	if pin.ActiveSessionCount != nil {
+		activeSessionCount = strconv.Itoa(*pin.ActiveSessionCount)
+	}
+
+	_, _ = fmt.Fprintf(
+		writer,
+		"user_key=%s present=%t backend=%s protocol=%s backend_pool=%s shard_tag=%s strategy=%s generation=%s active_session_count=%s\n",
+		fieldValue(pin.UserKey),
+		pin.Present,
+		fieldValue(backend),
+		fieldValue(protocol),
+		fieldValue(backendPool),
+		fieldValue(shardTag),
+		fieldValue(strategy),
+		fieldValue(generation),
+		fieldValue(activeSessionCount),
+	)
+}
+
+// stringPointerValue returns the pointed string or an empty value.
+func stringPointerValue(value *string) string {
+	if value == nil {
+		return ""
+	}
+
+	return *value
+}
+
 // writeNextCursorLine writes the explicit continuation hint for partial pages.
 func writeNextCursorLine(writer io.Writer, nextCursor *string) {
 	if nextCursor == nil || strings.TrimSpace(*nextCursor) == "" {
@@ -2822,6 +3066,21 @@ func writeRouteLine(writer io.Writer, route generated.RouteLookupResponse) {
 			route.Affinity.ActiveSessions,
 		)
 	}
+	pinBackend := stringPointerValue(route.BackendPin.Backend)
+	pinProtocol := stringPointerValue(route.BackendPin.Protocol)
+	pinPool := stringPointerValue(route.BackendPin.BackendPool)
+	pinShard := stringPointerValue(route.BackendPin.ShardTag)
+	_, _ = fmt.Fprintf(
+		writer,
+		" backend_pin_present=%t backend_pin_applied=%t backend_pin_backend=%s backend_pin_protocol=%s backend_pin_pool=%s backend_pin_shard=%s backend_pin_reason=%s",
+		route.BackendPin.Present,
+		route.BackendPin.Applied,
+		fieldValue(pinBackend),
+		fieldValue(pinProtocol),
+		fieldValue(pinPool),
+		fieldValue(pinShard),
+		fieldValue(route.BackendPin.Reason),
+	)
 	_, _ = fmt.Fprintln(writer)
 }
 

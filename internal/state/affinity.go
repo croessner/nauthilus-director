@@ -179,6 +179,45 @@ type UserClearRequest struct {
 	Actor            string
 }
 
+// UserBackendPinSetRequest describes an atomic user backend-pin mutation.
+type UserBackendPinSetRequest struct {
+	Key               AffinityKey
+	BackendIdentifier string
+	Protocol          string
+	BackendPool       string
+	ShardTag          string
+	Strategy          string
+	Reason            string
+	Actor             string
+}
+
+// UserBackendPinGetRequest describes one backend-pin read by affinity key.
+type UserBackendPinGetRequest struct {
+	Key AffinityKey
+}
+
+// UserBackendPinClearRequest describes an atomic backend-pin clear mutation.
+type UserBackendPinClearRequest struct {
+	Key    AffinityKey
+	Reason string
+	Actor  string
+}
+
+// UserBackendPinRecord describes Redis-backed backend-pin state after a read or mutation.
+type UserBackendPinRecord struct {
+	Present            bool
+	Status             string
+	Key                AffinityKey
+	BackendIdentifier  string
+	Protocol           string
+	BackendPool        string
+	ShardTag           string
+	Strategy           string
+	Generation         string
+	ActiveSessionCount int
+	ServerTime         time.Time
+}
+
 // UserRuntimeRecord describes Redis-backed user runtime state after a mutation.
 type UserRuntimeRecord struct {
 	Status             string

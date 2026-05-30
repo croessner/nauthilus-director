@@ -67,12 +67,14 @@ if redis.call("EXISTS", state_key) == 1 then
 		redis.call("HSET", override_key,
 			"target_shard", target_shard,
 			"strategy", strategy,
+			"backend_pin", "0",
 			"generation", generation,
 			"updated_at_ms", now)
 	else
 		redis.call("HSET", override_key,
 			"target_shard", target_shard,
 			"strategy", strategy,
+			"backend_pin", "0",
 			"generation", generation,
 			"updated_at_ms", now)
 	end
@@ -81,6 +83,7 @@ else
 	redis.call("HSET", override_key,
 		"target_shard", target_shard,
 		"strategy", strategy,
+		"backend_pin", "0",
 		"reason", reason or "",
 		"actor", actor or "",
 		"updated_at_ms", now)

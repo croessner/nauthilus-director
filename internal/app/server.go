@@ -320,26 +320,29 @@ func provideControlHandle(
 	}
 
 	runtimeReader := runtimectl.NewRedisRuntimeReader(store)
+	userBackendPinService := runtimectl.NewUserBackendPinService(store, registry, runtimectl.WithObservabilityRecorder(recorder))
 	handler := rest.NewServer(rest.Options{
 		Version:    options.Version,
 		ConfigPath: options.ConfigPath,
 		HandlerOptions: adapters.HandlerOptions{
-			Version:              options.Version,
-			ConfigPath:           options.ConfigPath,
-			Loader:               loader,
-			Snapshot:             snapshot,
-			BackendReader:        backendReader,
-			BackendMutator:       runtimectl.NewBackendService(store, localSessions, runtimectl.WithObservabilityRecorder(recorder)),
-			SessionReader:        runtimeReader,
-			SessionMutator:       runtimectl.NewSessionService(store, localSessions, runtimectl.WithObservabilityRecorder(recorder)),
-			UserReader:           runtimeReader,
-			RuntimeSummaryReader: runtimeReader,
-			UserMutator:          runtimectl.NewUserService(store, localSessions, runtimectl.WithObservabilityRecorder(recorder)),
-			RouteLookup:          routeLookup,
-			ListenerRuntime:      listenerRuntime,
-			Reload:               safeReloadService(cfg, loader, options.ConfigPath, recorder, registry, listenerManager),
-			Metrics:              metrics,
-			Observability:        recorder,
+			Version:               options.Version,
+			ConfigPath:            options.ConfigPath,
+			Loader:                loader,
+			Snapshot:              snapshot,
+			BackendReader:         backendReader,
+			BackendMutator:        runtimectl.NewBackendService(store, localSessions, runtimectl.WithObservabilityRecorder(recorder)),
+			SessionReader:         runtimeReader,
+			SessionMutator:        runtimectl.NewSessionService(store, localSessions, runtimectl.WithObservabilityRecorder(recorder)),
+			UserReader:            runtimeReader,
+			UserBackendPinReader:  userBackendPinService,
+			RuntimeSummaryReader:  runtimeReader,
+			UserMutator:           runtimectl.NewUserService(store, localSessions, runtimectl.WithObservabilityRecorder(recorder)),
+			UserBackendPinMutator: userBackendPinService,
+			RouteLookup:           routeLookup,
+			ListenerRuntime:       listenerRuntime,
+			Reload:                safeReloadService(cfg, loader, options.ConfigPath, recorder, registry, listenerManager),
+			Metrics:               metrics,
+			Observability:         recorder,
 		},
 	})
 
@@ -648,7 +651,7 @@ func routeLookupService(
 	registry backend.Registry,
 	selector backend.ExplainingSelector,
 	reader *runtimectl.BackendReadService,
-	store state.AffinityStore,
+	store *state.RedisSessionStore,
 	recorder observability.Recorder,
 ) (*runtimectl.RouteLookupService, error) {
 	resolver, err := routingResolver(cfg, registry)
@@ -661,6 +664,7 @@ func routeLookupService(
 		Selector:         selector,
 		BackendRead:      reader,
 		AffinityRead:     store,
+		BackendPinRead:   store,
 		IdentityLookup:   routeLookupIdentityLookuper(cfg),
 		ListenerContexts: routeLookupListenerContexts(cfg),
 		DefaultPool:      defaultBackendPool(cfg),

@@ -34,12 +34,12 @@ The key identifies an account-level runtime affinity without storing a raw
 username in Redis key names. `KeyBuilder.AffinityHash` hashes the normalized
 tenant and account key as `sha256(tenant + NUL + account_key)`.
 
-The authoritative user-level pin is the shard tag in `AffinityRecord.ShardTag`.
-Concrete backend identity is stored on attached session records and backend
-reservation state. The current Redis affinity scripts return an empty
-`backend_id` for affinity lookup/open responses; `PinnedBackendIdentifier`
-exists in the selector request type, but the user-affinity record does not
-currently store a backend id.
+The authoritative user-level shard pin is the shard tag in
+`AffinityRecord.ShardTag`. Concrete backend identity for active traffic is
+stored on attached session records and backend reservation state. Operator
+backend pins use a separate per-affinity `backend_pin` hash under the same Redis
+Cluster hash tag. The user-affinity record itself does not store backend
+transport details.
 
 `SessionRecord` represents one lease-backed holder under an affinity key. The
 code uses two holder kinds:
@@ -54,6 +54,7 @@ flowchart TB
     G --> S["state hash<br/>shard, generation, control, expiry"]
     G --> Z["sessions zset<br/>session id -> lease expiry"]
     G --> O["override hash<br/>future move target"]
+    G --> P["backend_pin hash<br/>bounded operator backend override"]
     G --> K["session hash<br/>protocol, holder_kind, shard, backend attachment"]
 ```
 
@@ -65,8 +66,29 @@ Per-affinity keys share one Redis Cluster hash tag:
 <prefix>:v<schema>:{aff:<affinity_hash>}:state
 <prefix>:v<schema>:{aff:<affinity_hash>}:sessions
 <prefix>:v<schema>:{aff:<affinity_hash>}:override
+<prefix>:v<schema>:{aff:<affinity_hash>}:backend_pin
 <prefix>:v<schema>:{aff:<affinity_hash>}:session:<session_id>
 ```
+
+`backend_pin` is the authoritative concrete backend override for one affinity
+key. It stores only bounded selector facts derived from the configured backend
+registry: tenant, account key, backend identifier, protocol, backend pool,
+effective shard, strategy, generation, reason, actor and update timestamp. It
+does not store backend addresses, credentials, TLS material, private key paths
+or raw usernames in Redis key names.
+
+Backend-pin mutations use the same per-affinity key group as user movement:
+
+- `backend_pin_set.lua` writes `backend_pin` and the target shard override in
+  one same-slot mutation. The override hash carries `backend_pin=1` so
+  `open.lua` can keep backend-pin `drain_existing` semantics separate from a
+  normal user move drain split. With `kick_existing`, the script updates the
+  active shard and control generation so heartbeats observe
+  `move_generation_changed`.
+- `backend_pin_get.lua` reads the pin hash and active-session count without
+  refreshing leases or mutating affinity state.
+- `backend_pin_clear.lua` deletes only `backend_pin`. It preserves active
+  sessions, shard affinity and any pending shard override.
 
 Backend capacity reservations use a separate same-slot key group per backend:
 
@@ -100,6 +122,7 @@ flowchart LR
         A3["close.lua"]
         A4["attach.lua"]
         A5["move.lua / kick.lua / clear.lua"]
+        A6["backend_pin_*.lua"]
     end
 
     subgraph "Backend same-slot capacity"
@@ -143,12 +166,19 @@ IMAP placement lives in `internal/protocol/imap/placement.go`.
 4. `sessionStore.OpenSession` opens or reuses the Redis affinity lease.
 5. The selected shard is the active affinity shard when present; otherwise it
    is the routing result shard.
-6. Backend selection receives `ActiveAffinity` and the effective shard.
-7. Backend capacity is reserved before the selected backend is attached to the
+6. A matching backend pin can replace the requested shard for a new affinity.
+   If an existing active affinity is reused, `new_sessions_only` and
+   `drain_existing` pins stay diagnostic and do not override the concrete
+   selector target; `kick_existing` may apply after the control generation asks
+   active sessions to close.
+7. Backend selection receives `ActiveAffinity` and the effective shard.
+   Operator backend pins pass a concrete selector target only after protocol,
+   backend pool and active-affinity strategy checks.
+8. Backend capacity is reserved before the selected backend is attached to the
    session.
-8. If backend selection or attach fails after open, the opened session is
+9. If backend selection or attach fails after open, the opened session is
    closed as rollback.
-9. Proxy mode heartbeats the Redis lease and closes it when proxying ends.
+10. Proxy mode heartbeats the Redis lease and closes it when proxying ends.
 
 ```mermaid
 sequenceDiagram
@@ -322,6 +352,11 @@ scripts:
 
 - `MoveUser` stores one of `new_sessions_only`, `kick_existing` or
   `drain_existing`.
+- `SetUserBackendPin` stores a concrete backend override plus the backend's
+  derived protocol, backend pool and effective shard. It is runtime state only
+  and never rewrites YAML configuration.
+- `ClearUserBackendPin` deletes the concrete backend override without killing
+  sessions or clearing shard affinity.
 - `KickUser` increments affinity control generation and marks the affinity for
   heartbeat-observed closure.
 - `ClearUserAffinity` clears inactive affinity and override state, and requires

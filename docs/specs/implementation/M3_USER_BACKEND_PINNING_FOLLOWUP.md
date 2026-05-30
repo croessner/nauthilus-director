@@ -1,8 +1,14 @@
 # M3 User Backend Pinning Follow-up
 
-Status: proposed. This follow-up amends the completed M2/M3 backend runtime and
-control milestone with an operator workflow for binding one user key to one
-concrete backend for controlled canary and commissioning tests.
+Status: completed. The generated REST boundary, generated
+`nauthilus-directorctl` client workflow, Redis-backed runtime state, selector
+support, route lookup diagnostics, operator documentation and public-boundary
+E2E proof are in place. `make e2e` and `make guardrails` passed on
+2026-05-30.
+
+This follow-up amends the completed M2/M3 backend runtime and control milestone
+with an operator workflow for binding one user key to one concrete backend for
+controlled canary and commissioning tests.
 
 The current user movement model intentionally targets shards, not concrete
 backends. That keeps normal placement director-owned and avoids turning
@@ -519,6 +525,41 @@ Run `make generate-openapi` after changing the OpenAPI spec, then run
 - Route lookup reports backend-pin context without mutating state.
 - Observability remains low-cardinality and secret-safe.
 - E2E proves externally visible protocol behavior through the production binary.
+
+## Closeout Evidence
+
+M3 user backend-pinning closeout completed on 2026-05-30 after the required
+final review pass. The implementation includes generated REST server/client
+boundaries, `nauthilus-directorctl` generated-client transport, Redis-backed
+backend-pin runtime state, selector support for explicit operator backend pins,
+side-effect-free route lookup diagnostics, bounded observability and
+operator-facing documentation.
+
+Closeout evidence:
+
+| Area | Evidence |
+| --- | --- |
+| REST and CLI | `GET`, `PUT` and `DELETE /api/v1/users/{user_key}/backend-pin` are generated from OpenAPI and adapted through `internal/rest/adapters`. `nauthilus-directorctl users backend-pin show/set/clear` uses the generated client SDK and keeps `users move` shard-targeted. |
+| Redis runtime state | Backend pins are stored under the per-affinity `backend_pin` hash with tenant, account key, backend identifier, protocol, backend pool, effective shard, strategy and generation. No backend transport details or credentials are stored. |
+| Selector behavior | `operator_backend_pin` selection validates protocol, backend pool and effective shard, bypasses only `weight_zero`, fails closed for all other effective exclusions and disables attach-retry failover for explicit operator pins. |
+| Active affinity strategies | `new_sessions_only` and backend-pin `drain_existing` preserve active placement while sessions are active. `kick_existing` updates the control generation and closes active sessions through the runtime action path. |
+| Route lookup | Route lookup reads backend-pin context without Nauthilus authentication or runtime mutation, reports applied, mismatch, active-affinity and fail-closed exclusion reasons, and keeps pin output bounded. |
+| Public-boundary E2E | `TestServerBinaryBackendPinPublicIMAPFlow` starts the production `nauthilus-director` binary with three fake IMAP backends in one pool, configures `mailstore-c-imap` with weight `0`, uses `nauthilus-directorctl` against the public control API, proves public IMAP proxying to the pinned backend, proves normal users avoid the weight-zero backend, proves non-zero backend pinning, proves fail-closed runtime-out behavior and verifies route lookup does not create sessions. |
+| Documentation | `docs/man/nauthilus-directorctl.1` documents backend-pin scope, weight-zero commissioning, explicit clear semantics and the shard-only `users move` boundary. `docs/developer/AFFINITY_SESSION_HANDLING.md` documents the Redis key layout and backend-pin strategy behavior. |
+| Guardrails | `make check-openapi`, `make check-docs`, `make test`, `make race`, `make e2e`, `make build-check` and `make guardrails` passed on 2026-05-30. |
+
+Validation evidence from the closeout run:
+
+- `make check-openapi`: passed; generated OpenAPI artifacts are fresh.
+- `make check-docs`: passed.
+- `make test`: passed.
+- `make race`: passed.
+- `make e2e`: passed; the deterministic fake-service lane proves backend
+  pinning through the production binary, public IMAP and control sockets,
+  `nauthilus-directorctl`, Redis-compatible runtime state, fake Nauthilus and
+  fake IMAP backends.
+- `make build-check`: passed.
+- `make guardrails`: passed.
 
 ## Review Checklist
 

@@ -1151,6 +1151,18 @@ Binary-entry E2E proves CLI and REST state parity against the running
 control surface against six real Dovecot backends behind three Director
 processes.
 
+The M3 user backend-pinning follow-up is complete. Operators can set, show and
+clear one user-scoped concrete backend pin through generated REST and
+`nauthilus-directorctl` commands without rewriting YAML. Backend pins are scoped
+by protocol and backend pool, can target weight-zero or non-zero-weight
+configured backends, bypass only the weight-zero selector exclusion, fail closed
+for other backend safety exclusions and keep `users move` shard-targeted.
+Public-boundary E2E starts the production server binary with three fake IMAP
+backends in one pool, proves weight-zero commissioning, non-zero backend pinning,
+active-strategy behavior, route lookup diagnostics and fail-closed pinned
+backend failure. The detailed completion evidence lives in
+`docs/specs/implementation/M3_USER_BACKEND_PINNING_FOLLOWUP.md`.
+
 The follow-up million-scale runtime-state pass is complete within the M2/M3
 scope. Runtime reads are cursor-paginated, reaping is due-time bounded, backend
 capacity uses Redis Cluster-safe reservations, aggregate summaries avoid full
@@ -1165,7 +1177,7 @@ outside normal guardrails. The detailed completion evidence lives in
 - backend list/show/maintenance/runtime operations
 - process-local listener list/show/drain/resume operations
 - session list/show/kill
-- user list/show/move/kick/affinity
+- user list/show/move/kick/affinity/backend-pin
 - route lookup
 - reload
 - `nauthilus-directorctl`

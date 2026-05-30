@@ -33,6 +33,8 @@ import (
 	"github.com/croessner/nauthilus-director/internal/state"
 )
 
+const affinityStatusReused = "reused"
+
 // authenticateAndPlace maps frontend credentials through Nauthilus and director placement.
 func (s *Session) authenticateAndPlace(ctx context.Context, tag string, credentials *frontendCredentials) (commandOutcome, error) {
 	result, err := s.authenticateWithAuthority(ctx, credentials)
@@ -142,7 +144,12 @@ func (s *Session) placeAuthenticatedSession(
 	s.recordRoutingResolve(routingCtx, observationResultOK, "", routingResult.RoutingSource, routingDuration)
 	routingSpan.End(observationResultOK, "")
 
-	sessionRecord := s.sessionRecord(routingResult)
+	backendPin, err := s.lookupOperatorBackendPin(ctx, routingResult)
+	if err != nil {
+		return err
+	}
+
+	sessionRecord := s.sessionRecord(routingResult, backendPin)
 
 	affinity, err := s.sessionStore.OpenSession(ctx, sessionRecord)
 	if err != nil {
@@ -159,7 +166,8 @@ func (s *Session) placeAuthenticatedSession(
 
 	s.recordAffinityOpen(ctx, observationResultOK, "", affinity.Status, selectedShardTag)
 
-	selectionRequest := s.selectionRequest(routingResult, selectedShardTag, affinity)
+	operatorBackend := s.operatorBackendPinIdentifier(backendPin, selectedShardTag, affinity)
+	selectionRequest := s.selectionRequest(routingResult, selectedShardTag, affinity, operatorBackend)
 	selectCtx, selectSpan := s.startObservationSpan(ctx, observability.TraceBoundaryBackendSelect, observationOperationBackendSelect, observationResultStart, "", map[string]string{
 		obsFieldShardTag: selectedShardTag,
 	})
@@ -195,8 +203,14 @@ func (s *Session) placeAuthenticatedSession(
 		obsFieldShardTag:          selectedShardTag,
 	})
 	s.recordSessionAttach(selectCtx, observationResultOK, "", backendResult.Backend.Identifier, selectedShardTag)
-	s.recordBackendSelect(selectCtx, observationResultOK, "", selectedShardTag, time.Since(selectStarted))
-	selectSpan.End(observationResultOK, "")
+
+	selectionReason := ""
+	if backendResult.Reason == reasonOperatorPin {
+		selectionReason = backendResult.Reason
+	}
+
+	s.recordBackendSelect(selectCtx, observationResultOK, selectionReason, selectedShardTag, time.Since(selectStarted))
+	selectSpan.End(observationResultOK, selectionReason)
 
 	s.placement = Placement{
 		AuthResult:       cloneAuthResult(result),
@@ -219,6 +233,10 @@ func (s *Session) attachSelectedBackend(
 	reservationTTL time.Duration,
 ) (backend.SelectionResult, error) {
 	if err := s.reserveAndAttachSelectedBackend(ctx, key, initial, reservationTTL); err != nil {
+		if request.OperatorBackendIdentifier != "" {
+			return backend.SelectionResult{}, err
+		}
+
 		retrySelector, ok := s.backendSelector.(interface {
 			RetryAfterAttachFailure(context.Context, backend.SelectionRequest, string) (backend.SelectionResult, error)
 		})
@@ -327,7 +345,7 @@ func (s *Session) routingRequest(
 }
 
 // sessionRecord builds the Redis session-open request after logical routing completes.
-func (s *Session) sessionRecord(result routing.RoutingResult) state.SessionRecord {
+func (s *Session) sessionRecord(result routing.RoutingResult, backendPin state.UserBackendPinRecord) state.SessionRecord {
 	ttl := result.TTL
 	if ttl <= 0 {
 		ttl = s.context.SessionLeaseTTL
@@ -342,7 +360,7 @@ func (s *Session) sessionRecord(result routing.RoutingResult) state.SessionRecor
 		Protocol:           protocolIMAP,
 		ListenerName:       s.context.ListenerName,
 		ServiceName:        s.context.ServiceName,
-		ShardTag:           normalizedRoutingFact(result.ShardTag),
+		ShardTag:           s.sessionOpenShard(result, backendPin),
 		DirectorInstanceID: s.context.DirectorInstanceID,
 		LeaseTTL:           ttl,
 		IdleGrace:          s.context.SessionIdleGrace,
@@ -350,16 +368,89 @@ func (s *Session) sessionRecord(result routing.RoutingResult) state.SessionRecor
 }
 
 // selectionRequest builds the backend selector input from the final active shard.
-func (s *Session) selectionRequest(result routing.RoutingResult, shardTag string, affinity state.AffinityRecord) backend.SelectionRequest {
+func (s *Session) selectionRequest(
+	result routing.RoutingResult,
+	shardTag string,
+	affinity state.AffinityRecord,
+	operatorBackend string,
+) backend.SelectionRequest {
 	return backend.SelectionRequest{
-		AccountKey:              normalizedAccount(result.AccountKey),
-		Tenant:                  normalizedRoutingFact(result.Tenant),
-		ShardTag:                normalizedRoutingFact(shardTag),
-		Protocol:                protocolIMAP,
-		BackendPool:             s.context.BackendPool,
-		ActiveAffinity:          affinityActiveForSelection(result, affinity),
-		PinnedBackendIdentifier: normalizedRoutingFact(affinity.BackendIdentifier),
+		AccountKey:                normalizedAccount(result.AccountKey),
+		Tenant:                    normalizedRoutingFact(result.Tenant),
+		ShardTag:                  normalizedRoutingFact(shardTag),
+		Protocol:                  protocolIMAP,
+		BackendPool:               s.context.BackendPool,
+		ActiveAffinity:            affinityActiveForSelection(result, affinity),
+		PinnedBackendIdentifier:   normalizedRoutingFact(affinity.BackendIdentifier),
+		OperatorBackendIdentifier: normalizedRoutingFact(operatorBackend),
 	}
+}
+
+type backendPinReader interface {
+	GetUserBackendPin(context.Context, state.UserBackendPinGetRequest) (state.UserBackendPinRecord, error)
+}
+
+// lookupOperatorBackendPin reads a concrete user backend pin when the store supports it.
+func (s *Session) lookupOperatorBackendPin(ctx context.Context, result routing.RoutingResult) (state.UserBackendPinRecord, error) {
+	reader, ok := s.sessionStore.(backendPinReader)
+	if !ok {
+		return state.UserBackendPinRecord{}, nil
+	}
+
+	return reader.GetUserBackendPin(ctx, state.UserBackendPinGetRequest{
+		Key: state.AffinityKey{
+			Tenant:     normalizedRoutingFact(result.Tenant),
+			AccountKey: normalizedAccount(result.AccountKey),
+		},
+	})
+}
+
+// sessionOpenShard applies a matching operator backend pin as the requested shard.
+func (s *Session) sessionOpenShard(result routing.RoutingResult, backendPin state.UserBackendPinRecord) string {
+	if backendPinMatchesScope(backendPin, protocolIMAP, s.context.BackendPool) {
+		return normalizedRoutingFact(backendPin.ShardTag)
+	}
+
+	return normalizedRoutingFact(result.ShardTag)
+}
+
+// operatorBackendPinIdentifier returns the exact backend target for this selection.
+func (s *Session) operatorBackendPinIdentifier(backendPin state.UserBackendPinRecord, shardTag string, affinity state.AffinityRecord) string {
+	if !backendPinMatchesScope(backendPin, protocolIMAP, s.context.BackendPool) {
+		return ""
+	}
+
+	if normalizedRoutingFact(backendPin.ShardTag) != normalizedRoutingFact(shardTag) {
+		return ""
+	}
+
+	if normalizedRoutingFact(affinity.BackendIdentifier) != "" {
+		return ""
+	}
+
+	if activeAffinityBlocksOperatorBackendPin(backendPin, affinity) {
+		return ""
+	}
+
+	return normalizedRoutingFact(backendPin.BackendIdentifier)
+}
+
+// activeAffinityBlocksOperatorBackendPin preserves active placement for deferred pin strategies.
+func activeAffinityBlocksOperatorBackendPin(backendPin state.UserBackendPinRecord, affinity state.AffinityRecord) bool {
+	if normalizedRoutingFact(backendPin.Strategy) == "kick_existing" {
+		return false
+	}
+
+	return affinity.Status == affinityStatusReused || affinity.ActiveSessionCount > 1
+}
+
+// backendPinMatchesScope checks protocol and pool before applying a concrete pin.
+func backendPinMatchesScope(backendPin state.UserBackendPinRecord, protocol string, backendPool string) bool {
+	return backendPin.Present &&
+		normalizedRoutingFact(backendPin.BackendIdentifier) != "" &&
+		strings.EqualFold(normalizedRoutingFact(backendPin.Protocol), normalizedRoutingFact(protocol)) &&
+		normalizedRoutingFact(backendPin.BackendPool) == normalizedRoutingFact(backendPool) &&
+		normalizedRoutingFact(backendPin.ShardTag) != ""
 }
 
 // selectedAffinityShard applies active affinity precedence over initial placement.

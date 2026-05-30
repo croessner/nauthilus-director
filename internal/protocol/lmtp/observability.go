@@ -64,6 +64,7 @@ const (
 	lmtpReasonDATA             = "data"
 	lmtpReasonMalformed        = "malformed"
 	lmtpReasonOK               = "ok"
+	lmtpReasonOperatorPin      = "operator_backend_pin"
 	lmtpReasonParser           = "parser"
 	lmtpReasonProtocol         = "protocol"
 	lmtpReasonRejected         = "rejected"

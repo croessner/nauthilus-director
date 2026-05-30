@@ -35,6 +35,7 @@ import (
 )
 
 const (
+	affinityStatusReused    = "reused"
 	defaultDeliveryLeaseTTL = 5 * time.Minute
 	deliveryHoldIDBytes     = 16
 	deliveryStatusCreated   = "created"
@@ -56,6 +57,7 @@ type RecipientPlacement struct {
 	HoldID           string
 	BackendCounted   bool
 	hold             *deliveryHold
+	selectionRequest backend.SelectionRequest
 }
 
 type deliveryHold struct {
@@ -114,11 +116,16 @@ func (s *Session) handleRecipientPlacement(ctx context.Context, recipient Recipi
 	s.recordRoutingResolve(routeCtx, lmtpObservationResultOK, lmtpReasonOK, routingResult.ShardTag, routeDuration)
 	routeSpan.End(lmtpObservationResultOK, lmtpReasonOK)
 
+	backendPin, err := s.lookupOperatorBackendPin(ctx, routingResult)
+	if err != nil {
+		return RecipientPlacement{}, err
+	}
+
 	selectCtx, selectSpan := s.startObservationSpan(ctx, observability.TraceBoundaryBackendSelect, lmtpObservationOperationBackendSelect, lmtpObservationResultStart, "", map[string]string{
 		lmtpObsFieldShardTag: routingResult.ShardTag,
 	})
 	selectStarted := time.Now()
-	initial, err := s.selectRecipientBackend(selectCtx, routingResult, state.AffinityRecord{})
+	initialRequest, initial, err := s.selectRecipientBackend(selectCtx, routingResult, state.AffinityRecord{}, backendPin)
 
 	selectDuration := time.Since(selectStarted)
 	if err != nil {
@@ -128,7 +135,7 @@ func (s *Session) handleRecipientPlacement(ctx context.Context, recipient Recipi
 		return RecipientPlacement{}, err
 	}
 
-	placement, err := s.openRecipientHold(ctx, recipient, routingResult, initial)
+	placement, err := s.openRecipientHold(ctx, recipient, routingResult, initialRequest, initial, backendPin)
 	if err != nil {
 		s.recordBackendSelect(selectCtx, lmtpObservationResultFailure, lmtpReasonClass(err), routingResult.ShardTag, time.Since(selectStarted))
 		selectSpan.End(lmtpObservationResultFailure, lmtpReasonClass(err))
@@ -164,8 +171,14 @@ func (s *Session) handleRecipientPlacement(ctx context.Context, recipient Recipi
 		lmtpObsFieldBackendIdentifier: placement.Backend.Backend.Identifier,
 		lmtpObsFieldShardTag:          placement.SelectedShardTag,
 	})
-	s.recordBackendSelect(selectCtx, lmtpObservationResultOK, lmtpReasonOK, placement.SelectedShardTag, time.Since(selectStarted))
-	selectSpan.End(lmtpObservationResultOK, lmtpReasonOK)
+
+	selectionReason := lmtpReasonOK
+	if placement.Backend.Reason == lmtpReasonOperatorPin {
+		selectionReason = placement.Backend.Reason
+	}
+
+	s.recordBackendSelect(selectCtx, lmtpObservationResultOK, selectionReason, placement.SelectedShardTag, time.Since(selectStarted))
+	selectSpan.End(lmtpObservationResultOK, selectionReason)
 
 	return placement, nil
 }
@@ -264,10 +277,19 @@ func (s *Session) withDefaultRecipientShard(result routing.RoutingResult) routin
 }
 
 // selectRecipientBackend selects through the shared runtime-aware backend selector.
-func (s *Session) selectRecipientBackend(ctx context.Context, result routing.RoutingResult, affinity state.AffinityRecord) (backend.SelectionResult, error) {
-	request := s.selectionRequest(result, selectedAffinityShard(result, affinity), affinity)
+func (s *Session) selectRecipientBackend(
+	ctx context.Context,
+	result routing.RoutingResult,
+	affinity state.AffinityRecord,
+	backendPin state.UserBackendPinRecord,
+) (backend.SelectionRequest, backend.SelectionResult, error) {
+	selectedShard := s.selectedPlacementShard(result, affinity, backendPin)
+	operatorBackend := s.operatorBackendPinIdentifier(backendPin, selectedShard, affinity)
+	request := s.selectionRequest(result, selectedShard, affinity, operatorBackend)
 
-	return s.backendSelector.Select(ctx, request)
+	selected, err := s.backendSelector.Select(ctx, request)
+
+	return request, selected, err
 }
 
 // openRecipientHold creates and attaches a delivery-scoped active-affinity hold.
@@ -275,14 +297,16 @@ func (s *Session) openRecipientHold(
 	ctx context.Context,
 	recipient RecipientPath,
 	result routing.RoutingResult,
+	initialRequest backend.SelectionRequest,
 	initial backend.SelectionResult,
+	backendPin state.UserBackendPinRecord,
 ) (RecipientPlacement, error) {
 	holdID, err := newDeliveryHoldID()
 	if err != nil {
 		return RecipientPlacement{}, err
 	}
 
-	record := s.deliverySessionRecord(result, holdID)
+	record := s.deliverySessionRecord(result, holdID, backendPin)
 
 	affinity, err := s.sessionStore.OpenSession(ctx, record)
 	if err != nil {
@@ -294,10 +318,12 @@ func (s *Session) openRecipientHold(
 	}
 
 	selected := initial
-	selectedShard := selectedAffinityShard(result, affinity)
+	selectedShard := s.selectedPlacementShard(result, affinity, backendPin)
 
-	selectionRequest := s.selectionRequest(result, selectedShard, affinity)
-	if selectedShard != result.ShardTag || affinityActiveForSelection(result, affinity) {
+	operatorBackend := s.operatorBackendPinIdentifier(backendPin, selectedShard, affinity)
+
+	selectionRequest := s.selectionRequest(result, selectedShard, affinity, operatorBackend)
+	if !samePlacementSelectionRequest(initialRequest, selectionRequest) {
 		selected, err = s.backendSelector.Select(ctx, selectionRequest)
 		if err != nil {
 			_, _ = s.sessionStore.CloseSession(context.Background(), record.Key, holdID)
@@ -318,6 +344,7 @@ func (s *Session) openRecipientHold(
 		SelectedShardTag: selectedShard,
 		HoldID:           holdID,
 		hold:             hold,
+		selectionRequest: selectionRequest,
 	}, nil
 }
 
@@ -331,7 +358,10 @@ func (s *Session) accountRecipientBackend(ctx context.Context, placement *Recipi
 		return nil
 	}
 
-	selectionRequest := s.selectionRequest(placement.Routing, placement.SelectedShardTag, placement.Affinity)
+	selectionRequest := placement.selectionRequest
+	if selectionRequest.AccountKey == "" {
+		selectionRequest = s.selectionRequest(placement.Routing, placement.SelectedShardTag, placement.Affinity, "")
+	}
 
 	selected, err := s.attachSelectedBackend(ctx, placement.hold.key, selectionRequest, placement.Backend, placement.HoldID, defaultDeliveryLease(s.sessionLeaseTTL))
 	if err != nil {
@@ -355,6 +385,10 @@ func (s *Session) attachSelectedBackend(
 	reservationTTL time.Duration,
 ) (backend.SelectionResult, error) {
 	if err := s.reserveAndAttachSelectedBackend(ctx, key, initial, holdID, reservationTTL); err != nil {
+		if request.OperatorBackendIdentifier != "" {
+			return backend.SelectionResult{}, err
+		}
+
 		retrySelector, ok := s.backendSelector.(interface {
 			RetryAfterAttachFailure(context.Context, backend.SelectionRequest, string) (backend.SelectionResult, error)
 		})
@@ -419,7 +453,7 @@ func (s *Session) reserveAndAttachSelectedBackend(
 }
 
 // deliverySessionRecord builds the Redis lease used for one delivery hold.
-func (s *Session) deliverySessionRecord(result routing.RoutingResult, holdID string) state.SessionRecord {
+func (s *Session) deliverySessionRecord(result routing.RoutingResult, holdID string, backendPin state.UserBackendPinRecord) state.SessionRecord {
 	return state.SessionRecord{
 		ID: holdID,
 		Key: state.AffinityKey{
@@ -430,7 +464,7 @@ func (s *Session) deliverySessionRecord(result routing.RoutingResult, holdID str
 		Protocol:           protocolLMTP,
 		ListenerName:       s.listenerName,
 		ServiceName:        s.serviceName,
-		ShardTag:           normalizedRoutingFact(result.ShardTag),
+		ShardTag:           s.selectedPlacementShard(result, state.AffinityRecord{}, backendPin),
 		DirectorInstanceID: s.directorInstanceID,
 		LeaseTTL:           s.sessionLeaseTTL,
 		IdleGrace:          s.sessionIdleGrace,
@@ -438,16 +472,109 @@ func (s *Session) deliverySessionRecord(result routing.RoutingResult, holdID str
 }
 
 // selectionRequest builds backend selector input from recipient routing facts.
-func (s *Session) selectionRequest(result routing.RoutingResult, shardTag string, affinity state.AffinityRecord) backend.SelectionRequest {
+func (s *Session) selectionRequest(
+	result routing.RoutingResult,
+	shardTag string,
+	affinity state.AffinityRecord,
+	operatorBackend string,
+) backend.SelectionRequest {
 	return backend.SelectionRequest{
-		AccountKey:              normalizedAccount(result.AccountKey),
-		Tenant:                  normalizedRoutingFact(result.Tenant),
-		ShardTag:                normalizedRoutingFact(shardTag),
-		Protocol:                protocolLMTP,
-		BackendPool:             s.backendPool,
-		ActiveAffinity:          affinityActiveForSelection(result, affinity),
-		PinnedBackendIdentifier: normalizedRoutingFact(affinity.BackendIdentifier),
+		AccountKey:                normalizedAccount(result.AccountKey),
+		Tenant:                    normalizedRoutingFact(result.Tenant),
+		ShardTag:                  normalizedRoutingFact(shardTag),
+		Protocol:                  protocolLMTP,
+		BackendPool:               s.backendPool,
+		ActiveAffinity:            affinityActiveForSelection(result, affinity),
+		PinnedBackendIdentifier:   normalizedRoutingFact(affinity.BackendIdentifier),
+		OperatorBackendIdentifier: normalizedRoutingFact(operatorBackend),
 	}
+}
+
+type backendPinReader interface {
+	GetUserBackendPin(context.Context, state.UserBackendPinGetRequest) (state.UserBackendPinRecord, error)
+}
+
+// lookupOperatorBackendPin reads a concrete user backend pin when the store supports it.
+func (s *Session) lookupOperatorBackendPin(ctx context.Context, result routing.RoutingResult) (state.UserBackendPinRecord, error) {
+	reader, ok := s.sessionStore.(backendPinReader)
+	if !ok {
+		return state.UserBackendPinRecord{}, nil
+	}
+
+	return reader.GetUserBackendPin(ctx, state.UserBackendPinGetRequest{
+		Key: state.AffinityKey{
+			Tenant:     normalizedRoutingFact(result.Tenant),
+			AccountKey: normalizedAccount(result.AccountKey),
+		},
+	})
+}
+
+// selectedPlacementShard applies active affinity first, then a matching backend pin.
+func (s *Session) selectedPlacementShard(
+	result routing.RoutingResult,
+	affinity state.AffinityRecord,
+	backendPin state.UserBackendPinRecord,
+) string {
+	if shardTag := normalizedRoutingFact(affinity.ShardTag); shardTag != "" {
+		return shardTag
+	}
+
+	if backendPinMatchesScope(backendPin, protocolLMTP, s.backendPool) {
+		return normalizedRoutingFact(backendPin.ShardTag)
+	}
+
+	return normalizedRoutingFact(result.ShardTag)
+}
+
+// operatorBackendPinIdentifier returns the exact backend target for this selection.
+func (s *Session) operatorBackendPinIdentifier(backendPin state.UserBackendPinRecord, shardTag string, affinity state.AffinityRecord) string {
+	if !backendPinMatchesScope(backendPin, protocolLMTP, s.backendPool) {
+		return ""
+	}
+
+	if normalizedRoutingFact(backendPin.ShardTag) != normalizedRoutingFact(shardTag) {
+		return ""
+	}
+
+	if normalizedRoutingFact(affinity.BackendIdentifier) != "" {
+		return ""
+	}
+
+	if activeAffinityBlocksOperatorBackendPin(backendPin, affinity) {
+		return ""
+	}
+
+	return normalizedRoutingFact(backendPin.BackendIdentifier)
+}
+
+// activeAffinityBlocksOperatorBackendPin preserves active placement for deferred pin strategies.
+func activeAffinityBlocksOperatorBackendPin(backendPin state.UserBackendPinRecord, affinity state.AffinityRecord) bool {
+	if normalizedRoutingFact(backendPin.Strategy) == "kick_existing" {
+		return false
+	}
+
+	return affinity.Status == affinityStatusReused || affinity.ActiveSessionCount > 1
+}
+
+// samePlacementSelectionRequest reports whether an opened hold needs reselection.
+func samePlacementSelectionRequest(left backend.SelectionRequest, right backend.SelectionRequest) bool {
+	return left.AccountKey == right.AccountKey &&
+		left.Tenant == right.Tenant &&
+		left.ShardTag == right.ShardTag &&
+		left.Protocol == right.Protocol &&
+		left.BackendPool == right.BackendPool &&
+		left.ActiveAffinity == right.ActiveAffinity &&
+		left.PinnedBackendIdentifier == right.PinnedBackendIdentifier &&
+		left.OperatorBackendIdentifier == right.OperatorBackendIdentifier
+}
+
+// backendPinMatchesScope checks protocol and pool before applying a concrete pin.
+func backendPinMatchesScope(backendPin state.UserBackendPinRecord, protocol string, backendPool string) bool {
+	return backendPin.Present &&
+		normalizedRoutingFact(backendPin.BackendIdentifier) != "" &&
+		strings.EqualFold(normalizedRoutingFact(backendPin.Protocol), normalizedRoutingFact(protocol)) &&
+		normalizedRoutingFact(backendPin.BackendPool) == normalizedRoutingFact(backendPool) &&
+		normalizedRoutingFact(backendPin.ShardTag) != ""
 }
 
 // selectedAffinityShard applies active affinity precedence over recipient routing.

@@ -31,11 +31,17 @@ import (
 const operationRouteLookup = "route_lookup"
 
 const (
+	routeLookupBackendPinAbsent       = "backend_pin_absent"
+	routeLookupBackendPinApplied      = "backend_pin_applied"
+	routeLookupBackendPinExcluded     = "backend_pin_excluded"
+	routeLookupBackendPinMismatch     = "backend_pin_mismatch"
+	routeLookupBackendPinReadFailed   = "backend_pin_read_failed"
 	routeLookupIdentityActiveAffinity = "active_affinity"
 	routeLookupIdentityCallerSupplied = "caller_supplied"
 	routeLookupIdentityNauthilus      = "nauthilus_lookup"
 	routeLookupIdentityNotApplicable  = "not_applicable"
 	routeLookupIdentityMethod         = "recipient_lookup"
+	routeLookupReasonOperatorPin      = "operator_backend_pin"
 	routeLookupProtocolLMTP           = "lmtp"
 )
 
@@ -84,6 +90,18 @@ type RouteLookupAffinityState struct {
 	ActiveSessions int
 }
 
+// RouteLookupBackendPinState describes read-only operator backend-pin context.
+type RouteLookupBackendPinState struct {
+	Present        bool
+	BackendID      string
+	Protocol       string
+	BackendPool    string
+	EffectiveShard string
+	Strategy       string
+	Applied        bool
+	ReasonClass    string
+}
+
 // RouteLookupBackendState describes one effective backend candidate safely.
 type RouteLookupBackendState struct {
 	Identifier        string
@@ -120,6 +138,11 @@ type RouteLookupIdentityLookuper interface {
 	LookupRouteIdentity(ctx context.Context, request RouteLookupIdentityLookupRequest) (RouteLookupIdentityLookupResult, error)
 }
 
+// RouteLookupBackendPinReader reads backend-pin state without mutating leases.
+type RouteLookupBackendPinReader interface {
+	GetUserBackendPin(ctx context.Context, request state.UserBackendPinGetRequest) (state.UserBackendPinRecord, error)
+}
+
 // RouteLookupIdentityLookupRequest carries secret-free identity lookup context.
 type RouteLookupIdentityLookupRequest struct {
 	Username string
@@ -139,6 +162,7 @@ type RouteLookupIdentityLookupResult struct {
 type RouteLookupResponse struct {
 	Routing         RouteLookupRoutingState
 	Affinity        RouteLookupAffinityState
+	BackendPin      RouteLookupBackendPinState
 	Backends        []RouteLookupBackendState
 	Effects         RouteLookupEffects
 	Identity        RouteLookupIdentityState
@@ -153,6 +177,7 @@ type RouteLookupServiceOptions struct {
 	Selector         backend.Selector
 	BackendRead      *BackendReadService
 	AffinityRead     state.AffinityStore
+	BackendPinRead   RouteLookupBackendPinReader
 	IdentityLookup   RouteLookupIdentityLookuper
 	ListenerContexts []RouteLookupListenerContext
 	DefaultPool      string
@@ -167,6 +192,7 @@ type RouteLookupService struct {
 	selector         backend.Selector
 	backendRead      *BackendReadService
 	affinityRead     state.AffinityStore
+	backendPinRead   RouteLookupBackendPinReader
 	identityLookup   RouteLookupIdentityLookuper
 	listenerContexts map[string]RouteLookupListenerContext
 	defaultPool      string
@@ -194,6 +220,7 @@ func NewRouteLookupService(options RouteLookupServiceOptions) (*RouteLookupServi
 		selector:         options.Selector,
 		backendRead:      options.BackendRead,
 		affinityRead:     options.AffinityRead,
+		backendPinRead:   options.BackendPinRead,
 		identityLookup:   options.IdentityLookup,
 		listenerContexts: routeLookupListenerContexts(options.ListenerContexts),
 		defaultPool:      strings.TrimSpace(options.DefaultPool),
@@ -259,12 +286,30 @@ func (s *RouteLookupService) Lookup(ctx context.Context, request RouteLookupRequ
 
 	usedDefaultShard := strings.TrimSpace(routingResult.ShardTag) == ""
 	routingResult = withDefaultRouteShard(routingResult, s.defaultShard)
+
+	backendPin, err := s.lookupBackendPin(ctx, request, routingResult)
+	if err != nil {
+		s.recordRouteLookup(ctx, request, runtimeObservationResultFailure, routeLookupBackendPinReadFailed, RouteLookupResponse{
+			Routing: RouteLookupRoutingState{
+				AccountKey:     routingResult.AccountKey,
+				Tenant:         routingResult.Tenant,
+				EffectiveShard: routingResult.ShardTag,
+				RoutingSource:  routingResult.RoutingSource,
+			},
+			Identity:   identity,
+			BackendPin: backendPin,
+		}, time.Since(started))
+
+		return RouteLookupResponse{}, err
+	}
+
 	affinity := s.lookupAffinity(ctx, request, routingResult)
-	selectionRequest := routeLookupSelectionRequest(request, routingResult, affinity)
+	selectionRequest := routeLookupSelectionRequest(request, routingResult, affinity, backendPin)
 	explanation, err := s.explainSelection(ctx, selectionRequest)
 
-	response := routeLookupResponse(routingResult, affinity, explanation, request, selectionRequest, usedDefaultShard)
+	response := routeLookupResponse(routingResult, affinity, backendPin, explanation, request, selectionRequest, usedDefaultShard)
 	response.Identity = identity
+	response.BackendPin = routeLookupBackendPinOutcome(response.BackendPin, explanation, selectionRequest, err)
 
 	if err != nil {
 		if backend.IsErrorKind(err, backend.ErrorKindNoBackend) {
@@ -560,16 +605,36 @@ func (s *RouteLookupService) lookupAffinity(ctx context.Context, request RouteLo
 	return affinity
 }
 
+// lookupBackendPin reads stored operator pin context without mutating placement state.
+func (s *RouteLookupService) lookupBackendPin(ctx context.Context, request RouteLookupRequest, result routing.RoutingResult) (RouteLookupBackendPinState, error) {
+	pin := RouteLookupBackendPinState{ReasonClass: routeLookupBackendPinAbsent}
+	if s == nil || s.backendPinRead == nil {
+		return pin, nil
+	}
+
+	record, err := s.backendPinRead.GetUserBackendPin(ctx, state.UserBackendPinGetRequest{
+		Key: state.AffinityKey{
+			Tenant:     result.Tenant,
+			AccountKey: result.AccountKey,
+		},
+	})
+	if err != nil {
+		s.recordBackendPinReadFailure(ctx, request, result, err)
+
+		return pin, err
+	}
+
+	return routeLookupBackendPinFromRecord(record), nil
+}
+
 // routeLookupSelectionRequest builds the shared backend selector input.
 func routeLookupSelectionRequest(
 	request RouteLookupRequest,
 	result routing.RoutingResult,
 	affinity RouteLookupAffinityState,
+	backendPin RouteLookupBackendPinState,
 ) backend.SelectionRequest {
-	shardTag := strings.TrimSpace(result.ShardTag)
-	if affinity.ShardTag != "" {
-		shardTag = affinity.ShardTag
-	}
+	shardTag := routeLookupSelectionShard(request, result, affinity, backendPin)
 
 	return backend.SelectionRequest{
 		AccountKey:              result.AccountKey,
@@ -579,13 +644,157 @@ func routeLookupSelectionRequest(
 		BackendPool:             request.BackendPool,
 		ActiveAffinity:          affinity.Active,
 		PinnedBackendIdentifier: affinity.BackendID,
+		OperatorBackendIdentifier: routeLookupOperatorBackendIdentifier(
+			request,
+			affinity,
+			backendPin,
+			shardTag,
+		),
 	}
+}
+
+// routeLookupBackendPinFromRecord converts stored pin metadata into diagnostics.
+func routeLookupBackendPinFromRecord(record state.UserBackendPinRecord) RouteLookupBackendPinState {
+	pin := RouteLookupBackendPinState{
+		Present:        record.Present,
+		BackendID:      strings.TrimSpace(record.BackendIdentifier),
+		Protocol:       strings.ToLower(strings.TrimSpace(record.Protocol)),
+		BackendPool:    strings.TrimSpace(record.BackendPool),
+		EffectiveShard: strings.TrimSpace(record.ShardTag),
+		Strategy:       strings.TrimSpace(record.Strategy),
+		ReasonClass:    routeLookupBackendPinAbsent,
+	}
+	if pin.Present {
+		pin.ReasonClass = routeLookupBackendPinMismatch
+	}
+
+	return pin
+}
+
+// routeLookupSelectionShard mirrors placement shard choice without opening a session.
+func routeLookupSelectionShard(
+	request RouteLookupRequest,
+	result routing.RoutingResult,
+	affinity RouteLookupAffinityState,
+	backendPin RouteLookupBackendPinState,
+) string {
+	shardTag := strings.TrimSpace(result.ShardTag)
+	if routeLookupBackendPinMatchesScope(backendPin, request.Protocol, request.BackendPool) {
+		shardTag = strings.TrimSpace(backendPin.EffectiveShard)
+	}
+
+	if affinity.ShardTag != "" {
+		shardTag = affinity.ShardTag
+	}
+
+	return shardTag
+}
+
+// routeLookupOperatorBackendIdentifier returns the explicit selector target if applicable.
+func routeLookupOperatorBackendIdentifier(
+	request RouteLookupRequest,
+	affinity RouteLookupAffinityState,
+	backendPin RouteLookupBackendPinState,
+	shardTag string,
+) string {
+	if !routeLookupBackendPinMatchesScope(backendPin, request.Protocol, request.BackendPool) {
+		return ""
+	}
+
+	if strings.TrimSpace(backendPin.EffectiveShard) != strings.TrimSpace(shardTag) {
+		return ""
+	}
+
+	if strings.TrimSpace(affinity.BackendID) != "" {
+		return ""
+	}
+
+	if affinity.ActiveSessions > 0 && strings.TrimSpace(backendPin.Strategy) != string(MoveStrategyKickExisting) {
+		return ""
+	}
+
+	return strings.TrimSpace(backendPin.BackendID)
+}
+
+// routeLookupBackendPinMatchesScope checks protocol and backend-pool scoping.
+func routeLookupBackendPinMatchesScope(pin RouteLookupBackendPinState, protocol string, backendPool string) bool {
+	return pin.Present &&
+		strings.TrimSpace(pin.BackendID) != "" &&
+		strings.EqualFold(strings.TrimSpace(pin.Protocol), strings.TrimSpace(protocol)) &&
+		strings.TrimSpace(pin.BackendPool) == strings.TrimSpace(backendPool) &&
+		strings.TrimSpace(pin.EffectiveShard) != ""
+}
+
+// routeLookupBackendPinOutcome classifies whether a stored pin affected selection.
+func routeLookupBackendPinOutcome(
+	pin RouteLookupBackendPinState,
+	explanation backend.SelectionExplanation,
+	selectionRequest backend.SelectionRequest,
+	selectionErr error,
+) RouteLookupBackendPinState {
+	if !pin.Present {
+		pin.ReasonClass = routeLookupBackendPinAbsent
+
+		return pin
+	}
+
+	if !routeLookupBackendPinMatchesScope(pin, selectionRequest.Protocol, selectionRequest.BackendPool) {
+		pin.ReasonClass = routeLookupBackendPinMismatch
+
+		return pin
+	}
+
+	if strings.TrimSpace(selectionRequest.OperatorBackendIdentifier) == "" {
+		pin.ReasonClass = routeLookupBackendPinMismatch
+		if selectionRequest.ActiveAffinity || strings.TrimSpace(selectionRequest.PinnedBackendIdentifier) != "" {
+			pin.ReasonClass = routeLookupIdentityActiveAffinity
+		}
+
+		return pin
+	}
+
+	if selectionErr == nil && explanation.Result.Reason == routeLookupReasonOperatorPin {
+		pin.Applied = true
+		pin.ReasonClass = routeLookupBackendPinApplied
+
+		return pin
+	}
+
+	pin.ReasonClass = routeLookupBackendPinRejectionReason(pin, explanation)
+
+	return pin
+}
+
+// routeLookupBackendPinRejectionReason reports a bounded pinned-target exclusion.
+func routeLookupBackendPinRejectionReason(pin RouteLookupBackendPinState, explanation backend.SelectionExplanation) string {
+	for _, candidate := range explanation.EffectiveBackends {
+		if candidate.Identifier != pin.BackendID {
+			continue
+		}
+
+		for _, exclusion := range candidate.Exclusions {
+			if exclusion.Reason == backend.EffectiveExclusionWeightZero {
+				continue
+			}
+
+			return string(exclusion.Reason)
+		}
+
+		if strings.TrimSpace(string(candidate.FailClosedReason)) != "" {
+			return string(candidate.FailClosedReason)
+		}
+
+		return routeLookupBackendPinExcluded
+	}
+
+	return routeLookupBackendPinExcluded
 }
 
 // routeLookupResponse builds the diagnostic response shell from shared domains.
 func routeLookupResponse(
 	result routing.RoutingResult,
 	affinity RouteLookupAffinityState,
+	backendPin RouteLookupBackendPinState,
 	explanation backend.SelectionExplanation,
 	request RouteLookupRequest,
 	selectionRequest backend.SelectionRequest,
@@ -603,9 +812,10 @@ func routeLookupResponse(
 			RoutingGeneration: result.RoutingGeneration,
 			UsedDefaultShard:  usedDefaultShard,
 		},
-		Affinity: affinity,
-		Backends: backends,
-		Effects:  effects,
+		Affinity:   affinity,
+		BackendPin: backendPin,
+		Backends:   backends,
+		Effects:    effects,
 	}
 }
 
@@ -631,7 +841,7 @@ func routeLookupAffinityActive(result routing.RoutingResult, record state.Affini
 	case "created", "":
 		return strings.TrimSpace(record.ShardTag) != "" && strings.TrimSpace(record.ShardTag) != strings.TrimSpace(result.ShardTag)
 	default:
-		return record.Present
+		return record.Present && record.ActiveSessionCount > 0
 	}
 }
 
@@ -711,6 +921,9 @@ func (s *RouteLookupService) recordRouteLookup(
 
 	fields := map[string]string{
 		runtimeObservationFieldAccountKeyPresent: boolAuditValue(strings.TrimSpace(request.AccountKey) != ""),
+		"backend_pin_applied":                    boolAuditValue(response.BackendPin.Applied),
+		"backend_pin_present":                    boolAuditValue(response.BackendPin.Present),
+		runtimeObservationFieldBackendID:         response.BackendPin.BackendID,
 		runtimeObservationFieldBackendPool:       request.BackendPool,
 		runtimeObservationFieldListener:          request.ListenerName,
 		runtimeObservationFieldProtocol:          request.Protocol,
@@ -776,4 +989,25 @@ func (s *RouteLookupService) recordRouteBackendState(ctx context.Context, protoc
 			runtimeObservationFieldShardTag:        state.EffectiveShard,
 		}, labels)
 	}
+}
+
+// recordBackendPinReadFailure emits bounded diagnostics for failed pin reads.
+func (s *RouteLookupService) recordBackendPinReadFailure(
+	ctx context.Context,
+	request RouteLookupRequest,
+	result routing.RoutingResult,
+	err error,
+) {
+	if s == nil {
+		return
+	}
+
+	recordRuntimeObservation(ctx, s.recorder, observability.EventUserBackendPin, observability.TraceBoundaryRESTRequest, operationUserBackendPinGet, runtimeObservationResultFailure, routeLookupBackendPinReadFailed, map[string]string{
+		runtimeObservationFieldAccountKeyPresent: boolAuditValue(strings.TrimSpace(result.AccountKey) != ""),
+		runtimeObservationFieldBackendPool:       request.BackendPool,
+		runtimeObservationFieldProtocol:          request.Protocol,
+		runtimeObservationFieldShardTag:          result.ShardTag,
+		runtimeObservationFieldUserHash:          result.AccountKey,
+		"backend_pin_error_present":              boolAuditValue(err != nil),
+	}, nil)
 }

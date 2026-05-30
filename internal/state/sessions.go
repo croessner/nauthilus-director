@@ -44,6 +44,7 @@ const (
 	scriptFieldBackendCounted     = "backend_counted"
 	scriptFieldBackendID          = "backend_id"
 	scriptFieldBackendMaxConn     = "backend_max_connections"
+	scriptFieldBackendPool        = "backend_pool"
 	scriptFieldBackendReservation = "backend_reservation_id"
 	scriptFieldControlAction      = "control_action"
 	scriptFieldControlGeneration  = "control_generation"
@@ -62,6 +63,7 @@ const (
 	scriptFieldSessionDueIndexKey = "session_due_index_key"
 	scriptFieldShardTag           = "shard_tag"
 	scriptFieldStatus             = "status"
+	scriptFieldStrategy           = "strategy"
 	scriptFieldTenant             = "tenant"
 	scriptFieldUserSessionsKey    = "user_sessions_key"
 )
@@ -435,7 +437,8 @@ func (s *RedisSessionStore) validateScriptKeys(name string, keys []string) error
 // isPerAffinityScript reports whether a script must stay inside one affinity slot.
 func isPerAffinityScript(name string) bool {
 	switch name {
-	case scriptAttach, scriptOpen, scriptHeartbeat, scriptClose, scriptLookup, scriptMove, scriptKick, scriptClear:
+	case scriptAttach, scriptOpen, scriptHeartbeat, scriptClose, scriptLookup, scriptMove, scriptKick, scriptClear,
+		scriptBackendPinSet, scriptBackendPinGet, scriptBackendPinClear:
 		return true
 	default:
 		return false
@@ -595,7 +598,7 @@ func parseAffinityRecordFields(key AffinityKey, fields map[string]string) (Affin
 	return record, nil
 }
 
-// parseSessionMutationDelta converts required follow-up fields from a mutation response.
+// parseSessionMutationDelta converts required session delta fields from a mutation response.
 func parseSessionMutationDelta(fields map[string]string) (sessionMutationDelta, error) {
 	delta := sessionMutationDelta{
 		SessionID:          strings.TrimSpace(fields[scriptFieldSessionID]),
@@ -928,7 +931,7 @@ func (s *RedisSessionStore) decrementLegacyBackendCount(ctx context.Context, bac
 	})
 }
 
-// runRepairableIndexCommand records a non-authoritative follow-up Redis write.
+// runRepairableIndexCommand records a non-authoritative repair Redis write.
 func (s *RedisSessionStore) runRepairableIndexCommand(ctx context.Context, operation string, command func(context.Context) error) {
 	redisCtx := redisContext(ctx)
 	started := time.Now()

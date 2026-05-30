@@ -370,6 +370,17 @@ type RouteLookupBackendExclusion struct {
 	Source string `json:"source"`
 }
 
+// RouteLookupBackendPin defines model for RouteLookupBackendPin.
+type RouteLookupBackendPin struct {
+	Applied     bool    `json:"applied"`
+	Backend     *string `json:"backend,omitempty"`
+	BackendPool *string `json:"backend_pool,omitempty"`
+	Present     bool    `json:"present"`
+	Protocol    *string `json:"protocol,omitempty"`
+	Reason      string  `json:"reason"`
+	ShardTag    *string `json:"shard_tag,omitempty"`
+}
+
 // RouteLookupBackendSummary defines model for RouteLookupBackendSummary.
 type RouteLookupBackendSummary struct {
 	AllowsActivePins  bool                          `json:"allows_active_pins"`
@@ -419,6 +430,7 @@ type RouteLookupRequest struct {
 type RouteLookupResponse struct {
 	AffectedBy         RouteLookupEffects             `json:"affected_by"`
 	Affinity           *RouteLookupAffinity           `json:"affinity,omitempty"`
+	BackendPin         RouteLookupBackendPin          `json:"backend_pin"`
 	Backends           []RouteLookupBackendSummary    `json:"backends"`
 	FailClosed         bool                           `json:"fail_closed"`
 	Healthy            bool                           `json:"healthy"`
@@ -536,6 +548,31 @@ type UserAffinity struct {
 	UserKey        string     `json:"user_key"`
 }
 
+// UserBackendPin defines model for UserBackendPin.
+type UserBackendPin struct {
+	ActiveSessionCount *int                     `json:"active_session_count,omitempty"`
+	Backend            *string                  `json:"backend,omitempty"`
+	BackendPool        *string                  `json:"backend_pool,omitempty"`
+	Generation         *string                  `json:"generation,omitempty"`
+	Present            bool                     `json:"present"`
+	Protocol           *string                  `json:"protocol,omitempty"`
+	ShardTag           *string                  `json:"shard_tag,omitempty"`
+	Strategy           *UserMoveRequestStrategy `json:"strategy,omitempty"`
+	UserKey            string                   `json:"user_key"`
+}
+
+// UserBackendPinClearRequest defines model for UserBackendPinClearRequest.
+type UserBackendPinClearRequest struct {
+	Reason string `json:"reason"`
+}
+
+// UserBackendPinRequest defines model for UserBackendPinRequest.
+type UserBackendPinRequest struct {
+	Backend  string                  `json:"backend"`
+	Reason   string                  `json:"reason"`
+	Strategy UserMoveRequestStrategy `json:"strategy"`
+}
+
 // UserDetail defines model for UserDetail.
 type UserDetail struct {
 	ActiveSessions int           `json:"active_sessions"`
@@ -561,7 +598,7 @@ type UserMoveRequest struct {
 	ToShard  string                  `json:"to_shard"`
 }
 
-// UserMoveRequestStrategy defines model for UserMoveRequest.Strategy.
+// UserMoveRequestStrategy defines model for UserMoveRequestStrategy.
 type UserMoveRequestStrategy string
 
 // VersionResponse defines model for VersionResponse.
@@ -696,6 +733,12 @@ type ClearUserAffinityJSONRequestBody = RuntimeReasonRequest
 
 // SetUserAffinityJSONRequestBody defines body for SetUserAffinity for application/json ContentType.
 type SetUserAffinityJSONRequestBody = AffinityUpdateRequest
+
+// ClearUserBackendPinJSONRequestBody defines body for ClearUserBackendPin for application/json ContentType.
+type ClearUserBackendPinJSONRequestBody = UserBackendPinClearRequest
+
+// SetUserBackendPinJSONRequestBody defines body for SetUserBackendPin for application/json ContentType.
+type SetUserBackendPinJSONRequestBody = UserBackendPinRequest
 
 // KickUserJSONRequestBody defines body for KickUser for application/json ContentType.
 type KickUserJSONRequestBody = UserKickRequest
@@ -882,6 +925,19 @@ type ClientInterface interface {
 	SetUserAffinityWithBody(ctx context.Context, userKey UserKey, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	SetUserAffinity(ctx context.Context, userKey UserKey, body SetUserAffinityJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ClearUserBackendPinWithBody request with any body
+	ClearUserBackendPinWithBody(ctx context.Context, userKey UserKey, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	ClearUserBackendPin(ctx context.Context, userKey UserKey, body ClearUserBackendPinJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// GetUserBackendPin request
+	GetUserBackendPin(ctx context.Context, userKey UserKey, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// SetUserBackendPinWithBody request with any body
+	SetUserBackendPinWithBody(ctx context.Context, userKey UserKey, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	SetUserBackendPin(ctx context.Context, userKey UserKey, body SetUserBackendPinJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// KickUserWithBody request with any body
 	KickUserWithBody(ctx context.Context, userKey UserKey, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -1379,6 +1435,66 @@ func (c *Client) SetUserAffinityWithBody(ctx context.Context, userKey UserKey, c
 
 func (c *Client) SetUserAffinity(ctx context.Context, userKey UserKey, body SetUserAffinityJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewSetUserAffinityRequest(c.Server, userKey, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ClearUserBackendPinWithBody(ctx context.Context, userKey UserKey, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewClearUserBackendPinRequestWithBody(c.Server, userKey, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ClearUserBackendPin(ctx context.Context, userKey UserKey, body ClearUserBackendPinJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewClearUserBackendPinRequest(c.Server, userKey, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) GetUserBackendPin(ctx context.Context, userKey UserKey, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetUserBackendPinRequest(c.Server, userKey)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) SetUserBackendPinWithBody(ctx context.Context, userKey UserKey, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewSetUserBackendPinRequestWithBody(c.Server, userKey, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) SetUserBackendPin(ctx context.Context, userKey UserKey, body SetUserBackendPinJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewSetUserBackendPinRequest(c.Server, userKey, body)
 	if err != nil {
 		return nil, err
 	}
@@ -2733,6 +2849,134 @@ func NewSetUserAffinityRequestWithBody(server string, userKey UserKey, contentTy
 	return req, nil
 }
 
+// NewClearUserBackendPinRequest calls the generic ClearUserBackendPin builder with application/json body
+func NewClearUserBackendPinRequest(server string, userKey UserKey, body ClearUserBackendPinJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewClearUserBackendPinRequestWithBody(server, userKey, "application/json", bodyReader)
+}
+
+// NewClearUserBackendPinRequestWithBody generates requests for ClearUserBackendPin with any type of body
+func NewClearUserBackendPinRequestWithBody(server string, userKey UserKey, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "user_key", userKey, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/users/%s/backend-pin", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodDelete, queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewGetUserBackendPinRequest generates requests for GetUserBackendPin
+func NewGetUserBackendPinRequest(server string, userKey UserKey) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "user_key", userKey, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/users/%s/backend-pin", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewSetUserBackendPinRequest calls the generic SetUserBackendPin builder with application/json body
+func NewSetUserBackendPinRequest(server string, userKey UserKey, body SetUserBackendPinJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewSetUserBackendPinRequestWithBody(server, userKey, "application/json", bodyReader)
+}
+
+// NewSetUserBackendPinRequestWithBody generates requests for SetUserBackendPin with any type of body
+func NewSetUserBackendPinRequestWithBody(server string, userKey UserKey, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "user_key", userKey, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/users/%s/backend-pin", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPut, queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
 // NewKickUserRequest calls the generic KickUser builder with application/json body
 func NewKickUserRequest(server string, userKey UserKey, body KickUserJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
@@ -3118,6 +3362,19 @@ type ClientWithResponsesInterface interface {
 	SetUserAffinityWithBodyWithResponse(ctx context.Context, userKey UserKey, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SetUserAffinityResponse, error)
 
 	SetUserAffinityWithResponse(ctx context.Context, userKey UserKey, body SetUserAffinityJSONRequestBody, reqEditors ...RequestEditorFn) (*SetUserAffinityResponse, error)
+
+	// ClearUserBackendPinWithBodyWithResponse request with any body
+	ClearUserBackendPinWithBodyWithResponse(ctx context.Context, userKey UserKey, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ClearUserBackendPinResponse, error)
+
+	ClearUserBackendPinWithResponse(ctx context.Context, userKey UserKey, body ClearUserBackendPinJSONRequestBody, reqEditors ...RequestEditorFn) (*ClearUserBackendPinResponse, error)
+
+	// GetUserBackendPinWithResponse request
+	GetUserBackendPinWithResponse(ctx context.Context, userKey UserKey, reqEditors ...RequestEditorFn) (*GetUserBackendPinResponse, error)
+
+	// SetUserBackendPinWithBodyWithResponse request with any body
+	SetUserBackendPinWithBodyWithResponse(ctx context.Context, userKey UserKey, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SetUserBackendPinResponse, error)
+
+	SetUserBackendPinWithResponse(ctx context.Context, userKey UserKey, body SetUserBackendPinJSONRequestBody, reqEditors ...RequestEditorFn) (*SetUserBackendPinResponse, error)
 
 	// KickUserWithBodyWithResponse request with any body
 	KickUserWithBodyWithResponse(ctx context.Context, userKey UserKey, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*KickUserResponse, error)
@@ -3983,6 +4240,99 @@ func (r SetUserAffinityResponse) ContentType() string {
 	return ""
 }
 
+type ClearUserBackendPinResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON202      *AcceptedResponse
+	JSONDefault  *Error
+}
+
+// Status returns HTTPResponse.Status
+func (r ClearUserBackendPinResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ClearUserBackendPinResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r ClearUserBackendPinResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type GetUserBackendPinResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *UserBackendPin
+	JSONDefault  *Error
+}
+
+// Status returns HTTPResponse.Status
+func (r GetUserBackendPinResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetUserBackendPinResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r GetUserBackendPinResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type SetUserBackendPinResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON202      *AcceptedResponse
+	JSONDefault  *Error
+}
+
+// Status returns HTTPResponse.Status
+func (r SetUserBackendPinResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r SetUserBackendPinResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r SetUserBackendPinResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
 type KickUserResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -4545,6 +4895,49 @@ func (c *ClientWithResponses) SetUserAffinityWithResponse(ctx context.Context, u
 		return nil, err
 	}
 	return ParseSetUserAffinityResponse(rsp)
+}
+
+// ClearUserBackendPinWithBodyWithResponse request with arbitrary body returning *ClearUserBackendPinResponse
+func (c *ClientWithResponses) ClearUserBackendPinWithBodyWithResponse(ctx context.Context, userKey UserKey, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ClearUserBackendPinResponse, error) {
+	rsp, err := c.ClearUserBackendPinWithBody(ctx, userKey, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseClearUserBackendPinResponse(rsp)
+}
+
+func (c *ClientWithResponses) ClearUserBackendPinWithResponse(ctx context.Context, userKey UserKey, body ClearUserBackendPinJSONRequestBody, reqEditors ...RequestEditorFn) (*ClearUserBackendPinResponse, error) {
+	rsp, err := c.ClearUserBackendPin(ctx, userKey, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseClearUserBackendPinResponse(rsp)
+}
+
+// GetUserBackendPinWithResponse request returning *GetUserBackendPinResponse
+func (c *ClientWithResponses) GetUserBackendPinWithResponse(ctx context.Context, userKey UserKey, reqEditors ...RequestEditorFn) (*GetUserBackendPinResponse, error) {
+	rsp, err := c.GetUserBackendPin(ctx, userKey, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetUserBackendPinResponse(rsp)
+}
+
+// SetUserBackendPinWithBodyWithResponse request with arbitrary body returning *SetUserBackendPinResponse
+func (c *ClientWithResponses) SetUserBackendPinWithBodyWithResponse(ctx context.Context, userKey UserKey, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SetUserBackendPinResponse, error) {
+	rsp, err := c.SetUserBackendPinWithBody(ctx, userKey, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseSetUserBackendPinResponse(rsp)
+}
+
+func (c *ClientWithResponses) SetUserBackendPinWithResponse(ctx context.Context, userKey UserKey, body SetUserBackendPinJSONRequestBody, reqEditors ...RequestEditorFn) (*SetUserBackendPinResponse, error) {
+	rsp, err := c.SetUserBackendPin(ctx, userKey, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseSetUserBackendPinResponse(rsp)
 }
 
 // KickUserWithBodyWithResponse request with arbitrary body returning *KickUserResponse
@@ -5500,6 +5893,105 @@ func ParseSetUserAffinityResponse(rsp *http.Response) (*SetUserAffinityResponse,
 	}
 
 	response := &SetUserAffinityResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 202:
+		var dest AcceptedResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON202 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseClearUserBackendPinResponse parses an HTTP response from a ClearUserBackendPinWithResponse call
+func ParseClearUserBackendPinResponse(rsp *http.Response) (*ClearUserBackendPinResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ClearUserBackendPinResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 202:
+		var dest AcceptedResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON202 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetUserBackendPinResponse parses an HTTP response from a GetUserBackendPinWithResponse call
+func ParseGetUserBackendPinResponse(rsp *http.Response) (*GetUserBackendPinResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetUserBackendPinResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest UserBackendPin
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseSetUserBackendPinResponse parses an HTTP response from a SetUserBackendPinWithResponse call
+func ParseSetUserBackendPinResponse(rsp *http.Response) (*SetUserBackendPinResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &SetUserBackendPinResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}
