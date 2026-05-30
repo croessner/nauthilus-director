@@ -83,6 +83,10 @@ fabric.properties
 server.crt
 server.key
 
+# Python bytecode caches from local helper-script checks.
+__pycache__/
+*.py[cod]
+
 # Demo stack generated TLS material, in case a Docker volume is replaced by a local bind mount.
 /contrib/demo-stack/**/*.crt
 /contrib/demo-stack/**/*.key
