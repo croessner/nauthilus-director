@@ -137,6 +137,8 @@ In scope:
   entry; do not trust operator-supplied duplicates for those facts.
 - Keep normal routing and Nauthilus identity resolution unchanged.
 - Keep normal user movement to shards unchanged.
+- Require backend pins to remain inside the pinned backend's derived effective
+  shard; cross-shard backend pinning is invalid and must fail closed.
 - Let an explicit backend pin override `weight_zero` for the pinned backend only.
 - Keep all other backend safety exclusions fail-closed unless this document
   explicitly allows them.
@@ -193,6 +195,12 @@ strategy. This keeps active affinity coherent: a user pinned to
 `mailstore-c-imap` in effective shard `mailstore-a` still has shard affinity to
 `mailstore-a`. The concrete backend pin is an additional selector constraint,
 not a replacement for shard affinity.
+
+A backend pin must never select a backend outside the target effective shard for
+the matching placement request. Cross-shard backend pinning is invalid; the
+server derives the target shard from the configured backend and the selector must
+fail closed if the pinned backend's effective shard does not match the request
+shard.
 
 Strategy behavior:
 
