@@ -330,14 +330,15 @@ func TestAuthenticatedPlacementGateRunsBeforeRuntimeReads(t *testing.T) {
 	}
 	store := &recordingSessionStore{}
 	selector := &recordingBackendSelector{result: backend.SelectionResult{Backend: backend.Backend{Identifier: "mailstore-c-imap"}}}
+	connector := &recordingBackendConnector{}
 	gate := &recordingPlacementGate{
 		wait: func(_ context.Context, request runtimectl.PlacementGateRequest) (runtimectl.PlacementGateResult, error) {
 			if request.Protocol != protocolIMAP || request.ListenerName == "" || request.ServiceName == "" {
 				t.Fatalf("placement-gate request = %#v, want IMAP listener context", request)
 			}
 
-			if store.backendPinCalls != 0 || store.calls != 0 || selector.calls != 0 {
-				t.Fatalf("runtime side effects before gate release = pin:%d session:%d selector:%d", store.backendPinCalls, store.calls, selector.calls)
+			if store.backendPinCalls != 0 || store.calls != 0 || store.reserveCalls != 0 || store.attachCalls != 0 || selector.calls != 0 || connector.calls != 0 {
+				t.Fatalf("runtime side effects before gate release = pin:%d session:%d reserve:%d attach:%d selector:%d connect:%d", store.backendPinCalls, store.calls, store.reserveCalls, store.attachCalls, selector.calls, connector.calls)
 			}
 
 			store.backendPin = state.UserBackendPinRecord{
@@ -357,6 +358,7 @@ func TestAuthenticatedPlacementGateRunsBeforeRuntimeReads(t *testing.T) {
 
 	config := pipelineSessionConfig(authenticator, router, store, selector)
 	config.PlacementGate = gate
+	config.BackendConnector = connector
 	harness := startTestSession(t, config)
 
 	harness.expectLine(t, greetingLine)
@@ -369,6 +371,10 @@ func TestAuthenticatedPlacementGateRunsBeforeRuntimeReads(t *testing.T) {
 
 	if selector.request.OperatorBackendIdentifier != "mailstore-c-imap" {
 		t.Fatalf("operator backend pin after gate release = %q, want re-read pin", selector.request.OperatorBackendIdentifier)
+	}
+
+	if store.calls != 1 || store.reserveCalls != 1 || store.attachCalls != 1 || connector.calls != 1 {
+		t.Fatalf("placement side effects after release = session:%d reserve:%d attach:%d connect:%d, want all once", store.calls, store.reserveCalls, store.attachCalls, connector.calls)
 	}
 }
 
@@ -384,20 +390,26 @@ func TestAuthenticatedPlacementGateTemporaryFailureStopsPlacement(t *testing.T) 
 	}
 	store := &recordingSessionStore{}
 	selector := &recordingBackendSelector{}
+	connector := &recordingBackendConnector{}
 	gate := &recordingPlacementGate{
 		err: &runtimectl.Error{Kind: runtimectl.ErrorKindUnavailable, Operation: "user_hold_check", Message: "user hold wait timeout"},
 	}
 
 	config := pipelineSessionConfig(authenticator, router, store, selector)
 	config.PlacementGate = gate
+	config.BackendConnector = connector
 	harness := startTestSession(t, config)
 
 	harness.expectLine(t, greetingLine)
 	harness.write(t, `A001 LOGIN "alice@example.test" "secret-password"`+"\r\n")
 	harness.expectLine(t, "A001 NO [UNAVAILABLE] Authentication service temporarily unavailable\r\n")
 
-	if store.backendPinCalls != 0 || store.calls != 0 || selector.calls != 0 {
-		t.Fatalf("placement after gate failure = pin:%d session:%d selector:%d, want none", store.backendPinCalls, store.calls, selector.calls)
+	if gate.calls != 1 {
+		t.Fatalf("placement gate calls = %d, want 1", gate.calls)
+	}
+
+	if store.backendPinCalls != 0 || store.calls != 0 || store.reserveCalls != 0 || store.attachCalls != 0 || selector.calls != 0 || connector.calls != 0 {
+		t.Fatalf("placement after gate failure = pin:%d session:%d reserve:%d attach:%d selector:%d connect:%d, want none", store.backendPinCalls, store.calls, store.reserveCalls, store.attachCalls, selector.calls, connector.calls)
 	}
 }
 
@@ -501,6 +513,60 @@ func TestReplaySecretsAreClearedBeforeProxyMode(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for transition")
+	}
+}
+
+// TestAttachedIMAPSessionDoesNotReenterPlacementGate verifies proxy mode stays attached.
+func TestAttachedIMAPSessionDoesNotReenterPlacementGate(t *testing.T) {
+	authenticator := &recordingAuthenticator{result: nauthilus.AuthResult{Decision: nauthilus.DecisionAuthenticated, Account: "alice@example.test"}}
+	router := &recordingRoutingResolver{
+		result: routing.RoutingResult{
+			AccountKey: "alice@example.test",
+			Tenant:     defaultTenantName,
+			ShardTag:   "mailstore-a",
+		},
+	}
+	store := &recordingSessionStore{}
+	selector := &recordingBackendSelector{result: backend.SelectionResult{Backend: backend.Backend{Identifier: "mailstore-a-imap"}}}
+	gate := &recordingPlacementGate{}
+
+	proxyStarted := make(chan struct{})
+	releaseProxy := make(chan struct{})
+	runner := &recordingProxyRunner{
+		check: func(proxy.PipeConfig) {
+			close(proxyStarted)
+			<-releaseProxy
+		},
+	}
+
+	config := pipelineSessionConfig(authenticator, router, store, selector)
+	config.PlacementGate = gate
+	config.ProxyRunner = runner
+	harness := startTestSession(t, config)
+
+	harness.expectLine(t, greetingLine)
+	harness.write(t, `A001 LOGIN "alice@example.test" "secret-password"`+"\r\n")
+	harness.expectLine(t, "A001 OK Authentication completed\r\n")
+
+	select {
+	case <-proxyStarted:
+	case <-time.After(time.Second):
+		t.Fatal("proxy mode did not start")
+	}
+
+	select {
+	case err := <-harness.done:
+		t.Fatalf("attached IMAP session stopped while proxy was active: %v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+
+	if gate.calls != 1 {
+		t.Fatalf("placement gate calls after proxy attach = %d, want initial placement only", gate.calls)
+	}
+
+	close(releaseProxy)
+	if err := harness.wait(t); err != nil {
+		t.Fatalf("session returned error after proxy release: %v", err)
 	}
 }
 

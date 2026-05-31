@@ -605,10 +605,131 @@ func TestRecipientPlacementGateTemporaryFailureStopsPlacement(t *testing.T) {
 
 	store.assertOpened(t, 0)
 	store.assertAttached(t, 0)
+	store.assertReserved(t, 0)
+
+	if store.backendPinReads() != 0 {
+		t.Fatalf("backend-pin reads = %d, want none before gate release", store.backendPinReads())
+	}
 
 	if selector.requestCount() != 0 {
 		t.Fatalf("selector calls = %d, want no backend selection", selector.requestCount())
 	}
+}
+
+// TestRecipientPlacementGateReleaseReReadsRuntimeState verifies release resumes fresh placement.
+func TestRecipientPlacementGateReleaseReReadsRuntimeState(t *testing.T) {
+	identity := identityLookuperForRecipients(map[string]string{
+		testRecipientSingle: testPlacementShardA,
+	})
+	resolver := &recordingRoutingResolver{}
+	store := &recordingDeliveryStore{}
+	selector := &recordingBackendSelector{}
+	gate := recipientPlacementReleaseGate(t, store, selector)
+	config := placementSessionConfig(identity, resolver, store, selector)
+	config.PlacementGate = gate
+
+	harness := startLMTPHarness(t, config)
+	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+	harness.write(t, "LHLO submitter.example\r\n")
+	harness.drainLHLO(t)
+	harness.write(t, "MAIL FROM:<sender@example.test>\r\n")
+	harness.expectLine(t, "250 2.0.0 Sender accepted\r\n")
+	harness.write(t, "RCPT TO:<recipient@example.test>\r\n")
+	harness.expectLine(t, "250 2.0.0 Recipient accepted\r\n")
+	harness.write(t, "DATA\r\n")
+	harness.expectLine(t, "354 2.0.0 End data with <CR><LF>.<CR><LF>\r\n")
+	harness.write(t, "line-one\r\n.\r\n")
+	harness.expectLine(t, "250 2.0.0 Message accepted\r\n")
+
+	if gate.calls != 1 {
+		t.Fatalf("placement gate calls = %d, want 1", gate.calls)
+	}
+
+	request := selector.firstRequest(t)
+	if request.OperatorBackendIdentifier != testPlacementBackendB || request.ShardTag != testPlacementShardB {
+		t.Fatalf("selection request after gate release = %#v, want re-read backend pin", request)
+	}
+
+	if open := store.singleOpen(t); open.ShardTag != testPlacementShardB {
+		t.Fatalf("delivery hold shard = %q, want re-read backend pin shard", open.ShardTag)
+	}
+
+	store.assertReserved(t, 1)
+	store.assertAttached(t, 1)
+	store.assertClosed(t, 1)
+}
+
+// recipientPlacementReleaseGate builds a gate that proves release happens before placement side effects.
+func recipientPlacementReleaseGate(
+	t *testing.T,
+	store *recordingDeliveryStore,
+	selector *recordingBackendSelector,
+) *recordingRecipientPlacementGate {
+	t.Helper()
+
+	return &recordingRecipientPlacementGate{
+		wait: func(_ context.Context, request runtimectl.PlacementGateRequest) (runtimectl.PlacementGateResult, error) {
+			if request.Protocol != protocolLMTP || request.ListenerName != testPlacementListener || request.ServiceName != testPlacementService {
+				t.Fatalf("placement gate request = %#v, want LMTP listener context", request)
+			}
+
+			store.assertOpened(t, 0)
+			store.assertReserved(t, 0)
+			store.assertAttached(t, 0)
+
+			if store.backendPinReads() != 0 || selector.requestCount() != 0 {
+				t.Fatalf("runtime side effects before gate release = pin:%d selector:%d", store.backendPinReads(), selector.requestCount())
+			}
+
+			store.setBackendPin(state.UserBackendPinRecord{
+				Present:           true,
+				BackendIdentifier: testPlacementBackendB,
+				Protocol:          protocolLMTP,
+				BackendPool:       testPlacementPool,
+				ShardTag:          testPlacementShardB,
+			})
+
+			return runtimectl.PlacementGateResult{
+				Outcome:                     runtimectl.PlacementGateOutcomeReleased,
+				RuntimeStateRecheckRequired: true,
+			}, nil
+		},
+	}
+}
+
+// TestAcceptedRecipientIgnoresLaterPlacementHold verifies active transactions are not retroactive.
+func TestAcceptedRecipientIgnoresLaterPlacementHold(t *testing.T) {
+	identity := identityLookuperForRecipients(map[string]string{
+		testRecipientSingle: testPlacementShardA,
+	})
+	resolver := &recordingRoutingResolver{}
+	store := &recordingDeliveryStore{}
+	selector := &recordingBackendSelector{}
+	gate := &recordingRecipientPlacementGate{}
+	config := placementSessionConfig(identity, resolver, store, selector)
+	config.PlacementGate = gate
+
+	harness := startLMTPHarness(t, config)
+	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+	harness.write(t, "LHLO submitter.example\r\n")
+	harness.drainLHLO(t)
+	harness.write(t, "MAIL FROM:<sender@example.test>\r\n")
+	harness.expectLine(t, "250 2.0.0 Sender accepted\r\n")
+	harness.write(t, "RCPT TO:<recipient@example.test>\r\n")
+	harness.expectLine(t, "250 2.0.0 Recipient accepted\r\n")
+
+	gate.err = &runtimectl.Error{Kind: runtimectl.ErrorKindUnavailable, Operation: "user_hold_check", Message: "user hold wait timeout"}
+
+	harness.write(t, "DATA\r\n")
+	harness.expectLine(t, "354 2.0.0 End data with <CR><LF>.<CR><LF>\r\n")
+	harness.write(t, "line-one\r\n.\r\n")
+	harness.expectLine(t, "250 2.0.0 Message accepted\r\n")
+
+	if gate.calls != 1 {
+		t.Fatalf("placement gate calls after accepted recipient = %d, want initial RCPT only", gate.calls)
+	}
+
+	store.assertClosed(t, 1)
 }
 
 // TestRecipientPlacementUsesScopedLMTPBackendPin verifies LMTP pins are pool scoped.
@@ -1566,6 +1687,14 @@ func (s *recordingDeliveryStore) GetUserBackendPin(
 	return s.backendPin, s.pinErr
 }
 
+// setBackendPin changes the fake backend-pin read model during gate-release tests.
+func (s *recordingDeliveryStore) setBackendPin(record state.UserBackendPinRecord) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.backendPin = record
+}
+
 // ReserveBackendCapacity records backend reservation for a delivery hold.
 func (s *recordingDeliveryStore) ReserveBackendCapacity(
 	_ context.Context,
@@ -1662,6 +1791,18 @@ func (s *recordingDeliveryStore) assertOpened(t *testing.T, want int) {
 	}
 }
 
+// assertReserved verifies the number of backend capacity reservations.
+func (s *recordingDeliveryStore) assertReserved(t *testing.T, want int) {
+	t.Helper()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if len(s.reservations) != want {
+		t.Fatalf("reservation calls = %d, want %d", len(s.reservations), want)
+	}
+}
+
 // assertAttached verifies the number of backend active-use accounting attachments.
 func (s *recordingDeliveryStore) assertAttached(t *testing.T, want int) {
 	t.Helper()
@@ -1684,6 +1825,14 @@ func (s *recordingDeliveryStore) assertClosed(t *testing.T, want int) {
 	if len(s.closes) != want {
 		t.Fatalf("close calls = %d, want %d", len(s.closes), want)
 	}
+}
+
+// backendPinReads returns the number of backend-pin read attempts.
+func (s *recordingDeliveryStore) backendPinReads() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.pinReads
 }
 
 // waitForHeartbeat waits until the delivery hold heartbeat loop refreshes once.
@@ -1717,6 +1866,7 @@ type recordingRecipientPlacementGate struct {
 	request runtimectl.PlacementGateRequest
 	result  runtimectl.PlacementGateResult
 	err     error
+	wait    func(context.Context, runtimectl.PlacementGateRequest) (runtimectl.PlacementGateResult, error)
 }
 
 // Select records backend selection and returns a deterministic LMTP backend.
@@ -1763,11 +1913,14 @@ func (s *recordingBackendSelector) Select(_ context.Context, request backend.Sel
 
 // WaitForPlacement records the shared recipient hold gate request.
 func (g *recordingRecipientPlacementGate) WaitForPlacement(
-	_ context.Context,
+	ctx context.Context,
 	request runtimectl.PlacementGateRequest,
 ) (runtimectl.PlacementGateResult, error) {
 	g.calls++
 	g.request = request
+	if g.wait != nil {
+		return g.wait(ctx, request)
+	}
 
 	return g.result, g.err
 }

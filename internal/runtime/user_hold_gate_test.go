@@ -27,6 +27,7 @@ import (
 
 const (
 	runtimeTestHoldStatusFound = "found"
+	runtimeTestOtherUserHash   = "hash-b"
 	runtimeTestPlacementMail   = "mail"
 )
 
@@ -55,6 +56,39 @@ func TestPlacementGateWithoutHoldContinuesImmediately(t *testing.T) {
 	if store.checkCount() != 1 {
 		t.Fatalf("hold checks = %d, want one initial check", store.checkCount())
 	}
+}
+
+// TestPlacementGateActiveHoldDoesNotBlockUnrelatedUser verifies hold keys stay scoped.
+func TestPlacementGateActiveHoldDoesNotBlockUnrelatedUser(t *testing.T) {
+	heldKey := UserKey{Tenant: runtimeTestTenant, UserHash: runtimeTestUserHash}
+	otherKey := UserKey{Tenant: runtimeTestTenant, UserHash: runtimeTestOtherUserHash}
+	store := newTestUserHoldStore(false)
+	store.setHeldForKey(heldKey, true)
+	service := newTestUserHoldService(t, store, UserHoldServiceConfig{
+		Enabled:                true,
+		MaxDuration:            time.Minute,
+		MaxWait:                25 * time.Millisecond,
+		PollInterval:           5 * time.Millisecond,
+		MaxLocalWaiters:        2,
+		MaxLocalWaitersPerUser: 1,
+	})
+
+	result, err := service.WaitForPlacement(context.Background(), testPlacementGateRequest(otherKey))
+	if err != nil {
+		t.Fatalf("unrelated WaitForPlacement returned error: %v", err)
+	}
+
+	if result.Outcome != PlacementGateOutcomeAllowed || result.RuntimeStateRecheckRequired {
+		t.Fatalf("unrelated placement result = %#v, want allowed without recheck", result)
+	}
+
+	_, err = service.WaitForPlacement(context.Background(), testPlacementGateRequest(heldKey))
+	if !IsErrorKind(err, ErrorKindUnavailable) {
+		t.Fatalf("held WaitForPlacement error = %v, want temporary unavailable", err)
+	}
+
+	assertNoPlacementWaiters(t, service, heldKey)
+	assertNoPlacementWaiters(t, service, otherKey)
 }
 
 // TestPlacementGateLocalClearReleasesAndRequiresRecheck verifies same-process clear wakes waiters.
@@ -190,7 +224,7 @@ func TestPlacementGateTimeoutTemporaryFails(t *testing.T) {
 // TestPlacementGateGlobalWaiterLimitRejectsWithoutQueuing verifies the process-wide bound.
 func TestPlacementGateGlobalWaiterLimitRejectsWithoutQueuing(t *testing.T) {
 	firstKey := UserKey{Tenant: runtimeTestTenant, UserHash: runtimeTestUserHash}
-	secondKey := UserKey{Tenant: runtimeTestTenant, UserHash: "hash-b"}
+	secondKey := UserKey{Tenant: runtimeTestTenant, UserHash: runtimeTestOtherUserHash}
 	store := newTestUserHoldStore(true)
 	service := newTestUserHoldService(t, store, UserHoldServiceConfig{
 		Enabled:                true,
@@ -380,6 +414,7 @@ type placementGateCall struct {
 type testUserHoldStore struct {
 	mu               sync.Mutex
 	held             bool
+	heldKeys         map[state.AffinityKey]bool
 	presenceSequence []bool
 	checks           int
 	clears           int
@@ -398,7 +433,11 @@ func (s *testUserHoldStore) SetUserHold(
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.held = true
+	if s.heldKeys != nil {
+		s.heldKeys[request.Key] = true
+	} else {
+		s.held = true
+	}
 
 	return s.recordLocked(request.Key, true), nil
 }
@@ -411,7 +450,7 @@ func (s *testUserHoldStore) GetUserHold(
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	return s.recordLocked(request.Key, s.held), nil
+	return s.recordLocked(request.Key, s.heldLocked(request.Key)), nil
 }
 
 // ClearUserHold clears the fake hold for same-process wake-up tests.
@@ -422,7 +461,11 @@ func (s *testUserHoldStore) ClearUserHold(
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.held = false
+	if s.heldKeys != nil {
+		s.heldKeys[request.Key] = false
+	} else {
+		s.held = false
+	}
 	s.clears++
 
 	return s.recordLocked(request.Key, false), nil
@@ -444,7 +487,7 @@ func (s *testUserHoldStore) CheckUserHold(
 
 	s.checks++
 
-	present := s.held
+	present := s.heldLocked(request.Key)
 	if len(s.presenceSequence) > 0 {
 		index := s.checks - 1
 		if index >= len(s.presenceSequence) {
@@ -463,6 +506,18 @@ func (s *testUserHoldStore) setHeld(held bool) {
 	defer s.mu.Unlock()
 
 	s.held = held
+}
+
+// setHeldForKey updates one fake hold key without affecting unrelated users.
+func (s *testUserHoldStore) setHeldForKey(key UserKey, held bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.heldKeys == nil {
+		s.heldKeys = map[state.AffinityKey]bool{}
+	}
+
+	s.heldKeys[key.Normalize().affinityKey()] = held
 }
 
 // setPresenceSequence installs deterministic check results.
@@ -487,6 +542,15 @@ func (s *testUserHoldStore) clearCount() int {
 	defer s.mu.Unlock()
 
 	return s.clears
+}
+
+// heldLocked reports the fake hold state while the mutex is held.
+func (s *testUserHoldStore) heldLocked(key state.AffinityKey) bool {
+	if s.heldKeys != nil {
+		return s.heldKeys[key]
+	}
+
+	return s.held
 }
 
 // recordLocked builds one fake Redis hold record while the mutex is held.

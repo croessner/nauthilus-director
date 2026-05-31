@@ -687,6 +687,51 @@ func TestUserKickClosesEveryLocalSessionForAffinity(t *testing.T) {
 	}
 }
 
+// TestUserHoldSetDoesNotCloseAttachedLocalSession verifies holds are not retroactive kicks.
+func TestUserHoldSetDoesNotCloseAttachedLocalSession(t *testing.T) {
+	registry := NewLocalSessionRegistry()
+	userKey := UserKey{Tenant: runtimeTestTenant, UserHash: runtimeTestUserHash}
+	active := &recordingLocalHandle{}
+
+	registerTestLocalSession(t, registry, LocalSessionInfo{
+		SessionID:         runtimeTestSessionA,
+		ListenerName:      routeLookupListener,
+		Tenant:            userKey.Tenant,
+		UserHash:          userKey.UserHash,
+		BackendIdentifier: runtimeTestBackendIdentifier,
+	}, active)
+
+	service := newTestUserHoldService(t, newTestUserHoldStore(false), UserHoldServiceConfig{
+		Enabled:                true,
+		MaxDuration:            time.Minute,
+		MaxWait:                time.Second,
+		PollInterval:           10 * time.Millisecond,
+		MaxLocalWaiters:        2,
+		MaxLocalWaitersPerUser: 1,
+	})
+
+	if _, err := service.SetUserHold(context.Background(), SetUserHoldRequest{
+		Key:      userKey,
+		Duration: time.Minute,
+		Reason:   runtimeTestHoldReason,
+	}); err != nil {
+		t.Fatalf("SetUserHold returned error: %v", err)
+	}
+
+	if active.closed != 0 {
+		t.Fatalf("attached local session closed after hold set = %d, want 0", active.closed)
+	}
+
+	closed, err := registry.CloseUser(context.Background(), userKey, LocalSessionControl{Action: "test_cleanup"})
+	if err != nil {
+		t.Fatalf("CloseUser returned error: %v", err)
+	}
+
+	if closed != 1 || active.closed != 1 {
+		t.Fatalf("explicit close after hold set = count:%d handle:%d, want one", closed, active.closed)
+	}
+}
+
 // TestSessionKillClosesOnlyTargetLocalSession verifies session-specific acceleration.
 func TestSessionKillClosesOnlyTargetLocalSession(t *testing.T) {
 	registry := NewLocalSessionRegistry()
