@@ -196,33 +196,28 @@ The backend pin affects only placements whose listener protocol and backend pool
 match the pinned backend. Other protocols and backend pools continue to use the
 normal shard routing and active-affinity rules.
 
-The target backend's effective shard becomes the target shard for the user move
-strategy. This keeps active affinity coherent: a user pinned to
-`mailstore-c-imap` in effective shard `mailstore-a` still has shard affinity to
-`mailstore-a`. The concrete backend pin is an additional selector constraint,
-not a replacement for shard affinity.
+The target backend's effective shard is a scope check, not a user move target.
+The concrete backend pin is an additional selector constraint inside the
+already selected shard, not a replacement for shard affinity. Cross-shard
+movement remains owned by `users move --to-shard`.
 
-A backend pin must never select a backend outside the target effective shard for
-the matching placement request. Cross-shard backend pinning is invalid; the
-server derives the target shard from the configured backend and the selector must
-fail closed if the pinned backend's effective shard does not match the request
-shard.
+A backend pin must never select a backend outside the matching placement
+request's selected shard. If the pinned backend's effective shard does not
+match the selected shard, the pin is reported as a bounded mismatch and is not
+applied.
 
 Strategy behavior:
 
-- `new_sessions_only` stores the backend pin and target shard for future
-  placement. Existing active sessions continue. While active affinity is still
-  present, new sessions preserve the existing active placement. After the active
-  affinity expires or is cleared, new matching-protocol sessions use the pinned
-  backend.
-- `drain_existing` stores the backend pin and target shard while allowing
-  existing sessions to drain naturally. It must not force-close sessions.
-  Matching-protocol sessions follow existing active affinity until the active
-  state is gone.
-- `kick_existing` stores the backend pin, updates the active shard to the pinned
-  backend's effective shard, increments the control generation and asks active
-  sessions for that affinity key to close through the existing controlled
-  runtime action path.
+- `new_sessions_only` stores the backend pin without changing shard affinity.
+  Existing active sessions continue. New matching-protocol sessions use the
+  pinned backend only when normal routing, active affinity or a user move has
+  already selected the pinned backend's shard.
+- `drain_existing` stores the backend pin without changing shard affinity while
+  allowing existing sessions to drain naturally. It must not force-close
+  sessions.
+- `kick_existing` stores the backend pin without changing shard affinity,
+  increments the control generation and asks active sessions for that affinity
+  key to close through the existing controlled runtime action path.
 
 Clearing a backend pin removes the concrete backend override. It does not kill
 active sessions, clear shard affinity or rewrite YAML. Existing sessions continue
@@ -292,9 +287,9 @@ Required operations:
 
 The set operation must be atomic for the user affinity key group. When
 `kick_existing` is requested, setting the backend pin and updating the user
-control generation must happen as one same-slot mutation. Repairable indexes may
-be updated from Go after the authoritative mutation, following the existing
-runtime-state pattern.
+control generation must happen as one same-slot mutation without changing the
+user shard. Repairable indexes may be updated from Go after the authoritative
+mutation, following the existing runtime-state pattern.
 
 Do not store backend transport details, TLS material, credentials or raw
 addresses in backend-pin state. Those remain in the typed config snapshot and

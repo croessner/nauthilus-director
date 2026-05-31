@@ -89,12 +89,11 @@ read as absent even when their cleanup TTL has not removed the physical hash.
 
 Backend-pin mutations use the same per-affinity key group as user movement:
 
-- `backend_pin_set.lua` writes `backend_pin` and the target shard override in
-  one same-slot mutation. The override hash carries `backend_pin=1` so
-  `open.lua` can keep backend-pin `drain_existing` semantics separate from a
-  normal user move drain split. With `kick_existing`, the script updates the
-  active shard and control generation so heartbeats observe
-  `move_generation_changed`.
+- `backend_pin_set.lua` writes only the `backend_pin` hash in the authoritative
+  same-slot mutation. It does not create a shard override and does not change
+  active shard affinity. With `kick_existing`, the script increments the active
+  control generation so heartbeats observe `move_generation_changed` and close
+  existing sessions through the controlled runtime path.
 - `backend_pin_get.lua` reads the pin hash and active-session count without
   refreshing leases or mutating affinity state.
 - `backend_pin_clear.lua` deletes only `backend_pin`. It preserves active
@@ -190,11 +189,9 @@ IMAP placement lives in `internal/protocol/imap/placement.go`.
 5. `sessionStore.OpenSession` opens or reuses the Redis affinity lease.
 6. The selected shard is the active affinity shard when present; otherwise it
    is the routing result shard.
-7. A matching backend pin can replace the requested shard for a new affinity.
-   If an existing active affinity is reused, `new_sessions_only` and
-   `drain_existing` pins stay diagnostic and do not override the concrete
-   selector target; `kick_existing` may apply after the control generation asks
-   active sessions to close.
+7. A matching backend pin can pass a concrete backend target only when the
+   selected shard already matches the pinned backend's effective shard. It never
+   replaces the requested shard for a new affinity.
 8. Backend selection receives `ActiveAffinity` and the effective shard.
    Operator backend pins pass a concrete selector target only after protocol,
    backend pool and active-affinity strategy checks.

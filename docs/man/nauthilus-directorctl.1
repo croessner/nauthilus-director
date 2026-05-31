@@ -228,6 +228,10 @@ The target must be a configured backend identifier.
 The pin is scoped to that backend's protocol and backend pool, and it derives
 the effective shard from the backend registry instead of trusting operator
 input.
+A backend pin applies only when the user's selected shard already matches the
+pinned backend's effective shard. Use
+.B users move
+for cross-shard movement.
 Backend pins can target either a weight-zero backend or an ordinary non-zero
 weight backend.
 They bypass only the weight-zero placement exclusion for the target backend;
