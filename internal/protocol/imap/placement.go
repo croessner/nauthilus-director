@@ -383,7 +383,7 @@ func (s *Session) sessionRecord(result routing.RoutingResult, backendPin state.U
 		Protocol:           protocolIMAP,
 		ListenerName:       s.context.ListenerName,
 		ServiceName:        s.context.ServiceName,
-		ShardTag:           s.sessionOpenShard(result, backendPin),
+		ShardTag:           s.sessionOpenShard(result),
 		DirectorInstanceID: s.context.DirectorInstanceID,
 		LeaseTTL:           ttl,
 		IdleGrace:          s.context.SessionIdleGrace,
@@ -428,12 +428,8 @@ func (s *Session) lookupOperatorBackendPin(ctx context.Context, result routing.R
 	})
 }
 
-// sessionOpenShard applies a matching operator backend pin as the requested shard.
-func (s *Session) sessionOpenShard(result routing.RoutingResult, backendPin state.UserBackendPinRecord) string {
-	if backendPinMatchesScope(backendPin, protocolIMAP, s.context.BackendPool) {
-		return normalizedRoutingFact(backendPin.ShardTag)
-	}
-
+// sessionOpenShard returns the shard chosen by routing before concrete backend pins.
+func (s *Session) sessionOpenShard(result routing.RoutingResult) string {
 	return normalizedRoutingFact(result.ShardTag)
 }
 

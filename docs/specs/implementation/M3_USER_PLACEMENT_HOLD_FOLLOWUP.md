@@ -839,7 +839,7 @@ ready=ok
 version=demo
 api_version=v1
 ./scripts/prove-user-hold.sh
-proof ok: mode=user-hold user=dave@example.test backend=mailstore-b-imap held_login_waited=true route_lookup_read_only=true
+proof ok: mode=user-hold user=bob@example.test backend=mailstore-b-imap held_login_waited=true route_lookup_read_only=true
 ```
 
 Director demo image IDs after the scoped rebuild:
@@ -859,7 +859,7 @@ changing IMAP, LMTP, proxy or bootstrap production code.
 | Area | Soll | Ist | Status | Notes |
 | --- | --- | --- | --- | --- |
 | E2E hold | Held user waits with no backend/session/reservation side effect | `TestServerBinaryUserHoldPublicIMAPReleaseFlow` starts a held public IMAP login, proves no fake backend connections, no REST sessions and no runtime reservations while the hold is active | OK | Route lookup is also checked while the login is waiting |
-| E2E release | Clear releases waiting placement to new target | The test sets `users backend-pin` to `mailstore-b-imap`, clears the hold through CLI and verifies the waiting login proxies to backend B | OK | Demo stack repeats this with `prove-user-hold.sh` |
+| E2E release | Clear releases waiting placement to pinned target in the selected shard | The test sets `users backend-pin` to a same-shard target, clears the hold through CLI and verifies the waiting login proxies to the pinned backend | OK | Demo stack repeats this with `prove-user-hold.sh` |
 | E2E timeout | `max_wait` temporary-fails without backend placement | `TestServerBinaryUserHoldPublicIMAPTimeoutFlow` uses a short `max_wait`, receives IMAP `[UNAVAILABLE]` and proves no backend connection, session or reservation | OK | Route lookup still reports the active hold after timeout |
 | Route lookup | Hold diagnostics read-only and non-waiting | Route lookup returns active hold context in under the bounded probe window and does not change public session or runtime-summary counts | OK | DTO exposes bounded reason class, not operator text |
 | Docs | Manpages, developer docs, spec and roadmap match shipped behavior | CLI manpage, affinity developer doc, architecture roadmap and this closeout describe runtime-only temporary holds, explicit clear and route lookup diagnostics | OK | Unsupported list, renew, force-placement and target flags remain undocumented |

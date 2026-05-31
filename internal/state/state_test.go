@@ -2066,6 +2066,66 @@ func TestRedisBackendPinSetGetClearScripts(t *testing.T) {
 	assertBackendPinClearPreservedAffinity(t, store, client, builder, key, sessionID)
 }
 
+// TestRedisBackendPinDoesNotCreateShardOverride verifies pins never move shard affinity.
+func TestRedisBackendPinDoesNotCreateShardOverride(t *testing.T) {
+	store, client, builder := redisIntegrationStore(t)
+	key := AffinityKey{Tenant: "blue", AccountKey: "backend-pin-no-move@example.test"}
+	sessionID := "backend-pin-no-move-session"
+
+	cleanupAffinity(t, client, builder, key, sessionID)
+
+	setBackendPinForTest(t, store, key, testShardB, moveStrategyNewSessionsOnly, "commission backend")
+
+	keys, err := builder.AffinityKeys(key.Tenant, key.AccountKey)
+	if err != nil {
+		t.Fatalf("AffinityKeys returned error: %v", err)
+	}
+
+	if override := client.HGetAll(context.Background(), keys.Override).Val(); len(override) != 0 {
+		t.Fatalf("backend pin override = %#v, want no shard override", override)
+	}
+
+	opened, err := store.OpenSession(context.Background(), testSessionRecord(key, sessionID))
+	if err != nil {
+		t.Fatalf("OpenSession after backend pin returned error: %v", err)
+	}
+
+	if opened.ShardTag != testShardA {
+		t.Fatalf("backend-pin session shard = %q, want requested shard %q", opened.ShardTag, testShardA)
+	}
+}
+
+// TestRedisBackendPinOverrideIsIgnoredDuringOpen rejects legacy pin-created moves.
+func TestRedisBackendPinOverrideIsIgnoredDuringOpen(t *testing.T) {
+	store, client, builder := redisIntegrationStore(t)
+	key := AffinityKey{Tenant: "blue", AccountKey: "backend-pin-legacy-override@example.test"}
+	sessionID := "backend-pin-legacy-override-session"
+
+	cleanupAffinity(t, client, builder, key, sessionID)
+
+	keys, err := builder.AffinityKeys(key.Tenant, key.AccountKey)
+	if err != nil {
+		t.Fatalf("AffinityKeys returned error: %v", err)
+	}
+
+	if err := client.HSet(context.Background(), keys.Override,
+		"target_shard", testShardB,
+		"strategy", moveStrategyNewSessionsOnly,
+		"backend_pin", "1",
+	).Err(); err != nil {
+		t.Fatalf("seed backend-pin override: %v", err)
+	}
+
+	opened, err := store.OpenSession(context.Background(), testSessionRecord(key, sessionID))
+	if err != nil {
+		t.Fatalf("OpenSession with legacy backend-pin override returned error: %v", err)
+	}
+
+	if opened.ShardTag != testShardA {
+		t.Fatalf("legacy backend-pin override shard = %q, want requested shard %q", opened.ShardTag, testShardA)
+	}
+}
+
 // TestRedisUserHoldSetGetCheckAndExpiry verifies the Redis-backed hold read model.
 func TestRedisUserHoldSetGetCheckAndExpiry(t *testing.T) {
 	store, client, builder := redisIntegrationStore(t)
@@ -2571,7 +2631,7 @@ func TestRedisBackendPinStrategiesControlExistingSessions(t *testing.T) {
 	}{
 		{name: "new sessions only", strategy: moveStrategyNewSessionsOnly, wantControlAction: ControlActionNone, wantShard: testShardA},
 		{name: "drain existing", strategy: moveStrategyDrainExisting, wantControlAction: ControlActionNone, wantShard: testShardA},
-		{name: "kick existing", strategy: moveStrategyKickExisting, wantControlAction: ControlActionMoveGenerationChanged, wantShard: testShardC},
+		{name: "kick existing", strategy: moveStrategyKickExisting, wantControlAction: ControlActionMoveGenerationChanged, wantShard: testShardA},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			store, client, builder := redisIntegrationStore(t)

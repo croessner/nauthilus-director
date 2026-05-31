@@ -583,8 +583,8 @@ Validation evidence from the closeout run:
 2. A backend pin targets one concrete configured backend identifier.
 3. Protocol, backend pool and effective shard are derived from the backend
    registry, not trusted from operator input.
-4. A backend pin applies only when the session protocol and backend pool match
-   the pinned backend.
+4. A backend pin applies only when the session protocol, backend pool and
+   already selected shard match the pinned backend.
 5. The pinned backend may be selected with effective weight `0`.
 6. The pinned backend must still pass all non-weight safety checks.
 7. A pinned backend failure fails closed and does not silently fail over.

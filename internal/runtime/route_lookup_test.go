@@ -389,6 +389,42 @@ func TestRouteLookupReportsBackendPinScopeMismatch(t *testing.T) {
 	assertNoRouteLookupMutations(t, store)
 }
 
+// TestRouteLookupReportsBackendPinShardMismatch verifies pins cannot move diagnostics across shards.
+func TestRouteLookupReportsBackendPinShardMismatch(t *testing.T) {
+	store := &countingRouteState{
+		backendPin: state.UserBackendPinRecord{
+			Present:           true,
+			BackendIdentifier: routeLookupBackendB,
+			Protocol:          routeLookupProtocol,
+			BackendPool:       routeLookupDefaultPool,
+			ShardTag:          routeLookupShardB,
+			Generation:        "pin-shard-mismatch",
+		},
+	}
+	service := newRouteLookupTestService(t, store, false)
+
+	response, err := service.Lookup(context.Background(), RouteLookupRequest{
+		Protocol:   routeLookupProtocol,
+		AccountKey: routeLookupAccount,
+		Attributes: map[string][]string{
+			routeLookupAttributeShard: {routeLookupShardA},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Lookup returned error: %v", err)
+	}
+
+	if response.Routing.EffectiveShard != routeLookupShardA {
+		t.Fatalf("effective shard = %q, want routed shard %q", response.Routing.EffectiveShard, routeLookupShardA)
+	}
+
+	if !response.BackendPin.Present || response.BackendPin.Applied || response.BackendPin.ReasonClass != routeLookupBackendPinMismatch {
+		t.Fatalf("backend pin = %#v, want cross-shard mismatch context", response.BackendPin)
+	}
+
+	assertNoRouteLookupMutations(t, store)
+}
+
 // TestRouteLookupReportsBackendPinExclusion verifies unusable pin reasons are bounded.
 func TestRouteLookupReportsBackendPinExclusion(t *testing.T) {
 	store := &countingRouteState{

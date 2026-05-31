@@ -250,7 +250,7 @@ func TestAuthenticatedPathPassesApplicableOperatorBackendPin(t *testing.T) {
 			BackendIdentifier: "mailstore-c-imap",
 			Protocol:          protocolIMAP,
 			BackendPool:       "imap-default",
-			ShardTag:          "mailstore-c",
+			ShardTag:          "mailstore-a",
 		},
 	}
 	selector := &recordingBackendSelector{result: backend.SelectionResult{Backend: backend.Backend{Identifier: "mailstore-c-imap"}}}
@@ -264,8 +264,8 @@ func TestAuthenticatedPathPassesApplicableOperatorBackendPin(t *testing.T) {
 		t.Fatalf("backend pin reads = %d, want 1", store.backendPinCalls)
 	}
 
-	if store.record.ShardTag != "mailstore-c" {
-		t.Fatalf("session open shard = %q, want backend pin shard", store.record.ShardTag)
+	if store.record.ShardTag != "mailstore-a" {
+		t.Fatalf("session open shard = %q, want routed shard", store.record.ShardTag)
 	}
 
 	if selector.request.OperatorBackendIdentifier != "mailstore-c-imap" {
@@ -274,6 +274,47 @@ func TestAuthenticatedPathPassesApplicableOperatorBackendPin(t *testing.T) {
 
 	if store.reserveCalls != 1 || store.attachCalls != 1 || store.attachment.BackendIdentifier != "mailstore-c-imap" {
 		t.Fatalf("reservation/attachment = %d/%d %#v, want pinned backend accounted", store.reserveCalls, store.attachCalls, store.attachment)
+	}
+}
+
+// TestAuthenticatedPathIgnoresCrossShardOperatorBackendPin verifies pins cannot move shards.
+func TestAuthenticatedPathIgnoresCrossShardOperatorBackendPin(t *testing.T) {
+	authenticator := &recordingAuthenticator{
+		result: nauthilus.AuthResult{
+			Decision: nauthilus.DecisionAuthenticated,
+			Account:  "alice@example.test",
+		},
+	}
+	router := &recordingRoutingResolver{
+		result: routing.RoutingResult{
+			AccountKey:    "alice@example.test",
+			Tenant:        defaultTenantName,
+			ShardTag:      "mailstore-a",
+			RoutingSource: routing.SourceAuthAttribute,
+		},
+	}
+	store := &recordingSessionStore{
+		backendPin: state.UserBackendPinRecord{
+			Present:           true,
+			BackendIdentifier: "mailstore-c-imap",
+			Protocol:          protocolIMAP,
+			BackendPool:       "imap-default",
+			ShardTag:          "mailstore-c",
+		},
+	}
+	selector := &recordingBackendSelector{result: backend.SelectionResult{Backend: backend.Backend{Identifier: "mailstore-a-imap"}}}
+	harness := startTestSession(t, pipelineSessionConfig(authenticator, router, store, selector))
+
+	harness.expectLine(t, greetingLine)
+	harness.write(t, `A001 LOGIN "alice@example.test" "secret-password"`+"\r\n")
+	harness.expectLine(t, "A001 OK Authentication completed\r\n")
+
+	if store.record.ShardTag != "mailstore-a" {
+		t.Fatalf("session open shard = %q, want routed shard", store.record.ShardTag)
+	}
+
+	if selector.request.OperatorBackendIdentifier != "" {
+		t.Fatalf("operator backend pin = %q, want ignored across shard boundary", selector.request.OperatorBackendIdentifier)
 	}
 }
 
@@ -346,7 +387,7 @@ func TestAuthenticatedPlacementGateRunsBeforeRuntimeReads(t *testing.T) {
 				BackendIdentifier: "mailstore-c-imap",
 				Protocol:          protocolIMAP,
 				BackendPool:       "imap-default",
-				ShardTag:          "mailstore-c",
+				ShardTag:          "mailstore-a",
 			}
 
 			return runtimectl.PlacementGateResult{

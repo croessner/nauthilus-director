@@ -104,7 +104,7 @@ if state_exists == 0 then
 		return ambiguous("sessions_without_state")
 	end
 
-	if override_target ~= false and override_target ~= nil and override_target ~= "" then
+	if override_target ~= false and override_target ~= nil and override_target ~= "" and override_backend_pin ~= "1" then
 		shard = override_target
 		status = "created_from_override"
 		clear_override = true
@@ -127,8 +127,8 @@ else
 	control_generation = tostring(redis.call("HGET", state_key, "control_generation") or "0")
 	status = "reused"
 
-	if override_target ~= false and override_target ~= nil and override_target ~= "" then
-		if override_strategy == "drain_existing" and override_backend_pin ~= "1" then
+	if override_target ~= false and override_target ~= nil and override_target ~= "" and override_backend_pin ~= "1" then
+		if override_strategy == "drain_existing" then
 			shard = override_target
 			status = "drain_override"
 		elseif prior_active_count == 0 then

@@ -393,7 +393,7 @@ func TestServerBinaryUserHoldPublicIMAPReleaseFlow(t *testing.T) {
 		UserHoldPollInterval: 25 * time.Millisecond,
 	}, []processBackendDefinition{
 		{Identifier: e2eBackendAID, Address: backendA.Address(), Shard: e2eShardTag, Weight: 100},
-		{Identifier: e2eBackendBID, Address: backendB.Address(), Shard: e2eShardTagB, Weight: 100},
+		{Identifier: e2eBackendBID, Address: backendB.Address(), Shard: e2eShardTag, Weight: 100},
 	})
 	process := startDirectorProcess(t, binary, configPath)
 

@@ -191,11 +191,11 @@ place after the proof. The affinity and backend-pin scripts accept the same
 host and credential environment overrides as the smoke scripts, plus
 `DEMO_CONTROL_URL`, `DEMO_USER`, `DEMO_PIN_BACKEND` and
 `DEMO_FOLLOWUP_COUNT`.
-`prove-user-hold.sh` sets a temporary placement hold for `dave@example.test`,
+`prove-user-hold.sh` sets a temporary placement hold for `bob@example.test`,
 starts a public IMAPS login that must wait without creating a runtime session,
 checks route lookup hold diagnostics, applies a backend pin as the migration
-target, clears only the hold, and verifies the waiting login resumes on the
-target backend. It accepts `DEMO_HOLD_DURATION_SECONDS`,
+target inside the user's shard, clears only the hold, and verifies the waiting
+login resumes on the target backend. It accepts `DEMO_HOLD_DURATION_SECONDS`,
 `DEMO_HOLD_PROBE_SECONDS`, `DEMO_HOLD_TARGET_BACKEND`,
 `DEMO_KEEP_BACKEND_PIN`, `DEMO_CONTROL_URL` and the same host and credential
 overrides as the other proof scripts.

@@ -2,11 +2,10 @@
 --
 -- SPDX-License-Identifier: AGPL-3.0-only
 --
--- Stores a concrete backend pin and matching shard target in one affinity slot.
+-- Stores a concrete backend pin without changing shard affinity.
 
 local state_key = KEYS[1]
 local sessions_key = KEYS[2]
-local override_key = KEYS[3]
 local backend_pin_key = KEYS[4]
 
 local backend_id = ARGV[1]
@@ -57,49 +56,26 @@ redis.call("ZREMRANGEBYSCORE", sessions_key, "-inf", now)
 local active_count = redis.call("ZCARD", sessions_key)
 local generation = 0
 local control_action = "none"
+local control_generation = 0
 
 if redis.call("EXISTS", state_key) == 1 then
 	require_value(redis.call("HGET", state_key, "shard_tag"), "state_shard_required")
 	require_value(redis.call("HGET", state_key, "generation"), "state_generation_required")
-
-	generation = redis.call("HINCRBY", state_key, "control_generation", 1)
-	redis.call("HSET", state_key,
-		"move_generation", generation,
-		"move_strategy", strategy,
-		"move_target_shard", shard_tag,
-		"move_reason", reason,
-		"move_actor", actor or "",
-		"updated_at_ms", now)
-
-	if strategy == "kick_existing" then
-		control_action = "move_generation_changed"
-		redis.call("HSET", state_key,
-			"shard_tag", shard_tag,
-			"control_action", control_action)
-	else
-		redis.call("HSET", override_key,
-			"target_shard", shard_tag,
-			"strategy", strategy,
-			"backend_pin", "1",
-			"generation", generation,
-			"reason", reason,
-			"actor", actor or "",
-			"updated_at_ms", now)
-	end
 else
 	if active_count > 0 then
 		return ambiguous("sessions_without_state")
 	end
+end
 
-	generation = redis.call("HINCRBY", backend_pin_key, "generation", 1)
-	redis.call("HSET", override_key,
-		"target_shard", shard_tag,
-		"strategy", strategy,
-		"backend_pin", "1",
-		"generation", generation,
-		"reason", reason,
-		"actor", actor or "",
-		"updated_at_ms", now)
+generation = redis.call("HINCRBY", backend_pin_key, "generation", 1)
+control_generation = generation
+
+if redis.call("EXISTS", state_key) == 1 and strategy == "kick_existing" then
+	control_generation = redis.call("HINCRBY", state_key, "control_generation", 1)
+	control_action = "move_generation_changed"
+	redis.call("HSET", state_key,
+		"updated_at_ms", now,
+		"control_action", control_action)
 end
 
 redis.call("HSET", backend_pin_key,
@@ -127,7 +103,7 @@ return {
 	"shard_tag", shard_tag,
 	"strategy", strategy,
 	"generation", tostring(generation),
-	"control_generation", tostring(generation),
+	"control_generation", tostring(control_generation),
 	"control_action", control_action,
 	"active_session_count", tostring(active_count),
 	"server_time_ms", tostring(now)

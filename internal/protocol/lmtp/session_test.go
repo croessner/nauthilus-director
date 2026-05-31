@@ -619,7 +619,7 @@ func TestRecipientPlacementGateTemporaryFailureStopsPlacement(t *testing.T) {
 // TestRecipientPlacementGateReleaseReReadsRuntimeState verifies release resumes fresh placement.
 func TestRecipientPlacementGateReleaseReReadsRuntimeState(t *testing.T) {
 	identity := identityLookuperForRecipients(map[string]string{
-		testRecipientSingle: testPlacementShardA,
+		testRecipientSingle: testPlacementShardB,
 	})
 	resolver := &recordingRoutingResolver{}
 	store := &recordingDeliveryStore{}
@@ -651,7 +651,7 @@ func TestRecipientPlacementGateReleaseReReadsRuntimeState(t *testing.T) {
 	}
 
 	if open := store.singleOpen(t); open.ShardTag != testPlacementShardB {
-		t.Fatalf("delivery hold shard = %q, want re-read backend pin shard", open.ShardTag)
+		t.Fatalf("delivery hold shard = %q, want routed shard after re-read", open.ShardTag)
 	}
 
 	store.assertReserved(t, 1)
@@ -735,7 +735,7 @@ func TestAcceptedRecipientIgnoresLaterPlacementHold(t *testing.T) {
 // TestRecipientPlacementUsesScopedLMTPBackendPin verifies LMTP pins are pool scoped.
 func TestRecipientPlacementUsesScopedLMTPBackendPin(t *testing.T) {
 	identity := identityLookuperForRecipients(map[string]string{
-		testRecipientSingle: testPlacementShardA,
+		testRecipientSingle: testPlacementShardB,
 	})
 	resolver := &recordingRoutingResolver{}
 	store := &recordingDeliveryStore{
@@ -769,11 +769,52 @@ func TestRecipientPlacementUsesScopedLMTPBackendPin(t *testing.T) {
 	}
 
 	if open := store.singleOpen(t); open.ShardTag != testPlacementShardB {
-		t.Fatalf("delivery hold shard = %q, want backend pin shard", open.ShardTag)
+		t.Fatalf("delivery hold shard = %q, want matching routed shard", open.ShardTag)
 	}
 
 	store.assertAttached(t, 1)
 	store.assertClosed(t, 1)
+}
+
+// TestRecipientPlacementIgnoresCrossShardBackendPin verifies LMTP pins cannot move shards.
+func TestRecipientPlacementIgnoresCrossShardBackendPin(t *testing.T) {
+	identity := identityLookuperForRecipients(map[string]string{
+		testRecipientSingle: testPlacementShardA,
+	})
+	resolver := &recordingRoutingResolver{}
+	store := &recordingDeliveryStore{
+		backendPin: state.UserBackendPinRecord{
+			Present:           true,
+			BackendIdentifier: testPlacementBackendB,
+			Protocol:          protocolLMTP,
+			BackendPool:       testPlacementPool,
+			ShardTag:          testPlacementShardB,
+		},
+	}
+	selector := &recordingBackendSelector{}
+	config := placementSessionConfig(identity, resolver, store, selector)
+
+	harness := startLMTPHarness(t, config)
+	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+	harness.write(t, "LHLO submitter.example\r\n")
+	harness.drainLHLO(t)
+	harness.write(t, "MAIL FROM:<sender@example.test>\r\n")
+	harness.expectLine(t, "250 2.0.0 Sender accepted\r\n")
+	harness.write(t, "RCPT TO:<recipient@example.test>\r\n")
+	harness.expectLine(t, "250 2.0.0 Recipient accepted\r\n")
+	harness.write(t, "DATA\r\n")
+	harness.expectLine(t, "354 2.0.0 End data with <CR><LF>.<CR><LF>\r\n")
+	harness.write(t, "line-one\r\n.\r\n")
+	harness.expectLine(t, "250 2.0.0 Message accepted\r\n")
+
+	request := selector.firstRequest(t)
+	if request.OperatorBackendIdentifier != "" || request.ShardTag != testPlacementShardA {
+		t.Fatalf("selection request = %#v, want routed shard without cross-shard pin", request)
+	}
+
+	if open := store.singleOpen(t); open.ShardTag != testPlacementShardA {
+		t.Fatalf("delivery hold shard = %q, want routing shard", open.ShardTag)
+	}
 }
 
 // TestRecipientPlacementIgnoresIMAPBackendPin verifies cross-protocol pins do not leak.

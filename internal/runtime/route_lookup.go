@@ -776,7 +776,7 @@ func routeLookupSelectionRequest(
 	affinity RouteLookupAffinityState,
 	backendPin RouteLookupBackendPinState,
 ) backend.SelectionRequest {
-	shardTag := routeLookupSelectionShard(request, result, affinity, backendPin)
+	shardTag := routeLookupSelectionShard(result, affinity)
 
 	return backend.SelectionRequest{
 		AccountKey:              result.AccountKey,
@@ -866,17 +866,8 @@ func userHoldRemaining(record state.UserHoldRecord) time.Duration {
 }
 
 // routeLookupSelectionShard mirrors placement shard choice without opening a session.
-func routeLookupSelectionShard(
-	request RouteLookupRequest,
-	result routing.RoutingResult,
-	affinity RouteLookupAffinityState,
-	backendPin RouteLookupBackendPinState,
-) string {
+func routeLookupSelectionShard(result routing.RoutingResult, affinity RouteLookupAffinityState) string {
 	shardTag := strings.TrimSpace(result.ShardTag)
-	if routeLookupBackendPinMatchesScope(backendPin, request.Protocol, request.BackendPool) {
-		shardTag = strings.TrimSpace(backendPin.EffectiveShard)
-	}
-
 	if affinity.ShardTag != "" {
 		shardTag = affinity.ShardTag
 	}

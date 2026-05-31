@@ -307,7 +307,7 @@ func (s *Session) selectRecipientBackend(
 	affinity state.AffinityRecord,
 	backendPin state.UserBackendPinRecord,
 ) (backend.SelectionRequest, backend.SelectionResult, error) {
-	selectedShard := s.selectedPlacementShard(result, affinity, backendPin)
+	selectedShard := s.selectedPlacementShard(result, affinity)
 	operatorBackend := s.operatorBackendPinIdentifier(backendPin, selectedShard, affinity)
 	request := s.selectionRequest(result, selectedShard, affinity, operatorBackend)
 
@@ -330,7 +330,7 @@ func (s *Session) openRecipientHold(
 		return RecipientPlacement{}, err
 	}
 
-	record := s.deliverySessionRecord(result, holdID, backendPin)
+	record := s.deliverySessionRecord(result, holdID)
 
 	affinity, err := s.sessionStore.OpenSession(ctx, record)
 	if err != nil {
@@ -342,7 +342,7 @@ func (s *Session) openRecipientHold(
 	}
 
 	selected := initial
-	selectedShard := s.selectedPlacementShard(result, affinity, backendPin)
+	selectedShard := s.selectedPlacementShard(result, affinity)
 
 	operatorBackend := s.operatorBackendPinIdentifier(backendPin, selectedShard, affinity)
 
@@ -477,7 +477,7 @@ func (s *Session) reserveAndAttachSelectedBackend(
 }
 
 // deliverySessionRecord builds the Redis lease used for one delivery hold.
-func (s *Session) deliverySessionRecord(result routing.RoutingResult, holdID string, backendPin state.UserBackendPinRecord) state.SessionRecord {
+func (s *Session) deliverySessionRecord(result routing.RoutingResult, holdID string) state.SessionRecord {
 	return state.SessionRecord{
 		ID: holdID,
 		Key: state.AffinityKey{
@@ -488,7 +488,7 @@ func (s *Session) deliverySessionRecord(result routing.RoutingResult, holdID str
 		Protocol:           protocolLMTP,
 		ListenerName:       s.listenerName,
 		ServiceName:        s.serviceName,
-		ShardTag:           s.selectedPlacementShard(result, state.AffinityRecord{}, backendPin),
+		ShardTag:           s.selectedPlacementShard(result, state.AffinityRecord{}),
 		DirectorInstanceID: s.directorInstanceID,
 		LeaseTTL:           s.sessionLeaseTTL,
 		IdleGrace:          s.sessionIdleGrace,
@@ -533,18 +533,13 @@ func (s *Session) lookupOperatorBackendPin(ctx context.Context, result routing.R
 	})
 }
 
-// selectedPlacementShard applies active affinity first, then a matching backend pin.
+// selectedPlacementShard applies active affinity before the routed shard.
 func (s *Session) selectedPlacementShard(
 	result routing.RoutingResult,
 	affinity state.AffinityRecord,
-	backendPin state.UserBackendPinRecord,
 ) string {
 	if shardTag := normalizedRoutingFact(affinity.ShardTag); shardTag != "" {
 		return shardTag
-	}
-
-	if backendPinMatchesScope(backendPin, protocolLMTP, s.backendPool) {
-		return normalizedRoutingFact(backendPin.ShardTag)
 	}
 
 	return normalizedRoutingFact(result.ShardTag)

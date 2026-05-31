@@ -1209,8 +1209,8 @@ they do not choose a shard or backend, do not close existing sessions, and
 clear removes only the hold. Public-boundary E2E starts the production server
 binary with fake Nauthilus and fake IMAP backends, proves that a held login
 waits without backend connections, sessions or reservations, applies a backend
-pin as the migration target, clears the hold and verifies the waiting login
-resumes on the new target. The same lane proves unrelated IMAP traffic
+pin as the same-shard migration target, clears the hold and verifies the waiting
+login resumes on the target backend. The same lane proves unrelated IMAP traffic
 continues normally, route lookup reports active hold context without mutation
 or waiting, and `max_wait` temporary-fails without placement. The demo stack
 also carries `contrib/demo-stack/scripts/prove-user-hold.sh` for an operator
