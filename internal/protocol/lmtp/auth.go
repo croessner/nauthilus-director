@@ -24,6 +24,7 @@ import (
 	"strings"
 
 	"github.com/croessner/nauthilus-director/internal/nauthilus"
+	"github.com/croessner/nauthilus-director/internal/protocol/tlscontext"
 )
 
 const (
@@ -147,16 +148,16 @@ func (c *peerCredentials) Clear() {
 }
 
 // NauthilusAuthRequest builds the credential-auth request for the submitter peer only.
-func (c *peerCredentials) NauthilusAuthRequest(context nauthilus.RequestContext) nauthilus.AuthRequest {
+func (c *peerCredentials) NauthilusAuthRequest(requestContext nauthilus.RequestContext) nauthilus.AuthRequest {
 	if c == nil {
-		return nauthilus.AuthRequest{Context: context}
+		return nauthilus.AuthRequest{Context: requestContext}
 	}
 
-	context.Username = c.username
-	context.Method = c.mechanism.Normalized()
+	requestContext.Username = c.username
+	requestContext.Method = c.mechanism.Normalized()
 
 	return nauthilus.AuthRequest{
-		Context:    context,
+		Context:    requestContext,
 		Credential: nauthilus.NewSecret(c.secret.Value()),
 	}
 }
@@ -690,28 +691,12 @@ func (s *Session) authMechanismAdvertised(wireName string) bool {
 
 // nauthilusRequestContext builds the submitter-auth authority context.
 func (s *Session) nauthilusRequestContext() nauthilus.RequestContext {
-	context := nauthilus.RequestContext{
+	requestContext := nauthilus.RequestContext{
 		Protocol: protocolLMTP,
-		TLS:      boolString(s.tlsActive),
 	}
+	state, ok := tlscontext.ConnectionState(s.conn)
 
-	if s.tlsClientVerified {
-		context.TLSClientVerify = "SUCCESS"
-		context.TLSClientCN = s.tlsClientCommonName
-	} else if s.tlsActive {
-		context.TLSClientVerify = "NONE"
-	}
-
-	return context
-}
-
-// boolString returns a stable text representation for authority context booleans.
-func boolString(value bool) string {
-	if value {
-		return "true"
-	}
-
-	return "false"
+	return tlscontext.Apply(requestContext, s.tlsActive, state, ok)
 }
 
 // authCapability returns the advertised AUTH line if configured and currently safe.

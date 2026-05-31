@@ -314,8 +314,14 @@ internal/protocol/imap/*_test.go
   advertisement during validation.
 - Advertise and accept `STARTTLS` only when configured, before TLS is active and
   only for listener TLS mode `starttls`.
-- Advertise `LOGINDISABLED` if plaintext password authentication is disabled
-  before TLS by policy.
+- Reject `LOGIN` and credential-bearing `AUTHENTICATE` mechanisms before
+  frontend TLS is active. For cleartext pre-TLS sessions, omit
+  `AUTH=<mechanism>` capabilities and advertise `LOGINDISABLED` when password
+  auth is otherwise configured.
+- Populate the flat Nauthilus SSL request fields from the frontend TLS state.
+  `ssl` must be `"true"` after implicit TLS or successful STARTTLS and
+  `"false"` before STARTTLS; available protocol, cipher and client-certificate
+  facts must be copied without inventing missing metadata.
 
 ### IMAP ID Rules
 
@@ -554,6 +560,8 @@ AuthResult + listener context
 ### Required Unit Tests
 
 - Nauthilus auth request mapping from IMAP mechanisms.
+- Nauthilus auth request mapping includes frontend SSL context for plaintext,
+  STARTTLS and implicit TLS sessions.
 - HTTP auth requests include `protocol: imap` and omit forbidden director
   fields.
 - Nauthilus rejected outcomes map authority-provided status messages into safe

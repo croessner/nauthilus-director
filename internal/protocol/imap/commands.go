@@ -78,6 +78,10 @@ func (s *Session) handleLogout(command preauthCommand) error {
 
 // handleLogin extracts LOGIN credentials without retaining them on the session.
 func (s *Session) handleLogin(ctx context.Context, command preauthCommand) (commandOutcome, error) {
+	if !s.credentialAuthAllowed() {
+		return commandOutcome{}, s.writeTagged(command.tag, responseNo, authPrivacyRequiredText)
+	}
+
 	credentials, err := parseLoginCredentials(command)
 	if err != nil {
 		return commandOutcome{}, s.writeTagged(command.tag, responseBad, "Invalid LOGIN command")
@@ -98,7 +102,19 @@ func (s *Session) handleAuthenticate(ctx context.Context, command preauthCommand
 	}
 
 	mechanism, err := newMechanismIdentity(command.arguments[0].value)
-	if err != nil || !s.authMechanismAdvertised(mechanism.Normalized()) {
+	if err != nil {
+		return commandOutcome{}, s.writeTagged(command.tag, responseNo, "Unsupported authentication mechanism")
+	}
+
+	if !s.authMechanismConfigured(mechanism.Normalized()) {
+		return commandOutcome{}, s.writeTagged(command.tag, responseNo, "Unsupported authentication mechanism")
+	}
+
+	if !s.credentialAuthAllowed() {
+		return commandOutcome{}, s.writeTagged(command.tag, responseNo, authPrivacyRequiredText)
+	}
+
+	if !s.authMechanismAdvertised(mechanism.Normalized()) {
 		return commandOutcome{}, s.writeTagged(command.tag, responseNo, "Unsupported authentication mechanism")
 	}
 
@@ -229,4 +245,25 @@ func (s *Session) supportsAuthMechanism(mechanism string) bool {
 	}
 
 	return false
+}
+
+// authMechanismConfigured reports whether listener config names the mechanism independently of TLS state.
+func (s *Session) authMechanismConfigured(mechanism string) bool {
+	if !s.supportsAuthMechanism(mechanism) {
+		return false
+	}
+
+	normalized := "AUTH=" + strings.ToUpper(strings.TrimSpace(mechanism))
+	for _, capability := range s.context.Capabilities {
+		if strings.EqualFold(strings.TrimSpace(capability), normalized) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// credentialAuthAllowed reports whether frontend transport can carry credentials safely.
+func (s *Session) credentialAuthAllowed() bool {
+	return s.tlsActive
 }

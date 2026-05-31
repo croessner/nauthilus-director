@@ -65,6 +65,9 @@ const (
 	testTenantAttribute     = "tenant"
 	testTemporaryDelivery   = "451 4.3.0 Message delivery temporarily failed\r\n"
 	testSubmitterIdentity   = "technical-submit@example.test"
+	testTLSActive           = "true"
+	testTLSClientVerifyNone = "NONE"
+	testTLSClientVerifyOK   = "SUCCESS"
 	testUnicodeRecipient    = "M\xc3\xbcller@example.test"
 	testUnicodeSender       = "sender-\xc3\xbc@example.test"
 )
@@ -303,6 +306,38 @@ func TestSASLPeerAuthUsesSubmitterIdentity(t *testing.T) {
 
 	if request.Context.Username == "mailbox-user@example.test" {
 		t.Fatal("recipient identity was used as peer-auth username")
+	}
+
+	if request.Context.TLS != testTLSActive || request.Context.TLSClientVerify != testTLSClientVerifyNone {
+		t.Fatalf("TLS context = %#v, want implicit TLS without client cert", request.Context)
+	}
+}
+
+// TestSASLPeerAuthPassesVerifiedTLSFacts verifies client certificate metadata reaches Nauthilus.
+func TestSASLPeerAuthPassesVerifiedTLSFacts(t *testing.T) {
+	authenticator := &recordingAuthenticator{}
+	config := testSessionConfig()
+	config.TLSMode = TLSModeImplicit
+	config.RequirePeerAuth = true
+	config.Authenticator = authenticator
+	config.Capabilities = []string{testPlainAuthCapability}
+	config.PeerAuthMechanisms = []string{mechanismPlain}
+
+	harness := startLMTPHarnessWithState(t, config, verifiedTLSState(testMTLSPeerIdentity))
+	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+	harness.write(t, "LHLO submitter.example\r\n")
+	harness.expectLine(t, "250-nauthilus-director\r\n")
+	harness.expectLine(t, "250 AUTH PLAIN\r\n")
+	harness.write(t, "AUTH PLAIN "+plainPayload(testSubmitterIdentity, testPeerPassword)+"\r\n")
+	harness.expectLine(t, "235 2.7.0 Authentication successful\r\n")
+
+	request := authenticator.singleRequest(t)
+	if request.Context.TLS != testTLSActive || request.Context.TLSClientVerify != testTLSClientVerifyOK {
+		t.Fatalf("TLS context = %#v, want verified TLS", request.Context)
+	}
+
+	if request.Context.TLSClientCN != testMTLSPeerIdentity {
+		t.Fatalf("TLS client CN = %q, want %q", request.Context.TLSClientCN, testMTLSPeerIdentity)
 	}
 }
 

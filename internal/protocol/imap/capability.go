@@ -16,11 +16,15 @@
 
 package imap
 
-import "strings"
+import (
+	"slices"
+	"strings"
+)
 
 const (
 	capabilityIMAP4Rev1 = "IMAP4rev1"
 	capabilityID        = "ID"
+	capabilityLoginOff  = "LOGINDISABLED"
 	capabilitySASLIR    = "SASL-IR"
 	capabilityStartTLS  = "STARTTLS"
 )
@@ -40,8 +44,8 @@ func (s *Session) handleCapability(command preauthCommand) error {
 
 // capabilities returns the implemented pre-auth capability set in stable wire order.
 func (s *Session) capabilities() []string {
-	capabilities := make([]string, 0, len(s.context.Capabilities))
-	seen := make(map[string]struct{}, len(s.context.Capabilities))
+	capabilities := make([]string, 0, len(s.context.Capabilities)+1)
+	seen := make(map[string]struct{}, len(s.context.Capabilities)+1)
 
 	for _, configured := range s.context.Capabilities {
 		capability := s.effectiveCapability(configured)
@@ -57,6 +61,10 @@ func (s *Session) capabilities() []string {
 		seen[key] = struct{}{}
 
 		capabilities = append(capabilities, capability)
+	}
+
+	if s.loginDisabledCapabilityNeeded() {
+		capabilities = append(capabilities, capabilityLoginOff)
 	}
 
 	return capabilities
@@ -79,6 +87,10 @@ func (s *Session) effectiveCapability(configured string) string {
 
 		return ""
 	case strings.HasPrefix(normalized, "AUTH="):
+		if !s.tlsActive {
+			return ""
+		}
+
 		mechanism := strings.TrimPrefix(normalized, "AUTH=")
 		if supportedPreauthAuthMechanism(mechanism) && s.supportsAuthMechanism(mechanism) {
 			return "AUTH=" + strings.ToUpper(mechanism)
@@ -86,6 +98,26 @@ func (s *Session) effectiveCapability(configured string) string {
 	}
 
 	return ""
+}
+
+// loginDisabledCapabilityNeeded reports whether cleartext password auth is locally unavailable.
+func (s *Session) loginDisabledCapabilityNeeded() bool {
+	return !s.tlsActive && s.passwordAuthConfigured()
+}
+
+// passwordAuthConfigured reports whether the listener exposes password-bearing auth.
+func (s *Session) passwordAuthConfigured() bool {
+	return slices.ContainsFunc(s.context.AuthMechanisms, passwordAuthMechanism)
+}
+
+// passwordAuthMechanism reports whether a mechanism carries reusable password material.
+func passwordAuthMechanism(mechanism string) bool {
+	switch strings.ToLower(strings.TrimSpace(mechanism)) {
+	case mechanismLogin, mechanismPlain:
+		return true
+	default:
+		return false
+	}
 }
 
 // supportedPreauthAuthMechanism reports whether command handling accepts the mechanism shape.

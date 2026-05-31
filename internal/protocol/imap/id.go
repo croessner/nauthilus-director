@@ -21,6 +21,7 @@ import (
 	"strings"
 
 	"github.com/croessner/nauthilus-director/internal/nauthilus"
+	"github.com/croessner/nauthilus-director/internal/protocol/tlscontext"
 )
 
 const (
@@ -57,7 +58,7 @@ func (s *Session) NauthilusRequestContext(method string) nauthilus.RequestContex
 	clientIP, clientPort := splitSessionAddr(s.context.RemoteAddr)
 	localIP, localPort := splitSessionAddr(s.context.LocalAddr)
 
-	return nauthilus.RequestContext{
+	requestContext := nauthilus.RequestContext{
 		ClientIP:   clientIP,
 		ClientPort: clientPort,
 		ClientID:   s.clientID,
@@ -66,6 +67,9 @@ func (s *Session) NauthilusRequestContext(method string) nauthilus.RequestContex
 		Protocol:   protocolIMAP,
 		Method:     method,
 	}
+	state, ok := tlscontext.ConnectionState(s.conn)
+
+	return tlscontext.Apply(requestContext, s.tlsActive, state, ok)
 }
 
 // ClientID returns the normalized IMAP ID value retained for auth context.

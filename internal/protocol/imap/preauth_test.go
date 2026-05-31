@@ -29,7 +29,7 @@ import (
 )
 
 const (
-	testCapabilityCleartext = "* CAPABILITY IMAP4rev1 ID SASL-IR STARTTLS AUTH=PLAIN AUTH=XOAUTH2 AUTH=OAUTHBEARER\r\n"
+	testCapabilityCleartext = "* CAPABILITY IMAP4rev1 ID SASL-IR STARTTLS LOGINDISABLED\r\n"
 	testCapabilityTLS       = "* CAPABILITY IMAP4rev1 ID SASL-IR AUTH=PLAIN AUTH=XOAUTH2 AUTH=OAUTHBEARER\r\n"
 )
 
@@ -85,6 +85,23 @@ func TestCapabilityCleartextPostStartTLSAndImplicitTLS(t *testing.T) {
 	implicit.expectLine(t, "A001 OK CAPABILITY completed\r\n")
 }
 
+// TestNauthilusContextReportsFrontendTLS verifies SSL facts reach the auth request context.
+func TestNauthilusContextReportsFrontendTLS(t *testing.T) {
+	cleartext := startTestSession(t, testPreauthConfig(TLSModeStartTLS, false))
+	cleartext.expectLine(t, greetingLine)
+	clearContext := cleartext.session.NauthilusRequestContext(mechanismPlain)
+	if clearContext.TLS != "false" {
+		t.Fatalf("cleartext TLS = %q, want false", clearContext.TLS)
+	}
+
+	implicit := startTestSession(t, testPreauthConfig(TLSModeImplicit, false))
+	implicit.expectLine(t, greetingLine)
+	implicitContext := implicit.session.NauthilusRequestContext(mechanismPlain)
+	if implicitContext.TLS != "true" || implicitContext.TLSClientVerify != "NONE" {
+		t.Fatalf("implicit TLS context = %#v, want TLS true and no client cert", implicitContext)
+	}
+}
+
 // TestCapabilityDoesNotAdvertiseEnable verifies unsupported ENABLE never appears.
 func TestCapabilityDoesNotAdvertiseEnable(t *testing.T) {
 	harness := startTestSession(t, testPreauthConfig(TLSModeStartTLS, false))
@@ -108,7 +125,7 @@ func TestOmittedCapabilitiesDisableAdvertisedExtensions(t *testing.T) {
 		harness := startTestSession(t, config)
 		harness.expectLine(t, greetingLine)
 		harness.write(t, "A001 CAPABILITY\r\n")
-		harness.expectLine(t, "* CAPABILITY IMAP4rev1 ID SASL-IR AUTH=PLAIN\r\n")
+		harness.expectLine(t, "* CAPABILITY IMAP4rev1 ID SASL-IR LOGINDISABLED\r\n")
 		harness.expectLine(t, "A001 OK CAPABILITY completed\r\n")
 		harness.write(t, "A002 STARTTLS\r\n")
 		harness.expectLine(t, "A002 BAD STARTTLS is not available\r\n")
@@ -125,7 +142,7 @@ func TestOmittedCapabilitiesDisableAdvertisedExtensions(t *testing.T) {
 	})
 
 	t.Run("sasl ir", func(t *testing.T) {
-		config := testPreauthConfig(TLSModeStartTLS, false)
+		config := testPreauthConfig(TLSModeImplicit, false)
 		config.Capabilities = []string{capabilityIMAP4Rev1, capabilityID, "AUTH=PLAIN"}
 
 		harness := startTestSession(t, config)
@@ -173,18 +190,18 @@ func TestIDDoesNotPopulateUserAgent(t *testing.T) {
 	harness.expectLine(t, "* ID NIL\r\n")
 	harness.expectLine(t, "A001 OK ID completed\r\n")
 
-	context := harness.session.NauthilusRequestContext("plain")
-	if context.ClientID != "Desktop Mail" {
-		t.Fatalf("client ID = %q, want Desktop Mail", context.ClientID)
+	requestContext := harness.session.NauthilusRequestContext("plain")
+	if requestContext.ClientID != "Desktop Mail" {
+		t.Fatalf("client ID = %q, want Desktop Mail", requestContext.ClientID)
 	}
-	if context.UserAgent != "" {
-		t.Fatalf("user agent = %q, want empty", context.UserAgent)
+	if requestContext.UserAgent != "" {
+		t.Fatalf("user agent = %q, want empty", requestContext.UserAgent)
 	}
 }
 
 // TestMissingIDPermissiveByDefault verifies auth shape is allowed to reach the later auth boundary.
 func TestMissingIDPermissiveByDefault(t *testing.T) {
-	harness := startTestSession(t, testPreauthConfig(TLSModeStartTLS, false))
+	harness := startTestSession(t, testPreauthConfig(TLSModeImplicit, false))
 	harness.expectLine(t, greetingLine)
 	harness.write(t, `A001 LOGIN "alice" "secret"`+"\r\n")
 	harness.expectLine(t, "A001 NO [UNAVAILABLE] Authentication service temporarily unavailable\r\n")
@@ -192,7 +209,7 @@ func TestMissingIDPermissiveByDefault(t *testing.T) {
 
 // TestAuthenticateMechanismShapes verifies supported SASL mechanisms and initial responses parse.
 func TestAuthenticateMechanismShapes(t *testing.T) {
-	harness := startTestSession(t, testPreauthConfig(TLSModeStartTLS, false))
+	harness := startTestSession(t, testPreauthConfig(TLSModeImplicit, false))
 	harness.expectLine(t, greetingLine)
 	harness.write(t, "A001 AUTHENTICATE PLAIN "+plainPayload("plain-user@example.test", "plain-passphrase")+"\r\n"+
 		"A002 AUTHENTICATE XOAUTH2 "+xoauth2Payload("xoauth2-user@example.test", "xoauth2-token")+"\r\n"+
@@ -205,15 +222,25 @@ func TestAuthenticateMechanismShapes(t *testing.T) {
 
 // TestAuthenticateRejectsMalformedInitialResponse verifies SASL-IR shape validation.
 func TestAuthenticateRejectsMalformedInitialResponse(t *testing.T) {
-	harness := startTestSession(t, testPreauthConfig(TLSModeStartTLS, false))
+	harness := startTestSession(t, testPreauthConfig(TLSModeImplicit, false))
 	harness.expectLine(t, greetingLine)
 	harness.write(t, "A001 AUTHENTICATE PLAIN !!!\r\n")
 	harness.expectLine(t, "A001 BAD Invalid AUTHENTICATE response\r\n")
 }
 
+// TestPasswordAuthRequiresFrontendTLS verifies credentials never reach auth handling before TLS.
+func TestPasswordAuthRequiresFrontendTLS(t *testing.T) {
+	harness := startTestSession(t, testPreauthConfig(TLSModeStartTLS, false))
+	harness.expectLine(t, greetingLine)
+	harness.write(t, `A001 LOGIN "alice" "secret"`+"\r\n")
+	harness.expectLine(t, "A001 NO "+authPrivacyRequiredText+"\r\n")
+	harness.write(t, "A002 AUTHENTICATE PLAIN "+plainPayload("plain-user@example.test", "plain-passphrase")+"\r\n")
+	harness.expectLine(t, "A002 NO "+authPrivacyRequiredText+"\r\n")
+}
+
 // TestMissingIDCanBeRequiredBeforeAuth verifies listener policy blocks auth generically.
 func TestMissingIDCanBeRequiredBeforeAuth(t *testing.T) {
-	harness := startTestSession(t, testPreauthConfig(TLSModeStartTLS, true))
+	harness := startTestSession(t, testPreauthConfig(TLSModeImplicit, true))
 	harness.expectLine(t, greetingLine)
 	harness.write(t, "A001 AUTHENTICATE PLAIN AHVzZXIAcGFzcw==\r\n")
 	harness.expectLine(t, "A001 NO Authentication failed\r\n")
@@ -237,7 +264,7 @@ func TestMalformedAndOversizedIDRejectWithoutRawLeakage(t *testing.T) {
 
 // TestUnsupportedLiteralMarkerIsTaggedAndStops verifies literals never trigger continuations.
 func TestUnsupportedLiteralMarkerIsTaggedAndStops(t *testing.T) {
-	harness := startTestSession(t, testPreauthConfig(TLSModeStartTLS, false))
+	harness := startTestSession(t, testPreauthConfig(TLSModeImplicit, false))
 	harness.expectLine(t, greetingLine)
 	harness.write(t, "A001 LOGIN alice {5}\r\n")
 	harness.expectLine(t, "A001 BAD Unsupported IMAP literal before authentication\r\n")

@@ -114,6 +114,7 @@ func TestFakeHTTPAuthorityPublicIMAPFlow(t *testing.T) {
 
 	reader := bufio.NewReader(client)
 	expectLine(t, reader, "* OK nauthilus-director IMAP session ready\r\n")
+	markIMAPStartTLS(t, client, reader)
 	writeLine(t, client, `A001 ID ("client_id" "e2e-client")`)
 	expectLine(t, reader, "* ID NIL\r\n")
 	expectLine(t, reader, "A001 OK ID completed\r\n")
@@ -170,6 +171,7 @@ func TestServerBinaryPublicIMAPFlow(t *testing.T) {
 
 	reader := bufio.NewReader(client)
 	expectLine(t, reader, "* OK nauthilus-director IMAP session ready\r\n")
+	client, reader = upgradeIMAPStartTLS(t, client, reader)
 	writeLine(t, client, `A001 LOGIN "`+e2eAccount+`" "`+e2ePassword+`"`)
 	expectLine(t, reader, "A001 OK Authentication completed\r\n")
 	writeLine(t, client, "A002 NOOP")
@@ -269,7 +271,7 @@ func TestServerBinaryBackendPinPublicIMAPFlow(t *testing.T) {
 		t.Fatalf("unrelated route = %#v, want normal backend and weight-zero exclusion", unrelated)
 	}
 
-	activeClient, activeReader := loginIMAP(t, directorAddress, e2ePinnedLogin)
+	activeClient, activeReader := loginProcessIMAP(t, directorAddress, e2ePinnedLogin)
 	activeBackend := waitForRESTSessionCount(t, controlURL, 1)[0].Backend
 	if activeBackend == e2eBackendCID {
 		t.Fatalf("normal login selected weight-zero backend %q", activeBackend)
@@ -311,7 +313,7 @@ func TestServerBinaryBackendPinPublicIMAPFlow(t *testing.T) {
 		t.Fatalf("route lookup changed session count from %d to %d", beforeLookup, afterLookup)
 	}
 
-	pinnedClient, pinnedReader := loginIMAP(t, directorAddress, e2ePinnedLogin)
+	pinnedClient, pinnedReader := loginProcessIMAP(t, directorAddress, e2ePinnedLogin)
 	expectBackendProxy(t, pinnedClient, pinnedReader, backendC, "B002")
 
 	runDirectorctl(t, ctl, controlURL, "users", "backend-pin", "clear", e2ePinnedAccountKey, "--reason", "e2e clear weight zero")
@@ -331,7 +333,7 @@ func TestServerBinaryBackendPinPublicIMAPFlow(t *testing.T) {
 		"--reason", "e2e normal backend pin")
 	normalPinRoute := lookupRoute(t, controlURL, e2ePinnedAccountKey, true)
 	assertBackendPinRoute(t, normalPinRoute, e2eBackendAID)
-	normalPinClient, normalPinReader := loginIMAP(t, directorAddress, e2ePinnedLogin)
+	normalPinClient, normalPinReader := loginProcessIMAP(t, directorAddress, e2ePinnedLogin)
 	expectBackendProxy(t, normalPinClient, normalPinReader, backendA, "C002")
 	runDirectorctl(t, ctl, controlURL, "users", "backend-pin", "clear", e2ePinnedAccountKey, "--reason", "e2e clear normal backend pin")
 	_ = normalPinClient.Close()
@@ -347,7 +349,7 @@ func TestServerBinaryBackendPinPublicIMAPFlow(t *testing.T) {
 	if !failClosed.FailClosed || failClosed.SelectedBackend != "" || failClosed.BackendPin.Applied || failClosed.BackendPin.Reason != "runtime_out" {
 		t.Fatalf("fail-closed route = %#v, want runtime_out without selected backend", failClosed)
 	}
-	expectIMAPLoginUnavailable(t, directorAddress, e2ePinnedLogin)
+	expectProcessIMAPLoginUnavailable(t, directorAddress, e2ePinnedLogin)
 	waitForRESTSessionCount(t, controlURL, 0)
 	runDirectorctl(t, ctl, controlURL, "backends", "in", e2eBackendCID, "--reason", "e2e fail closed restore")
 	runDirectorctl(t, ctl, controlURL, "users", "backend-pin", "clear", e2ePinnedAccountKey, "--reason", "e2e clear failed pin")
@@ -408,7 +410,7 @@ func TestServerBinaryUserHoldPublicIMAPReleaseFlow(t *testing.T) {
 	assertCLIOutputFields(t, holdShow, "user_key="+e2eHoldAccountKey, "present=true")
 	assertOutputOmits(t, holdShow, "e2e hold migration")
 
-	pending := beginIMAPLogin(t, directorAddress, e2eHoldLogin)
+	pending := beginProcessIMAPLogin(t, directorAddress, e2eHoldLogin)
 	defer func() { _ = pending.client.Close() }()
 
 	expectNoIMAPLoginResult(t, pending, 150*time.Millisecond)
@@ -428,7 +430,7 @@ func TestServerBinaryUserHoldPublicIMAPReleaseFlow(t *testing.T) {
 		t.Fatalf("route lookup changed session count from %#v to %#v", beforeLookup.ActiveSessions.Total, afterLookup.ActiveSessions.Total)
 	}
 
-	otherClient, otherReader := loginIMAP(t, directorAddress, e2eHoldOtherLogin)
+	otherClient, otherReader := loginProcessIMAP(t, directorAddress, e2eHoldOtherLogin)
 	otherBackend := waitForRESTSessionCount(t, controlURL, 1)[0].Backend
 	backends := map[string]*fakeIMAPBackend{e2eBackendAID: backendA, e2eBackendBID: backendB}
 	expectBackendProxy(t, otherClient, otherReader, backends[otherBackend], "U002")
@@ -495,7 +497,7 @@ func TestServerBinaryUserHoldPublicIMAPTimeoutFlow(t *testing.T) {
 	runDirectorctl(t, ctl, controlURL, "users", "hold", "set", e2eHoldTimeoutKey,
 		"--duration", "5s",
 		"--reason", "e2e hold timeout")
-	pending := beginIMAPLogin(t, directorAddress, e2eHoldTimeoutLogin)
+	pending := beginProcessIMAPLogin(t, directorAddress, e2eHoldTimeoutLogin)
 	defer func() { _ = pending.client.Close() }()
 
 	expectIMAPLoginResult(t, pending, "A001 NO [UNAVAILABLE] Authentication service temporarily unavailable\r\n")
@@ -660,6 +662,7 @@ func TestFakeHTTPAuthorityUsesRedisLeaseStore(t *testing.T) {
 
 	reader := bufio.NewReader(client)
 	expectLine(t, reader, "* OK nauthilus-director IMAP session ready\r\n")
+	markIMAPStartTLS(t, client, reader)
 	writeLine(t, client, `A001 LOGIN "`+e2eAccount+`" "`+e2ePassword+`"`)
 	expectLine(t, reader, "A001 OK Authentication completed\r\n")
 
@@ -722,6 +725,7 @@ func TestMaxConnectionsPreventOverbookingThroughPublicIMAP(t *testing.T) {
 	defer func() { _ = secondClient.Close() }()
 	secondReader := bufio.NewReader(secondClient)
 	expectLine(t, secondReader, "* OK nauthilus-director IMAP session ready\r\n")
+	markIMAPStartTLS(t, secondClient, secondReader)
 	writeLine(t, secondClient, `A001 LOGIN "bob@example.test" "`+e2ePassword+`"`)
 	expectLine(t, secondReader, "A001 NO [UNAVAILABLE] Authentication service temporarily unavailable\r\n")
 	waitForSessionIDs(t, store, 1)
@@ -751,6 +755,7 @@ func TestFakeGRPCAuthorityPublicIMAPFlow(t *testing.T) {
 
 	reader := bufio.NewReader(client)
 	expectLine(t, reader, "* OK nauthilus-director IMAP session ready\r\n")
+	markIMAPStartTLS(t, client, reader)
 	writeLine(t, client, `A001 LOGIN "`+e2eAccount+`" "`+e2ePassword+`"`)
 	expectLine(t, reader, "A001 OK Authentication completed\r\n")
 	writeLine(t, client, "A002 NOOP")
@@ -2776,10 +2781,47 @@ func loginIMAP(t *testing.T, address string, account string) (net.Conn, *bufio.R
 	client := dialPlain(t, address)
 	reader := bufio.NewReader(client)
 	expectLine(t, reader, "* OK nauthilus-director IMAP session ready\r\n")
+	markIMAPStartTLS(t, client, reader)
 	writeLine(t, client, `A001 LOGIN "`+account+`" "`+e2ePassword+`"`)
 	expectLine(t, reader, "A001 OK Authentication completed\r\n")
 
 	return client, reader
+}
+
+// loginProcessIMAP authenticates one real-process IMAP client after a TLS handshake.
+func loginProcessIMAP(t *testing.T, address string, account string) (net.Conn, *bufio.Reader) {
+	t.Helper()
+
+	client := dialPlain(t, address)
+	reader := bufio.NewReader(client)
+	expectLine(t, reader, "* OK nauthilus-director IMAP session ready\r\n")
+	client, reader = upgradeIMAPStartTLS(t, client, reader)
+	writeLine(t, client, `A001 LOGIN "`+account+`" "`+e2ePassword+`"`)
+	expectLine(t, reader, "A001 OK Authentication completed\r\n")
+
+	return client, reader
+}
+
+// markIMAPStartTLS asks in-memory sessions to enter logical TLS without a socket handshake.
+func markIMAPStartTLS(t *testing.T, client net.Conn, reader *bufio.Reader) {
+	t.Helper()
+
+	writeLine(t, client, "S001 STARTTLS")
+	expectLine(t, reader, "S001 OK Begin TLS negotiation now\r\n")
+}
+
+// upgradeIMAPStartTLS negotiates real STARTTLS for production-process tests.
+func upgradeIMAPStartTLS(t *testing.T, client net.Conn, reader *bufio.Reader) (net.Conn, *bufio.Reader) {
+	t.Helper()
+
+	writeLine(t, client, "S001 STARTTLS")
+	expectLine(t, reader, "S001 OK Begin TLS negotiation now\r\n")
+	tlsClient := tls.Client(client, &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12})
+	if err := tlsClient.Handshake(); err != nil {
+		t.Fatalf("STARTTLS client handshake: %v", err)
+	}
+
+	return tlsClient, bufio.NewReader(tlsClient)
 }
 
 // beginIMAPLogin starts one public LOGIN command and leaves the tagged result pending.
@@ -2789,6 +2831,26 @@ func beginIMAPLogin(t *testing.T, address string, account string) pendingIMAPLog
 	client := dialPlain(t, address)
 	reader := bufio.NewReader(client)
 	expectLine(t, reader, "* OK nauthilus-director IMAP session ready\r\n")
+	markIMAPStartTLS(t, client, reader)
+	writeLine(t, client, `A001 LOGIN "`+account+`" "`+e2ePassword+`"`)
+
+	pending := pendingIMAPLogin{client: client, reader: reader, done: make(chan imapLoginResult, 1)}
+	go func() {
+		line, err := reader.ReadString('\n')
+		pending.done <- imapLoginResult{line: line, err: err}
+	}()
+
+	return pending
+}
+
+// beginProcessIMAPLogin starts a real-process TLS LOGIN command and leaves the result pending.
+func beginProcessIMAPLogin(t *testing.T, address string, account string) pendingIMAPLogin {
+	t.Helper()
+
+	client := dialPlain(t, address)
+	reader := bufio.NewReader(client)
+	expectLine(t, reader, "* OK nauthilus-director IMAP session ready\r\n")
+	client, reader = upgradeIMAPStartTLS(t, client, reader)
 	writeLine(t, client, `A001 LOGIN "`+account+`" "`+e2ePassword+`"`)
 
 	pending := pendingIMAPLogin{client: client, reader: reader, done: make(chan imapLoginResult, 1)}
@@ -2837,6 +2899,21 @@ func expectIMAPLoginUnavailable(t *testing.T, address string, account string) {
 
 	reader := bufio.NewReader(client)
 	expectLine(t, reader, "* OK nauthilus-director IMAP session ready\r\n")
+	markIMAPStartTLS(t, client, reader)
+	writeLine(t, client, `A001 LOGIN "`+account+`" "`+e2ePassword+`"`)
+	expectLine(t, reader, "A001 NO [UNAVAILABLE] Authentication service temporarily unavailable\r\n")
+}
+
+// expectProcessIMAPLoginUnavailable verifies a real-process TLS login fails before proxy mode.
+func expectProcessIMAPLoginUnavailable(t *testing.T, address string, account string) {
+	t.Helper()
+
+	client := dialPlain(t, address)
+	defer func() { _ = client.Close() }()
+
+	reader := bufio.NewReader(client)
+	expectLine(t, reader, "* OK nauthilus-director IMAP session ready\r\n")
+	client, reader = upgradeIMAPStartTLS(t, client, reader)
 	writeLine(t, client, `A001 LOGIN "`+account+`" "`+e2ePassword+`"`)
 	expectLine(t, reader, "A001 NO [UNAVAILABLE] Authentication service temporarily unavailable\r\n")
 }

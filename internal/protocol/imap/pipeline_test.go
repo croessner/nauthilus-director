@@ -734,6 +734,10 @@ func assertAuthRequest(t *testing.T, authenticator *recordingAuthenticator) {
 	if got := authenticator.requests[0].Context.ClientID; got != "desktop-client" {
 		t.Fatalf("auth client ID = %q, want desktop-client", got)
 	}
+
+	if got := authenticator.requests[0].Context.TLS; got != "true" {
+		t.Fatalf("auth TLS = %q, want true", got)
+	}
 }
 
 // assertRoutingRequest verifies authenticated attributes reached routing.
@@ -1123,7 +1127,7 @@ func pipelineSessionConfig(
 	sessionStore state.SessionStore,
 	selector backend.Selector,
 ) SessionConfig {
-	config := testPreauthConfig(TLSModeStartTLS, false)
+	config := testPreauthConfig(TLSModeImplicit, false)
 	config.BackendPool = "imap-default"
 	config.DirectorInstanceID = "pipeline-director"
 	config.DefaultTenant = defaultTenantName

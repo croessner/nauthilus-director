@@ -41,10 +41,16 @@ func TestHTTPAuthenticateSendsStrictNauthilusJSON(t *testing.T) {
 			"method",
 			"password",
 			"protocol",
+			"ssl",
+			"ssl_client_cn",
+			"ssl_client_verify",
 			"username",
 		})
 		assertForbiddenDirectorFieldsAbsent(t, captured)
 		assertField(t, captured, "protocol", "imap")
+		assertField(t, captured, "ssl", "true")
+		assertField(t, captured, "ssl_client_verify", "SUCCESS")
+		assertField(t, captured, "ssl_client_cn", "client.example.test")
 		assertFieldAbsent(t, captured, "service")
 
 		writer.Header().Set("Content-Type", defaultHTTPContentType)
@@ -55,11 +61,14 @@ func TestHTTPAuthenticateSendsStrictNauthilusJSON(t *testing.T) {
 	client := newTestHTTPClient(t, server.URL+"/api/v1/auth/json", nil)
 	result, err := client.Authenticate(context.Background(), AuthRequest{
 		Context: RequestContext{
-			Username:   "alice@example.test",
-			ClientIP:   "203.0.113.10",
-			ClientPort: "12345",
-			Protocol:   "imap",
-			Method:     "plain",
+			Username:        "alice@example.test",
+			ClientIP:        "203.0.113.10",
+			ClientPort:      "12345",
+			Protocol:        "imap",
+			Method:          "plain",
+			TLS:             "true",
+			TLSClientVerify: "SUCCESS",
+			TLSClientCN:     "client.example.test",
 		},
 		Credential:       NewSecret("correct horse battery staple"),
 		AuthLoginAttempt: 1,

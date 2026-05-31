@@ -220,14 +220,14 @@ func TestAuthenticateSASLIRAndContinuationFlows(t *testing.T) {
 
 	for _, testCase := range testCases {
 		t.Run(testCase.name+"_sasl_ir", func(t *testing.T) {
-			harness := startTestSession(t, testPreauthConfig(TLSModeStartTLS, false))
+			harness := startTestSession(t, testPreauthConfig(TLSModeImplicit, false))
 			harness.expectLine(t, greetingLine)
 			harness.write(t, fmt.Sprintf("A001 AUTHENTICATE %s %s\r\n", testCase.mechanism, testCase.encoded))
 			harness.expectLine(t, "A001 NO [UNAVAILABLE] Authentication service temporarily unavailable\r\n")
 		})
 
 		t.Run(testCase.name+"_continuation", func(t *testing.T) {
-			harness := startTestSession(t, testPreauthConfig(TLSModeStartTLS, false))
+			harness := startTestSession(t, testPreauthConfig(TLSModeImplicit, false))
 			harness.expectLine(t, greetingLine)
 			harness.write(t, fmt.Sprintf("A001 AUTHENTICATE %s\r\n", testCase.mechanism))
 			harness.expectLine(t, "+ \r\n")
@@ -239,7 +239,7 @@ func TestAuthenticateSASLIRAndContinuationFlows(t *testing.T) {
 
 // TestBearerTokenLimitUsesSessionConfig verifies authority-derived bearer limits fail closed.
 func TestBearerTokenLimitUsesSessionConfig(t *testing.T) {
-	config := testPreauthConfig(TLSModeStartTLS, false)
+	config := testPreauthConfig(TLSModeImplicit, false)
 	config.MaxBearerTokenBytes = 8
 
 	harness := startTestSession(t, config)
@@ -250,7 +250,7 @@ func TestBearerTokenLimitUsesSessionConfig(t *testing.T) {
 
 // TestMalformedContinuationResponseIsTagged verifies continuation failures stay generic.
 func TestMalformedContinuationResponseIsTagged(t *testing.T) {
-	harness := startTestSession(t, testPreauthConfig(TLSModeStartTLS, false))
+	harness := startTestSession(t, testPreauthConfig(TLSModeImplicit, false))
 	harness.expectLine(t, greetingLine)
 	harness.write(t, "A001 AUTHENTICATE PLAIN\r\n")
 	harness.expectLine(t, "+ \r\n")

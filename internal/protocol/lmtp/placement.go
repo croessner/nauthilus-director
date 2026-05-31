@@ -234,15 +234,15 @@ func (s *Session) lookupRecipientIdentity(ctx context.Context, lookupName string
 
 // recipientLookupContext builds the no-auth authority context for recipient lookup.
 func (s *Session) recipientLookupContext(lookupName string) nauthilus.RequestContext {
-	context := s.nauthilusRequestContext()
-	context.Username = lookupName
-	context.Method = recipientLookupMethod
+	requestContext := s.nauthilusRequestContext()
+	requestContext.Username = lookupName
+	requestContext.Method = recipientLookupMethod
 
 	clientIP, clientPort := splitAddr(s.conn.RemoteAddr())
-	context.ClientIP = clientIP
-	context.ClientPort = clientPort
+	requestContext.ClientIP = clientIP
+	requestContext.ClientPort = clientPort
 
-	return context
+	return requestContext
 }
 
 // resolveRecipientRoute maps identity facts through the director-owned routing resolver.

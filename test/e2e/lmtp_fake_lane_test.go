@@ -225,7 +225,7 @@ func exerciseStartTLSLMTPFlow(
 	client.WriteLine("RCPT TO:<" + e2eLMTPRecipientA + ">")
 	client.ExpectLine("250 2.0.0 Recipient accepted\r\n")
 	assertNoLMTPSessionsListed(t, ctl, controlURL)
-	imapClient, imapReader := loginIMAP(t, imapAddress, e2eLMTPRecipientA)
+	imapClient, imapReader := loginProcessIMAP(t, imapAddress, e2eLMTPRecipientA)
 	defer func() { _ = imapClient.Close() }()
 	expectBackendProxy(t, imapClient, imapReader, fakeIMAPA, "A002")
 	client.WriteLine("RCPT TO:<" + e2eLMTPRecipientASecond + ">")

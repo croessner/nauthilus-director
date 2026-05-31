@@ -38,11 +38,14 @@ func TestGRPCNetworkClientAuthenticatesAgainstProtoService(t *testing.T) {
 
 	result, err := client.Authenticate(context.Background(), AuthRequest{
 		Context: RequestContext{
-			Username:   "alice@example.test",
-			ClientIP:   "203.0.113.10",
-			ClientPort: "12345",
-			Protocol:   "imap",
-			Method:     "plain",
+			Username:        "alice@example.test",
+			ClientIP:        "203.0.113.10",
+			ClientPort:      "12345",
+			Protocol:        "imap",
+			Method:          "plain",
+			TLS:             "true",
+			TLSClientVerify: "SUCCESS",
+			TLSClientCN:     "client.example.test",
 		},
 		Credential:       NewSecret("secret-password"),
 		AuthLoginAttempt: 1,
@@ -64,6 +67,10 @@ func TestGRPCNetworkClientAuthenticatesAgainstProtoService(t *testing.T) {
 	}
 	if server.authRequest.GetProtocol() != "imap" || server.authRequest.GetMethod() != "plain" {
 		t.Fatalf("protobuf auth request = %#v", server.authRequest)
+	}
+	if server.authRequest.GetSsl() != "true" || server.authRequest.GetSslClientVerify() != "SUCCESS" ||
+		server.authRequest.GetSslClientCn() != "client.example.test" {
+		t.Fatalf("protobuf TLS context = %#v", server.authRequest)
 	}
 	if server.authorization != "Basic "+base64.StdEncoding.EncodeToString([]byte("director:director-api-secret")) {
 		t.Fatalf("authorization metadata = %q", server.authorization)

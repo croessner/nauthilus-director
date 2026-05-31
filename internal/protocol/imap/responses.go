@@ -27,6 +27,7 @@ const (
 	responseOK  = "OK"
 
 	authFailedCode                 = "[AUTHENTICATIONFAILED]"
+	authPrivacyRequiredText        = "[PRIVACYREQUIRED] TLS is required for authentication"
 	authUnavailableText            = "[UNAVAILABLE] Authentication service temporarily unavailable"
 	genericAuthFailText            = "Authentication failed"
 	authSuccessText                = "Authentication completed"

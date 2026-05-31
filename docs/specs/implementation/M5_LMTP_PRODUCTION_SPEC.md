@@ -433,6 +433,10 @@ M5 state rules:
   when `SMTPUTF8` is advertised and the current transaction opted in through
   `MAIL FROM ... SMTPUTF8`.
 - Require STARTTLS before SASL AUTH unless the listener is already implicit TLS.
+- Populate the flat Nauthilus SSL request fields for SASL peer auth and
+  recipient identity lookup from the frontend TLS state. `ssl` must reflect
+  implicit TLS or successful STARTTLS; available protocol, cipher and
+  client-certificate facts must be copied without inventing missing metadata.
 - Reset capability and transaction state after STARTTLS.
 - When LMTP client auth is required, reject `MAIL FROM`, `RCPT TO`, `DATA` and
   `BDAT` until peer auth succeeds.

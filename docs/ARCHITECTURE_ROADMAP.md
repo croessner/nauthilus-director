@@ -343,6 +343,8 @@ Mechanism handling rules:
 - Tokens, passwords and SASL blobs must never be logged, traced or exposed in metrics.
 - The director may parse the SASL envelope enough to extract the authorization identity, authentication identity, bearer token and optional client metadata.
 - The request sent to Nauthilus must include the original mechanism name so Nauthilus can apply mechanism-specific policy.
+- The director owns the transport privacy gate. Credential-bearing frontend mechanisms, including password and bearer mechanisms, must be rejected before Nauthilus is called unless the client has already crossed an implicit TLS or STARTTLS boundary with the director.
+- When frontend TLS is active, every protocol handler must populate the flat Nauthilus SSL DTO fields it can derive from the connection state, including `ssl`, TLS protocol, cipher, client-certificate verification status and bounded peer-certificate metadata. Missing TLS metadata must not be invented, but `ssl` must still truthfully report whether the frontend connection was encrypted.
 - SASL-IR is allowed where the frontend protocol supports it, but size limits and pre-auth timeouts still apply.
 
 ### 7.2 HTTP JSON authentication request

@@ -166,16 +166,16 @@ func (c *frontendCredentials) Clear() {
 }
 
 // NauthilusAuthRequest builds the later authority request without exposing credential formatting.
-func (c *frontendCredentials) NauthilusAuthRequest(context nauthilus.RequestContext) nauthilus.AuthRequest {
+func (c *frontendCredentials) NauthilusAuthRequest(requestContext nauthilus.RequestContext) nauthilus.AuthRequest {
 	if c == nil {
-		return nauthilus.AuthRequest{Context: context}
+		return nauthilus.AuthRequest{Context: requestContext}
 	}
 
-	context.Username = c.username
-	context.Method = c.mechanism.Normalized()
+	requestContext.Username = c.username
+	requestContext.Method = c.mechanism.Normalized()
 
 	return nauthilus.AuthRequest{
-		Context:    context,
+		Context:    requestContext,
 		Credential: nauthilus.NewSecret(c.secret.Value()),
 	}
 }
