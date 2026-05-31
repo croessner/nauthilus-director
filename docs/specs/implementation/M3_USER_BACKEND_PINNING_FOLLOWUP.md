@@ -32,7 +32,6 @@ This follow-up is governed by:
 - `docs/specs/implementation/M2_M3_BACKEND_RUNTIME_CONTROL_SPEC.md`
 - `docs/specs/implementation/M2_M3_RUNTIME_STATE_MILLION_SCALE_CHANGE_SPEC.md`
 - `docs/specs/implementation/M3_LISTENER_RUNTIME_CONTROL_FOLLOWUP.md`
-- `docs/specs/implementation/M3_USER_PLACEMENT_HOLD_FOLLOWUP.md`
 - `docs/specs/implementation/M4_OBSERVABILITY_SPEC.md`
 - `docs/specs/implementation/M5_LMTP_PRODUCTION_SPEC.md`
 - `docs/specs/openapi/nauthilus-director.yaml`
@@ -272,54 +271,6 @@ result the operator needs.
 The selector must still reserve backend capacity before attaching the selected
 backend to the session. A backend pin must not bypass the backend reservation
 model or max-connection accounting.
-
-## Interaction With Later Milestones
-
-Backend pinning is a selector constraint after placement has been allowed to
-continue. It is never a placement gate, never a replacement for active affinity
-and never a substitute for the user placement hold workflow.
-
-The ordering with later and concurrent runtime-control features is binding:
-
-```text
-authoritative identity
-  -> user placement hold gate, when implemented and enabled
-  -> active affinity and runtime movement state
-  -> matching protocol/backend-pool backend pin
-  -> backend selection, reservation and attach
-  -> session or delivery holder lifecycle
-```
-
-M4 observability must treat backend-pin operations and selector outcomes as
-runtime events recorded through the shared observability service. Follow-up
-protocol milestones may add observations for pinned placement, but they must not
-add raw backend identifiers, usernames, recipients, request identifiers, session
-identifiers, trace identifiers, operator reason text or raw error text as metric
-labels.
-
-For M5 LMTP, a backend pin applies only when the pinned backend is an LMTP
-backend in the listener's backend pool. An IMAP backend pin does not influence
-LMTP delivery placement, and an LMTP backend pin does not influence IMAP login
-placement. LMTP evaluates the pin as part of the normal runtime-aware selector
-after recipient identity resolution and after any active user placement hold has
-released. A backend pin must not make LMTP accept a recipient, open a
-delivery-scoped hold, reserve capacity or set a transaction backend while a user
-placement hold is still active.
-
-LMTP delivery-scoped holders count as active affinity for backend-pin strategy
-semantics. With `new_sessions_only` and `drain_existing`, an existing delivery
-holder preserves the active shard until it closes or expires. With
-`kick_existing`, the pin uses the existing controlled runtime action path, but
-it must not silently redirect an already accepted LMTP transaction to another
-backend. A transaction whose next recipient would select a different pinned or
-unpinned backend still follows the M5 same-backend-only rule and rejects or
-temporary-fails that recipient before `DATA` or `BDAT`.
-
-For M6 ManageSieve and M7 POP3, backend pins must use the same protocol and
-backend-pool scope as IMAP and LMTP. A pin for one protocol never names the
-concrete backend for another protocol. Cross-protocol consistency comes from the
-shared effective shard and active-affinity model, not from reusing one backend
-identifier across protocol-specific backend registries.
 
 ## Redis State Model
 

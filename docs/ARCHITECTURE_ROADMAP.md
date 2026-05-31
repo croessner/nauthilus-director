@@ -644,7 +644,28 @@ Required commands before proxy mode:
 - QUIT
 - NOOP
 
-After authentication and backend selection, proxy transparently.
+After Nauthilus accepts authentication, POP3 placement must use the same
+canonical tenant and normalized account key as IMAP active affinity, user
+movement, backend pins and user placement holds. A client-supplied `USER` value
+is only protocol input until authentication succeeds; it must not be used as an
+authoritative hold or affinity key.
+
+POP3 must check a user placement hold after successful authentication and
+routing fact resolution, but before returning a login success response, backend
+selection, backend capacity reservation, backend connect, backend
+authentication or proxy mode. If the hold clears or expires within the bounded
+wait budget, POP3 must re-read active affinity, movement overrides, backend-pin
+state, backend health and capacity before selecting. If the hold remains active
+past the wait budget, POP3 must return a generic temporary failure and must not
+fall back to the old backend.
+
+Backend pins apply to POP3 only when the pin's protocol and backend pool match
+the POP3 placement request. A pin for an IMAP, LMTP or ManageSieve backend must
+not name the concrete POP3 backend. Cross-protocol consistency comes from the
+shared shard tag and active affinity; after the shard is known, POP3 resolves a
+protocol-specific backend entry.
+
+After placement succeeds, proxy transparently.
 
 ## 12. LMTP design
 
@@ -691,6 +712,23 @@ ManageSieve client
 ```
 
 Decision: use separate backend entries per protocol and connect them through the same `shard_tag`. This avoids assuming IMAP, LMTP and ManageSieve ports live on identical host/port definitions while preserving user affinity.
+
+ManageSieve must check a user placement hold after Nauthilus has authenticated
+the user and produced canonical tenant plus account facts, but before backend
+selection, backend capacity reservation, backend connect, backend auth/trust or
+proxy mode. The director must not return an authentication success response that
+implies script-management access is ready while the user's placement is held. If
+the hold clears or expires within the bounded wait budget, ManageSieve must
+re-read active affinity, movement overrides, backend-pin state, backend health
+and capacity before selecting. If the hold remains active past the wait budget,
+ManageSieve must return a generic temporary failure and must not fall back to
+the old backend.
+
+Backend pins apply to ManageSieve only when the pin's protocol and backend pool
+match the ManageSieve placement request. A pin for an IMAP, LMTP or POP3 backend
+must not name the concrete ManageSieve backend. Cross-protocol consistency comes
+from the shared shard tag and active affinity; after the shard is known,
+ManageSieve resolves a protocol-specific backend entry.
 
 Sieve script contents, script names and command bodies should not be logged or used as high-cardinality metrics labels.
 
@@ -1228,16 +1266,29 @@ in place. The detailed completion evidence lives in
 
 - ManageSieve pre-auth handling
 - Nauthilus auth
+- user placement hold gate after authoritative auth and before backend
+  selection, backend connect, backend auth or proxy mode
 - same-shard backend selection
+- protocol/backend-pool-scoped backend-pin handling after the hold gate; do not
+  reuse an IMAP or LMTP backend identifier as the concrete ManageSieve backend
 - transparent proxying
 - metrics/tracing without script leakage
+- no Sieve script names, script contents, operator hold reasons, raw backend
+  identifiers or raw error text as metric labels
 
 ### M7: POP3
 
 - POP3 pre-auth state machine
 - Nauthilus auth
+- user placement hold gate after successful auth and routing fact resolution,
+  before login success, backend selection, backend connect, backend auth or
+  proxy mode
 - backend selection
+- protocol/backend-pool-scoped backend-pin handling after the hold gate; do not
+  treat a client-supplied `USER` value as authoritative identity for hold
+  enforcement
 - transparent proxying
+- temporary failure on hold timeout; never silently fall back to the old backend
 
 ### M8: Production hardening
 
@@ -1248,6 +1299,9 @@ in place. The detailed completion evidence lives in
 - operational docs
 - failure-mode docs
 - rollout and operational migration guide
+- document operator migration workflows that combine user placement holds,
+  user moves, backend pins and active-affinity draining without rewriting YAML
+  runtime configuration
 
 ## 23. Open decisions
 
