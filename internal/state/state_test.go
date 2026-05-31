@@ -34,34 +34,41 @@ import (
 )
 
 const (
-	testAttachSessionID  = "attach-session"
-	testBackendPool      = "primary"
-	testBackendIMAP      = "mailstore-a-imap"
-	testBackendLMTP      = "mailstore-a-lmtp"
-	testKickSessionID    = "kick-session"
-	testKillSessionID    = "kill-session"
-	testOperatorClear    = "operator clear"
-	testOperatorActor    = "test-operator"
-	testProtocolIMAP     = "imap"
-	testProtocolLMTP     = "lmtp"
-	testProtocolPOP3     = "pop3"
-	testRedisModeCluster = "cluster"
-	testExpiredReserve   = "expired-reservation"
-	testReservationOne   = "reservation-1"
-	testReservationTwo   = "reservation-2"
-	testReservationThree = "reservation-3"
-	testRuntimeSessionID = "runtime-session"
-	testSessionOne       = "session-1"
-	testSessionTwo       = "session-2"
-	testTenantDefault    = "default"
-	testClearStatus      = "cleared"
-	testListenerIMAPS    = "imaps"
-	testMissingStatus    = "missing"
-	testShardA           = "mailstore-a"
-	testShardB           = "mailstore-b"
-	testShardC           = "mailstore-c"
-	testStatusCreated    = "created"
-	testUserExample      = "user@example.org"
+	testAttachSessionID     = "attach-session"
+	testBackendPool         = "primary"
+	testBackendIMAP         = "mailstore-a-imap"
+	testBackendLMTP         = "mailstore-a-lmtp"
+	testHoldReason          = "hold user placement"
+	testKickSessionID       = "kick-session"
+	testKillSessionID       = "kill-session"
+	testOperatorClear       = "operator clear"
+	testOperatorActor       = "test-operator"
+	testProtocolIMAP        = "imap"
+	testProtocolLMTP        = "lmtp"
+	testProtocolPOP3        = "pop3"
+	testRedisModeCluster    = "cluster"
+	testExpiredReserve      = "expired-reservation"
+	testForbiddenAddress    = "address"
+	testForbiddenPassword   = "password"
+	testForbiddenPrivateKey = "private_key"
+	testForbiddenToken      = "token"
+	testReservationOne      = "reservation-1"
+	testReservationTwo      = "reservation-2"
+	testReservationThree    = "reservation-3"
+	testRuntimeSessionID    = "runtime-session"
+	testSessionOne          = "session-1"
+	testSessionTwo          = "session-2"
+	testTenantDefault       = "default"
+	testClearStatus         = "cleared"
+	testListenerIMAPS       = "imaps"
+	testMissingStatus       = "missing"
+	testShardA              = "mailstore-a"
+	testShardB              = "mailstore-b"
+	testShardC              = "mailstore-c"
+	testStatusCreated       = "created"
+	testStatusExpired       = "expired"
+	testStatusFound         = "found"
+	testUserExample         = "user@example.org"
 )
 
 var packageRedisAddr string
@@ -202,6 +209,7 @@ func TestKeyBuilderCreatesClusterHashTaggedAffinityKeys(t *testing.T) {
 		affinityKeySessions:   keys.Sessions,
 		affinityKeyOverride:   keys.Override,
 		affinityKeyBackendPin: keys.BackendPin,
+		affinityKeyHold:       keys.Hold,
 	} {
 		if !strings.Contains(key, keys.HashTag) {
 			t.Fatalf("%s key %q does not contain hash tag %q", name, key, keys.HashTag)
@@ -227,6 +235,7 @@ func TestKeyBuilderCreatesClusterHashTaggedAffinityKeys(t *testing.T) {
 		affinityKeySessions:   keys.Sessions,
 		affinityKeyOverride:   keys.Override,
 		affinityKeyBackendPin: keys.BackendPin,
+		affinityKeyHold:       keys.Hold,
 		"session":             sessionKey,
 	} {
 		if got := redisHashTag(t, key); got != firstTag {
@@ -281,6 +290,9 @@ func TestPerAffinityScriptWrappersUseAffinityOwnedKeys(t *testing.T) {
 		{operation: scriptBackendPinSet, keys: store.backendPinSetScriptKeys(affinityKeys)},
 		{operation: scriptBackendPinGet, keys: store.backendPinGetScriptKeys(affinityKeys)},
 		{operation: scriptBackendPinClear, keys: store.backendPinClearScriptKeys(affinityKeys)},
+		{operation: scriptUserHoldSet, keys: store.userHoldScriptKeys(affinityKeys)},
+		{operation: scriptUserHoldGet, keys: store.userHoldScriptKeys(affinityKeys)},
+		{operation: scriptUserHoldClear, keys: store.userHoldScriptKeys(affinityKeys)},
 	} {
 		assertAffinityOwnedScriptKeys(t, store, item.operation, item.keys)
 	}
@@ -388,7 +400,7 @@ func TestKeyBuilderDoesNotRequireRawUsernameInKeys(t *testing.T) {
 		t.Fatalf("AffinityKeys returned error: %v", err)
 	}
 
-	for _, key := range []string{keys.State, keys.Sessions, keys.Override, keys.BackendPin} {
+	for _, key := range []string{keys.State, keys.Sessions, keys.Override, keys.BackendPin, keys.Hold} {
 		if strings.Contains(key, rawAccount) || strings.Contains(key, strings.ToLower(rawAccount)) {
 			t.Fatalf("key %q leaked raw account %q", key, rawAccount)
 		}
@@ -591,6 +603,9 @@ func TestScriptLoaderTracksSHAAndMissingScripts(t *testing.T) {
 		scriptOpen,
 		scriptReap,
 		scriptSessionKill,
+		scriptUserHoldClear,
+		scriptUserHoldGet,
+		scriptUserHoldSet,
 	} {
 		if _, ok := registry.Get(name); !ok {
 			t.Fatalf("%s script missing; scripts=%v", name, registry.Names())
@@ -963,7 +978,7 @@ func TestRedisLookupAffinityDoesNotDependOnSecondaryIndexes(t *testing.T) {
 		t.Fatalf("LookupAffinity returned error with missing indexes: %v", err)
 	}
 
-	assertAffinityRecord(t, lookedUp, "found", testShardA, 1)
+	assertAffinityRecord(t, lookedUp, testStatusFound, testShardA, 1)
 
 	reused := testSessionRecord(key, "reuse-session")
 	reused.ShardTag = testShardB
@@ -2051,6 +2066,395 @@ func TestRedisBackendPinSetGetClearScripts(t *testing.T) {
 	assertBackendPinClearPreservedAffinity(t, store, client, builder, key, sessionID)
 }
 
+// TestRedisUserHoldSetGetCheckAndExpiry verifies the Redis-backed hold read model.
+func TestRedisUserHoldSetGetCheckAndExpiry(t *testing.T) {
+	store, client, builder := redisIntegrationStore(t)
+	key := AffinityKey{Tenant: "blue", AccountKey: "hold@example.test"}
+
+	cleanupAffinity(t, client, builder, key)
+
+	assertAbsentUserHold(t, store, key)
+
+	duration := 10 * time.Second
+	held := setUserHoldForTest(t, store, key, duration, "start migration")
+	assertUserHoldRecord(t, held, key, true, "held", duration)
+	assertStoredUserHoldHash(t, client, builder, key, duration)
+
+	read, err := store.GetUserHold(context.Background(), UserHoldGetRequest{Key: key})
+	if err != nil {
+		t.Fatalf("GetUserHold present returned error: %v", err)
+	}
+
+	assertUserHoldRecord(t, read, key, true, testStatusFound, duration)
+
+	checked, err := store.CheckUserHold(context.Background(), UserHoldCheckRequest{Key: key})
+	if err != nil {
+		t.Fatalf("CheckUserHold present returned error: %v", err)
+	}
+
+	assertUserHoldRecord(t, checked, key, true, testStatusFound, duration)
+
+	seedExpiredUserHold(t, client, builder, key)
+
+	expired, err := store.GetUserHold(context.Background(), UserHoldGetRequest{Key: key})
+	if err != nil {
+		t.Fatalf("GetUserHold expired returned error: %v", err)
+	}
+
+	if expired.Present || expired.Status != testStatusExpired || expired.Key != key {
+		t.Fatalf("expired hold = %#v, want absent expired state", expired)
+	}
+
+	checkedExpired, err := store.CheckUserHold(context.Background(), UserHoldCheckRequest{Key: key})
+	if err != nil {
+		t.Fatalf("CheckUserHold expired returned error: %v", err)
+	}
+
+	if checkedExpired.Present || checkedExpired.Status != testStatusExpired {
+		t.Fatalf("expired check = %#v, want absent expired state", checkedExpired)
+	}
+
+	keys, err := builder.AffinityKeys(key.Tenant, key.AccountKey)
+	if err != nil {
+		t.Fatalf("AffinityKeys returned error: %v", err)
+	}
+
+	if exists := client.Exists(context.Background(), keys.Hold).Val(); exists != 1 {
+		t.Fatalf("expired hold key exists = %d, want stale physical hash for cleanup TTL", exists)
+	}
+}
+
+// TestRedisUserHoldClearPreservesOtherRuntimeState verifies clear deletes only the hold hash.
+func TestRedisUserHoldClearPreservesOtherRuntimeState(t *testing.T) {
+	store, client, builder := redisIntegrationStore(t)
+	key := AffinityKey{Tenant: "blue", AccountKey: "hold-clear@example.test"}
+	sessionID := "hold-clear-session"
+	deliveryID := "hold-clear-delivery"
+
+	cleanupAffinity(t, client, builder, key, sessionID, deliveryID)
+	cleanupBackend(t, client, builder, testBackendIMAP)
+	cleanupBackend(t, client, builder, testBackendLMTP)
+
+	openAttachedSession(t, store, key, sessionID, testBackendIMAP)
+	openDeliveryHoldForTest(t, store, key, deliveryID)
+	setBackendPinForTest(t, store, key, testShardB, moveStrategyNewSessionsOnly, "commission backend")
+
+	if _, err := store.MoveUser(context.Background(), UserMoveRequest{
+		Key:         key,
+		TargetShard: testShardC,
+		Strategy:    moveStrategyNewSessionsOnly,
+		Reason:      "prepare shard move",
+		Actor:       testOperatorActor,
+	}); err != nil {
+		t.Fatalf("MoveUser returned error: %v", err)
+	}
+
+	setUserHoldForTest(t, store, key, time.Minute, "pause placement")
+
+	cleared, err := store.ClearUserHold(context.Background(), UserHoldClearRequest{
+		Key:    key,
+		Reason: "migration complete",
+		Actor:  testOperatorActor,
+	})
+	if err != nil {
+		t.Fatalf("ClearUserHold returned error: %v", err)
+	}
+
+	if cleared.Present || cleared.Status != testClearStatus || cleared.Generation == "" {
+		t.Fatalf("cleared hold = %#v, want deleted hold metadata", cleared)
+	}
+
+	keys, err := builder.AffinityKeys(key.Tenant, key.AccountKey)
+	if err != nil {
+		t.Fatalf("AffinityKeys returned error: %v", err)
+	}
+
+	assertUserHoldClearRemovedOnlyHold(t, store, client, builder, keys, key, sessionID, deliveryID)
+}
+
+// TestUserHoldValidationAndMalformedPayloadsFailClosed verifies ambiguous hold state is rejected.
+func TestUserHoldValidationAndMalformedPayloadsFailClosed(t *testing.T) {
+	key := AffinityKey{Tenant: testTenantDefault, AccountKey: "hold-validation@example.test"}
+
+	for name, request := range map[string]UserHoldSetRequest{
+		"missing duration": {
+			Key:         key,
+			MaxDuration: time.Minute,
+			Reason:      testHoldReason,
+		},
+		"missing max duration": {
+			Key:      key,
+			Duration: time.Minute,
+			Reason:   testHoldReason,
+		},
+		"duration exceeds max": {
+			Key:         key,
+			Duration:    2 * time.Minute,
+			MaxDuration: time.Minute,
+			Reason:      testHoldReason,
+		},
+		"missing reason": {
+			Key:         key,
+			Duration:    time.Minute,
+			MaxDuration: time.Minute,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := validateUserHoldSetRequest(request); !IsRedisErrorKind(err, RedisErrorKindAmbiguousState) {
+				t.Fatalf("validateUserHoldSetRequest error = %v, want ambiguous_state", err)
+			}
+		})
+	}
+
+	_, err := parseUserHoldRecord(key, []any{
+		scriptFieldStatus, testStatusFound,
+		scriptFieldPresent, "1",
+		scriptFieldTenant, key.Tenant,
+		scriptFieldAccountKey, key.AccountKey,
+		scriptFieldCreatedAtMS, "1000",
+		scriptFieldExpiresAtMS, "2000",
+		scriptFieldRequestedDuration, "1000",
+		scriptFieldUpdatedAtMS, "1000",
+		scriptFieldServerTimeMS, "1000",
+	})
+	if !IsRedisErrorKind(err, RedisErrorKindAmbiguousState) {
+		t.Fatalf("parseUserHoldRecord error = %v, want ambiguous_state", err)
+	}
+}
+
+// assertAbsentUserHold verifies a missing hold uses the public absent read model.
+func assertAbsentUserHold(t *testing.T, store *RedisSessionStore, key AffinityKey) {
+	t.Helper()
+
+	absent, err := store.GetUserHold(context.Background(), UserHoldGetRequest{Key: key})
+	if err != nil {
+		t.Fatalf("GetUserHold absent returned error: %v", err)
+	}
+
+	if absent.Present || absent.Status != testMissingStatus || absent.Key != key {
+		t.Fatalf("absent hold = %#v, want missing key state", absent)
+	}
+
+	checked, err := store.CheckUserHold(context.Background(), UserHoldCheckRequest{Key: key})
+	if err != nil {
+		t.Fatalf("CheckUserHold absent returned error: %v", err)
+	}
+
+	if checked.Present || checked.Status != testMissingStatus || checked.Key != key {
+		t.Fatalf("absent hold check = %#v, want missing key state", checked)
+	}
+}
+
+// setUserHoldForTest writes a standard placement-hold fixture.
+func setUserHoldForTest(t *testing.T, store *RedisSessionStore, key AffinityKey, duration time.Duration, reason string) UserHoldRecord {
+	t.Helper()
+
+	held, err := store.SetUserHold(context.Background(), UserHoldSetRequest{
+		Key:         key,
+		Duration:    duration,
+		MaxDuration: 30 * time.Minute,
+		Reason:      reason,
+		Actor:       testOperatorActor,
+	})
+	if err != nil {
+		t.Fatalf("SetUserHold returned error: %v", err)
+	}
+
+	return held
+}
+
+// seedExpiredUserHold writes a stale physical hold hash that must read as absent.
+func seedExpiredUserHold(t *testing.T, client *redis.Client, builder KeyBuilder, key AffinityKey) {
+	t.Helper()
+
+	keys, err := builder.AffinityKeys(key.Tenant, key.AccountKey)
+	if err != nil {
+		t.Fatalf("AffinityKeys returned error: %v", err)
+	}
+
+	now, err := client.Time(context.Background()).Result()
+	if err != nil {
+		t.Fatalf("redis TIME returned error: %v", err)
+	}
+
+	createdAt := now.Add(-2 * time.Second).UnixMilli()
+	expiresAt := now.Add(-time.Second).UnixMilli()
+
+	if err := client.HSet(context.Background(), keys.Hold,
+		"schema_version", "1",
+		scriptFieldTenant, key.Tenant,
+		scriptFieldAccountKey, key.AccountKey,
+		scriptFieldGeneration, "41",
+		scriptFieldCreatedAtMS, createdAt,
+		scriptFieldExpiresAtMS, expiresAt,
+		scriptFieldRequestedDuration, "1000",
+		"reason", testHoldReason,
+		"actor", testOperatorActor,
+		scriptFieldUpdatedAtMS, createdAt,
+	).Err(); err != nil {
+		t.Fatalf("seed hold hash: %v", err)
+	}
+
+	if err := client.PExpire(context.Background(), keys.Hold, time.Minute).Err(); err != nil {
+		t.Fatalf("seed hold cleanup ttl: %v", err)
+	}
+}
+
+// assertUserHoldRecord verifies the bounded placement-hold state fields.
+func assertUserHoldRecord(
+	t *testing.T,
+	record UserHoldRecord,
+	key AffinityKey,
+	present bool,
+	status string,
+	duration time.Duration,
+) {
+	t.Helper()
+
+	if record.Present != present ||
+		record.Status != status ||
+		record.Key != key ||
+		record.Generation == "" ||
+		record.CreatedAt.IsZero() ||
+		record.ExpiresAt.IsZero() ||
+		record.UpdatedAt.IsZero() ||
+		record.ServerTime.IsZero() ||
+		record.RequestedDuration != duration {
+		t.Fatalf("hold record = %#v", record)
+	}
+
+	if got := record.ExpiresAt.Sub(record.CreatedAt); got != duration {
+		t.Fatalf("hold expiry delta = %s, want %s", got, duration)
+	}
+
+	if !record.ExpiresAt.After(record.ServerTime) {
+		t.Fatalf("hold expires_at = %s, server_time = %s", record.ExpiresAt, record.ServerTime)
+	}
+}
+
+// assertStoredUserHoldHash verifies Redis stores only bounded placement-hold metadata.
+func assertStoredUserHoldHash(t *testing.T, client *redis.Client, builder KeyBuilder, key AffinityKey, duration time.Duration) {
+	t.Helper()
+
+	keys, err := builder.AffinityKeys(key.Tenant, key.AccountKey)
+	if err != nil {
+		t.Fatalf("AffinityKeys returned error: %v", err)
+	}
+
+	if !strings.Contains(keys.Hold, keys.HashTag) {
+		t.Fatalf("hold key = %q, want hash tag %q", keys.Hold, keys.HashTag)
+	}
+
+	if strings.Contains(keys.Hold, key.AccountKey) || strings.Contains(keys.Hold, strings.ToLower(key.AccountKey)) {
+		t.Fatalf("hold key %q leaked account key %q", keys.Hold, key.AccountKey)
+	}
+
+	fields := client.HGetAll(context.Background(), keys.Hold).Val()
+	for name, want := range map[string]string{
+		scriptFieldTenant:            key.Tenant,
+		scriptFieldAccountKey:        key.AccountKey,
+		scriptFieldRequestedDuration: strconv.FormatInt(duration.Milliseconds(), 10),
+	} {
+		if got := fields[name]; got != want {
+			t.Fatalf("hold field %s = %q, want %q in %#v", name, got, want, fields)
+		}
+	}
+
+	for _, forbidden := range []string{
+		testForbiddenAddress,
+		testForbiddenPassword,
+		testForbiddenToken,
+		testForbiddenPrivateKey,
+		scriptFieldBackendID,
+		scriptFieldShardTag,
+		scriptFieldSessionID,
+	} {
+		if _, ok := fields[forbidden]; ok {
+			t.Fatalf("hold stored forbidden field %q: %#v", forbidden, fields)
+		}
+	}
+
+	if ttl := client.PTTL(context.Background(), keys.Hold).Val(); ttl <= 0 {
+		t.Fatalf("hold cleanup ttl = %s, want positive", ttl)
+	}
+}
+
+// assertUserHoldClearRemovedOnlyHold verifies the side effects after hold clear.
+func assertUserHoldClearRemovedOnlyHold(
+	t *testing.T,
+	store *RedisSessionStore,
+	client *redis.Client,
+	builder KeyBuilder,
+	keys AffinityKeys,
+	key AffinityKey,
+	sessionID string,
+	deliveryID string,
+) {
+	t.Helper()
+
+	assertHoldKeyRemoved(t, client, keys)
+	assertHoldClearPreservedAffinity(t, store, key)
+	assertHoldClearPreservedBackendPin(t, store, key)
+	assertHeartbeatAction(t, store, key, sessionID, ControlActionNone)
+	assertHeartbeatAction(t, store, key, deliveryID, ControlActionNone)
+	assertHoldClearPreservedBackendReservations(t, client, builder)
+	assertHoldClearPreservedOverride(t, client, keys)
+}
+
+// assertHoldKeyRemoved verifies ClearUserHold deletes the hold hash itself.
+func assertHoldKeyRemoved(t *testing.T, client *redis.Client, keys AffinityKeys) {
+	t.Helper()
+
+	if exists := client.Exists(context.Background(), keys.Hold).Val(); exists != 0 {
+		t.Fatalf("hold key still exists after clear: %d", exists)
+	}
+}
+
+// assertHoldClearPreservedAffinity verifies sessions and active shard survive hold clear.
+func assertHoldClearPreservedAffinity(t *testing.T, store *RedisSessionStore, key AffinityKey) {
+	t.Helper()
+
+	affinity, err := store.LookupAffinity(context.Background(), key)
+	if err != nil {
+		t.Fatalf("LookupAffinity after hold clear returned error: %v", err)
+	}
+
+	if !affinity.Present || affinity.ActiveSessionCount != 2 || affinity.ShardTag != testShardA {
+		t.Fatalf("affinity after hold clear = %#v, want sessions preserved", affinity)
+	}
+}
+
+// assertHoldClearPreservedBackendPin verifies backend pin state survives hold clear.
+func assertHoldClearPreservedBackendPin(t *testing.T, store *RedisSessionStore, key AffinityKey) {
+	t.Helper()
+
+	pin := getBackendPinForTest(t, store, key)
+	assertBackendPinRecord(t, pin, key, testBackendIMAP, testShardB, moveStrategyNewSessionsOnly, 2)
+}
+
+// assertHoldClearPreservedBackendReservations verifies backend counts survive hold clear.
+func assertHoldClearPreservedBackendReservations(t *testing.T, client *redis.Client, builder KeyBuilder) {
+	t.Helper()
+
+	if got := redisBackendActiveCount(t, client, builder, testBackendIMAP); got != 1 {
+		t.Fatalf("IMAP backend reservation count = %d, want 1", got)
+	}
+
+	if got := redisBackendActiveCount(t, client, builder, testBackendLMTP); got != 1 {
+		t.Fatalf("LMTP backend reservation count = %d, want 1", got)
+	}
+}
+
+// assertHoldClearPreservedOverride verifies pending movement state survives hold clear.
+func assertHoldClearPreservedOverride(t *testing.T, client *redis.Client, keys AffinityKeys) {
+	t.Helper()
+
+	override := client.HGetAll(context.Background(), keys.Override).Val()
+	if override["target_shard"] == "" {
+		t.Fatalf("hold clear removed movement override: %#v", override)
+	}
+}
+
 // assertAbsentBackendPin verifies an absent backend pin uses the public read model.
 func assertAbsentBackendPin(t *testing.T, store *RedisSessionStore, key AffinityKey) {
 	t.Helper()
@@ -2234,7 +2638,7 @@ func TestBackendPinScriptPayloadFailsClosed(t *testing.T) {
 	key := AffinityKey{Tenant: testTenantDefault, AccountKey: "hash"}
 
 	_, err := parseUserBackendPinRecord(key, []any{
-		scriptFieldStatus, "found",
+		scriptFieldStatus, testStatusFound,
 		scriptFieldPresent, "1",
 		scriptFieldTenant, key.Tenant,
 		scriptFieldAccountKey, key.AccountKey,
@@ -2305,7 +2709,12 @@ func assertStoredBackendPinHash(t *testing.T, client *redis.Client, builder KeyB
 		}
 	}
 
-	for _, forbidden := range []string{"address", "password", "token", "private_key"} {
+	for _, forbidden := range []string{
+		testForbiddenAddress,
+		testForbiddenPassword,
+		testForbiddenToken,
+		testForbiddenPrivateKey,
+	} {
 		if _, ok := fields[forbidden]; ok {
 			t.Fatalf("backend pin stored forbidden field %q: %#v", forbidden, fields)
 		}
@@ -2661,7 +3070,7 @@ func assertLookupAndHeartbeat(t *testing.T, store *RedisSessionStore, key Affini
 		t.Fatalf("LookupAffinity returned error: %v", err)
 	}
 
-	assertAffinityRecord(t, lookedUp, "found", testShardA, 1)
+	assertAffinityRecord(t, lookedUp, testStatusFound, testShardA, 1)
 
 	if lookedUp.Generation != opened.Generation {
 		t.Fatalf("lookup generation = %q, want unchanged %q", lookedUp.Generation, opened.Generation)
@@ -2731,7 +3140,7 @@ func cleanupAffinity(t *testing.T, client *redis.Client, builder KeyBuilder, key
 		t.Fatalf("AffinityKeys returned error: %v", err)
 	}
 
-	redisKeys := []string{keys.State, keys.Sessions, keys.Override, keys.BackendPin}
+	redisKeys := []string{keys.State, keys.Sessions, keys.Override, keys.BackendPin, keys.Hold}
 
 	userSessionIndexes, err := builder.UserSessionIndexShardKeys(key.Tenant, key.AccountKey)
 	if err != nil {

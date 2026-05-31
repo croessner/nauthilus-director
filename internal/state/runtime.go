@@ -36,10 +36,15 @@ const (
 	scriptKick                = "kick"
 	scriptMove                = "move"
 	scriptSessionKill         = "session_kill"
+	scriptUserHoldClear       = "user_hold_clear"
+	scriptUserHoldGet         = "user_hold_get"
+	scriptUserHoldSet         = "user_hold_set"
 
 	moveStrategyDrainExisting   = "drain_existing"
 	moveStrategyKickExisting    = "kick_existing"
 	moveStrategyNewSessionsOnly = "new_sessions_only"
+
+	operationUserHoldCheck = "user_hold_check"
 )
 
 // MoveUser records a user move strategy in Redis-backed affinity runtime state.
@@ -196,6 +201,57 @@ func (s *RedisSessionStore) ClearUserBackendPin(
 	}
 
 	return parseUserBackendPinRecord(request.Key, value)
+}
+
+// SetUserHold stores one bounded placement hold for an affinity key.
+func (s *RedisSessionStore) SetUserHold(ctx context.Context, request UserHoldSetRequest) (UserHoldRecord, error) {
+	if err := validateUserHoldSetRequest(request); err != nil {
+		return UserHoldRecord{}, err
+	}
+
+	keys, err := s.keys.AffinityKeys(request.Key.Tenant, request.Key.AccountKey)
+	if err != nil {
+		return UserHoldRecord{}, err
+	}
+
+	value, err := s.runScript(ctx, scriptUserHoldSet, s.userHoldScriptKeys(keys),
+		durationMilliseconds(request.Duration),
+		durationMilliseconds(request.MaxDuration),
+		normalizedStateValue(request.Reason),
+		normalizedStateValue(request.Actor),
+		s.keys.schemaVersion,
+		normalizedStateValue(request.Key.Tenant),
+		normalizedStateValue(request.Key.AccountKey),
+	)
+	if err != nil {
+		return UserHoldRecord{}, err
+	}
+
+	return parseUserHoldRecord(request.Key, value)
+}
+
+// GetUserHold reads an active placement hold without mutating affinity state.
+func (s *RedisSessionStore) GetUserHold(ctx context.Context, request UserHoldGetRequest) (UserHoldRecord, error) {
+	return s.readUserHold(ctx, request.Key, scriptUserHoldGet)
+}
+
+// ClearUserHold removes only placement-hold state for an affinity key.
+func (s *RedisSessionStore) ClearUserHold(ctx context.Context, request UserHoldClearRequest) (UserHoldRecord, error) {
+	if err := validateUserAction(request.Key, request.Reason, scriptUserHoldClear); err != nil {
+		return UserHoldRecord{}, err
+	}
+
+	value, err := s.runUserHoldClearScript(ctx, request)
+	if err != nil {
+		return UserHoldRecord{}, err
+	}
+
+	return parseUserHoldRecord(request.Key, value)
+}
+
+// CheckUserHold reads the placement gate without refreshing, clearing or waiting.
+func (s *RedisSessionStore) CheckUserHold(ctx context.Context, request UserHoldCheckRequest) (UserHoldRecord, error) {
+	return s.readUserHold(ctx, request.Key, operationUserHoldCheck)
 }
 
 // KillSession marks one indexed session for heartbeat-observed closure.
@@ -356,6 +412,26 @@ func (s *RedisSessionStore) backendPinGetScriptKeys(keys AffinityKeys) []string 
 // backendPinClearScriptKeys returns the same-slot key list for backend-pin clears.
 func (s *RedisSessionStore) backendPinClearScriptKeys(keys AffinityKeys) []string {
 	return []string{keys.Sessions, keys.BackendPin}
+}
+
+// userHoldScriptKeys returns the same-slot key list for placement-hold operations.
+func (s *RedisSessionStore) userHoldScriptKeys(keys AffinityKeys) []string {
+	return []string{keys.Hold}
+}
+
+// runUserHoldClearScript executes the clear mutation after request validation.
+func (s *RedisSessionStore) runUserHoldClearScript(ctx context.Context, request UserHoldClearRequest) (any, error) {
+	keys, err := s.keys.AffinityKeys(request.Key.Tenant, request.Key.AccountKey)
+	if err != nil {
+		return nil, err
+	}
+
+	return s.runScript(ctx, scriptUserHoldClear, s.userHoldScriptKeys(keys),
+		normalizedStateValue(request.Reason),
+		normalizedStateValue(request.Actor),
+		normalizedStateValue(request.Key.Tenant),
+		normalizedStateValue(request.Key.AccountKey),
+	)
 }
 
 // backendRuntimeKeys returns the runtime state and membership index for a backend.
@@ -590,6 +666,31 @@ func validateUserBackendPinSetRequest(request UserBackendPinSetRequest) error {
 	return nil
 }
 
+// validateUserHoldSetRequest rejects ambiguous placement-hold payloads.
+func validateUserHoldSetRequest(request UserHoldSetRequest) error {
+	if err := validateAffinityKey(request.Key, scriptUserHoldSet); err != nil {
+		return err
+	}
+
+	if request.Duration <= 0 {
+		return newStateError(RedisErrorKindAmbiguousState, scriptUserHoldSet, "duration required", nil)
+	}
+
+	if request.MaxDuration <= 0 {
+		return newStateError(RedisErrorKindAmbiguousState, scriptUserHoldSet, "max duration required", nil)
+	}
+
+	if request.Duration > request.MaxDuration {
+		return newStateError(RedisErrorKindAmbiguousState, scriptUserHoldSet, "duration exceeds maximum", nil)
+	}
+
+	if strings.TrimSpace(request.Reason) == "" {
+		return newStateError(RedisErrorKindAmbiguousState, scriptUserHoldSet, "reason required", nil)
+	}
+
+	return nil
+}
+
 // validateUserAction checks common user mutation fields.
 func validateUserAction(key AffinityKey, reason string, operation string) error {
 	if err := validateAffinityKey(key, operation); err != nil {
@@ -728,6 +829,92 @@ func parseUserBackendPinRecord(defaultKey AffinityKey, value any) (UserBackendPi
 	return record, nil
 }
 
+// parseUserHoldRecord converts a placement-hold script result.
+func parseUserHoldRecord(defaultKey AffinityKey, value any) (UserHoldRecord, error) {
+	fields, err := parseScriptFields(value)
+	if err != nil {
+		return UserHoldRecord{}, err
+	}
+
+	record, err := userHoldRecordIdentity(defaultKey, fields)
+	if err != nil {
+		return UserHoldRecord{}, err
+	}
+
+	if err := parseUserHoldTimestamps(fields, &record); err != nil {
+		return UserHoldRecord{}, err
+	}
+
+	if record.Present {
+		if err := validatePresentUserHoldRecord(record); err != nil {
+			return UserHoldRecord{}, err
+		}
+	}
+
+	return record, nil
+}
+
+// userHoldRecordIdentity parses common hold status, presence and identity fields.
+func userHoldRecordIdentity(defaultKey AffinityKey, fields map[string]string) (UserHoldRecord, error) {
+	record := UserHoldRecord{
+		Status:     fields[scriptFieldStatus],
+		Key:        defaultKey,
+		Generation: strings.TrimSpace(fields[scriptFieldGeneration]),
+	}
+
+	if record.Status == "" {
+		return UserHoldRecord{}, newStateError(RedisErrorKindAmbiguousState, "script_result", "status required", nil)
+	}
+
+	present, err := parsePresentField(fields)
+	if err != nil {
+		return UserHoldRecord{}, err
+	}
+
+	record.Present = present
+
+	if tenant := strings.TrimSpace(fields[scriptFieldTenant]); tenant != "" {
+		record.Key.Tenant = tenant
+	}
+
+	if accountKey := strings.TrimSpace(fields[scriptFieldAccountKey]); accountKey != "" {
+		record.Key.AccountKey = accountKey
+	}
+
+	return record, nil
+}
+
+// parseUserHoldTimestamps parses Redis-time hold fields into the typed record.
+func parseUserHoldTimestamps(fields map[string]string, record *UserHoldRecord) error {
+	var err error
+
+	record.CreatedAt, err = parseTimeField(fields, scriptFieldCreatedAtMS)
+	if err != nil {
+		return err
+	}
+
+	record.ExpiresAt, err = parseTimeField(fields, scriptFieldExpiresAtMS)
+	if err != nil {
+		return err
+	}
+
+	requestedMilliseconds, err := parseIntField(fields, scriptFieldRequestedDuration)
+	if err != nil {
+		return err
+	}
+
+	record.RequestedDuration = time.Duration(requestedMilliseconds) * time.Millisecond
+
+	record.UpdatedAt, err = parseTimeField(fields, scriptFieldUpdatedAtMS)
+	if err != nil {
+		return err
+	}
+
+	record.ServerTime, err = parseTimeField(fields, scriptFieldServerTimeMS)
+
+	return err
+}
+
 // parsePresentField extracts the required script presence bit.
 func parsePresentField(fields map[string]string) (bool, error) {
 	switch fields[scriptFieldPresent] {
@@ -764,6 +951,69 @@ func validatePresentBackendPinRecord(record UserBackendPinRecord) error {
 	}
 
 	return nil
+}
+
+// validatePresentUserHoldRecord rejects incomplete active placement-hold state.
+func validatePresentUserHoldRecord(record UserHoldRecord) error {
+	if record.ServerTime.IsZero() {
+		return newStateError(RedisErrorKindAmbiguousState, "script_result", "server_time_ms required", nil)
+	}
+
+	if record.CreatedAt.IsZero() {
+		return newStateError(RedisErrorKindAmbiguousState, "script_result", scriptFieldCreatedAtMS+" required", nil)
+	}
+
+	if record.ExpiresAt.IsZero() {
+		return newStateError(RedisErrorKindAmbiguousState, "script_result", "expires_at_ms required", nil)
+	}
+
+	if record.UpdatedAt.IsZero() {
+		return newStateError(RedisErrorKindAmbiguousState, "script_result", scriptFieldUpdatedAtMS+" required", nil)
+	}
+
+	if record.RequestedDuration <= 0 {
+		return newStateError(RedisErrorKindAmbiguousState, "script_result", scriptFieldRequestedDuration+" required", nil)
+	}
+
+	required := map[string]string{
+		scriptFieldTenant:     record.Key.Tenant,
+		scriptFieldAccountKey: record.Key.AccountKey,
+		scriptFieldGeneration: record.Generation,
+	}
+
+	for name, value := range required {
+		if strings.TrimSpace(value) == "" {
+			return newStateError(RedisErrorKindAmbiguousState, "script_result", name+" required", nil)
+		}
+	}
+
+	if !record.ExpiresAt.After(record.ServerTime) {
+		return newStateError(RedisErrorKindAmbiguousState, "script_result", "active hold already expired", nil)
+	}
+
+	return nil
+}
+
+// readUserHold runs the shared read script for hold GET and placement checks.
+func (s *RedisSessionStore) readUserHold(ctx context.Context, key AffinityKey, operation string) (UserHoldRecord, error) {
+	if err := validateAffinityKey(key, operation); err != nil {
+		return UserHoldRecord{}, err
+	}
+
+	keys, err := s.keys.AffinityKeys(key.Tenant, key.AccountKey)
+	if err != nil {
+		return UserHoldRecord{}, err
+	}
+
+	value, err := s.runScript(ctx, scriptUserHoldGet, s.userHoldScriptKeys(keys),
+		normalizedStateValue(key.Tenant),
+		normalizedStateValue(key.AccountKey),
+	)
+	if err != nil {
+		return UserHoldRecord{}, err
+	}
+
+	return parseUserHoldRecord(key, value)
 }
 
 // parseSessionKillRecord converts a session kill script result.

@@ -203,6 +203,45 @@ type UserBackendPinClearRequest struct {
 	Actor  string
 }
 
+// UserHoldSetRequest describes an atomic user placement-hold mutation.
+type UserHoldSetRequest struct {
+	Key         AffinityKey
+	Duration    time.Duration
+	MaxDuration time.Duration
+	Reason      string
+	Actor       string
+}
+
+// UserHoldGetRequest describes one placement-hold read by affinity key.
+type UserHoldGetRequest struct {
+	Key AffinityKey
+}
+
+// UserHoldClearRequest describes an atomic placement-hold clear mutation.
+type UserHoldClearRequest struct {
+	Key    AffinityKey
+	Reason string
+	Actor  string
+}
+
+// UserHoldCheckRequest describes one read-only placement gate check.
+type UserHoldCheckRequest struct {
+	Key AffinityKey
+}
+
+// UserHoldRecord describes Redis-backed placement-hold state after a read or mutation.
+type UserHoldRecord struct {
+	Present           bool
+	Status            string
+	Key               AffinityKey
+	Generation        string
+	CreatedAt         time.Time
+	ExpiresAt         time.Time
+	RequestedDuration time.Duration
+	UpdatedAt         time.Time
+	ServerTime        time.Time
+}
+
 // UserBackendPinRecord describes Redis-backed backend-pin state after a read or mutation.
 type UserBackendPinRecord struct {
 	Present            bool

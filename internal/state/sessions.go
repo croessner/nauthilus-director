@@ -48,6 +48,7 @@ const (
 	scriptFieldBackendReservation = "backend_reservation_id"
 	scriptFieldControlAction      = "control_action"
 	scriptFieldControlGeneration  = "control_generation"
+	scriptFieldCreatedAtMS        = "created_at_ms"
 	scriptFieldExpiresAtMS        = "expires_at_ms"
 	scriptFieldGeneration         = "generation"
 	scriptFieldHolderKind         = "holder_kind"
@@ -65,6 +66,8 @@ const (
 	scriptFieldStatus             = "status"
 	scriptFieldStrategy           = "strategy"
 	scriptFieldTenant             = "tenant"
+	scriptFieldRequestedDuration  = "requested_duration_ms"
+	scriptFieldUpdatedAtMS        = "updated_at_ms"
 	scriptFieldUserSessionsKey    = "user_sessions_key"
 )
 
@@ -438,7 +441,8 @@ func (s *RedisSessionStore) validateScriptKeys(name string, keys []string) error
 func isPerAffinityScript(name string) bool {
 	switch name {
 	case scriptAttach, scriptOpen, scriptHeartbeat, scriptClose, scriptLookup, scriptMove, scriptKick, scriptClear,
-		scriptBackendPinSet, scriptBackendPinGet, scriptBackendPinClear:
+		scriptBackendPinSet, scriptBackendPinGet, scriptBackendPinClear,
+		scriptUserHoldSet, scriptUserHoldGet, scriptUserHoldClear:
 		return true
 	default:
 		return false

@@ -38,8 +38,9 @@ The authoritative user-level shard pin is the shard tag in
 `AffinityRecord.ShardTag`. Concrete backend identity for active traffic is
 stored on attached session records and backend reservation state. Operator
 backend pins use a separate per-affinity `backend_pin` hash under the same Redis
-Cluster hash tag. The user-affinity record itself does not store backend
-transport details.
+Cluster hash tag. Operator placement holds use a separate per-affinity `hold`
+hash that gates future placement without choosing a shard or backend. The
+user-affinity record itself does not store backend transport details.
 
 `SessionRecord` represents one lease-backed holder under an affinity key. The
 code uses two holder kinds:
@@ -55,6 +56,7 @@ flowchart TB
     G --> Z["sessions zset<br/>session id -> lease expiry"]
     G --> O["override hash<br/>future move target"]
     G --> P["backend_pin hash<br/>bounded operator backend override"]
+    G --> Q["hold hash<br/>bounded placement gate"]
     G --> K["session hash<br/>protocol, holder_kind, shard, backend attachment"]
 ```
 
@@ -67,6 +69,7 @@ Per-affinity keys share one Redis Cluster hash tag:
 <prefix>:v<schema>:{aff:<affinity_hash>}:sessions
 <prefix>:v<schema>:{aff:<affinity_hash>}:override
 <prefix>:v<schema>:{aff:<affinity_hash>}:backend_pin
+<prefix>:v<schema>:{aff:<affinity_hash>}:hold
 <prefix>:v<schema>:{aff:<affinity_hash>}:session:<session_id>
 ```
 
@@ -76,6 +79,13 @@ registry: tenant, account key, backend identifier, protocol, backend pool,
 effective shard, strategy, generation, reason, actor and update timestamp. It
 does not store backend addresses, credentials, TLS material, private key paths
 or raw usernames in Redis key names.
+
+`hold` is the authoritative operator placement gate for one affinity key. It
+stores tenant, account key, generation, Redis-server `created_at_ms`,
+`expires_at_ms`, requested duration, reason, actor and update timestamp. It does
+not store target shard, backend identity, backend transport details, credentials,
+session identifiers or raw usernames in Redis key names. Expired hold hashes
+read as absent even when their cleanup TTL has not removed the physical hash.
 
 Backend-pin mutations use the same per-affinity key group as user movement:
 
@@ -89,6 +99,14 @@ Backend-pin mutations use the same per-affinity key group as user movement:
   refreshing leases or mutating affinity state.
 - `backend_pin_clear.lua` deletes only `backend_pin`. It preserves active
   sessions, shard affinity and any pending shard override.
+- `user_hold_set.lua` writes the `hold` hash with Redis-server timestamps and a
+  cleanup TTL. It rejects non-positive durations and durations above the
+  caller-provided maximum.
+- `user_hold_get.lua` reads the hold hash without refreshing, clearing or
+  consuming it. It reports expired hashes as absent.
+- `user_hold_clear.lua` deletes only `hold`. It preserves active sessions,
+  delivery holds, shard affinity, movement overrides, backend pins and backend
+  reservations.
 
 Backend capacity reservations use a separate same-slot key group per backend:
 
@@ -123,6 +141,7 @@ flowchart LR
         A4["attach.lua"]
         A5["move.lua / kick.lua / clear.lua"]
         A6["backend_pin_*.lua"]
+        A7["user_hold_*.lua"]
     end
 
     subgraph "Backend same-slot capacity"
@@ -357,6 +376,13 @@ scripts:
   and never rewrites YAML configuration.
 - `ClearUserBackendPin` deletes the concrete backend override without killing
   sessions or clearing shard affinity.
+- `SetUserHold` stores a bounded placement hold with expiry computed from Redis
+  server time. It is runtime state only and never rewrites YAML configuration.
+- `GetUserHold` and `CheckUserHold` read hold state without waiting, refreshing
+  leases or mutating affinity state. Expired holds are absent.
+- `ClearUserHold` deletes only placement-hold state and leaves active affinity,
+  movement overrides, backend pins, sessions, delivery holds and backend
+  reservations untouched.
 - `KickUser` increments affinity control generation and marks the affinity for
   heartbeat-observed closure.
 - `ClearUserAffinity` clears inactive affinity and override state, and requires
@@ -377,6 +403,7 @@ Session and backend controls use repairable indexes:
 flowchart TD
     U["Operator runtime command"] --> R{"Mutation scope"}
     R -->|user affinity| M["move.lua / kick.lua / clear.lua"]
+    R -->|user placement hold| P["user_hold_set.lua / user_hold_clear.lua"]
     R -->|single session| K["session_kill.lua via session index"]
     R -->|backend drain or hard maintenance| B["backend_runtime_set.lua"]
     B --> W["SScan backend-session shards"]
