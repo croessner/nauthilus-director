@@ -91,6 +91,11 @@ type UserBackendPinReader interface {
 	GetUserBackendPin(ctx context.Context, request runtime.GetUserBackendPinRequest) (runtime.UserBackendPinReadResult, error)
 }
 
+// UserHoldReader exposes user placement-hold state to REST adapters.
+type UserHoldReader interface {
+	GetUserHold(ctx context.Context, request runtime.GetUserHoldRequest) (runtime.GetUserHoldResult, error)
+}
+
 // RuntimeSummaryReader exposes aggregate runtime summaries to REST adapters.
 type RuntimeSummaryReader interface {
 	RuntimeSummary(ctx context.Context) (runtime.Summary, error)
@@ -107,6 +112,12 @@ type UserMutator interface {
 type UserBackendPinMutator interface {
 	SetUserBackendPin(ctx context.Context, request runtime.SetUserBackendPinRequest) (runtime.UserBackendPinMutationResult, error)
 	ClearUserBackendPin(ctx context.Context, request runtime.ClearUserBackendPinRequest) (runtime.UserBackendPinMutationResult, error)
+}
+
+// UserHoldMutator exposes user placement-hold mutations to REST adapters.
+type UserHoldMutator interface {
+	SetUserHold(ctx context.Context, request runtime.SetUserHoldRequest) (runtime.SetUserHoldResult, error)
+	ClearUserHold(ctx context.Context, request runtime.ClearUserHoldRequest) (runtime.ClearUserHoldResult, error)
 }
 
 // RouteLookupService exposes side-effect-free route diagnostics to REST adapters.
@@ -170,9 +181,11 @@ type HandlerOptions struct {
 	SessionMutator            SessionMutator
 	UserReader                UserReader
 	UserBackendPinReader      UserBackendPinReader
+	UserHoldReader            UserHoldReader
 	RuntimeSummaryReader      RuntimeSummaryReader
 	UserMutator               UserMutator
 	UserBackendPinMutator     UserBackendPinMutator
+	UserHoldMutator           UserHoldMutator
 	RouteLookup               RouteLookupService
 	ListenerRuntime           ListenerRuntimeService
 	Reload                    ReloadService
@@ -194,9 +207,11 @@ type Handler struct {
 	sessionMutator            SessionMutator
 	userReader                UserReader
 	userBackendPinReader      UserBackendPinReader
+	userHoldReader            UserHoldReader
 	runtimeSummaryReader      RuntimeSummaryReader
 	userMutator               UserMutator
 	userBackendPinMutator     UserBackendPinMutator
+	userHoldMutator           UserHoldMutator
 	routeLookup               RouteLookupService
 	listenerRuntime           ListenerRuntimeService
 	reload                    ReloadService
@@ -220,9 +235,11 @@ func NewHandler(options HandlerOptions) *Handler {
 		sessionMutator:            options.SessionMutator,
 		userReader:                options.UserReader,
 		userBackendPinReader:      options.UserBackendPinReader,
+		userHoldReader:            options.UserHoldReader,
 		runtimeSummaryReader:      options.RuntimeSummaryReader,
 		userMutator:               options.UserMutator,
 		userBackendPinMutator:     options.UserBackendPinMutator,
+		userHoldMutator:           options.UserHoldMutator,
 		routeLookup:               options.RouteLookup,
 		listenerRuntime:           options.ListenerRuntime,
 		reload:                    options.Reload,
@@ -780,6 +797,81 @@ func (h *Handler) SetUserBackendPin(ctx context.Context, request generated.SetUs
 	return generated.SetUserBackendPin202JSONResponse(accepted()), nil
 }
 
+// ClearUserHold removes one placement hold with an audit reason.
+//
+//nolint:dupl // Hold and backend-pin adapters intentionally mirror generated response plumbing.
+func (h *Handler) ClearUserHold(ctx context.Context, request generated.ClearUserHoldRequestObject) (generated.ClearUserHoldResponseObject, error) {
+	if request.Body == nil {
+		return generated.ClearUserHolddefaultJSONResponse{StatusCode: http.StatusBadRequest, Body: h.problem(http.StatusBadRequest, "invalid_request", "request body is required", "ClearUserHold")}, nil
+	}
+
+	reason := strings.TrimSpace(request.Body.Reason)
+	if reason == "" {
+		return generated.ClearUserHolddefaultJSONResponse{StatusCode: http.StatusBadRequest, Body: h.problem(http.StatusBadRequest, "invalid_request", "reason required", "ClearUserHold")}, nil
+	}
+
+	if h.userHoldMutator == nil {
+		return generated.ClearUserHolddefaultJSONResponse{StatusCode: http.StatusServiceUnavailable, Body: h.runtimeUnavailable("ClearUserHold")}, nil
+	}
+
+	if _, err := h.userHoldMutator.ClearUserHold(ctx, runtime.ClearUserHoldRequest{
+		Key:    parseUserKey(request.UserKey),
+		Reason: reason,
+		Actor:  actorFromContext(ctx),
+	}); err != nil {
+		return generated.ClearUserHolddefaultJSONResponse{StatusCode: statusForError(err), Body: h.problemFromError("ClearUserHold", err)}, nil
+	}
+
+	return generated.ClearUserHold202JSONResponse(accepted()), nil
+}
+
+// GetUserHold returns the bounded placement-hold read model.
+func (h *Handler) GetUserHold(ctx context.Context, request generated.GetUserHoldRequestObject) (generated.GetUserHoldResponseObject, error) {
+	key := parseUserKey(request.UserKey)
+
+	if h.userHoldReader == nil {
+		return generated.GetUserHolddefaultJSONResponse{StatusCode: http.StatusServiceUnavailable, Body: h.runtimeUnavailable("GetUserHold")}, nil
+	}
+
+	result, err := h.userHoldReader.GetUserHold(ctx, runtime.GetUserHoldRequest{Key: key})
+	if err != nil {
+		return generated.GetUserHolddefaultJSONResponse{StatusCode: statusForError(err), Body: h.problemFromError("GetUserHold", err)}, nil
+	}
+
+	return generated.GetUserHold200JSONResponse(userHold(result.Hold, key)), nil
+}
+
+// SetUserHold stores one bounded placement hold through the runtime domain.
+func (h *Handler) SetUserHold(ctx context.Context, request generated.SetUserHoldRequestObject) (generated.SetUserHoldResponseObject, error) {
+	if request.Body == nil {
+		return generated.SetUserHolddefaultJSONResponse{StatusCode: http.StatusBadRequest, Body: h.problem(http.StatusBadRequest, "invalid_request", "request body is required", "SetUserHold")}, nil
+	}
+
+	if request.Body.DurationSeconds <= 0 {
+		return generated.SetUserHolddefaultJSONResponse{StatusCode: http.StatusBadRequest, Body: h.problem(http.StatusBadRequest, "invalid_request", "duration_seconds must be greater than zero", "SetUserHold")}, nil
+	}
+
+	reason := strings.TrimSpace(request.Body.Reason)
+	if reason == "" {
+		return generated.SetUserHolddefaultJSONResponse{StatusCode: http.StatusBadRequest, Body: h.problem(http.StatusBadRequest, "invalid_request", "reason required", "SetUserHold")}, nil
+	}
+
+	if h.userHoldMutator == nil {
+		return generated.SetUserHolddefaultJSONResponse{StatusCode: http.StatusServiceUnavailable, Body: h.runtimeUnavailable("SetUserHold")}, nil
+	}
+
+	if _, err := h.userHoldMutator.SetUserHold(ctx, runtime.SetUserHoldRequest{
+		Key:      parseUserKey(request.UserKey),
+		Duration: time.Duration(request.Body.DurationSeconds) * time.Second,
+		Reason:   reason,
+		Actor:    actorFromContext(ctx),
+	}); err != nil {
+		return generated.SetUserHolddefaultJSONResponse{StatusCode: statusForError(err), Body: h.problemFromError("SetUserHold", err)}, nil
+	}
+
+	return generated.SetUserHold202JSONResponse(accepted()), nil
+}
+
 // KickUser marks a user's active sessions for closure.
 func (h *Handler) KickUser(ctx context.Context, request generated.KickUserRequestObject) (generated.KickUserResponseObject, error) {
 	if request.Body == nil {
@@ -1083,6 +1175,10 @@ func withDefaultHandlerOptions(options HandlerOptions) HandlerOptions {
 
 	if options.UserBackendPinReader == nil {
 		options.UserBackendPinReader = emptyRuntimeReader{}
+	}
+
+	if options.UserHoldReader == nil {
+		options.UserHoldReader = emptyRuntimeReader{}
 	}
 
 	if options.RuntimeSummaryReader == nil {
@@ -1412,6 +1508,7 @@ func routeLookupResponse(result runtime.RouteLookupResponse) generated.RouteLook
 			Maintenance:     result.Effects.Maintenance,
 			MaxConnections:  result.Effects.MaxConnections,
 			RuntimeOverride: result.Effects.RuntimeOverride,
+			UserHold:        result.Effects.UserHold,
 		},
 		Affinity:   routeLookupAffinity(result.Affinity),
 		BackendPin: routeLookupBackendPin(result.BackendPin),
@@ -1436,6 +1533,7 @@ func routeLookupResponse(result runtime.RouteLookupResponse) generated.RouteLook
 		RoutingGeneration: generationPtr,
 		SelectedBackend:   result.SelectedBackend,
 		ShardTag:          result.Routing.EffectiveShard,
+		UserHold:          routeLookupUserHold(result.UserHold),
 	}
 }
 
@@ -1450,6 +1548,30 @@ func routeLookupBackendPin(pin runtime.RouteLookupBackendPinState) generated.Rou
 		Reason:      pin.ReasonClass,
 		ShardTag:    stringPtrIfNotEmpty(pin.EffectiveShard),
 	}
+}
+
+// routeLookupUserHold adapts placement-hold diagnostics into generated DTOs.
+func routeLookupUserHold(hold runtime.RouteLookupUserHoldState) generated.RouteLookupUserHold {
+	reason := strings.TrimSpace(hold.ReasonClass)
+	if reason == "" {
+		reason = "user_hold_absent"
+		if hold.Present {
+			reason = "user_hold_active"
+		}
+	}
+
+	detail := generated.RouteLookupUserHold{
+		ExpiresAt:         timePtrIfPresent(hold.ExpiresAt),
+		Generation:        stringPtrIfNotEmpty(hold.Generation),
+		PlacementDeferred: hold.PlacementDeferred,
+		Present:           hold.Present,
+		Reason:            reason,
+	}
+	if hold.Present {
+		detail.RemainingSeconds = secondsPtrFromDuration(hold.Remaining)
+	}
+
+	return detail
 }
 
 // routeLookupAffinity adapts requested affinity context when it was read.
@@ -1675,6 +1797,30 @@ func userBackendPin(pin runtime.UserBackendPin, fallbackKey runtime.UserKey) gen
 	return detail
 }
 
+// userHold adapts runtime placement-hold state into the generated REST DTO.
+func userHold(hold runtime.UserHold, fallbackKey runtime.UserKey) generated.UserHold {
+	key := hold.Key.Normalize()
+	if key.Tenant == "" || key.UserHash == "" {
+		key = fallbackKey.Normalize()
+	}
+
+	detail := generated.UserHold{
+		Present: hold.Present,
+		UserKey: formatUserKey(key),
+	}
+
+	if !hold.Present {
+		return detail
+	}
+
+	detail.CreatedAt = timePtrIfPresent(hold.CreatedAt)
+	detail.ExpiresAt = timePtrIfPresent(hold.ExpiresAt)
+	detail.Generation = stringPtrIfNotEmpty(hold.Generation)
+	detail.RemainingSeconds = secondsPtrUntil(hold.ExpiresAt)
+
+	return detail
+}
+
 // statusForError maps domain error classes to stable REST status codes.
 func statusForError(err error) int {
 	if status, ok := runtimeErrorStatus(err); ok {
@@ -1865,6 +2011,39 @@ func stringPtrIfNotEmpty(value string) *string {
 	return &value
 }
 
+// timePtrIfPresent returns an optional UTC time when the value is set.
+func timePtrIfPresent(value time.Time) *time.Time {
+	if value.IsZero() {
+		return nil
+	}
+
+	utc := value.UTC()
+
+	return &utc
+}
+
+// secondsPtrFromDuration returns non-negative whole seconds for optional durations.
+func secondsPtrFromDuration(value time.Duration) *int {
+	if value <= 0 {
+		zero := 0
+
+		return &zero
+	}
+
+	seconds := int(value / time.Second)
+
+	return &seconds
+}
+
+// secondsPtrUntil returns non-negative whole seconds until a target time.
+func secondsPtrUntil(value time.Time) *int {
+	if value.IsZero() {
+		return nil
+	}
+
+	return secondsPtrFromDuration(time.Until(value.UTC()))
+}
+
 // pointerMap unwraps optional generated attribute maps.
 func pointerMap(value *map[string][]string) map[string][]string {
 	if value == nil {
@@ -1958,6 +2137,16 @@ func (emptyRuntimeReader) GetUserAffinity(context.Context, runtime.UserKey) (run
 func (emptyRuntimeReader) GetUserBackendPin(_ context.Context, request runtime.GetUserBackendPinRequest) (runtime.UserBackendPinReadResult, error) {
 	return runtime.UserBackendPinReadResult{
 		Pin: runtime.UserBackendPin{
+			Present: false,
+			Key:     request.Key.Normalize(),
+		},
+	}, nil
+}
+
+// GetUserHold reports absent placement-hold state when no runtime reader is assembled.
+func (emptyRuntimeReader) GetUserHold(_ context.Context, request runtime.GetUserHoldRequest) (runtime.GetUserHoldResult, error) {
+	return runtime.GetUserHoldResult{
+		Hold: runtime.UserHold{
 			Present: false,
 			Key:     request.Key.Normalize(),
 		},

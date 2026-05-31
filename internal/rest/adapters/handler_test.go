@@ -46,6 +46,7 @@ const (
 	testBackendPinProtocol  = "imap"
 	testConfigView          = configViewDefaults
 	testHandlerVersion      = "test"
+	testHoldReason          = "pause placement"
 	testListenerBound       = "127.0.0.1:2143"
 	testListenerName        = "imap"
 	testListenerReason      = "node maintenance"
@@ -504,6 +505,134 @@ func TestBackendPinRuntimeErrorsMapToStableStatuses(t *testing.T) {
 	}
 }
 
+// TestGetUserHoldMapsPresentDTO verifies hold reads stay bounded and reason-free.
+func TestGetUserHoldMapsPresentDTO(t *testing.T) {
+	createdAt := time.Now().Add(-time.Minute).UTC()
+	expiresAt := time.Now().Add(time.Minute).UTC()
+	service := &recordingUserHoldService{
+		readResult: runtime.GetUserHoldResult{
+			Hold: runtime.UserHold{
+				Present:    true,
+				Key:        runtime.UserKey{Tenant: testBackendPinTenant, UserHash: testBackendPinUserHash},
+				Generation: "7",
+				CreatedAt:  createdAt,
+				ExpiresAt:  expiresAt,
+			},
+		},
+	}
+	handler := NewHandler(HandlerOptions{
+		Version:        testHandlerVersion,
+		UserHoldReader: service,
+	})
+
+	response, err := handler.GetUserHold(context.Background(), generated.GetUserHoldRequestObject{UserKey: testBackendPinUserKey})
+	if err != nil {
+		t.Fatalf("GetUserHold returned error: %v", err)
+	}
+
+	hold, ok := response.(generated.GetUserHold200JSONResponse)
+	if !ok {
+		t.Fatalf("GetUserHold response = %T, want 200 hold", response)
+	}
+
+	if service.readCalls != 1 {
+		t.Fatalf("hold read calls = %d, want 1", service.readCalls)
+	}
+
+	if !hold.Present || hold.UserKey != testBackendPinUserKey {
+		t.Fatalf("hold DTO = %#v, want present user hold", hold)
+	}
+
+	assertStringPtrValue(t, "hold generation", hold.Generation, "7")
+
+	if hold.CreatedAt == nil || hold.ExpiresAt == nil || hold.RemainingSeconds == nil {
+		t.Fatalf("hold timestamps = created=%v expires=%v remaining=%v, want present", hold.CreatedAt, hold.ExpiresAt, hold.RemainingSeconds)
+	}
+}
+
+// TestSetUserHoldMapsGeneratedRequest verifies duration_seconds converts at the REST boundary.
+func TestSetUserHoldMapsGeneratedRequest(t *testing.T) {
+	service := &recordingUserHoldService{}
+	handler := NewHandler(HandlerOptions{
+		Version:         testHandlerVersion,
+		UserHoldMutator: service,
+	})
+
+	body := generated.SetUserHoldJSONRequestBody{
+		DurationSeconds: 90,
+		Reason:          " " + testHoldReason + " ",
+	}
+
+	response, err := handler.SetUserHold(context.Background(), generated.SetUserHoldRequestObject{
+		UserKey: testBackendPinUserKey,
+		Body:    &body,
+	})
+	if err != nil {
+		t.Fatalf("SetUserHold returned error: %v", err)
+	}
+
+	if _, ok := response.(generated.SetUserHold202JSONResponse); !ok {
+		t.Fatalf("SetUserHold response = %T, want 202 accepted", response)
+	}
+
+	if service.setCalls != 1 {
+		t.Fatalf("hold set calls = %d, want 1", service.setCalls)
+	}
+
+	wantKey := runtime.UserKey{Tenant: testBackendPinTenant, UserHash: testBackendPinUserHash}
+	if service.setRequest.Key != wantKey || service.setRequest.Duration != 90*time.Second || service.setRequest.Reason != testHoldReason {
+		t.Fatalf("hold set request = %#v, want parsed key, duration and trimmed reason", service.setRequest)
+	}
+}
+
+// TestClearUserHoldRequiresReasonAndCallsRuntime verifies clear validation and mutation flow.
+func TestClearUserHoldRequiresReasonAndCallsRuntime(t *testing.T) {
+	service := &recordingUserHoldService{}
+	handler := NewHandler(HandlerOptions{
+		Version:         testHandlerVersion,
+		UserHoldMutator: service,
+	})
+
+	emptyBody := generated.ClearUserHoldJSONRequestBody{Reason: "   "}
+
+	emptyResponse, err := handler.ClearUserHold(context.Background(), generated.ClearUserHoldRequestObject{
+		UserKey: testBackendPinUserHash,
+		Body:    &emptyBody,
+	})
+	if err != nil {
+		t.Fatalf("ClearUserHold empty reason returned error: %v", err)
+	}
+
+	assertUserHoldProblemStatus(t, emptyResponse, http.StatusBadRequest)
+
+	if service.clearCalls != 0 {
+		t.Fatalf("hold clear calls = %d, want 0 for invalid reason", service.clearCalls)
+	}
+
+	body := generated.ClearUserHoldJSONRequestBody{Reason: " " + testHoldReason + " "}
+
+	response, err := handler.ClearUserHold(context.Background(), generated.ClearUserHoldRequestObject{
+		UserKey: testBackendPinUserHash,
+		Body:    &body,
+	})
+	if err != nil {
+		t.Fatalf("ClearUserHold returned error: %v", err)
+	}
+
+	if _, ok := response.(generated.ClearUserHold202JSONResponse); !ok {
+		t.Fatalf("ClearUserHold response = %T, want 202 accepted", response)
+	}
+
+	if service.clearCalls != 1 {
+		t.Fatalf("hold clear calls = %d, want 1", service.clearCalls)
+	}
+
+	if service.clearRequest.Key != (runtime.UserKey{Tenant: defaultTenant, UserHash: testBackendPinUserHash}) ||
+		service.clearRequest.Reason != testHoldReason {
+		t.Fatalf("hold clear request = %#v, want parsed key and trimmed reason", service.clearRequest)
+	}
+}
+
 // TestRuntimeListHandlersMapPaginationClientErrors verifies list cursors and limits fail as client errors.
 func TestRuntimeListHandlersMapPaginationClientErrors(t *testing.T) {
 	reader := &recordingRuntimeReadService{}
@@ -928,8 +1057,74 @@ func (r *recordingUserBackendPinService) ClearUserBackendPin(_ context.Context, 
 	return r.clearResult, nil
 }
 
+// recordingUserHoldService captures placement-hold runtime requests.
+type recordingUserHoldService struct {
+	readCalls    int
+	readRequest  runtime.GetUserHoldRequest
+	readResult   runtime.GetUserHoldResult
+	readErr      error
+	setCalls     int
+	setRequest   runtime.SetUserHoldRequest
+	setResult    runtime.SetUserHoldResult
+	setErr       error
+	clearCalls   int
+	clearRequest runtime.ClearUserHoldRequest
+	clearResult  runtime.ClearUserHoldResult
+	clearErr     error
+}
+
+// GetUserHold records one placement-hold read request.
+func (r *recordingUserHoldService) GetUserHold(_ context.Context, request runtime.GetUserHoldRequest) (runtime.GetUserHoldResult, error) {
+	r.readCalls++
+
+	r.readRequest = request
+	if r.readErr != nil {
+		return runtime.GetUserHoldResult{}, r.readErr
+	}
+
+	return r.readResult, nil
+}
+
+// SetUserHold records one placement-hold set request.
+func (r *recordingUserHoldService) SetUserHold(_ context.Context, request runtime.SetUserHoldRequest) (runtime.SetUserHoldResult, error) {
+	r.setCalls++
+
+	r.setRequest = request
+	if r.setErr != nil {
+		return runtime.SetUserHoldResult{}, r.setErr
+	}
+
+	return r.setResult, nil
+}
+
+// ClearUserHold records one placement-hold clear request.
+func (r *recordingUserHoldService) ClearUserHold(_ context.Context, request runtime.ClearUserHoldRequest) (runtime.ClearUserHoldResult, error) {
+	r.clearCalls++
+
+	r.clearRequest = request
+	if r.clearErr != nil {
+		return runtime.ClearUserHoldResult{}, r.clearErr
+	}
+
+	return r.clearResult, nil
+}
+
 // assertBackendPinProblemStatus checks backend-pin generated problem responses.
 func assertBackendPinProblemStatus(t *testing.T, response any, want int) {
+	t.Helper()
+
+	assertGeneratedUserProblemStatus(t, response, want, "backend-pin")
+}
+
+// assertUserHoldProblemStatus checks placement-hold generated problem responses.
+func assertUserHoldProblemStatus(t *testing.T, response any, want int) {
+	t.Helper()
+
+	assertGeneratedUserProblemStatus(t, response, want, "user-hold")
+}
+
+// assertGeneratedUserProblemStatus checks generated user-runtime problem responses.
+func assertGeneratedUserProblemStatus(t *testing.T, response any, want int, label string) {
 	t.Helper()
 
 	var got int
@@ -941,8 +1136,14 @@ func assertBackendPinProblemStatus(t *testing.T, response any, want int) {
 		got = typed.StatusCode
 	case generated.SetUserBackendPindefaultJSONResponse:
 		got = typed.StatusCode
+	case generated.ClearUserHolddefaultJSONResponse:
+		got = typed.StatusCode
+	case generated.GetUserHolddefaultJSONResponse:
+		got = typed.StatusCode
+	case generated.SetUserHolddefaultJSONResponse:
+		got = typed.StatusCode
 	default:
-		t.Fatalf("response = %T, want backend-pin problem", response)
+		t.Fatalf("response = %T, want %s problem", response, label)
 	}
 
 	if got != want {

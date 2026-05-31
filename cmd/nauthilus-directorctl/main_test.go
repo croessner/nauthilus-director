@@ -1564,6 +1564,39 @@ func (fake *fakeControlClient) SetUserBackendPinWithResponse(_ context.Context, 
 	return &generated.SetUserBackendPinResponse{HTTPResponse: httpResponse(http.StatusAccepted), JSON202: acceptedResponse()}, nil
 }
 
+// ClearUserHoldWithBodyWithResponse records unsupported raw-body usage.
+func (fake *fakeControlClient) ClearUserHoldWithBodyWithResponse(context.Context, generated.UserKey, string, io.Reader, ...generated.RequestEditorFn) (*generated.ClearUserHoldResponse, error) {
+	fake.record("ClearUserHoldWithBody")
+	return nil, nil
+}
+
+// ClearUserHoldWithResponse records and returns an accepted response.
+func (fake *fakeControlClient) ClearUserHoldWithResponse(context.Context, generated.UserKey, generated.ClearUserHoldJSONRequestBody, ...generated.RequestEditorFn) (*generated.ClearUserHoldResponse, error) {
+	fake.record("ClearUserHold")
+	return &generated.ClearUserHoldResponse{HTTPResponse: httpResponse(http.StatusAccepted), JSON202: acceptedResponse()}, nil
+}
+
+// GetUserHoldWithResponse records and returns absent placement-hold state.
+func (fake *fakeControlClient) GetUserHoldWithResponse(_ context.Context, userKey generated.UserKey, _ ...generated.RequestEditorFn) (*generated.GetUserHoldResponse, error) {
+	fake.record("GetUserHold")
+	return &generated.GetUserHoldResponse{
+		HTTPResponse: httpResponse(http.StatusOK),
+		JSON200:      &generated.UserHold{Present: false, UserKey: string(userKey)},
+	}, nil
+}
+
+// SetUserHoldWithBodyWithResponse records unsupported raw-body usage.
+func (fake *fakeControlClient) SetUserHoldWithBodyWithResponse(context.Context, generated.UserKey, string, io.Reader, ...generated.RequestEditorFn) (*generated.SetUserHoldResponse, error) {
+	fake.record("SetUserHoldWithBody")
+	return nil, nil
+}
+
+// SetUserHoldWithResponse records and returns an accepted response.
+func (fake *fakeControlClient) SetUserHoldWithResponse(context.Context, generated.UserKey, generated.SetUserHoldJSONRequestBody, ...generated.RequestEditorFn) (*generated.SetUserHoldResponse, error) {
+	fake.record("SetUserHold")
+	return &generated.SetUserHoldResponse{HTTPResponse: httpResponse(http.StatusAccepted), JSON202: acceptedResponse()}, nil
+}
+
 // KickUserWithBodyWithResponse records unsupported raw-body usage.
 func (fake *fakeControlClient) KickUserWithBodyWithResponse(context.Context, generated.UserKey, string, io.Reader, ...generated.RequestEditorFn) (*generated.KickUserResponse, error) {
 	fake.record("KickUserWithBody")

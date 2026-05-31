@@ -673,6 +673,63 @@ paths:
                 $ref: "#/components/schemas/AcceptedResponse"
         default:
           $ref: "#/components/responses/Error"
+  /api/v1/users/{user_key}/hold:
+    parameters:
+      - $ref: "#/components/parameters/UserKey"
+    get:
+      operationId: getUserHold
+      tags:
+        - users
+      summary: Show placement hold for one user key.
+      responses:
+        "200":
+          description: User placement hold state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserHold"
+        default:
+          $ref: "#/components/responses/Error"
+    put:
+      operationId: setUserHold
+      tags:
+        - users
+      summary: Set a bounded placement hold for one user key.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UserHoldRequest"
+      responses:
+        "202":
+          description: Placement hold update was accepted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AcceptedResponse"
+        default:
+          $ref: "#/components/responses/Error"
+    delete:
+      operationId: clearUserHold
+      tags:
+        - users
+      summary: Clear placement hold for one user key.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UserHoldClearRequest"
+      responses:
+        "202":
+          description: Placement hold clear was accepted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AcceptedResponse"
+        default:
+          $ref: "#/components/responses/Error"
   /api/v1/users/{user_key}/move:
     parameters:
       - $ref: "#/components/parameters/UserKey"
@@ -1110,6 +1167,7 @@ components:
         - shard_tag
         - routing
         - backend_pin
+        - user_hold
         - backends
         - affected_by
         - fail_closed
@@ -1132,6 +1190,8 @@ components:
           $ref: "#/components/schemas/RouteLookupAffinity"
         backend_pin:
           $ref: "#/components/schemas/RouteLookupBackendPin"
+        user_hold:
+          $ref: "#/components/schemas/RouteLookupUserHold"
         backends:
           type: array
           items:
@@ -1406,6 +1466,7 @@ components:
         - maintenance
         - runtime_override
         - max_connections
+        - user_hold
       properties:
         health:
           type: boolean
@@ -1415,6 +1476,35 @@ components:
           type: boolean
         max_connections:
           type: boolean
+        user_hold:
+          type: boolean
+          description: Whether a user placement hold affected the diagnostic outcome.
+    RouteLookupUserHold:
+      type: object
+      additionalProperties: false
+      required:
+        - present
+        - placement_deferred
+        - reason
+      properties:
+        present:
+          type: boolean
+        expires_at:
+          type: string
+          format: date-time
+        remaining_seconds:
+          type: integer
+          minimum: 0
+        placement_deferred:
+          type: boolean
+          description: >
+            True when an active placement hold would defer placement; route
+            lookup remains side-effect-free and does not wait or mutate state.
+        reason:
+          type: string
+          description: Bounded diagnostic reason class such as user_hold_active, never operator-supplied reason text.
+        generation:
+          type: string
     RuntimeReasonRequest:
       type: object
       additionalProperties: false
@@ -1600,6 +1690,51 @@ components:
           type: string
           minLength: 1
     UserBackendPinClearRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - reason
+      properties:
+        reason:
+          type: string
+          minLength: 1
+    UserHold:
+      type: object
+      additionalProperties: false
+      required:
+        - present
+        - user_key
+      properties:
+        present:
+          type: boolean
+        user_key:
+          type: string
+          minLength: 1
+        expires_at:
+          type: string
+          format: date-time
+        remaining_seconds:
+          type: integer
+          minimum: 0
+        generation:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+    UserHoldRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - duration_seconds
+        - reason
+      properties:
+        duration_seconds:
+          type: integer
+          minimum: 1
+        reason:
+          type: string
+          minLength: 1
+    UserHoldClearRequest:
       type: object
       additionalProperties: false
       required:

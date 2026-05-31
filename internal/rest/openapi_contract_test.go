@@ -43,6 +43,7 @@ const (
 	pathContractSession            = "/api/v1/sessions/{session_id}"
 	pathContractUserAffinity       = "/api/v1/users/{user_key}/affinity"
 	pathContractUserBackendPin     = "/api/v1/users/{user_key}/backend-pin"
+	pathContractUserHold           = "/api/v1/users/{user_key}/hold"
 	queryContractCursor            = "cursor"
 	queryContractLimit             = "limit"
 )
@@ -86,6 +87,9 @@ func TestOpenAPIContractIncludesPlannedEndpointGroupSet(t *testing.T) {
 		{method: http.MethodGet, path: pathContractUserBackendPin},
 		{method: http.MethodPut, path: pathContractUserBackendPin},
 		{method: http.MethodDelete, path: pathContractUserBackendPin},
+		{method: http.MethodGet, path: pathContractUserHold},
+		{method: http.MethodPut, path: pathContractUserHold},
+		{method: http.MethodDelete, path: pathContractUserHold},
 		{method: http.MethodPost, path: "/api/v1/users/{user_key}/move"},
 		{method: http.MethodPost, path: "/api/v1/users/{user_key}/kick"},
 		{method: http.MethodPost, path: "/api/v1/route/lookup"},
@@ -145,6 +149,59 @@ func TestOpenAPIContractIncludesUserBackendPinOperations(t *testing.T) {
 	assertSchemaRequires(t, clearSchema, "reason")
 }
 
+// TestOpenAPIContractIncludesUserHoldOperations checks the user-hold contract.
+func TestOpenAPIContractIncludesUserHoldOperations(t *testing.T) {
+	contract := loadContract(t)
+	expectedOperations := []struct {
+		method      string
+		operationID string
+	}{
+		{method: http.MethodGet, operationID: "getUserHold"},
+		{method: http.MethodPut, operationID: "setUserHold"},
+		{method: http.MethodDelete, operationID: "clearUserHold"},
+	}
+
+	for _, expected := range expectedOperations {
+		operation := contract.Paths.Find(pathContractUserHold).GetOperation(expected.method)
+		if operation == nil {
+			t.Fatalf("OpenAPI contract missing %s %s", expected.method, pathContractUserHold)
+		}
+
+		if operation.OperationID != expected.operationID {
+			t.Fatalf("%s %s operationId = %q, want %q", expected.method, pathContractUserHold, operation.OperationID, expected.operationID)
+		}
+	}
+
+	holdSchema := contract.Components.Schemas["UserHold"].Value
+	if !schemaRejectsAdditionalProperties(holdSchema) {
+		t.Fatal("UserHold must reject additional properties")
+	}
+
+	assertSchemaRequires(t, holdSchema, "present", "user_key")
+
+	if _, ok := holdSchema.Properties["reason"]; ok {
+		t.Fatal("UserHold must not expose operator reason text")
+	}
+
+	setSchema := contract.Components.Schemas["UserHoldRequest"].Value
+	if !schemaRejectsAdditionalProperties(setSchema) {
+		t.Fatal("UserHoldRequest must reject additional properties")
+	}
+
+	assertSchemaRequires(t, setSchema, "duration_seconds", "reason")
+
+	if _, ok := setSchema.Properties["expires_at"]; ok {
+		t.Fatal("UserHoldRequest must not accept operator-supplied expires_at")
+	}
+
+	clearSchema := contract.Components.Schemas["UserHoldClearRequest"].Value
+	if !schemaRejectsAdditionalProperties(clearSchema) {
+		t.Fatal("UserHoldClearRequest must reject additional properties")
+	}
+
+	assertSchemaRequires(t, clearSchema, "reason")
+}
+
 // TestOpenAPIContractIncludesRouteLookupBackendPin checks route diagnostics.
 func TestOpenAPIContractIncludesRouteLookupBackendPin(t *testing.T) {
 	contract := loadContract(t)
@@ -157,6 +214,31 @@ func TestOpenAPIContractIncludesRouteLookupBackendPin(t *testing.T) {
 	}
 
 	assertSchemaRequires(t, pinSchema, "present", "applied", "reason")
+}
+
+// TestOpenAPIContractIncludesRouteLookupUserHold checks hold diagnostics.
+func TestOpenAPIContractIncludesRouteLookupUserHold(t *testing.T) {
+	contract := loadContract(t)
+	responseSchema := contract.Components.Schemas["RouteLookupResponse"].Value
+	assertSchemaRequires(t, responseSchema, "user_hold")
+
+	holdSchema := contract.Components.Schemas["RouteLookupUserHold"].Value
+	if !schemaRejectsAdditionalProperties(holdSchema) {
+		t.Fatal("RouteLookupUserHold must reject additional properties")
+	}
+
+	assertSchemaRequires(t, holdSchema, "present", "placement_deferred", "reason")
+
+	if _, ok := holdSchema.Properties["operator_reason"]; ok {
+		t.Fatal("RouteLookupUserHold must not expose operator reason text")
+	}
+
+	effectsSchema := contract.Components.Schemas["RouteLookupEffects"].Value
+	assertSchemaRequires(t, effectsSchema, "user_hold")
+
+	if _, ok := effectsSchema.Properties["user_hold"]; !ok {
+		t.Fatal("RouteLookupEffects must expose user_hold context")
+	}
 }
 
 // TestDomainPackagesDoNotImportGeneratedDTOs keeps generated models at the REST boundary.

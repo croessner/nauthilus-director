@@ -42,6 +42,9 @@ const (
 	routeLookupIdentityMethod         = "recipient_lookup"
 	routeLookupReasonOperatorPin      = "operator_backend_pin"
 	routeLookupProtocolLMTP           = "lmtp"
+	routeLookupUserHoldAbsent         = "user_hold_absent"
+	routeLookupUserHoldActive         = "user_hold_active"
+	routeLookupUserHoldReadFailed     = "user_hold_read_failed"
 )
 
 // RouteLookupRequest describes a side-effect-free route diagnostic request.
@@ -101,6 +104,16 @@ type RouteLookupBackendPinState struct {
 	ReasonClass    string
 }
 
+// RouteLookupUserHoldState describes read-only placement-hold context.
+type RouteLookupUserHoldState struct {
+	Present           bool
+	ExpiresAt         time.Time
+	Remaining         time.Duration
+	PlacementDeferred bool
+	ReasonClass       string
+	Generation        string
+}
+
 // RouteLookupBackendState describes one effective backend candidate safely.
 type RouteLookupBackendState struct {
 	Identifier        string
@@ -122,6 +135,7 @@ type RouteLookupEffects struct {
 	Maintenance     bool
 	RuntimeOverride bool
 	MaxConnections  bool
+	UserHold        bool
 }
 
 // RouteLookupIdentityState describes how account facts were obtained.
@@ -140,6 +154,11 @@ type RouteLookupIdentityLookuper interface {
 // RouteLookupBackendPinReader reads backend-pin state without mutating leases.
 type RouteLookupBackendPinReader interface {
 	GetUserBackendPin(ctx context.Context, request state.UserBackendPinGetRequest) (state.UserBackendPinRecord, error)
+}
+
+// RouteLookupUserHoldReader reads placement-hold state without mutating or waiting.
+type RouteLookupUserHoldReader interface {
+	CheckUserHold(ctx context.Context, request state.UserHoldCheckRequest) (state.UserHoldRecord, error)
 }
 
 // RouteLookupIdentityLookupRequest carries secret-free identity lookup context.
@@ -162,6 +181,7 @@ type RouteLookupResponse struct {
 	Routing         RouteLookupRoutingState
 	Affinity        RouteLookupAffinityState
 	BackendPin      RouteLookupBackendPinState
+	UserHold        RouteLookupUserHoldState
 	Backends        []RouteLookupBackendState
 	Effects         RouteLookupEffects
 	Identity        RouteLookupIdentityState
@@ -177,6 +197,7 @@ type RouteLookupServiceOptions struct {
 	BackendRead      *BackendReadService
 	AffinityRead     state.AffinityStore
 	BackendPinRead   RouteLookupBackendPinReader
+	UserHoldRead     RouteLookupUserHoldReader
 	IdentityLookup   RouteLookupIdentityLookuper
 	ListenerContexts []RouteLookupListenerContext
 	DefaultPool      string
@@ -192,6 +213,7 @@ type RouteLookupService struct {
 	backendRead      *BackendReadService
 	affinityRead     state.AffinityStore
 	backendPinRead   RouteLookupBackendPinReader
+	userHoldRead     RouteLookupUserHoldReader
 	identityLookup   RouteLookupIdentityLookuper
 	listenerContexts map[string]RouteLookupListenerContext
 	defaultPool      string
@@ -220,6 +242,7 @@ func NewRouteLookupService(options RouteLookupServiceOptions) (*RouteLookupServi
 		backendRead:      options.BackendRead,
 		affinityRead:     options.AffinityRead,
 		backendPinRead:   options.BackendPinRead,
+		userHoldRead:     options.UserHoldRead,
 		identityLookup:   options.IdentityLookup,
 		listenerContexts: routeLookupListenerContexts(options.ListenerContexts),
 		defaultPool:      strings.TrimSpace(options.DefaultPool),
@@ -302,11 +325,28 @@ func (s *RouteLookupService) Lookup(ctx context.Context, request RouteLookupRequ
 		return RouteLookupResponse{}, err
 	}
 
+	userHold, err := s.lookupUserHold(ctx, routingResult)
+	if err != nil {
+		s.recordRouteLookup(ctx, request, runtimeObservationResultFailure, routeLookupUserHoldReadFailed, RouteLookupResponse{
+			Routing: RouteLookupRoutingState{
+				AccountKey:     routingResult.AccountKey,
+				Tenant:         routingResult.Tenant,
+				EffectiveShard: routingResult.ShardTag,
+				RoutingSource:  routingResult.RoutingSource,
+			},
+			Identity:   identity,
+			BackendPin: backendPin,
+			UserHold:   userHold,
+		}, time.Since(started))
+
+		return RouteLookupResponse{}, err
+	}
+
 	affinity := s.lookupAffinity(ctx, request, routingResult)
 	selectionRequest := routeLookupSelectionRequest(request, routingResult, affinity, backendPin)
 	explanation, err := s.explainSelection(ctx, selectionRequest)
 
-	response := routeLookupResponse(routingResult, affinity, backendPin, explanation, request, selectionRequest, usedDefaultShard)
+	response := routeLookupResponse(routingResult, affinity, backendPin, userHold, explanation, request, selectionRequest, usedDefaultShard)
 	response.Identity = identity
 	response.BackendPin = routeLookupBackendPinOutcome(response.BackendPin, explanation, selectionRequest, err)
 
@@ -329,6 +369,7 @@ func (s *RouteLookupService) Lookup(ctx context.Context, request RouteLookupRequ
 	response.Routing.RoutingGeneration = firstNonEmpty(explanation.Result.Generation, routingResult.RoutingGeneration)
 	response.Routing.EffectiveShard = explanation.Result.EffectiveBackend.EffectiveShardTag
 	response.Effects = response.Effects.Merge(NewRouteLookupBackendState(explanation.Result.EffectiveBackend, selectionRequest.ActiveAffinity).Effects())
+	response.Effects = response.Effects.Merge(response.UserHold.Effects())
 
 	s.recordRouteLookup(ctx, request, runtimeObservationResultOK, response.ReasonClass, response, time.Since(started))
 
@@ -393,7 +434,13 @@ func (e RouteLookupEffects) Merge(other RouteLookupEffects) RouteLookupEffects {
 		Maintenance:     e.Maintenance || other.Maintenance,
 		RuntimeOverride: e.RuntimeOverride || other.RuntimeOverride,
 		MaxConnections:  e.MaxConnections || other.MaxConnections,
+		UserHold:        e.UserHold || other.UserHold,
 	}
+}
+
+// Effects reports whether a user hold deferred placement in this diagnostic.
+func (s RouteLookupUserHoldState) Effects() RouteLookupEffects {
+	return RouteLookupEffects{UserHold: s.PlacementDeferred}
 }
 
 // applyDefaults validates request facts and applies listener/config fallbacks.
@@ -688,6 +735,26 @@ func (s *RouteLookupService) lookupBackendPin(ctx context.Context, request Route
 	return routeLookupBackendPinFromRecord(record), nil
 }
 
+// lookupUserHold reads placement-hold context without mutating or waiting.
+func (s *RouteLookupService) lookupUserHold(ctx context.Context, result routing.RoutingResult) (RouteLookupUserHoldState, error) {
+	hold := RouteLookupUserHoldState{ReasonClass: routeLookupUserHoldAbsent}
+	if s == nil || s.userHoldRead == nil {
+		return hold, nil
+	}
+
+	record, err := s.userHoldRead.CheckUserHold(ctx, state.UserHoldCheckRequest{
+		Key: state.AffinityKey{
+			Tenant:     result.Tenant,
+			AccountKey: result.AccountKey,
+		},
+	})
+	if err != nil {
+		return hold, err
+	}
+
+	return routeLookupUserHoldFromRecord(record), nil
+}
+
 // routeLookupSelectionRequest builds the shared backend selector input.
 func routeLookupSelectionRequest(
 	request RouteLookupRequest,
@@ -730,6 +797,37 @@ func routeLookupBackendPinFromRecord(record state.UserBackendPinRecord) RouteLoo
 	}
 
 	return pin
+}
+
+// routeLookupUserHoldFromRecord converts stored hold metadata into diagnostics.
+func routeLookupUserHoldFromRecord(record state.UserHoldRecord) RouteLookupUserHoldState {
+	hold := RouteLookupUserHoldState{
+		Present:           record.Present,
+		ExpiresAt:         record.ExpiresAt,
+		Remaining:         userHoldRemaining(record),
+		PlacementDeferred: record.Present,
+		ReasonClass:       routeLookupUserHoldAbsent,
+		Generation:        strings.TrimSpace(record.Generation),
+	}
+	if hold.Present {
+		hold.ReasonClass = routeLookupUserHoldActive
+	}
+
+	return hold
+}
+
+// userHoldRemaining derives non-negative remaining hold time from Redis server time.
+func userHoldRemaining(record state.UserHoldRecord) time.Duration {
+	if record.ExpiresAt.IsZero() || record.ServerTime.IsZero() {
+		return 0
+	}
+
+	remaining := record.ExpiresAt.Sub(record.ServerTime)
+	if remaining < 0 {
+		return 0
+	}
+
+	return remaining
 }
 
 // routeLookupSelectionShard mirrors placement shard choice without opening a session.
@@ -856,6 +954,7 @@ func routeLookupResponse(
 	result routing.RoutingResult,
 	affinity RouteLookupAffinityState,
 	backendPin RouteLookupBackendPinState,
+	userHold RouteLookupUserHoldState,
 	explanation backend.SelectionExplanation,
 	request RouteLookupRequest,
 	selectionRequest backend.SelectionRequest,
@@ -875,8 +974,9 @@ func routeLookupResponse(
 		},
 		Affinity:   affinity,
 		BackendPin: backendPin,
+		UserHold:   userHold,
 		Backends:   backends,
-		Effects:    effects,
+		Effects:    effects.Merge(userHold.Effects()),
 	}
 }
 

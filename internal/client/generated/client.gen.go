@@ -402,6 +402,9 @@ type RouteLookupEffects struct {
 	Maintenance     bool `json:"maintenance"`
 	MaxConnections  bool `json:"max_connections"`
 	RuntimeOverride bool `json:"runtime_override"`
+
+	// UserHold Whether a user placement hold affected the diagnostic outcome.
+	UserHold bool `json:"user_hold"`
 }
 
 // RouteLookupIdentityResolution defines model for RouteLookupIdentityResolution.
@@ -441,6 +444,7 @@ type RouteLookupResponse struct {
 	RoutingGeneration  *string                        `json:"routing_generation,omitempty"`
 	SelectedBackend    string                         `json:"selected_backend"`
 	ShardTag           string                         `json:"shard_tag"`
+	UserHold           RouteLookupUserHold            `json:"user_hold"`
 }
 
 // RouteLookupRouting defines model for RouteLookupRouting.
@@ -450,6 +454,20 @@ type RouteLookupRouting struct {
 	ShardTag         string  `json:"shard_tag"`
 	Source           string  `json:"source"`
 	UsedDefaultShard bool    `json:"used_default_shard"`
+}
+
+// RouteLookupUserHold defines model for RouteLookupUserHold.
+type RouteLookupUserHold struct {
+	ExpiresAt  *time.Time `json:"expires_at,omitempty"`
+	Generation *string    `json:"generation,omitempty"`
+
+	// PlacementDeferred True when an active placement hold would defer placement; route lookup remains side-effect-free and does not wait or mutate state.
+	PlacementDeferred bool `json:"placement_deferred"`
+	Present           bool `json:"present"`
+
+	// Reason Bounded diagnostic reason class such as user_hold_active, never operator-supplied reason text.
+	Reason           string `json:"reason"`
+	RemainingSeconds *int   `json:"remaining_seconds,omitempty"`
 }
 
 // RuntimeBackendCapacitySummary defines model for RuntimeBackendCapacitySummary.
@@ -578,6 +596,27 @@ type UserDetail struct {
 	ActiveSessions int           `json:"active_sessions"`
 	Affinity       *UserAffinity `json:"affinity,omitempty"`
 	UserKey        string        `json:"user_key"`
+}
+
+// UserHold defines model for UserHold.
+type UserHold struct {
+	CreatedAt        *time.Time `json:"created_at,omitempty"`
+	ExpiresAt        *time.Time `json:"expires_at,omitempty"`
+	Generation       *string    `json:"generation,omitempty"`
+	Present          bool       `json:"present"`
+	RemainingSeconds *int       `json:"remaining_seconds,omitempty"`
+	UserKey          string     `json:"user_key"`
+}
+
+// UserHoldClearRequest defines model for UserHoldClearRequest.
+type UserHoldClearRequest struct {
+	Reason string `json:"reason"`
+}
+
+// UserHoldRequest defines model for UserHoldRequest.
+type UserHoldRequest struct {
+	DurationSeconds int    `json:"duration_seconds"`
+	Reason          string `json:"reason"`
 }
 
 // UserKickRequest defines model for UserKickRequest.
@@ -739,6 +778,12 @@ type ClearUserBackendPinJSONRequestBody = UserBackendPinClearRequest
 
 // SetUserBackendPinJSONRequestBody defines body for SetUserBackendPin for application/json ContentType.
 type SetUserBackendPinJSONRequestBody = UserBackendPinRequest
+
+// ClearUserHoldJSONRequestBody defines body for ClearUserHold for application/json ContentType.
+type ClearUserHoldJSONRequestBody = UserHoldClearRequest
+
+// SetUserHoldJSONRequestBody defines body for SetUserHold for application/json ContentType.
+type SetUserHoldJSONRequestBody = UserHoldRequest
 
 // KickUserJSONRequestBody defines body for KickUser for application/json ContentType.
 type KickUserJSONRequestBody = UserKickRequest
@@ -938,6 +983,19 @@ type ClientInterface interface {
 	SetUserBackendPinWithBody(ctx context.Context, userKey UserKey, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	SetUserBackendPin(ctx context.Context, userKey UserKey, body SetUserBackendPinJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ClearUserHoldWithBody request with any body
+	ClearUserHoldWithBody(ctx context.Context, userKey UserKey, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	ClearUserHold(ctx context.Context, userKey UserKey, body ClearUserHoldJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// GetUserHold request
+	GetUserHold(ctx context.Context, userKey UserKey, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// SetUserHoldWithBody request with any body
+	SetUserHoldWithBody(ctx context.Context, userKey UserKey, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	SetUserHold(ctx context.Context, userKey UserKey, body SetUserHoldJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// KickUserWithBody request with any body
 	KickUserWithBody(ctx context.Context, userKey UserKey, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -1495,6 +1553,66 @@ func (c *Client) SetUserBackendPinWithBody(ctx context.Context, userKey UserKey,
 
 func (c *Client) SetUserBackendPin(ctx context.Context, userKey UserKey, body SetUserBackendPinJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewSetUserBackendPinRequest(c.Server, userKey, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ClearUserHoldWithBody(ctx context.Context, userKey UserKey, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewClearUserHoldRequestWithBody(c.Server, userKey, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ClearUserHold(ctx context.Context, userKey UserKey, body ClearUserHoldJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewClearUserHoldRequest(c.Server, userKey, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) GetUserHold(ctx context.Context, userKey UserKey, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetUserHoldRequest(c.Server, userKey)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) SetUserHoldWithBody(ctx context.Context, userKey UserKey, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewSetUserHoldRequestWithBody(c.Server, userKey, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) SetUserHold(ctx context.Context, userKey UserKey, body SetUserHoldJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewSetUserHoldRequest(c.Server, userKey, body)
 	if err != nil {
 		return nil, err
 	}
@@ -2977,6 +3095,134 @@ func NewSetUserBackendPinRequestWithBody(server string, userKey UserKey, content
 	return req, nil
 }
 
+// NewClearUserHoldRequest calls the generic ClearUserHold builder with application/json body
+func NewClearUserHoldRequest(server string, userKey UserKey, body ClearUserHoldJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewClearUserHoldRequestWithBody(server, userKey, "application/json", bodyReader)
+}
+
+// NewClearUserHoldRequestWithBody generates requests for ClearUserHold with any type of body
+func NewClearUserHoldRequestWithBody(server string, userKey UserKey, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "user_key", userKey, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/users/%s/hold", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodDelete, queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewGetUserHoldRequest generates requests for GetUserHold
+func NewGetUserHoldRequest(server string, userKey UserKey) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "user_key", userKey, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/users/%s/hold", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewSetUserHoldRequest calls the generic SetUserHold builder with application/json body
+func NewSetUserHoldRequest(server string, userKey UserKey, body SetUserHoldJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewSetUserHoldRequestWithBody(server, userKey, "application/json", bodyReader)
+}
+
+// NewSetUserHoldRequestWithBody generates requests for SetUserHold with any type of body
+func NewSetUserHoldRequestWithBody(server string, userKey UserKey, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "user_key", userKey, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/users/%s/hold", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPut, queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
 // NewKickUserRequest calls the generic KickUser builder with application/json body
 func NewKickUserRequest(server string, userKey UserKey, body KickUserJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
@@ -3375,6 +3621,19 @@ type ClientWithResponsesInterface interface {
 	SetUserBackendPinWithBodyWithResponse(ctx context.Context, userKey UserKey, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SetUserBackendPinResponse, error)
 
 	SetUserBackendPinWithResponse(ctx context.Context, userKey UserKey, body SetUserBackendPinJSONRequestBody, reqEditors ...RequestEditorFn) (*SetUserBackendPinResponse, error)
+
+	// ClearUserHoldWithBodyWithResponse request with any body
+	ClearUserHoldWithBodyWithResponse(ctx context.Context, userKey UserKey, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ClearUserHoldResponse, error)
+
+	ClearUserHoldWithResponse(ctx context.Context, userKey UserKey, body ClearUserHoldJSONRequestBody, reqEditors ...RequestEditorFn) (*ClearUserHoldResponse, error)
+
+	// GetUserHoldWithResponse request
+	GetUserHoldWithResponse(ctx context.Context, userKey UserKey, reqEditors ...RequestEditorFn) (*GetUserHoldResponse, error)
+
+	// SetUserHoldWithBodyWithResponse request with any body
+	SetUserHoldWithBodyWithResponse(ctx context.Context, userKey UserKey, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SetUserHoldResponse, error)
+
+	SetUserHoldWithResponse(ctx context.Context, userKey UserKey, body SetUserHoldJSONRequestBody, reqEditors ...RequestEditorFn) (*SetUserHoldResponse, error)
 
 	// KickUserWithBodyWithResponse request with any body
 	KickUserWithBodyWithResponse(ctx context.Context, userKey UserKey, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*KickUserResponse, error)
@@ -4333,6 +4592,99 @@ func (r SetUserBackendPinResponse) ContentType() string {
 	return ""
 }
 
+type ClearUserHoldResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON202      *AcceptedResponse
+	JSONDefault  *Error
+}
+
+// Status returns HTTPResponse.Status
+func (r ClearUserHoldResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ClearUserHoldResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r ClearUserHoldResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type GetUserHoldResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *UserHold
+	JSONDefault  *Error
+}
+
+// Status returns HTTPResponse.Status
+func (r GetUserHoldResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetUserHoldResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r GetUserHoldResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type SetUserHoldResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON202      *AcceptedResponse
+	JSONDefault  *Error
+}
+
+// Status returns HTTPResponse.Status
+func (r SetUserHoldResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r SetUserHoldResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r SetUserHoldResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
 type KickUserResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -4938,6 +5290,49 @@ func (c *ClientWithResponses) SetUserBackendPinWithResponse(ctx context.Context,
 		return nil, err
 	}
 	return ParseSetUserBackendPinResponse(rsp)
+}
+
+// ClearUserHoldWithBodyWithResponse request with arbitrary body returning *ClearUserHoldResponse
+func (c *ClientWithResponses) ClearUserHoldWithBodyWithResponse(ctx context.Context, userKey UserKey, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ClearUserHoldResponse, error) {
+	rsp, err := c.ClearUserHoldWithBody(ctx, userKey, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseClearUserHoldResponse(rsp)
+}
+
+func (c *ClientWithResponses) ClearUserHoldWithResponse(ctx context.Context, userKey UserKey, body ClearUserHoldJSONRequestBody, reqEditors ...RequestEditorFn) (*ClearUserHoldResponse, error) {
+	rsp, err := c.ClearUserHold(ctx, userKey, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseClearUserHoldResponse(rsp)
+}
+
+// GetUserHoldWithResponse request returning *GetUserHoldResponse
+func (c *ClientWithResponses) GetUserHoldWithResponse(ctx context.Context, userKey UserKey, reqEditors ...RequestEditorFn) (*GetUserHoldResponse, error) {
+	rsp, err := c.GetUserHold(ctx, userKey, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetUserHoldResponse(rsp)
+}
+
+// SetUserHoldWithBodyWithResponse request with arbitrary body returning *SetUserHoldResponse
+func (c *ClientWithResponses) SetUserHoldWithBodyWithResponse(ctx context.Context, userKey UserKey, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SetUserHoldResponse, error) {
+	rsp, err := c.SetUserHoldWithBody(ctx, userKey, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseSetUserHoldResponse(rsp)
+}
+
+func (c *ClientWithResponses) SetUserHoldWithResponse(ctx context.Context, userKey UserKey, body SetUserHoldJSONRequestBody, reqEditors ...RequestEditorFn) (*SetUserHoldResponse, error) {
+	rsp, err := c.SetUserHold(ctx, userKey, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseSetUserHoldResponse(rsp)
 }
 
 // KickUserWithBodyWithResponse request with arbitrary body returning *KickUserResponse
@@ -5992,6 +6387,105 @@ func ParseSetUserBackendPinResponse(rsp *http.Response) (*SetUserBackendPinRespo
 	}
 
 	response := &SetUserBackendPinResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 202:
+		var dest AcceptedResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON202 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseClearUserHoldResponse parses an HTTP response from a ClearUserHoldWithResponse call
+func ParseClearUserHoldResponse(rsp *http.Response) (*ClearUserHoldResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ClearUserHoldResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 202:
+		var dest AcceptedResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON202 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetUserHoldResponse parses an HTTP response from a GetUserHoldWithResponse call
+func ParseGetUserHoldResponse(rsp *http.Response) (*GetUserHoldResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetUserHoldResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest UserHold
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseSetUserHoldResponse parses an HTTP response from a SetUserHoldWithResponse call
+func ParseSetUserHoldResponse(rsp *http.Response) (*SetUserHoldResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &SetUserHoldResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}

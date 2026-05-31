@@ -402,6 +402,9 @@ type RouteLookupEffects struct {
 	Maintenance     bool `json:"maintenance"`
 	MaxConnections  bool `json:"max_connections"`
 	RuntimeOverride bool `json:"runtime_override"`
+
+	// UserHold Whether a user placement hold affected the diagnostic outcome.
+	UserHold bool `json:"user_hold"`
 }
 
 // RouteLookupIdentityResolution defines model for RouteLookupIdentityResolution.
@@ -441,6 +444,7 @@ type RouteLookupResponse struct {
 	RoutingGeneration  *string                        `json:"routing_generation,omitempty"`
 	SelectedBackend    string                         `json:"selected_backend"`
 	ShardTag           string                         `json:"shard_tag"`
+	UserHold           RouteLookupUserHold            `json:"user_hold"`
 }
 
 // RouteLookupRouting defines model for RouteLookupRouting.
@@ -450,6 +454,20 @@ type RouteLookupRouting struct {
 	ShardTag         string  `json:"shard_tag"`
 	Source           string  `json:"source"`
 	UsedDefaultShard bool    `json:"used_default_shard"`
+}
+
+// RouteLookupUserHold defines model for RouteLookupUserHold.
+type RouteLookupUserHold struct {
+	ExpiresAt  *time.Time `json:"expires_at,omitempty"`
+	Generation *string    `json:"generation,omitempty"`
+
+	// PlacementDeferred True when an active placement hold would defer placement; route lookup remains side-effect-free and does not wait or mutate state.
+	PlacementDeferred bool `json:"placement_deferred"`
+	Present           bool `json:"present"`
+
+	// Reason Bounded diagnostic reason class such as user_hold_active, never operator-supplied reason text.
+	Reason           string `json:"reason"`
+	RemainingSeconds *int   `json:"remaining_seconds,omitempty"`
 }
 
 // RuntimeBackendCapacitySummary defines model for RuntimeBackendCapacitySummary.
@@ -578,6 +596,27 @@ type UserDetail struct {
 	ActiveSessions int           `json:"active_sessions"`
 	Affinity       *UserAffinity `json:"affinity,omitempty"`
 	UserKey        string        `json:"user_key"`
+}
+
+// UserHold defines model for UserHold.
+type UserHold struct {
+	CreatedAt        *time.Time `json:"created_at,omitempty"`
+	ExpiresAt        *time.Time `json:"expires_at,omitempty"`
+	Generation       *string    `json:"generation,omitempty"`
+	Present          bool       `json:"present"`
+	RemainingSeconds *int       `json:"remaining_seconds,omitempty"`
+	UserKey          string     `json:"user_key"`
+}
+
+// UserHoldClearRequest defines model for UserHoldClearRequest.
+type UserHoldClearRequest struct {
+	Reason string `json:"reason"`
+}
+
+// UserHoldRequest defines model for UserHoldRequest.
+type UserHoldRequest struct {
+	DurationSeconds int    `json:"duration_seconds"`
+	Reason          string `json:"reason"`
 }
 
 // UserKickRequest defines model for UserKickRequest.
@@ -740,6 +779,12 @@ type ClearUserBackendPinJSONRequestBody = UserBackendPinClearRequest
 // SetUserBackendPinJSONRequestBody defines body for SetUserBackendPin for application/json ContentType.
 type SetUserBackendPinJSONRequestBody = UserBackendPinRequest
 
+// ClearUserHoldJSONRequestBody defines body for ClearUserHold for application/json ContentType.
+type ClearUserHoldJSONRequestBody = UserHoldClearRequest
+
+// SetUserHoldJSONRequestBody defines body for SetUserHold for application/json ContentType.
+type SetUserHoldJSONRequestBody = UserHoldRequest
+
 // KickUserJSONRequestBody defines body for KickUser for application/json ContentType.
 type KickUserJSONRequestBody = UserKickRequest
 
@@ -838,6 +883,15 @@ type ServerInterface interface {
 	// Set backend pin for one user key.
 	// (PUT /api/v1/users/{user_key}/backend-pin)
 	SetUserBackendPin(w http.ResponseWriter, r *http.Request, userKey UserKey)
+	// Clear placement hold for one user key.
+	// (DELETE /api/v1/users/{user_key}/hold)
+	ClearUserHold(w http.ResponseWriter, r *http.Request, userKey UserKey)
+	// Show placement hold for one user key.
+	// (GET /api/v1/users/{user_key}/hold)
+	GetUserHold(w http.ResponseWriter, r *http.Request, userKey UserKey)
+	// Set a bounded placement hold for one user key.
+	// (PUT /api/v1/users/{user_key}/hold)
+	SetUserHold(w http.ResponseWriter, r *http.Request, userKey UserKey)
 	// Terminate active sessions for one user key.
 	// (POST /api/v1/users/{user_key}/kick)
 	KickUser(w http.ResponseWriter, r *http.Request, userKey UserKey)
@@ -1716,6 +1770,84 @@ func (siw *ServerInterfaceWrapper) SetUserBackendPin(w http.ResponseWriter, r *h
 	handler.ServeHTTP(w, r)
 }
 
+// ClearUserHold operation middleware
+func (siw *ServerInterfaceWrapper) ClearUserHold(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "user_key" -------------
+	var userKey UserKey
+
+	err = runtime.BindStyledParameterWithOptions("simple", "user_key", r.PathValue("user_key"), &userKey, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "user_key", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ClearUserHold(w, r, userKey)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetUserHold operation middleware
+func (siw *ServerInterfaceWrapper) GetUserHold(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "user_key" -------------
+	var userKey UserKey
+
+	err = runtime.BindStyledParameterWithOptions("simple", "user_key", r.PathValue("user_key"), &userKey, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "user_key", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetUserHold(w, r, userKey)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// SetUserHold operation middleware
+func (siw *ServerInterfaceWrapper) SetUserHold(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "user_key" -------------
+	var userKey UserKey
+
+	err = runtime.BindStyledParameterWithOptions("simple", "user_key", r.PathValue("user_key"), &userKey, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "user_key", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.SetUserHold(w, r, userKey)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // KickUser operation middleware
 func (siw *ServerInterfaceWrapper) KickUser(w http.ResponseWriter, r *http.Request) {
 
@@ -2000,6 +2132,9 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc(http.MethodDelete+" "+options.BaseURL+"/api/v1/users/{user_key}/backend-pin", wrapper.ClearUserBackendPin)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/users/{user_key}/backend-pin", wrapper.GetUserBackendPin)
 	m.HandleFunc(http.MethodPut+" "+options.BaseURL+"/api/v1/users/{user_key}/backend-pin", wrapper.SetUserBackendPin)
+	m.HandleFunc(http.MethodDelete+" "+options.BaseURL+"/api/v1/users/{user_key}/hold", wrapper.ClearUserHold)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/users/{user_key}/hold", wrapper.GetUserHold)
+	m.HandleFunc(http.MethodPut+" "+options.BaseURL+"/api/v1/users/{user_key}/hold", wrapper.SetUserHold)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/api/v1/users/{user_key}/kick", wrapper.KickUser)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/api/v1/users/{user_key}/move", wrapper.MoveUser)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/users/{user_key}/sessions", wrapper.GetUserSessions)
@@ -3209,6 +3344,125 @@ func (response SetUserBackendPindefaultJSONResponse) VisitSetUserBackendPinRespo
 	return err
 }
 
+type ClearUserHoldRequestObject struct {
+	UserKey UserKey `json:"user_key"`
+	Body    *ClearUserHoldJSONRequestBody
+}
+
+type ClearUserHoldResponseObject interface {
+	VisitClearUserHoldResponse(w http.ResponseWriter) error
+}
+
+type ClearUserHold202JSONResponse AcceptedResponse
+
+func (response ClearUserHold202JSONResponse) VisitClearUserHoldResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(202)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ClearUserHolddefaultJSONResponse struct {
+	Body       ErrorResponse
+	StatusCode int
+}
+
+func (response ClearUserHolddefaultJSONResponse) VisitClearUserHoldResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetUserHoldRequestObject struct {
+	UserKey UserKey `json:"user_key"`
+}
+
+type GetUserHoldResponseObject interface {
+	VisitGetUserHoldResponse(w http.ResponseWriter) error
+}
+
+type GetUserHold200JSONResponse UserHold
+
+func (response GetUserHold200JSONResponse) VisitGetUserHoldResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetUserHolddefaultJSONResponse struct {
+	Body       ErrorResponse
+	StatusCode int
+}
+
+func (response GetUserHolddefaultJSONResponse) VisitGetUserHoldResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type SetUserHoldRequestObject struct {
+	UserKey UserKey `json:"user_key"`
+	Body    *SetUserHoldJSONRequestBody
+}
+
+type SetUserHoldResponseObject interface {
+	VisitSetUserHoldResponse(w http.ResponseWriter) error
+}
+
+type SetUserHold202JSONResponse AcceptedResponse
+
+func (response SetUserHold202JSONResponse) VisitSetUserHoldResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(202)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type SetUserHolddefaultJSONResponse struct {
+	Body       ErrorResponse
+	StatusCode int
+}
+
+func (response SetUserHolddefaultJSONResponse) VisitSetUserHoldResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(response.StatusCode)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
 type KickUserRequestObject struct {
 	UserKey UserKey `json:"user_key"`
 	Body    *KickUserJSONRequestBody
@@ -3583,6 +3837,15 @@ type StrictServerInterface interface {
 	// Set backend pin for one user key.
 	// (PUT /api/v1/users/{user_key}/backend-pin)
 	SetUserBackendPin(ctx context.Context, request SetUserBackendPinRequestObject) (SetUserBackendPinResponseObject, error)
+	// Clear placement hold for one user key.
+	// (DELETE /api/v1/users/{user_key}/hold)
+	ClearUserHold(ctx context.Context, request ClearUserHoldRequestObject) (ClearUserHoldResponseObject, error)
+	// Show placement hold for one user key.
+	// (GET /api/v1/users/{user_key}/hold)
+	GetUserHold(ctx context.Context, request GetUserHoldRequestObject) (GetUserHoldResponseObject, error)
+	// Set a bounded placement hold for one user key.
+	// (PUT /api/v1/users/{user_key}/hold)
+	SetUserHold(ctx context.Context, request SetUserHoldRequestObject) (SetUserHoldResponseObject, error)
 	// Terminate active sessions for one user key.
 	// (POST /api/v1/users/{user_key}/kick)
 	KickUser(ctx context.Context, request KickUserRequestObject) (KickUserResponseObject, error)
@@ -4503,6 +4766,98 @@ func (sh *strictHandler) SetUserBackendPin(w http.ResponseWriter, r *http.Reques
 		sh.options.ResponseErrorHandlerFunc(w, r, err)
 	} else if validResponse, ok := response.(SetUserBackendPinResponseObject); ok {
 		if err := validResponse.VisitSetUserBackendPinResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// ClearUserHold operation middleware
+func (sh *strictHandler) ClearUserHold(w http.ResponseWriter, r *http.Request, userKey UserKey) {
+	var request ClearUserHoldRequestObject
+
+	request.UserKey = userKey
+
+	var body ClearUserHoldJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.ClearUserHold(ctx, request.(ClearUserHoldRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ClearUserHold")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ClearUserHoldResponseObject); ok {
+		if err := validResponse.VisitClearUserHoldResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// GetUserHold operation middleware
+func (sh *strictHandler) GetUserHold(w http.ResponseWriter, r *http.Request, userKey UserKey) {
+	var request GetUserHoldRequestObject
+
+	request.UserKey = userKey
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.GetUserHold(ctx, request.(GetUserHoldRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetUserHold")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetUserHoldResponseObject); ok {
+		if err := validResponse.VisitGetUserHoldResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// SetUserHold operation middleware
+func (sh *strictHandler) SetUserHold(w http.ResponseWriter, r *http.Request, userKey UserKey) {
+	var request SetUserHoldRequestObject
+
+	request.UserKey = userKey
+
+	var body SetUserHoldJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.SetUserHold(ctx, request.(SetUserHoldRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "SetUserHold")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(SetUserHoldResponseObject); ok {
+		if err := validResponse.VisitSetUserHoldResponse(w); err != nil {
 			sh.options.ResponseErrorHandlerFunc(w, r, err)
 		}
 	} else if response != nil {
