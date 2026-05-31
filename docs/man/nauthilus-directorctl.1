@@ -1,7 +1,7 @@
 .\" Copyright (C) 2026 Christian Rößner
 .\"
 .\" SPDX-License-Identifier: AGPL-3.0-only
-.TH NAUTHILUS-DIRECTORCTL 1 "2026-05-29" "nauthilus-director" "User Commands"
+.TH NAUTHILUS-DIRECTORCTL 1 "2026-05-31" "nauthilus-director" "User Commands"
 .SH NAME
 nauthilus-directorctl \- control a running Nauthilus Director
 .SH SYNOPSIS
@@ -244,6 +244,35 @@ Clear the concrete backend pin for one user without rewriting YAML
 configuration.
 Clearing a backend pin is explicit and does not terminate sessions, clear shard
 affinity or remove a pending shard move by itself.
+.TP
+.BI "users hold show " user-key
+Show the active placement hold for one user.
+Absent or expired holds are reported as
+.B present=false .
+The read output includes only bounded hold metadata such as expiry, remaining
+seconds, generation and creation time.
+Operator reason text is not displayed.
+.TP
+.BI "users hold set " user-key " --duration " duration " --reason " text
+Set a time-limited placement hold for one user.
+The
+.B --duration
+value uses Go duration syntax and must resolve to a positive whole-second value
+before it is sent as generated REST
+.B duration_seconds .
+The server enforces the configured
+.B director.affinity.user_holds.max_duration
+limit.
+A hold is a temporary placement gate only; it does not choose a shard or backend
+and it does not rewrite YAML configuration.
+.TP
+.BI "users hold clear " user-key " --reason " text
+Clear the placement hold for one user.
+Clearing a hold does not kill sessions, clear affinity, clear backend pins or
+change pending move state.
+The command is intended for migration workflows that first set a bounded hold,
+apply a shard move or backend pin, then clear the hold when the target runtime
+state is ready.
 .TP
 .BI "users move " user-key " --to-shard " shard " --strategy " strategy " --reason " text
 Move future user placement to a shard.

@@ -114,6 +114,30 @@ func TestHelpOutputListsCommands(t *testing.T) {
 			t.Fatalf("backend-pin set help missing %q:\n%s", want, backendPinSetHelp)
 		}
 	}
+
+	var holdOut, holdErr bytes.Buffer
+	code = run([]string{"users", "hold", "--help"}, &holdOut, &holdErr)
+	if code != 0 {
+		t.Fatalf("hold help exit code %d, want 0; stderr=%q", code, holdErr.String())
+	}
+	holdHelp := holdOut.String()
+	for _, want := range []string{"show", "set", "clear", "Inspect and control user placement holds"} {
+		if !strings.Contains(holdHelp, want) {
+			t.Fatalf("hold help missing %q:\n%s", want, holdHelp)
+		}
+	}
+
+	var holdSetOut, holdSetErr bytes.Buffer
+	code = run([]string{"users", "hold", "set", "--help"}, &holdSetOut, &holdSetErr)
+	if code != 0 {
+		t.Fatalf("hold set help exit code %d, want 0; stderr=%q", code, holdSetErr.String())
+	}
+	holdSetHelp := holdSetOut.String()
+	for _, want := range []string{"--duration", "--reason"} {
+		if !strings.Contains(holdSetHelp, want) {
+			t.Fatalf("hold set help missing %q:\n%s", want, holdSetHelp)
+		}
+	}
 }
 
 // TestLongOptionsRequireDoubleDash rejects long options written with one dash.
@@ -183,6 +207,9 @@ func TestNestedCommandsUseGeneratedClient(t *testing.T) {
 		{name: "users backend-pin show", args: []string{"users", "backend-pin", "show", "user-a"}, wantCalls: []string{"GetUserBackendPin"}},
 		{name: "users backend-pin set", args: []string{"users", "backend-pin", "set", "user-a", "--backend", "backend-a", "--strategy", "kick_existing", "--reason", "commission"}, wantCalls: []string{"SetUserBackendPin"}},
 		{name: "users backend-pin clear", args: []string{"users", "backend-pin", "clear", "user-a", "--reason", "done"}, wantCalls: []string{"ClearUserBackendPin"}},
+		{name: "users hold show", args: []string{"users", "hold", "show", "user-a"}, wantCalls: []string{"GetUserHold"}},
+		{name: "users hold set", args: []string{"users", "hold", "set", "user-a", "--duration", "10m", "--reason", "migrate"}, wantCalls: []string{"SetUserHold"}},
+		{name: "users hold clear", args: []string{"users", "hold", "clear", "user-a", "--reason", "done"}, wantCalls: []string{"ClearUserHold"}},
 		{name: "users move", args: []string{"users", "move", "user-a", "--to-shard", "shard-b", "--strategy", "kick_existing", "--reason", "rebalance"}, wantCalls: []string{"MoveUser"}},
 		{name: "users kick", args: []string{"users", "kick", "user-a", "--reason", "abuse"}, wantCalls: []string{"KickUser"}},
 		{name: "runtime summary", args: []string{"runtime", "summary"}, wantCalls: []string{"GetRuntimeSummary"}},
@@ -221,6 +248,8 @@ func TestMutatingCommandsRequireReason(t *testing.T) {
 		{"users", "affinity", "clear", "user-a"},
 		{"users", "backend-pin", "set", "user-a", "--backend", "backend-a", "--strategy", "kick_existing"},
 		{"users", "backend-pin", "clear", "user-a"},
+		{"users", "hold", "set", "user-a", "--duration", "10m"},
+		{"users", "hold", "clear", "user-a"},
 		{"users", "move", "user-a", "--to-shard", "shard-b", "--strategy", "kick_existing"},
 		{"users", "kick", "user-a"},
 	}
@@ -286,6 +315,64 @@ func TestBackendPinRequestsUseGeneratedDTOs(t *testing.T) {
 	}
 }
 
+// TestHoldShowUsesGeneratedDTO verifies show uses the generated hold read method.
+func TestHoldShowUsesGeneratedDTO(t *testing.T) {
+	fake := newFakeControlClient()
+	stdout, stderr, code := runWithFakeClient([]string{"users", "hold", "show", "user-a"}, fake)
+	if code != 0 {
+		t.Fatalf("hold show returned exit code %d, want 0; stdout=%q stderr=%q", code, stdout, stderr)
+	}
+	if !reflect.DeepEqual(fake.calls, []string{"GetUserHold"}) {
+		t.Fatalf("calls = %#v, want GetUserHold", fake.calls)
+	}
+	if fake.getHoldUserKey != generated.UserKey("user-a") {
+		t.Fatalf("show user key = %q, want user-a", fake.getHoldUserKey)
+	}
+}
+
+// TestHoldSetUsesGeneratedDTO verifies set sends generated duration_seconds.
+func TestHoldSetUsesGeneratedDTO(t *testing.T) {
+	fake := newFakeControlClient()
+	stdout, stderr, code := runWithFakeClient([]string{
+		"users", "hold", "set", "user-a",
+		"--duration", "90s",
+		"--reason", "migrate",
+	}, fake)
+	if code != 0 {
+		t.Fatalf("hold set returned exit code %d, want 0; stdout=%q stderr=%q", code, stdout, stderr)
+	}
+	if !reflect.DeepEqual(fake.calls, []string{"SetUserHold"}) {
+		t.Fatalf("calls = %#v, want SetUserHold", fake.calls)
+	}
+	if fake.setHoldUserKey != generated.UserKey("user-a") {
+		t.Fatalf("set user key = %q, want user-a", fake.setHoldUserKey)
+	}
+	if fake.setHoldRequest.DurationSeconds != 90 {
+		t.Fatalf("duration_seconds = %d, want 90", fake.setHoldRequest.DurationSeconds)
+	}
+	if fake.setHoldRequest.Reason != "migrate" {
+		t.Fatalf("reason = %q, want migrate", fake.setHoldRequest.Reason)
+	}
+}
+
+// TestHoldClearUsesGeneratedDTO verifies clear sends the generated reason DTO.
+func TestHoldClearUsesGeneratedDTO(t *testing.T) {
+	fake := newFakeControlClient()
+	stdout, stderr, code := runWithFakeClient([]string{"users", "hold", "clear", "user-a", "--reason", "done"}, fake)
+	if code != 0 {
+		t.Fatalf("hold clear returned exit code %d, want 0; stdout=%q stderr=%q", code, stdout, stderr)
+	}
+	if !reflect.DeepEqual(fake.calls, []string{"ClearUserHold"}) {
+		t.Fatalf("calls = %#v, want ClearUserHold", fake.calls)
+	}
+	if fake.clearHoldUserKey != generated.UserKey("user-a") {
+		t.Fatalf("clear user key = %q, want user-a", fake.clearHoldUserKey)
+	}
+	if fake.clearHoldRequest.Reason != "done" {
+		t.Fatalf("clear reason = %q, want done", fake.clearHoldRequest.Reason)
+	}
+}
+
 // TestBackendPinUsageValidationKeepsRequestsLocal rejects malformed backend-pin commands before transport.
 func TestBackendPinUsageValidationKeepsRequestsLocal(t *testing.T) {
 	tests := []struct {
@@ -303,6 +390,48 @@ func TestBackendPinUsageValidationKeepsRequestsLocal(t *testing.T) {
 		{name: "clear missing user", args: []string{"users", "backend-pin", "clear", "--reason", "done"}, wantStderr: "exactly one user key"},
 		{name: "clear empty user", args: []string{"users", "backend-pin", "clear", "", "--reason", "done"}, wantStderr: "non-empty user key"},
 		{name: "clear missing reason", args: []string{"users", "backend-pin", "clear", "user-a"}, wantStderr: "--reason"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fake := newFakeControlClient()
+			stdout, stderr, code := runWithFakeClient(test.args, fake)
+			if code != 2 {
+				t.Fatalf("run returned exit code %d, want 2; stderr=%q", code, stderr)
+			}
+			if stdout != "" {
+				t.Fatalf("stdout = %q, want empty output", stdout)
+			}
+			if !strings.Contains(stderr, test.wantStderr) {
+				t.Fatalf("stderr = %q, want %q", stderr, test.wantStderr)
+			}
+			if len(fake.calls) != 0 {
+				t.Fatalf("calls = %#v, want none", fake.calls)
+			}
+		})
+	}
+}
+
+// TestHoldUsageValidationKeepsRequestsLocal rejects malformed hold commands before transport.
+func TestHoldUsageValidationKeepsRequestsLocal(t *testing.T) {
+	tests := []struct {
+		name       string
+		args       []string
+		wantStderr string
+	}{
+		{name: "show missing user", args: []string{"users", "hold", "show"}, wantStderr: "exactly one user key"},
+		{name: "show empty user", args: []string{"users", "hold", "show", ""}, wantStderr: "non-empty user key"},
+		{name: "set missing user", args: []string{"users", "hold", "set", "--duration", "10m", "--reason", "migrate"}, wantStderr: "exactly one user key"},
+		{name: "set empty user", args: []string{"users", "hold", "set", "", "--duration", "10m", "--reason", "migrate"}, wantStderr: "non-empty user key"},
+		{name: "set missing duration", args: []string{"users", "hold", "set", "user-a", "--reason", "migrate"}, wantStderr: "--duration"},
+		{name: "set invalid duration", args: []string{"users", "hold", "set", "user-a", "--duration", "soon", "--reason", "migrate"}, wantStderr: "valid Go duration"},
+		{name: "set zero duration", args: []string{"users", "hold", "set", "user-a", "--duration", "0s", "--reason", "migrate"}, wantStderr: "positive --duration"},
+		{name: "set negative duration", args: []string{"users", "hold", "set", "user-a", "--duration", "-1s", "--reason", "migrate"}, wantStderr: "positive --duration"},
+		{name: "set subsecond duration", args: []string{"users", "hold", "set", "user-a", "--duration", "500ms", "--reason", "migrate"}, wantStderr: "whole seconds"},
+		{name: "set missing reason", args: []string{"users", "hold", "set", "user-a", "--duration", "10m"}, wantStderr: "--reason"},
+		{name: "clear missing user", args: []string{"users", "hold", "clear", "--reason", "done"}, wantStderr: "exactly one user key"},
+		{name: "clear empty user", args: []string{"users", "hold", "clear", "", "--reason", "done"}, wantStderr: "non-empty user key"},
+		{name: "clear missing reason", args: []string{"users", "hold", "clear", "user-a"}, wantStderr: "--reason"},
 	}
 
 	for _, test := range tests {
@@ -867,6 +996,47 @@ func TestTextAndJSONOutputDeterministic(t *testing.T) {
 	if stdout != wantPinJSON {
 		t.Fatalf("backend-pin JSON output = %q, want %q", stdout, wantPinJSON)
 	}
+
+	absentHoldFake := newFakeControlClient()
+	stdout, stderr, code = runWithFakeClient([]string{"users", "hold", "show", "user-a"}, absentHoldFake)
+	if code != 0 {
+		t.Fatalf("absent hold command returned exit code %d, want 0; stderr=%q", code, stderr)
+	}
+	wantAbsentHoldText := "user_key=user-a present=false created_at=\"\" expires_at=\"\" remaining_seconds=\"\" generation=\"\"\n"
+	if stdout != wantAbsentHoldText {
+		t.Fatalf("absent hold text output = %q, want %q", stdout, wantAbsentHoldText)
+	}
+
+	presentHoldFake := newFakeControlClient()
+	hold := userHoldA()
+	presentHoldFake.holdResponse = &hold
+	stdout, stderr, code = runWithFakeClient([]string{"users", "hold", "show", "user-a"}, presentHoldFake)
+	if code != 0 {
+		t.Fatalf("present hold command returned exit code %d, want 0; stderr=%q", code, stderr)
+	}
+	wantPresentHoldText := "user_key=user-a present=true created_at=2026-05-26T12:00:00Z expires_at=2026-05-26T12:10:00Z remaining_seconds=600 generation=hold-gen-a\n"
+	if stdout != wantPresentHoldText {
+		t.Fatalf("present hold text output = %q, want %q", stdout, wantPresentHoldText)
+	}
+
+	jsonHoldFake := newFakeControlClient()
+	hold = userHoldA()
+	jsonHoldFake.holdResponse = &hold
+	stdout, stderr, code = runWithFakeClient([]string{"--output", "json", "users", "hold", "show", "user-a"}, jsonHoldFake)
+	if code != 0 {
+		t.Fatalf("hold json command returned exit code %d, want 0; stderr=%q", code, stderr)
+	}
+	wantHoldJSON := "{\n" +
+		"  \"created_at\": \"2026-05-26T12:00:00Z\",\n" +
+		"  \"expires_at\": \"2026-05-26T12:10:00Z\",\n" +
+		"  \"generation\": \"hold-gen-a\",\n" +
+		"  \"present\": true,\n" +
+		"  \"remaining_seconds\": 600,\n" +
+		"  \"user_key\": \"user-a\"\n" +
+		"}\n"
+	if stdout != wantHoldJSON {
+		t.Fatalf("hold JSON output = %q, want %q", stdout, wantHoldJSON)
+	}
 }
 
 // TestUsageErrorsDoNotPrintSecrets verifies rejected route facts do not echo secret values.
@@ -906,6 +1076,8 @@ func TestManpagesDocumentImplementedSurface(t *testing.T) {
 		"sessions kill",
 		"users affinity set",
 		"users backend-pin set",
+		"users hold set",
+		"users hold clear",
 		"commissioning",
 		"runtime summary",
 		"route lookup",
@@ -1008,6 +1180,12 @@ type fakeControlClient struct {
 	setBackendPinRequest   generated.UserBackendPinRequest
 	clearBackendPinUserKey generated.UserKey
 	clearBackendPinRequest generated.UserBackendPinClearRequest
+	holdResponse           *generated.UserHold
+	getHoldUserKey         generated.UserKey
+	setHoldUserKey         generated.UserKey
+	setHoldRequest         generated.UserHoldRequest
+	clearHoldUserKey       generated.UserKey
+	clearHoldRequest       generated.UserHoldClearRequest
 	defaultConfigStatus    int
 	defaultConfigProblem   *generated.ErrorResponse
 	getBackendStatus       int
@@ -1142,6 +1320,23 @@ func backendPinA() generated.UserBackendPin {
 		ShardTag:           &shardTag,
 		Strategy:           &strategy,
 		UserKey:            "user-a",
+	}
+}
+
+// userHoldA returns a stable present placement-hold fixture.
+func userHoldA() generated.UserHold {
+	createdAt := time.Date(2026, 5, 26, 12, 0, 0, 0, time.UTC)
+	expiresAt := time.Date(2026, 5, 26, 12, 10, 0, 0, time.UTC)
+	generation := "hold-gen-a"
+	remainingSeconds := 600
+
+	return generated.UserHold{
+		CreatedAt:        &createdAt,
+		ExpiresAt:        &expiresAt,
+		Generation:       &generation,
+		Present:          true,
+		RemainingSeconds: &remainingSeconds,
+		UserKey:          "user-a",
 	}
 }
 
@@ -1571,17 +1766,25 @@ func (fake *fakeControlClient) ClearUserHoldWithBodyWithResponse(context.Context
 }
 
 // ClearUserHoldWithResponse records and returns an accepted response.
-func (fake *fakeControlClient) ClearUserHoldWithResponse(context.Context, generated.UserKey, generated.ClearUserHoldJSONRequestBody, ...generated.RequestEditorFn) (*generated.ClearUserHoldResponse, error) {
+func (fake *fakeControlClient) ClearUserHoldWithResponse(_ context.Context, userKey generated.UserKey, body generated.ClearUserHoldJSONRequestBody, _ ...generated.RequestEditorFn) (*generated.ClearUserHoldResponse, error) {
 	fake.record("ClearUserHold")
+	fake.clearHoldUserKey = userKey
+	fake.clearHoldRequest = body
 	return &generated.ClearUserHoldResponse{HTTPResponse: httpResponse(http.StatusAccepted), JSON202: acceptedResponse()}, nil
 }
 
 // GetUserHoldWithResponse records and returns absent placement-hold state.
 func (fake *fakeControlClient) GetUserHoldWithResponse(_ context.Context, userKey generated.UserKey, _ ...generated.RequestEditorFn) (*generated.GetUserHoldResponse, error) {
 	fake.record("GetUserHold")
+	fake.getHoldUserKey = userKey
+	hold := generated.UserHold{Present: false, UserKey: string(userKey)}
+	if fake.holdResponse != nil {
+		hold = *fake.holdResponse
+	}
+
 	return &generated.GetUserHoldResponse{
 		HTTPResponse: httpResponse(http.StatusOK),
-		JSON200:      &generated.UserHold{Present: false, UserKey: string(userKey)},
+		JSON200:      &hold,
 	}, nil
 }
 
@@ -1592,8 +1795,10 @@ func (fake *fakeControlClient) SetUserHoldWithBodyWithResponse(context.Context, 
 }
 
 // SetUserHoldWithResponse records and returns an accepted response.
-func (fake *fakeControlClient) SetUserHoldWithResponse(context.Context, generated.UserKey, generated.SetUserHoldJSONRequestBody, ...generated.RequestEditorFn) (*generated.SetUserHoldResponse, error) {
+func (fake *fakeControlClient) SetUserHoldWithResponse(_ context.Context, userKey generated.UserKey, body generated.SetUserHoldJSONRequestBody, _ ...generated.RequestEditorFn) (*generated.SetUserHoldResponse, error) {
 	fake.record("SetUserHold")
+	fake.setHoldUserKey = userKey
+	fake.setHoldRequest = body
 	return &generated.SetUserHoldResponse{HTTPResponse: httpResponse(http.StatusAccepted), JSON202: acceptedResponse()}, nil
 }
 

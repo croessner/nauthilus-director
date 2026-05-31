@@ -47,6 +47,10 @@ const (
 	testConfigView          = configViewDefaults
 	testHandlerVersion      = "test"
 	testHoldReason          = "pause placement"
+	testHoldSetOperation    = "user_hold_set"
+	testRuntimeBadRequest   = "hold bad request"
+	testRuntimeConflict     = "hold conflict"
+	testRuntimeUnavailable  = "hold unavailable"
 	testListenerBound       = "127.0.0.1:2143"
 	testListenerName        = "imap"
 	testListenerReason      = "node maintenance"
@@ -505,6 +509,41 @@ func TestBackendPinRuntimeErrorsMapToStableStatuses(t *testing.T) {
 	}
 }
 
+// TestGetUserHoldMapsAbsentDTO verifies absent hold reads keep reason-free DTOs.
+func TestGetUserHoldMapsAbsentDTO(t *testing.T) {
+	service := &recordingUserHoldService{
+		readResult: runtime.GetUserHoldResult{
+			Hold: runtime.UserHold{Present: false},
+		},
+	}
+	handler := NewHandler(HandlerOptions{
+		Version:        testHandlerVersion,
+		UserHoldReader: service,
+	})
+
+	response, err := handler.GetUserHold(context.Background(), generated.GetUserHoldRequestObject{UserKey: testBackendPinUserHash})
+	if err != nil {
+		t.Fatalf("GetUserHold returned error: %v", err)
+	}
+
+	hold, ok := response.(generated.GetUserHold200JSONResponse)
+	if !ok {
+		t.Fatalf("GetUserHold response = %T, want 200 hold", response)
+	}
+
+	if service.readCalls != 1 {
+		t.Fatalf("hold read calls = %d, want 1", service.readCalls)
+	}
+
+	if service.readRequest.Key != (runtime.UserKey{Tenant: defaultTenant, UserHash: testBackendPinUserHash}) {
+		t.Fatalf("hold read key = %#v, want parsed default tenant key", service.readRequest.Key)
+	}
+
+	if hold.Present || hold.UserKey != testBackendPinUserHash || hold.CreatedAt != nil || hold.ExpiresAt != nil || hold.RemainingSeconds != nil || hold.Generation != nil {
+		t.Fatalf("absent hold DTO = %#v, want only present=false and user key", hold)
+	}
+}
+
 // TestGetUserHoldMapsPresentDTO verifies hold reads stay bounded and reason-free.
 func TestGetUserHoldMapsPresentDTO(t *testing.T) {
 	createdAt := time.Now().Add(-time.Minute).UTC()
@@ -582,6 +621,81 @@ func TestSetUserHoldMapsGeneratedRequest(t *testing.T) {
 	wantKey := runtime.UserKey{Tenant: testBackendPinTenant, UserHash: testBackendPinUserHash}
 	if service.setRequest.Key != wantKey || service.setRequest.Duration != 90*time.Second || service.setRequest.Reason != testHoldReason {
 		t.Fatalf("hold set request = %#v, want parsed key, duration and trimmed reason", service.setRequest)
+	}
+}
+
+// TestSetUserHoldRejectsInvalidRequests keeps malformed DTOs local to the REST edge.
+func TestSetUserHoldRejectsInvalidRequests(t *testing.T) {
+	testCases := []struct {
+		name string
+		body *generated.SetUserHoldJSONRequestBody
+	}{
+		{name: "missing body", body: nil},
+		{name: "zero duration", body: &generated.SetUserHoldJSONRequestBody{Reason: testHoldReason}},
+		{name: "negative duration", body: &generated.SetUserHoldJSONRequestBody{DurationSeconds: -1, Reason: testHoldReason}},
+		{name: "missing reason", body: &generated.SetUserHoldJSONRequestBody{DurationSeconds: 60, Reason: "  "}},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			service := &recordingUserHoldService{}
+			handler := NewHandler(HandlerOptions{
+				Version:         testHandlerVersion,
+				UserHoldMutator: service,
+			})
+
+			response, err := handler.SetUserHold(context.Background(), generated.SetUserHoldRequestObject{
+				UserKey: testBackendPinUserHash,
+				Body:    testCase.body,
+			})
+			if err != nil {
+				t.Fatalf("SetUserHold returned error: %v", err)
+			}
+
+			assertUserHoldProblemStatus(t, response, http.StatusBadRequest)
+
+			if service.setCalls != 0 {
+				t.Fatalf("hold set calls = %d, want 0 for invalid request", service.setCalls)
+			}
+		})
+	}
+}
+
+// TestUserHoldRuntimeErrorsMapToRESTStatuses verifies generated problem status mapping.
+func TestUserHoldRuntimeErrorsMapToRESTStatuses(t *testing.T) {
+	testCases := []struct {
+		name   string
+		err    error
+		status int
+	}{
+		{name: testRuntimeBadRequest, err: newRuntimeError(runtime.ErrorKindInvalidRequest, testHoldSetOperation, testRuntimeBadRequest), status: http.StatusBadRequest},
+		{name: testRuntimeConflict, err: newRuntimeError(runtime.ErrorKindConflict, testHoldSetOperation, testRuntimeConflict), status: http.StatusConflict},
+		{name: testRuntimeUnavailable, err: newRuntimeError(runtime.ErrorKindUnavailable, testHoldSetOperation, "redis unavailable"), status: http.StatusServiceUnavailable},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			service := &recordingUserHoldService{setErr: testCase.err}
+			handler := NewHandler(HandlerOptions{
+				Version:         testHandlerVersion,
+				UserHoldMutator: service,
+			})
+
+			body := generated.SetUserHoldJSONRequestBody{
+				DurationSeconds: 60,
+				Reason:          testHoldReason,
+			}
+
+			response, err := handler.SetUserHold(context.Background(), generated.SetUserHoldRequestObject{
+				UserKey: testBackendPinUserHash,
+				Body:    &body,
+			})
+			if err != nil {
+				t.Fatalf("SetUserHold returned error: %v", err)
+			}
+
+			assertUserHoldProblemStatus(t, response, testCase.status)
+		})
 	}
 }
 

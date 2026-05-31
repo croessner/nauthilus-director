@@ -363,6 +363,7 @@ func newUsersCommand(stdout io.Writer, stderr io.Writer) *cobra.Command {
 	})
 	command.AddCommand(newUserAffinityCommand(stdout, stderr))
 	command.AddCommand(newUserBackendPinCommand(stdout, stderr))
+	command.AddCommand(newUserHoldCommand(stdout, stderr))
 	move := &cobra.Command{
 		Use:   "move <user-key>",
 		Short: "Move future user placement",
@@ -424,6 +425,31 @@ func newUserBackendPinCommand(stdout io.Writer, stderr io.Writer) *cobra.Command
 	set.Flags().String("reason", "", "auditable reason")
 	command.AddCommand(set)
 	command.AddCommand(runtimeReasonCommand("clear <user-key>", "Clear the backend pin for one user", stdout, stderr, application.runUsersBackendPinClear))
+
+	return command
+}
+
+// newUserHoldCommand builds user placement-hold commands.
+func newUserHoldCommand(stdout io.Writer, stderr io.Writer) *cobra.Command {
+	command := &cobra.Command{
+		Use:   "hold",
+		Short: "Inspect and control user placement holds",
+		RunE:  cobraHandler(stdout, stderr, application.runUsersHold),
+	}
+	command.AddCommand(&cobra.Command{
+		Use:   "show <user-key>",
+		Short: "Show the placement hold for one user",
+		RunE:  cobraHandler(stdout, stderr, application.runUsersHoldShow),
+	})
+	set := &cobra.Command{
+		Use:   "set <user-key>",
+		Short: "Set a bounded placement hold for one user",
+		RunE:  cobraHandler(stdout, stderr, application.runUsersHoldSet, "duration", "reason"),
+	}
+	set.Flags().String("duration", "", "hold duration")
+	set.Flags().String("reason", "", "auditable reason")
+	command.AddCommand(set)
+	command.AddCommand(runtimeReasonCommand("clear <user-key>", "Clear the placement hold for one user", stdout, stderr, application.runUsersHoldClear))
 
 	return command
 }
@@ -1614,6 +1640,8 @@ func (app application) runUsers(args []string) int {
 		return app.runUsersAffinity(args[1:])
 	case "backend-pin":
 		return app.runUsersBackendPin(args[1:])
+	case "hold":
+		return app.runUsersHold(args[1:])
 	case "move":
 		return app.runUsersMove(args[1:])
 	case "kick":
@@ -2038,6 +2066,140 @@ func (app application) runUsersBackendPinClear(args []string) int {
 	return app.handleClearUserBackendPinResponse(response)
 }
 
+// runUsersHold dispatches user placement-hold commands.
+func (app application) runUsersHold(args []string) int {
+	if len(args) == 0 {
+		return app.usageError("users hold requires a subcommand")
+	}
+
+	switch args[0] {
+	case "show":
+		return app.runUsersHoldShow(args[1:])
+	case "set":
+		return app.runUsersHoldSet(args[1:])
+	case "clear":
+		return app.runUsersHoldClear(args[1:])
+	default:
+		return app.usageError("unknown users hold subcommand %q", args[0])
+	}
+}
+
+// runUsersHoldShow shows the placement hold for one user.
+func (app application) runUsersHoldShow(args []string) int {
+	userKey, code := app.userKeyArg(args, "users hold show")
+	if code != 0 {
+		return code
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), app.options.Timeout)
+	defer cancel()
+
+	client, code := app.client()
+	if code != 0 {
+		return code
+	}
+
+	response, err := client.GetUserHoldWithResponse(ctx, generated.UserKey(userKey))
+	if err != nil {
+		return app.requestError("users hold show", err)
+	}
+	if response.StatusCode() != http.StatusOK {
+		return app.serverError("users hold show", response.StatusCode(), response.JSONDefault)
+	}
+	if response.JSON200 == nil {
+		return app.serverError("users hold show", http.StatusBadGateway, nil)
+	}
+
+	return app.writeObject(response.JSON200, func(writer io.Writer) error {
+		writeUserHoldLine(writer, *response.JSON200)
+		return nil
+	})
+}
+
+// runUsersHoldSet creates a bounded placement hold for one user.
+func (app application) runUsersHoldSet(args []string) int {
+	line, err := parseCommandLine(args, []commandFlag{
+		valueFlag("duration"),
+		valueFlag("reason"),
+	})
+	if err != nil {
+		return app.usageError("%v", err)
+	}
+	userKey, code := app.userKeyFromLine(line, "users hold set")
+	if code != 0 {
+		return code
+	}
+
+	reason, ok := requiredValue(line, "reason")
+	if !ok {
+		return app.usageError("users hold set requires --reason")
+	}
+	durationText, ok := requiredValue(line, "duration")
+	if !ok {
+		return app.usageError("users hold set requires --duration")
+	}
+
+	durationSeconds, err := parseHoldDurationSeconds(durationText)
+	if err != nil {
+		return app.usageError("%v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), app.options.Timeout)
+	defer cancel()
+
+	client, code := app.client()
+	if code != 0 {
+		return code
+	}
+
+	body := generated.SetUserHoldJSONRequestBody{
+		DurationSeconds: durationSeconds,
+		Reason:          reason,
+	}
+	response, err := client.SetUserHoldWithResponse(ctx, generated.UserKey(userKey), body)
+	if err != nil {
+		return app.requestError("users hold set", err)
+	}
+
+	return app.handleSetUserHoldResponse(response)
+}
+
+// runUsersHoldClear removes one user's placement hold.
+func (app application) runUsersHoldClear(args []string) int {
+	line, err := parseCommandLine(args, []commandFlag{valueFlag("reason")})
+	if err != nil {
+		return app.usageError("%v", err)
+	}
+	userKey, code := app.userKeyFromLine(line, "users hold clear")
+	if code != 0 {
+		return code
+	}
+
+	reason, ok := requiredValue(line, "reason")
+	if !ok {
+		return app.usageError("users hold clear requires --reason")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), app.options.Timeout)
+	defer cancel()
+
+	client, code := app.client()
+	if code != 0 {
+		return code
+	}
+
+	response, err := client.ClearUserHoldWithResponse(
+		ctx,
+		generated.UserKey(userKey),
+		generated.ClearUserHoldJSONRequestBody{Reason: reason},
+	)
+	if err != nil {
+		return app.requestError("users hold clear", err)
+	}
+
+	return app.handleClearUserHoldResponse(response)
+}
+
 // userKeyArg parses one non-empty user key.
 func (app application) userKeyArg(args []string, operation string) (string, int) {
 	line, err := parseCommandLine(args, nil)
@@ -2442,6 +2604,22 @@ func (app application) handleSetUserBackendPinResponse(response *generated.SetUs
 	return app.writeAccepted(response.JSON202)
 }
 
+// handleClearUserHoldResponse renders a placement-hold clear response.
+func (app application) handleClearUserHoldResponse(response *generated.ClearUserHoldResponse) int {
+	if response.StatusCode() != http.StatusAccepted {
+		return app.serverError("users hold clear", response.StatusCode(), response.JSONDefault)
+	}
+	return app.writeAccepted(response.JSON202)
+}
+
+// handleSetUserHoldResponse renders a placement-hold set response.
+func (app application) handleSetUserHoldResponse(response *generated.SetUserHoldResponse) int {
+	if response.StatusCode() != http.StatusAccepted {
+		return app.serverError("users hold set", response.StatusCode(), response.JSONDefault)
+	}
+	return app.writeAccepted(response.JSON202)
+}
+
 // handleKickUserResponse renders a user kick response.
 func (app application) handleKickUserResponse(response *generated.KickUserResponse) int {
 	if response.StatusCode() != http.StatusAccepted {
@@ -2830,6 +3008,28 @@ func optionalPositiveInt(line parsedCommandLine, name string) (*int, error) {
 	return &parsed, nil
 }
 
+// parseHoldDurationSeconds converts a Go duration into whole REST seconds.
+func parseHoldDurationSeconds(value string) (int, error) {
+	duration, err := time.ParseDuration(strings.TrimSpace(value))
+	if err != nil {
+		return 0, fmt.Errorf("users hold set requires a valid Go duration for --duration")
+	}
+	if duration <= 0 {
+		return 0, fmt.Errorf("users hold set requires a positive --duration")
+	}
+	if duration%time.Second != 0 {
+		return 0, fmt.Errorf("users hold set requires --duration to use whole seconds")
+	}
+
+	seconds := int64(duration / time.Second)
+	maxInt := int64(^uint(0) >> 1)
+	if seconds > maxInt {
+		return 0, fmt.Errorf("users hold set --duration is too large")
+	}
+
+	return int(seconds), nil
+}
+
 // parseRouteAttributes converts repeated k=v flags to the generated request shape.
 func parseRouteAttributes(values []string) (*map[string][]string, error) {
 	if len(values) == 0 {
@@ -2981,6 +3181,28 @@ func writeBackendPinLine(writer io.Writer, pin generated.UserBackendPin) {
 	)
 }
 
+// writeUserHoldLine writes one scriptable placement-hold text row.
+func writeUserHoldLine(writer io.Writer, hold generated.UserHold) {
+	createdAt := timePointerValue(hold.CreatedAt)
+	expiresAt := timePointerValue(hold.ExpiresAt)
+	generation := stringPointerValue(hold.Generation)
+	remainingSeconds := ""
+	if hold.RemainingSeconds != nil {
+		remainingSeconds = strconv.Itoa(*hold.RemainingSeconds)
+	}
+
+	_, _ = fmt.Fprintf(
+		writer,
+		"user_key=%s present=%t created_at=%s expires_at=%s remaining_seconds=%s generation=%s\n",
+		fieldValue(hold.UserKey),
+		hold.Present,
+		fieldValue(createdAt),
+		fieldValue(expiresAt),
+		fieldValue(remainingSeconds),
+		fieldValue(generation),
+	)
+}
+
 // stringPointerValue returns the pointed string or an empty value.
 func stringPointerValue(value *string) string {
 	if value == nil {
@@ -2988,6 +3210,15 @@ func stringPointerValue(value *string) string {
 	}
 
 	return *value
+}
+
+// timePointerValue returns an RFC3339 timestamp for present generated times.
+func timePointerValue(value *time.Time) string {
+	if value == nil {
+		return ""
+	}
+
+	return value.UTC().Format(time.RFC3339)
 }
 
 // writeNextCursorLine writes the explicit continuation hint for partial pages.
