@@ -37,6 +37,7 @@ func Module() fx.Option {
 			provideRuntimeSelector,
 			provideRoutingResolver,
 			provideLocalSessionRegistry,
+			provideUserHoldService,
 			provideListenerManager,
 			provideBackendReadService,
 			provideRouteLookupService,

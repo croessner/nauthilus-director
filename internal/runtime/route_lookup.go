@@ -23,7 +23,6 @@ import (
 
 	"github.com/croessner/nauthilus-director/internal/backend"
 	"github.com/croessner/nauthilus-director/internal/observability"
-	"github.com/croessner/nauthilus-director/internal/protocol/lmtp"
 	"github.com/croessner/nauthilus-director/internal/routing"
 	"github.com/croessner/nauthilus-director/internal/state"
 )
@@ -436,12 +435,12 @@ func (s *RouteLookupService) resolveLookupIdentity(ctx context.Context, request 
 		return RouteLookupIdentityState{Source: routeLookupIdentityNotApplicable}, newRuntimeError(ErrorKindInvalidRequest, operationRouteLookup, "account key required")
 	}
 
-	recipient, err := lmtp.ParseRecipientInput(request.Recipient)
+	recipient, err := routeLookupRecipientIdentity(request.Recipient)
 	if err != nil {
 		return RouteLookupIdentityState{Source: routeLookupIdentityNotApplicable}, newRuntimeError(ErrorKindInvalidRequest, operationRouteLookup, "recipient invalid")
 	}
 
-	if identity := s.resolveIdentityFromActiveAffinity(ctx, request, recipient.LookupName); identity.AccountResolved {
+	if identity := s.resolveIdentityFromActiveAffinity(ctx, request, recipient); identity.AccountResolved {
 		return identity, nil
 	}
 
@@ -450,7 +449,7 @@ func (s *RouteLookupService) resolveLookupIdentity(ctx context.Context, request 
 	}
 
 	result, err := s.identityLookup.LookupRouteIdentity(ctx, RouteLookupIdentityLookupRequest{
-		Username: recipient.LookupName,
+		Username: recipient,
 		ClientIP: request.ClientIP,
 		Protocol: request.Protocol,
 		Method:   routeLookupIdentityMethod,
@@ -472,6 +471,68 @@ func (s *RouteLookupService) resolveLookupIdentity(ctx context.Context, request 
 		NauthilusUsed:   true,
 		AccountResolved: true,
 	}, nil
+}
+
+// routeLookupRecipientIdentity derives the LMTP lookup identity without importing protocol state.
+func routeLookupRecipientIdentity(value string) (string, error) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return "", newRuntimeError(ErrorKindInvalidRequest, operationRouteLookup, "recipient required")
+	}
+
+	if strings.HasPrefix(strings.ToUpper(trimmed), "TO:") {
+		return routeLookupIdentityFromPath(strings.TrimSpace(trimmed[len("TO:"):]))
+	}
+
+	if strings.HasPrefix(trimmed, "<") {
+		return routeLookupIdentityFromPath(trimmed)
+	}
+
+	return routeLookupIdentityFromPath("<" + trimmed + ">")
+}
+
+// routeLookupIdentityFromPath extracts a conservative mailbox identity from an LMTP path.
+func routeLookupIdentityFromPath(path string) (string, error) {
+	path = strings.TrimSpace(path)
+	if len(path) < 3 || path[0] != '<' {
+		return "", newRuntimeError(ErrorKindInvalidRequest, operationRouteLookup, "recipient invalid")
+	}
+
+	closeIndex := strings.Index(path, ">")
+	if closeIndex <= 0 || strings.TrimSpace(path[closeIndex+1:]) != "" {
+		return "", newRuntimeError(ErrorKindInvalidRequest, operationRouteLookup, "recipient invalid")
+	}
+
+	address := strings.TrimSpace(path[1:closeIndex])
+
+	address = routeLookupStripSourceRoute(address)
+	if address == "" || strings.ContainsAny(address, " \t\r\n<>") {
+		return "", newRuntimeError(ErrorKindInvalidRequest, operationRouteLookup, "recipient invalid")
+	}
+
+	local, domain, ok := strings.Cut(address, "@")
+	if !ok {
+		return address, nil
+	}
+
+	if local == "" || domain == "" || strings.Contains(domain, "@") {
+		return "", newRuntimeError(ErrorKindInvalidRequest, operationRouteLookup, "recipient invalid")
+	}
+
+	return local + "@" + strings.ToLower(domain), nil
+}
+
+// routeLookupStripSourceRoute removes obsolete source-route syntax before identity lookup.
+func routeLookupStripSourceRoute(address string) string {
+	if !strings.HasPrefix(address, "@") {
+		return address
+	}
+
+	if index := strings.LastIndex(address, ":"); index >= 0 && index+1 < len(address) {
+		return address[index+1:]
+	}
+
+	return ""
 }
 
 // resolveIdentityFromActiveAffinity uses an existing active pin before external lookup.

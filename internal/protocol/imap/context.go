@@ -89,6 +89,7 @@ type SessionConfig struct {
 	BackendConnector       BackendConnector
 	ProxyRunner            proxy.Runner
 	LocalSessions          *runtimectl.LocalSessionRegistry
+	PlacementGate          runtimectl.PlacementGate
 	Observability          observability.Recorder
 }
 

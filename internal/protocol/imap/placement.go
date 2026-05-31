@@ -144,6 +144,10 @@ func (s *Session) placeAuthenticatedSession(
 	s.recordRoutingResolve(routingCtx, observationResultOK, "", routingResult.RoutingSource, routingDuration)
 	routingSpan.End(observationResultOK, "")
 
+	if err := s.waitForPlacementGate(ctx, routingResult); err != nil {
+		return err
+	}
+
 	backendPin, err := s.lookupOperatorBackendPin(ctx, routingResult)
 	if err != nil {
 		return err
@@ -222,6 +226,25 @@ func (s *Session) placeAuthenticatedSession(
 	s.placed = true
 
 	return nil
+}
+
+// waitForPlacementGate applies the shared user-hold gate before runtime placement reads.
+func (s *Session) waitForPlacementGate(ctx context.Context, result routing.RoutingResult) error {
+	if s.placementGate == nil {
+		return nil
+	}
+
+	_, err := s.placementGate.WaitForPlacement(ctx, runtimectl.PlacementGateRequest{
+		Key: runtimectl.UserKey{
+			Tenant:   normalizedRoutingFact(result.Tenant),
+			UserHash: normalizedAccount(result.AccountKey),
+		},
+		Protocol:     protocolIMAP,
+		ListenerName: s.context.ListenerName,
+		ServiceName:  s.context.ServiceName,
+	})
+
+	return err
 }
 
 // attachSelectedBackend registers backend counts and retries same-shard placement on attach races.

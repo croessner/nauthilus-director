@@ -22,6 +22,7 @@ import (
 	"maps"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/croessner/nauthilus-director/internal/backend"
@@ -233,6 +234,47 @@ type CheckUserHoldResult struct {
 	Hold UserHold
 }
 
+// UserHoldServiceConfig bounds user-hold mutations and local placement waiters.
+type UserHoldServiceConfig struct {
+	Enabled                bool
+	MaxDuration            time.Duration
+	MaxWait                time.Duration
+	PollInterval           time.Duration
+	MaxLocalWaiters        int
+	MaxLocalWaitersPerUser int
+}
+
+// PlacementGateOutcome describes how the hold gate released placement.
+type PlacementGateOutcome string
+
+const (
+	// PlacementGateOutcomeAllowed means no active hold delayed placement.
+	PlacementGateOutcomeAllowed PlacementGateOutcome = "allowed"
+	// PlacementGateOutcomeReleased means placement waited and must re-read runtime state.
+	PlacementGateOutcomeReleased PlacementGateOutcome = "released"
+)
+
+// PlacementGateRequest identifies one post-identity placement attempt.
+type PlacementGateRequest struct {
+	Key          UserKey
+	Protocol     string
+	ListenerName string
+	ServiceName  string
+	Deadline     time.Time
+}
+
+// PlacementGateResult describes a protocol-neutral hold-gate outcome.
+type PlacementGateResult struct {
+	Outcome                     PlacementGateOutcome
+	Hold                        UserHold
+	RuntimeStateRecheckRequired bool
+}
+
+// PlacementGate is the shared protocol-neutral user placement gate.
+type PlacementGate interface {
+	WaitForPlacement(ctx context.Context, request PlacementGateRequest) (PlacementGateResult, error)
+}
+
 // UserStateStore persists Redis-backed user runtime operations.
 type UserStateStore interface {
 	MoveUser(ctx context.Context, request state.UserMoveRequest) (state.UserRuntimeRecord, error)
@@ -261,6 +303,28 @@ type UserBackendPinService struct {
 	recorder observability.Recorder
 }
 
+// UserHoldService coordinates user placement holds and local waiters.
+type UserHoldService struct {
+	store    state.UserHoldStore
+	config   UserHoldServiceConfig
+	waiters  *userHoldWaiterRegistry
+	recorder observability.Recorder
+}
+
+type userHoldWaiter struct {
+	key  UserKey
+	wake chan struct{}
+}
+
+type userHoldWaiterRegistry struct {
+	mu         sync.Mutex
+	total      int
+	byUser     map[UserKey]int
+	waiters    map[UserKey]map[*userHoldWaiter]struct{}
+	maxTotal   int
+	maxPerUser int
+}
+
 // NewUserService creates the runtime user operation service.
 func NewUserService(store UserStateStore, local *LocalSessionRegistry, options ...ServiceOption) *UserService {
 	applied := applyServiceOptions(options)
@@ -277,6 +341,203 @@ func NewUserBackendPinService(
 	applied := applyServiceOptions(options)
 
 	return &UserBackendPinService{store: store, registry: registry, recorder: applied.recorder}
+}
+
+// NewUserHoldService creates the shared placement-hold service.
+func NewUserHoldService(
+	store state.UserHoldStore,
+	serviceConfig UserHoldServiceConfig,
+	options ...ServiceOption,
+) (*UserHoldService, error) {
+	applied := applyServiceOptions(options)
+
+	serviceConfig, err := serviceConfig.normalize()
+	if err != nil {
+		return nil, err
+	}
+
+	return &UserHoldService{
+		store:    store,
+		config:   serviceConfig,
+		waiters:  newUserHoldWaiterRegistry(serviceConfig.MaxLocalWaiters, serviceConfig.MaxLocalWaitersPerUser),
+		recorder: applied.recorder,
+	}, nil
+}
+
+// SetUserHold records one audited placement hold.
+func (s *UserHoldService) SetUserHold(ctx context.Context, request SetUserHoldRequest) (SetUserHoldResult, error) {
+	if s == nil {
+		return SetUserHoldResult{}, newRuntimeError(ErrorKindUnavailable, operationUserHoldSet, "user hold service required")
+	}
+
+	request.Key = request.Key.Normalize()
+	if err := request.Validate(s.config.MaxDuration); err != nil {
+		return SetUserHoldResult{}, err
+	}
+
+	if s.store == nil {
+		return SetUserHoldResult{}, newRuntimeError(ErrorKindUnavailable, operationUserHoldSet, "user hold store required")
+	}
+
+	record, err := s.store.SetUserHold(ctx, state.UserHoldSetRequest{
+		Key:         request.Key.affinityKey(),
+		Duration:    request.Duration,
+		MaxDuration: s.config.MaxDuration,
+		Reason:      request.Reason,
+		Actor:       actorAuditValue(request.Actor),
+	})
+	if err != nil {
+		return SetUserHoldResult{}, err
+	}
+
+	hold := userHoldFromRecord(userHoldRecordWithKey(record, request.Key))
+
+	audit, err := request.AuditMetadata(hold)
+	if err != nil {
+		return SetUserHoldResult{}, err
+	}
+
+	return SetUserHoldResult{Hold: hold, Audit: audit}, nil
+}
+
+// GetUserHold reads one placement hold without mutating runtime state.
+func (s *UserHoldService) GetUserHold(ctx context.Context, request GetUserHoldRequest) (GetUserHoldResult, error) {
+	request.Key = request.Key.Normalize()
+	if err := request.Validate(); err != nil {
+		return GetUserHoldResult{}, err
+	}
+
+	if s == nil || s.store == nil {
+		return GetUserHoldResult{}, newRuntimeError(ErrorKindUnavailable, operationUserHoldGet, "user hold store required")
+	}
+
+	record, err := s.store.GetUserHold(ctx, state.UserHoldGetRequest{Key: request.Key.affinityKey()})
+	if err != nil {
+		return GetUserHoldResult{}, err
+	}
+
+	return GetUserHoldResult{Hold: userHoldFromRecord(userHoldRecordWithKey(record, request.Key))}, nil
+}
+
+// ClearUserHold removes one placement hold and wakes same-process waiters.
+func (s *UserHoldService) ClearUserHold(ctx context.Context, request ClearUserHoldRequest) (ClearUserHoldResult, error) {
+	request.Key = request.Key.Normalize()
+	if err := request.Validate(); err != nil {
+		return ClearUserHoldResult{}, err
+	}
+
+	if s == nil || s.store == nil {
+		return ClearUserHoldResult{}, newRuntimeError(ErrorKindUnavailable, operationUserHoldClear, "user hold store required")
+	}
+
+	record, err := s.store.ClearUserHold(ctx, state.UserHoldClearRequest{
+		Key:    request.Key.affinityKey(),
+		Reason: request.Reason,
+		Actor:  actorAuditValue(request.Actor),
+	})
+	if err != nil {
+		return ClearUserHoldResult{}, err
+	}
+
+	hold := userHoldFromRecord(userHoldRecordWithKey(record, request.Key))
+	if s.waiters != nil {
+		s.waiters.wake(request.Key)
+	}
+
+	audit, err := request.AuditMetadata(hold)
+	if err != nil {
+		return ClearUserHoldResult{}, err
+	}
+
+	return ClearUserHoldResult{Hold: hold, Audit: audit}, nil
+}
+
+// CheckUserHold reads the placement gate without waiting.
+func (s *UserHoldService) CheckUserHold(ctx context.Context, request CheckUserHoldRequest) (CheckUserHoldResult, error) {
+	request.Key = request.Key.Normalize()
+	if err := request.Validate(); err != nil {
+		return CheckUserHoldResult{}, err
+	}
+
+	hold, err := s.checkUserHold(ctx, request.Key)
+	if err != nil {
+		return CheckUserHoldResult{}, err
+	}
+
+	return CheckUserHoldResult{Hold: hold}, nil
+}
+
+// WaitForPlacement blocks placement behind an active hold with bounded local waiters.
+func (s *UserHoldService) WaitForPlacement(ctx context.Context, request PlacementGateRequest) (PlacementGateResult, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	request = request.Normalize()
+	if err := request.Validate(); err != nil {
+		return PlacementGateResult{}, err
+	}
+
+	if s == nil {
+		return PlacementGateResult{}, newRuntimeError(ErrorKindUnavailable, operationUserHoldCheck, "user hold service required")
+	}
+
+	if !s.config.Enabled {
+		return PlacementGateResult{Outcome: PlacementGateOutcomeAllowed}, nil
+	}
+
+	hold, err := s.checkUserHold(ctx, request.Key)
+	if err != nil {
+		return PlacementGateResult{}, err
+	}
+
+	if !hold.Present {
+		return PlacementGateResult{Outcome: PlacementGateOutcomeAllowed, Hold: hold}, nil
+	}
+
+	return s.waitForActiveUserHold(ctx, request)
+}
+
+// waitForActiveUserHold waits locally after the initial hold check observed an active hold.
+func (s *UserHoldService) waitForActiveUserHold(
+	ctx context.Context,
+	request PlacementGateRequest,
+) (PlacementGateResult, error) {
+	if s.waiters == nil {
+		return PlacementGateResult{}, newRuntimeError(ErrorKindUnavailable, operationUserHoldCheck, "user hold waiter registry required")
+	}
+
+	waiter, err := s.waiters.register(request.Key)
+	if err != nil {
+		return PlacementGateResult{}, newRuntimeError(ErrorKindUnavailable, operationUserHoldCheck, err.Error())
+	}
+	defer s.waiters.unregister(waiter)
+
+	waitCtx, cancel := s.placementWaitContext(ctx, request)
+	defer cancel()
+
+	for {
+		hold, err := s.checkUserHold(waitCtx, request.Key)
+		if err != nil {
+			if waitCtx.Err() != nil {
+				return PlacementGateResult{}, placementGateWaitError(ctx)
+			}
+
+			return PlacementGateResult{}, err
+		}
+
+		if !hold.Present {
+			return PlacementGateResult{
+				Outcome:                     PlacementGateOutcomeReleased,
+				Hold:                        hold,
+				RuntimeStateRecheckRequired: true,
+			}, nil
+		}
+
+		if err := s.waitForHoldRecheck(waitCtx, waiter); err != nil {
+			return PlacementGateResult{}, placementGateWaitError(ctx)
+		}
+	}
 }
 
 // SetUserBackendPin derives target facts and records one concrete backend pin.
@@ -667,6 +928,58 @@ func (r CheckUserHoldRequest) Validate() error {
 	return r.Key.Validate(operationUserHoldCheck)
 }
 
+// Normalize returns a placement-gate request with canonical comparable fields.
+func (r PlacementGateRequest) Normalize() PlacementGateRequest {
+	r.Key = r.Key.Normalize()
+	r.Protocol = strings.TrimSpace(r.Protocol)
+	r.ListenerName = strings.TrimSpace(r.ListenerName)
+	r.ServiceName = strings.TrimSpace(r.ServiceName)
+
+	return r
+}
+
+// Validate checks the placement-gate request before waiting or state reads.
+func (r PlacementGateRequest) Validate() error {
+	if err := r.Key.Validate(operationUserHoldCheck); err != nil {
+		return err
+	}
+
+	if strings.TrimSpace(r.Protocol) == "" {
+		return newRuntimeError(ErrorKindInvalidRequest, operationUserHoldCheck, "protocol required")
+	}
+
+	return nil
+}
+
+// normalize validates the hold gate policy before it is shared with protocols.
+func (c UserHoldServiceConfig) normalize() (UserHoldServiceConfig, error) {
+	if c.MaxDuration <= 0 {
+		return UserHoldServiceConfig{}, newRuntimeError(ErrorKindUnavailable, operationUserHoldSet, "hold maximum duration unavailable")
+	}
+
+	if c.MaxWait <= 0 {
+		return UserHoldServiceConfig{}, newRuntimeError(ErrorKindUnavailable, operationUserHoldCheck, "hold maximum wait unavailable")
+	}
+
+	if c.PollInterval <= 0 {
+		return UserHoldServiceConfig{}, newRuntimeError(ErrorKindUnavailable, operationUserHoldCheck, "hold poll interval unavailable")
+	}
+
+	if c.PollInterval > c.MaxWait {
+		return UserHoldServiceConfig{}, newRuntimeError(ErrorKindUnavailable, operationUserHoldCheck, "hold poll interval exceeds maximum wait")
+	}
+
+	if c.MaxLocalWaiters <= 0 {
+		return UserHoldServiceConfig{}, newRuntimeError(ErrorKindUnavailable, operationUserHoldCheck, "hold waiter limit unavailable")
+	}
+
+	if c.MaxLocalWaitersPerUser <= 0 || c.MaxLocalWaitersPerUser > c.MaxLocalWaiters {
+		return UserHoldServiceConfig{}, newRuntimeError(ErrorKindUnavailable, operationUserHoldCheck, "hold per-user waiter limit unavailable")
+	}
+
+	return c, nil
+}
+
 // Validate checks derived backend-pin target facts before persistence.
 func (t UserBackendPinTarget) Validate(operation string) error {
 	if strings.TrimSpace(t.BackendIdentifier) == "" {
@@ -852,6 +1165,89 @@ func backendPinTargetFromRecord(record state.UserBackendPinRecord) UserBackendPi
 	}
 }
 
+// checkUserHold reads one placement hold through the shared state boundary.
+func (s *UserHoldService) checkUserHold(ctx context.Context, key UserKey) (UserHold, error) {
+	if s == nil || s.store == nil {
+		return UserHold{}, newRuntimeError(ErrorKindUnavailable, operationUserHoldCheck, "user hold store required")
+	}
+
+	key = key.Normalize()
+
+	record, err := s.store.CheckUserHold(ctx, state.UserHoldCheckRequest{Key: key.affinityKey()})
+	if err != nil {
+		return UserHold{}, err
+	}
+
+	return userHoldFromRecord(userHoldRecordWithKey(record, key)), nil
+}
+
+// placementWaitContext derives the bounded waiter context for one placement attempt.
+func (s *UserHoldService) placementWaitContext(
+	ctx context.Context,
+	request PlacementGateRequest,
+) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	deadline := time.Now().Add(s.config.MaxWait)
+	if !request.Deadline.IsZero() && request.Deadline.Before(deadline) {
+		deadline = request.Deadline
+	}
+
+	return context.WithDeadline(ctx, deadline)
+}
+
+// waitForHoldRecheck waits for a local clear wake-up, polling cadence or cancellation.
+func (s *UserHoldService) waitForHoldRecheck(ctx context.Context, waiter *userHoldWaiter) error {
+	timer := time.NewTimer(s.config.PollInterval)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-waiter.wake:
+		return nil
+	case <-timer.C:
+		return nil
+	}
+}
+
+// placementGateWaitError classifies hold wait exits for protocol-neutral callers.
+func placementGateWaitError(ctx context.Context) error {
+	if errors.Is(ctx.Err(), context.Canceled) {
+		return ctx.Err()
+	}
+
+	return newRuntimeError(ErrorKindUnavailable, operationUserHoldCheck, "user hold wait timeout")
+}
+
+// userHoldRecordWithKey preserves the requested affinity key in sparse hold records.
+func userHoldRecordWithKey(record state.UserHoldRecord, key UserKey) state.UserHoldRecord {
+	if strings.TrimSpace(record.Key.Tenant) == "" {
+		record.Key.Tenant = key.Tenant
+	}
+
+	if strings.TrimSpace(record.Key.AccountKey) == "" {
+		record.Key.AccountKey = key.UserHash
+	}
+
+	return record
+}
+
+// userHoldFromRecord maps Redis output into the runtime placement-hold state.
+func userHoldFromRecord(record state.UserHoldRecord) UserHold {
+	return UserHold{
+		Present:           record.Present,
+		Key:               UserKey{Tenant: record.Key.Tenant, UserHash: record.Key.AccountKey}.Normalize(),
+		Generation:        strings.TrimSpace(record.Generation),
+		CreatedAt:         record.CreatedAt,
+		ExpiresAt:         record.ExpiresAt,
+		RequestedDuration: record.RequestedDuration,
+		UpdatedAt:         record.ServerTime,
+	}
+}
+
 // userRuntimeStateFromRecord maps Redis mutation output into runtime domain state.
 func userRuntimeStateFromRecord(record state.UserRuntimeRecord) UserRuntimeState {
 	runtimeState := UserRuntimeState{
@@ -985,6 +1381,109 @@ func boolAuditValue(value bool) string {
 	}
 
 	return auditValueFalse
+}
+
+// newUserHoldWaiterRegistry creates local waiter accounting for one process.
+func newUserHoldWaiterRegistry(maxTotal int, maxPerUser int) *userHoldWaiterRegistry {
+	return &userHoldWaiterRegistry{
+		byUser:     map[UserKey]int{},
+		waiters:    map[UserKey]map[*userHoldWaiter]struct{}{},
+		maxTotal:   maxTotal,
+		maxPerUser: maxPerUser,
+	}
+}
+
+// register accounts for one local placement waiter before it can block.
+func (r *userHoldWaiterRegistry) register(key UserKey) (*userHoldWaiter, error) {
+	key = key.Normalize()
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.total >= r.maxTotal {
+		return nil, errors.New("user hold waiter limit exceeded")
+	}
+
+	if r.byUser[key] >= r.maxPerUser {
+		return nil, errors.New("user hold per-user waiter limit exceeded")
+	}
+
+	waiter := &userHoldWaiter{key: key, wake: make(chan struct{}, 1)}
+	if r.waiters[key] == nil {
+		r.waiters[key] = map[*userHoldWaiter]struct{}{}
+	}
+
+	r.waiters[key][waiter] = struct{}{}
+	r.total++
+	r.byUser[key]++
+
+	return waiter, nil
+}
+
+// unregister releases one local placement waiter on every exit path.
+func (r *userHoldWaiterRegistry) unregister(waiter *userHoldWaiter) {
+	if r == nil || waiter == nil {
+		return
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	waiters := r.waiters[waiter.key]
+	if _, ok := waiters[waiter]; !ok {
+		return
+	}
+
+	delete(waiters, waiter)
+
+	if len(waiters) == 0 {
+		delete(r.waiters, waiter.key)
+	}
+
+	r.total--
+
+	r.byUser[waiter.key]--
+	if r.byUser[waiter.key] <= 0 {
+		delete(r.byUser, waiter.key)
+	}
+}
+
+// wake notifies same-process waiters without relying on Redis pub/sub correctness.
+func (r *userHoldWaiterRegistry) wake(key UserKey) {
+	if r == nil {
+		return
+	}
+
+	key = key.Normalize()
+
+	r.mu.Lock()
+
+	waiters := make([]*userHoldWaiter, 0, len(r.waiters[key]))
+	for waiter := range r.waiters[key] {
+		waiters = append(waiters, waiter)
+	}
+	r.mu.Unlock()
+
+	for _, waiter := range waiters {
+		select {
+		case waiter.wake <- struct{}{}:
+		default:
+		}
+	}
+}
+
+// counts returns current waiter totals for focused domain tests.
+func (r *userHoldWaiterRegistry) counts(key UserKey) (int, int) {
+	if r == nil {
+		return 0, 0
+	}
+
+	key = key.Normalize()
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	return r.total, r.byUser[key]
 }
 
 // recordUserOperation emits one secret-safe user runtime observation.

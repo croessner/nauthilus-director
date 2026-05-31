@@ -28,6 +28,7 @@ import (
 	"github.com/croessner/nauthilus-director/internal/nauthilus"
 	"github.com/croessner/nauthilus-director/internal/observability"
 	"github.com/croessner/nauthilus-director/internal/routing"
+	runtimectl "github.com/croessner/nauthilus-director/internal/runtime"
 	"github.com/croessner/nauthilus-director/internal/state"
 )
 
@@ -76,6 +77,7 @@ type SessionConfig struct {
 	SessionStore            state.SessionStore
 	BackendSelector         backend.Selector
 	BackendConnector        BackendConnector
+	PlacementGate           runtimectl.PlacementGate
 	MessageSink             MessageSink
 	Observability           observability.Recorder
 }

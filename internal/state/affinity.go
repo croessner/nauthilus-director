@@ -242,6 +242,14 @@ type UserHoldRecord struct {
 	ServerTime        time.Time
 }
 
+// UserHoldStore owns Redis-backed user placement-hold reads and mutations.
+type UserHoldStore interface {
+	SetUserHold(ctx context.Context, request UserHoldSetRequest) (UserHoldRecord, error)
+	GetUserHold(ctx context.Context, request UserHoldGetRequest) (UserHoldRecord, error)
+	ClearUserHold(ctx context.Context, request UserHoldClearRequest) (UserHoldRecord, error)
+	CheckUserHold(ctx context.Context, request UserHoldCheckRequest) (UserHoldRecord, error)
+}
+
 // UserBackendPinRecord describes Redis-backed backend-pin state after a read or mutation.
 type UserBackendPinRecord struct {
 	Present            bool

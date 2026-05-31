@@ -31,6 +31,7 @@ import (
 	"github.com/croessner/nauthilus-director/internal/nauthilus"
 	"github.com/croessner/nauthilus-director/internal/observability"
 	"github.com/croessner/nauthilus-director/internal/routing"
+	runtimectl "github.com/croessner/nauthilus-director/internal/runtime"
 	"github.com/croessner/nauthilus-director/internal/state"
 )
 
@@ -115,6 +116,10 @@ func (s *Session) handleRecipientPlacement(ctx context.Context, recipient Recipi
 	})
 	s.recordRoutingResolve(routeCtx, lmtpObservationResultOK, lmtpReasonOK, routingResult.ShardTag, routeDuration)
 	routeSpan.End(lmtpObservationResultOK, lmtpReasonOK)
+
+	if err := s.waitForPlacementGate(ctx, routingResult); err != nil {
+		return RecipientPlacement{}, err
+	}
 
 	backendPin, err := s.lookupOperatorBackendPin(ctx, routingResult)
 	if err != nil {
@@ -274,6 +279,25 @@ func (s *Session) withDefaultRecipientShard(result routing.RoutingResult) routin
 	result.ShardTag = s.defaultShard
 
 	return result
+}
+
+// waitForPlacementGate applies the shared user-hold gate before delivery placement reads.
+func (s *Session) waitForPlacementGate(ctx context.Context, result routing.RoutingResult) error {
+	if s.placementGate == nil {
+		return nil
+	}
+
+	_, err := s.placementGate.WaitForPlacement(ctx, runtimectl.PlacementGateRequest{
+		Key: runtimectl.UserKey{
+			Tenant:   normalizedRoutingFact(result.Tenant),
+			UserHash: normalizedAccount(result.AccountKey),
+		},
+		Protocol:     protocolLMTP,
+		ListenerName: s.listenerName,
+		ServiceName:  s.serviceName,
+	})
+
+	return err
 }
 
 // selectRecipientBackend selects through the shared runtime-aware backend selector.

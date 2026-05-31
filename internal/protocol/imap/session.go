@@ -87,6 +87,7 @@ type Session struct {
 	backendConnector BackendConnector
 	proxyRunner      proxy.Runner
 	localSessions    *runtimectl.LocalSessionRegistry
+	placementGate    runtimectl.PlacementGate
 	observability    observability.Recorder
 
 	tlsActive     bool
@@ -159,6 +160,7 @@ func NewSession(config SessionConfig, conn net.Conn) (*Session, error) {
 		backendConnector: backendConnector,
 		proxyRunner:      proxyRunner,
 		localSessions:    config.LocalSessions,
+		placementGate:    config.PlacementGate,
 		observability:    observability.NormalizeRecorder(config.Observability),
 		tlsActive:        config.TLSMode == TLSModeImplicit,
 	}, nil

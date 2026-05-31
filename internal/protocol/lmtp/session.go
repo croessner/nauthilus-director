@@ -30,6 +30,7 @@ import (
 	"github.com/croessner/nauthilus-director/internal/nauthilus"
 	"github.com/croessner/nauthilus-director/internal/observability"
 	"github.com/croessner/nauthilus-director/internal/routing"
+	runtimectl "github.com/croessner/nauthilus-director/internal/runtime"
 	"github.com/croessner/nauthilus-director/internal/state"
 )
 
@@ -86,6 +87,7 @@ type Session struct {
 	routingResolver            routing.RoutingResolver
 	sessionStore               state.SessionStore
 	backendSelector            backend.Selector
+	placementGate              runtimectl.PlacementGate
 	observability              observability.Recorder
 
 	tlsActive             bool
@@ -169,6 +171,7 @@ func NewSession(config SessionConfig, conn net.Conn) (*Session, error) {
 		routingResolver:            config.RoutingResolver,
 		sessionStore:               config.SessionStore,
 		backendSelector:            config.BackendSelector,
+		placementGate:              config.PlacementGate,
 		observability:              observability.NormalizeRecorder(config.Observability),
 		tlsActive:                  config.TLSMode == TLSModeImplicit,
 	}, nil

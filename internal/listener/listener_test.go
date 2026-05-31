@@ -564,6 +564,25 @@ func TestRepeatedDrainAndResumeCallsAreDeterministic(t *testing.T) {
 	}
 }
 
+// TestHardDrainCancelsSessionContext verifies blocking protocol waits observe listener drains.
+func TestHardDrainCancelsSessionContext(t *testing.T) {
+	cfg := singleListenerConfig(t, testIMAPListener, tlsModeStartTLS)
+	handler := newContextAwareHandler()
+	manager, address := startManager(t, cfg, testIMAPListener, WithSessionHandlerFactory(handler.factory))
+
+	conn, err := net.Dial(networkTCP, address)
+	if err != nil {
+		t.Fatalf("dial listener: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	handler.waitStarted(t)
+
+	grace := time.Duration(0)
+	drainListener(t, manager, DrainRequest{Name: testIMAPListener, Mode: DrainModeHard, Grace: &grace})
+	handler.waitCancelled(t)
+}
+
 // TestDrainRequestValidationRequiresExplicitHardGrace verifies fail-closed drain input.
 func TestDrainRequestValidationRequiresExplicitHardGrace(t *testing.T) {
 	cfg := singleListenerConfig(t, testIMAPListener, tlsModeStartTLS)
@@ -890,6 +909,12 @@ type recordingHandler struct {
 	remote chan string
 }
 
+// contextAwareHandler records whether the listener cancels the protocol context.
+type contextAwareHandler struct {
+	started   chan struct{}
+	cancelled chan struct{}
+}
+
 type recordingListenerObservability struct {
 	mu     sync.Mutex
 	events []observability.Event
@@ -962,8 +987,21 @@ func newRecordingHandler() *recordingHandler {
 	return &recordingHandler{remote: make(chan string, 1)}
 }
 
+// newContextAwareHandler creates a handler that blocks on context cancellation.
+func newContextAwareHandler() *contextAwareHandler {
+	return &contextAwareHandler{
+		started:   make(chan struct{}),
+		cancelled: make(chan struct{}),
+	}
+}
+
 // factory returns the recorder itself as the configured session handler.
 func (h *recordingHandler) factory(SessionOptions) SessionHandler {
+	return h
+}
+
+// factory returns the context-aware handler for one listener config.
+func (h *contextAwareHandler) factory(SessionOptions) SessionHandler {
 	return h
 }
 
@@ -978,6 +1016,37 @@ func (h *recordingHandler) Serve(_ context.Context, conn net.Conn) error {
 	_, _ = io.Copy(io.Discard, conn)
 
 	return nil
+}
+
+// Serve waits until the listener cancels the protocol context.
+func (h *contextAwareHandler) Serve(ctx context.Context, _ net.Conn) error {
+	close(h.started)
+	<-ctx.Done()
+	close(h.cancelled)
+
+	return ctx.Err()
+}
+
+// waitStarted waits until the context-aware handler is running.
+func (h *contextAwareHandler) waitStarted(t *testing.T) {
+	t.Helper()
+
+	select {
+	case <-h.started:
+	case <-time.After(time.Second):
+		t.Fatal("handler did not start")
+	}
+}
+
+// waitCancelled waits until the context-aware handler observes cancellation.
+func (h *contextAwareHandler) waitCancelled(t *testing.T) {
+	t.Helper()
+
+	select {
+	case <-h.cancelled:
+	case <-time.After(time.Second):
+		t.Fatal("handler context was not cancelled")
+	}
 }
 
 // expectRemote asserts that the handler observed the expected remote address.

@@ -258,6 +258,7 @@ func provideListenerManager(
 	resolver routing.RoutingResolver,
 	store *state.RedisSessionStore,
 	selector *backend.RuntimeSelector,
+	userHolds *runtimectl.UserHoldService,
 	localSessions *runtimectl.LocalSessionRegistry,
 	recorder observability.Recorder,
 ) (*listener.Manager, error) {
@@ -265,8 +266,26 @@ func provideListenerManager(
 		cfg,
 		listener.WithLocalSessionRegistry(localSessions),
 		listener.WithObservabilityRecorder(recorder),
-		listener.WithSessionHandlerFactory(sessionHandlerFactory(resolver, store, selector, selector, recorder)),
+		listener.WithSessionHandlerFactory(sessionHandlerFactory(resolver, store, selector, selector, userHolds, recorder)),
 	)
+}
+
+// provideUserHoldService creates the shared user placement-hold gate.
+func provideUserHoldService(
+	cfg config.Config,
+	store *state.RedisSessionStore,
+	recorder observability.Recorder,
+) (*runtimectl.UserHoldService, error) {
+	holds := cfg.Director.Affinity.UserHolds
+
+	return runtimectl.NewUserHoldService(store, runtimectl.UserHoldServiceConfig{
+		Enabled:                holds.Enabled,
+		MaxDuration:            holds.MaxDuration.Std(),
+		MaxWait:                holds.MaxWait.Std(),
+		PollInterval:           holds.PollInterval.Std(),
+		MaxLocalWaiters:        holds.MaxLocalWaiters,
+		MaxLocalWaitersPerUser: holds.MaxLocalWaitersPerUser,
+	}, runtimectl.WithObservabilityRecorder(recorder))
 }
 
 // provideBackendReadService creates the runtime-effective backend inventory reader.
@@ -497,14 +516,15 @@ func sessionHandlerFactory(
 	store state.SessionStore,
 	selector backend.Selector,
 	capabilities backendCapabilityReader,
+	placementGate runtimectl.PlacementGate,
 	recorder observability.Recorder,
 ) listener.SessionHandlerFactory {
 	return func(options listener.SessionOptions) listener.SessionHandler {
 		switch strings.ToLower(strings.TrimSpace(options.Config.Protocol)) {
 		case protocolIMAP:
-			return imapSessionHandler(options, resolver, store, selector, recorder)
+			return imapSessionHandler(options, resolver, store, selector, placementGate, recorder)
 		case protocolLMTP:
-			return lmtpSessionHandler(options, resolver, store, selector, capabilities)
+			return lmtpSessionHandler(options, resolver, store, selector, capabilities, placementGate)
 		default:
 			return unsupportedProtocolHandler{protocol: options.Config.Protocol}
 		}
@@ -526,6 +546,7 @@ func imapSessionHandler(
 	resolver routing.RoutingResolver,
 	store state.SessionStore,
 	selector backend.Selector,
+	placementGate runtimectl.PlacementGate,
 	recorder observability.Recorder,
 ) listener.SessionHandler {
 	capabilities, mechanisms, requireID := imapListenerOptions(options.Config)
@@ -561,6 +582,7 @@ func imapSessionHandler(
 		BackendConnector:       imap.NewTCPBackendConnector(nil),
 		ProxyRunner:            proxy.NewPipe(),
 		LocalSessions:          options.LocalSessions,
+		PlacementGate:          placementGate,
 		Observability:          recorder,
 	})
 }
@@ -572,6 +594,7 @@ func lmtpSessionHandler(
 	store state.SessionStore,
 	selector backend.Selector,
 	capabilityReader backendCapabilityReader,
+	placementGate runtimectl.PlacementGate,
 ) listener.SessionHandler {
 	var (
 		listenerCapabilities []string
@@ -612,6 +635,7 @@ func lmtpSessionHandler(
 		SessionStore:            store,
 		BackendSelector:         selector,
 		BackendConnector:        lmtp.NewTCPBackendConnector(nil),
+		PlacementGate:           placementGate,
 		BackendChunkingAllowed:  lmtpBackendChunkingAllowed(capabilityReader, options.Config.BackendPool),
 		RecipientLookupRequired: true,
 		Observability:           options.Observability,

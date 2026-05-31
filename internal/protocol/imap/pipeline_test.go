@@ -36,6 +36,7 @@ import (
 	"github.com/croessner/nauthilus-director/internal/nauthilus"
 	"github.com/croessner/nauthilus-director/internal/proxy"
 	"github.com/croessner/nauthilus-director/internal/routing"
+	runtimectl "github.com/croessner/nauthilus-director/internal/runtime"
 	"github.com/croessner/nauthilus-director/internal/state"
 )
 
@@ -314,6 +315,89 @@ func TestAuthenticatedPathKeepsActiveBackendSeparateFromOperatorPin(t *testing.T
 
 	if selector.request.OperatorBackendIdentifier != "" {
 		t.Fatalf("operator backend pin = %q, want inactive while active backend is present", selector.request.OperatorBackendIdentifier)
+	}
+}
+
+// TestAuthenticatedPlacementGateRunsBeforeRuntimeReads verifies release re-enters state reads.
+func TestAuthenticatedPlacementGateRunsBeforeRuntimeReads(t *testing.T) {
+	authenticator := &recordingAuthenticator{result: nauthilus.AuthResult{Decision: nauthilus.DecisionAuthenticated, Account: "alice@example.test"}}
+	router := &recordingRoutingResolver{
+		result: routing.RoutingResult{
+			AccountKey: "alice@example.test",
+			Tenant:     defaultTenantName,
+			ShardTag:   "mailstore-a",
+		},
+	}
+	store := &recordingSessionStore{}
+	selector := &recordingBackendSelector{result: backend.SelectionResult{Backend: backend.Backend{Identifier: "mailstore-c-imap"}}}
+	gate := &recordingPlacementGate{
+		wait: func(_ context.Context, request runtimectl.PlacementGateRequest) (runtimectl.PlacementGateResult, error) {
+			if request.Protocol != protocolIMAP || request.ListenerName == "" || request.ServiceName == "" {
+				t.Fatalf("placement-gate request = %#v, want IMAP listener context", request)
+			}
+
+			if store.backendPinCalls != 0 || store.calls != 0 || selector.calls != 0 {
+				t.Fatalf("runtime side effects before gate release = pin:%d session:%d selector:%d", store.backendPinCalls, store.calls, selector.calls)
+			}
+
+			store.backendPin = state.UserBackendPinRecord{
+				Present:           true,
+				BackendIdentifier: "mailstore-c-imap",
+				Protocol:          protocolIMAP,
+				BackendPool:       "imap-default",
+				ShardTag:          "mailstore-c",
+			}
+
+			return runtimectl.PlacementGateResult{
+				Outcome:                     runtimectl.PlacementGateOutcomeReleased,
+				RuntimeStateRecheckRequired: true,
+			}, nil
+		},
+	}
+
+	config := pipelineSessionConfig(authenticator, router, store, selector)
+	config.PlacementGate = gate
+	harness := startTestSession(t, config)
+
+	harness.expectLine(t, greetingLine)
+	harness.write(t, `A001 LOGIN "alice@example.test" "secret-password"`+"\r\n")
+	harness.expectLine(t, "A001 OK Authentication completed\r\n")
+
+	if gate.calls != 1 {
+		t.Fatalf("placement gate calls = %d, want 1", gate.calls)
+	}
+
+	if selector.request.OperatorBackendIdentifier != "mailstore-c-imap" {
+		t.Fatalf("operator backend pin after gate release = %q, want re-read pin", selector.request.OperatorBackendIdentifier)
+	}
+}
+
+// TestAuthenticatedPlacementGateTemporaryFailureStopsPlacement verifies timeout does not route.
+func TestAuthenticatedPlacementGateTemporaryFailureStopsPlacement(t *testing.T) {
+	authenticator := &recordingAuthenticator{result: nauthilus.AuthResult{Decision: nauthilus.DecisionAuthenticated, Account: "alice@example.test"}}
+	router := &recordingRoutingResolver{
+		result: routing.RoutingResult{
+			AccountKey: "alice@example.test",
+			Tenant:     defaultTenantName,
+			ShardTag:   "mailstore-a",
+		},
+	}
+	store := &recordingSessionStore{}
+	selector := &recordingBackendSelector{}
+	gate := &recordingPlacementGate{
+		err: &runtimectl.Error{Kind: runtimectl.ErrorKindUnavailable, Operation: "user_hold_check", Message: "user hold wait timeout"},
+	}
+
+	config := pipelineSessionConfig(authenticator, router, store, selector)
+	config.PlacementGate = gate
+	harness := startTestSession(t, config)
+
+	harness.expectLine(t, greetingLine)
+	harness.write(t, `A001 LOGIN "alice@example.test" "secret-password"`+"\r\n")
+	harness.expectLine(t, "A001 NO [UNAVAILABLE] Authentication service temporarily unavailable\r\n")
+
+	if store.backendPinCalls != 0 || store.calls != 0 || selector.calls != 0 {
+		t.Fatalf("placement after gate failure = pin:%d session:%d selector:%d, want none", store.backendPinCalls, store.calls, selector.calls)
 	}
 }
 
@@ -892,6 +976,14 @@ type recordingBackendSelector struct {
 	err     error
 }
 
+type recordingPlacementGate struct {
+	calls   int
+	request runtimectl.PlacementGateRequest
+	result  runtimectl.PlacementGateResult
+	err     error
+	wait    func(context.Context, runtimectl.PlacementGateRequest) (runtimectl.PlacementGateResult, error)
+}
+
 // Select records the selector request and returns the configured backend result.
 func (s *recordingBackendSelector) Select(_ context.Context, request backend.SelectionRequest) (backend.SelectionResult, error) {
 	s.calls++
@@ -901,6 +993,20 @@ func (s *recordingBackendSelector) Select(_ context.Context, request backend.Sel
 	}
 
 	return s.result, s.err
+}
+
+// WaitForPlacement records the shared hold gate request and returns the configured result.
+func (g *recordingPlacementGate) WaitForPlacement(
+	ctx context.Context,
+	request runtimectl.PlacementGateRequest,
+) (runtimectl.PlacementGateResult, error) {
+	g.calls++
+	g.request = request
+	if g.wait != nil {
+		return g.wait(ctx, request)
+	}
+
+	return g.result, g.err
 }
 
 // pipelineSessionConfig returns a bounded IMAP config with auth pipeline dependencies installed.

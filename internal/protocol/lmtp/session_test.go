@@ -37,6 +37,7 @@ import (
 	"github.com/croessner/nauthilus-director/internal/backend"
 	"github.com/croessner/nauthilus-director/internal/nauthilus"
 	"github.com/croessner/nauthilus-director/internal/routing"
+	runtimectl "github.com/croessner/nauthilus-director/internal/runtime"
 	"github.com/croessner/nauthilus-director/internal/state"
 )
 
@@ -569,6 +570,45 @@ func TestRecipientPlacementUsesIdentityRoutingAndPreservesWirePath(t *testing.T)
 	assertSingleWireRecipient(t, sink.singleSnapshot(t))
 
 	store.assertClosed(t, 1)
+}
+
+// TestRecipientPlacementGateTemporaryFailureStopsPlacement verifies held recipients do not route.
+func TestRecipientPlacementGateTemporaryFailureStopsPlacement(t *testing.T) {
+	identity := identityLookuperForRecipients(map[string]string{
+		testRecipientSingle: testPlacementShardA,
+	})
+	resolver := &recordingRoutingResolver{}
+	store := &recordingDeliveryStore{}
+	selector := &recordingBackendSelector{}
+	gate := &recordingRecipientPlacementGate{
+		err: &runtimectl.Error{Kind: runtimectl.ErrorKindUnavailable, Operation: "user_hold_check", Message: "user hold wait timeout"},
+	}
+	config := placementSessionConfig(identity, resolver, store, selector)
+	config.PlacementGate = gate
+
+	harness := startLMTPHarness(t, config)
+	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+	harness.write(t, "LHLO submitter.example\r\n")
+	harness.drainLHLO(t)
+	harness.write(t, "MAIL FROM:<sender@example.test>\r\n")
+	harness.expectLine(t, "250 2.0.0 Sender accepted\r\n")
+	harness.write(t, "RCPT TO:<recipient@example.test>\r\n")
+	harness.expectLine(t, "451 4.3.0 Recipient lookup temporarily unavailable\r\n")
+
+	if gate.calls != 1 {
+		t.Fatalf("placement gate calls = %d, want 1", gate.calls)
+	}
+
+	if gate.request.Protocol != protocolLMTP || gate.request.ListenerName != testPlacementListener || gate.request.ServiceName != testPlacementService {
+		t.Fatalf("placement gate request = %#v, want LMTP listener context", gate.request)
+	}
+
+	store.assertOpened(t, 0)
+	store.assertAttached(t, 0)
+
+	if selector.requestCount() != 0 {
+		t.Fatalf("selector calls = %d, want no backend selection", selector.requestCount())
+	}
 }
 
 // TestRecipientPlacementUsesScopedLMTPBackendPin verifies LMTP pins are pool scoped.
@@ -1672,6 +1712,13 @@ type recordingBackendSelector struct {
 	backendForShard map[string]string
 }
 
+type recordingRecipientPlacementGate struct {
+	calls   int
+	request runtimectl.PlacementGateRequest
+	result  runtimectl.PlacementGateResult
+	err     error
+}
+
 // Select records backend selection and returns a deterministic LMTP backend.
 func (s *recordingBackendSelector) Select(_ context.Context, request backend.SelectionRequest) (backend.SelectionResult, error) {
 	s.mu.Lock()
@@ -1714,6 +1761,17 @@ func (s *recordingBackendSelector) Select(_ context.Context, request backend.Sel
 	}, nil
 }
 
+// WaitForPlacement records the shared recipient hold gate request.
+func (g *recordingRecipientPlacementGate) WaitForPlacement(
+	_ context.Context,
+	request runtimectl.PlacementGateRequest,
+) (runtimectl.PlacementGateResult, error) {
+	g.calls++
+	g.request = request
+
+	return g.result, g.err
+}
+
 // firstRequest returns the first selector request.
 func (s *recordingBackendSelector) firstRequest(t *testing.T) backend.SelectionRequest {
 	t.Helper()
@@ -1726,6 +1784,14 @@ func (s *recordingBackendSelector) firstRequest(t *testing.T) backend.SelectionR
 	}
 
 	return s.requests[0]
+}
+
+// requestCount returns how often the selector was called.
+func (s *recordingBackendSelector) requestCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return len(s.requests)
 }
 
 type recordingAuthenticator struct {

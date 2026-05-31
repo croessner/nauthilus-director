@@ -43,7 +43,7 @@ type managedListener struct {
 
 	mu        sync.Mutex
 	listener  net.Listener
-	active    map[net.Conn]struct{}
+	active    map[net.Conn]context.CancelFunc
 	state     State
 	drainMode DrainMode
 	acceptWG  sync.WaitGroup
@@ -137,7 +137,7 @@ func newManagedListener(
 		proxyProtocol: proxyPolicy,
 		listenConfig:  options.listenConfig,
 		observability: observability.NormalizeRecorder(options.observability),
-		active:        map[net.Conn]struct{}{},
+		active:        map[net.Conn]context.CancelFunc{},
 		state:         StateStopped,
 	}, nil
 }
@@ -257,7 +257,6 @@ func (l *managedListener) acceptLoop(ln net.Listener) {
 			return
 		}
 
-		l.trackConnection(conn)
 		l.sessionWG.Add(1)
 		go l.serveConnection(conn)
 	}
@@ -267,6 +266,10 @@ func (l *managedListener) acceptLoop(ln net.Listener) {
 func (l *managedListener) serveConnection(conn net.Conn) {
 	defer l.sessionWG.Done()
 
+	sessionCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	l.trackConnection(conn, cancel)
 	defer l.untrackConnection(conn)
 	defer func() { _ = conn.Close() }()
 
@@ -275,7 +278,7 @@ func (l *managedListener) serveConnection(conn net.Conn) {
 		return
 	}
 
-	_ = l.handler.Serve(context.Background(), prepared)
+	_ = l.handler.Serve(sessionCtx, prepared)
 }
 
 // prepareConnection validates optional PROXY metadata before optional TLS wrapping.
@@ -306,11 +309,11 @@ func (l *managedListener) prepareConnection(conn net.Conn) (net.Conn, error) {
 }
 
 // trackConnection records an active connection for deadline-enforced shutdown.
-func (l *managedListener) trackConnection(conn net.Conn) {
+func (l *managedListener) trackConnection(conn net.Conn, cancel context.CancelFunc) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	l.active[conn] = struct{}{}
+	l.active[conn] = cancel
 }
 
 // untrackConnection removes a connection from the shutdown tracking set.
@@ -326,15 +329,22 @@ func (l *managedListener) untrackConnection(conn net.Conn) {
 func (l *managedListener) closeActiveConnections() {
 	l.mu.Lock()
 
-	active := make([]net.Conn, 0, len(l.active))
-	for conn := range l.active {
-		active = append(active, conn)
+	active := make([]activeConnection, 0, len(l.active))
+	for conn, cancel := range l.active {
+		active = append(active, activeConnection{conn: conn, cancel: cancel})
 	}
 	l.mu.Unlock()
 
-	for _, conn := range active {
-		_ = conn.Close()
+	for _, entry := range active {
+		entry.cancel()
+		_ = entry.conn.Close()
 	}
+}
+
+// activeConnection couples one tracked transport with its protocol context canceler.
+type activeConnection struct {
+	conn   net.Conn
+	cancel context.CancelFunc
 }
 
 // softDrain closes only the accept socket while preserving active streams.
