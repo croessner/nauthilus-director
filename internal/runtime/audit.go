@@ -105,6 +105,10 @@ const (
 	AuditOperationUserBackendPinClear AuditOperation = "user_backend_pin_clear"
 	// AuditOperationUserBackendPinSet records a user backend-pin mutation.
 	AuditOperationUserBackendPinSet AuditOperation = "user_backend_pin_set"
+	// AuditOperationUserHoldClear records a user placement-hold clear mutation.
+	AuditOperationUserHoldClear AuditOperation = "user_hold_clear"
+	// AuditOperationUserHoldSet records a user placement-hold mutation.
+	AuditOperationUserHoldSet AuditOperation = "user_hold_set"
 	// AuditOperationUserKick records a user kick mutation.
 	AuditOperationUserKick AuditOperation = "user_kick"
 	// AuditOperationUserMove records a user move mutation.
@@ -119,6 +123,9 @@ const (
 	auditFieldControlAction      = "control_action"
 	auditFieldEffectiveShard     = "effective_shard"
 	auditFieldExpiredSessions    = "expired_sessions"
+	auditFieldHoldDuration       = "hold_duration_seconds"
+	auditFieldHoldExpiresAt      = "hold_expires_at"
+	auditFieldHoldPresent        = "hold_present"
 	auditFieldListenerDrainMode  = "listener_drain_mode"
 	auditFieldListenerGrace      = "listener_grace_seconds"
 	auditFieldListenerName       = "listener"

@@ -28,7 +28,7 @@ paths:
     description: Director-owned routing selector, shard default, hash-key, and failover behavior.
   director.affinity.**:
     stability: stable
-    description: Active user affinity, pinning, failover, and local-cache behavior.
+    description: Active user affinity, placement holds, pinning, failover, and local-cache behavior.
   director.runtime_overrides.**:
     stability: stable
     description: Operator-controlled runtime override permissions and safety envelopes.

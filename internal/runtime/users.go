@@ -34,6 +34,10 @@ const (
 	operationUserBackendPinSet   = "user_backend_pin_set"
 	operationUserBackendPinGet   = "user_backend_pin_get"
 	operationUserBackendPinClear = "user_backend_pin_clear"
+	operationUserHoldSet         = "user_hold_set"
+	operationUserHoldGet         = "user_hold_get"
+	operationUserHoldClear       = "user_hold_clear"
+	operationUserHoldCheck       = "user_hold_check"
 	operationUserKick            = "user_kick"
 	operationUserMove            = "user_move"
 )
@@ -89,6 +93,17 @@ type UserBackendPin struct {
 	Generation         string
 	ActiveSessionCount int
 	UpdatedAt          time.Time
+}
+
+// UserHold describes one temporary user placement gate without a routing target.
+type UserHold struct {
+	Present           bool
+	Key               UserKey
+	Generation        string
+	CreatedAt         time.Time
+	ExpiresAt         time.Time
+	RequestedDuration time.Duration
+	UpdatedAt         time.Time
 }
 
 // UserListRequest describes one bounded runtime user read.
@@ -153,6 +168,31 @@ type ClearUserBackendPinRequest struct {
 	ExpectedGeneration string
 }
 
+// SetUserHoldRequest asks runtime state to block new placement for one affinity key.
+type SetUserHoldRequest struct {
+	Key      UserKey
+	Duration time.Duration
+	Reason   string
+	Actor    Actor
+}
+
+// GetUserHoldRequest asks runtime state for one user placement hold.
+type GetUserHoldRequest struct {
+	Key UserKey
+}
+
+// ClearUserHoldRequest asks runtime state to remove one user placement hold.
+type ClearUserHoldRequest struct {
+	Key    UserKey
+	Reason string
+	Actor  Actor
+}
+
+// CheckUserHoldRequest asks placement to read the hold gate for one affinity key.
+type CheckUserHoldRequest struct {
+	Key UserKey
+}
+
 // UserMutationResult describes a runtime user mutation outcome.
 type UserMutationResult struct {
 	State UserRuntimeState
@@ -169,6 +209,28 @@ type UserBackendPinMutationResult struct {
 	Pin    UserBackendPin
 	Target UserBackendPinTarget
 	Audit  AuditMetadata
+}
+
+// SetUserHoldResult describes an audited hold-set outcome.
+type SetUserHoldResult struct {
+	Hold  UserHold
+	Audit AuditMetadata
+}
+
+// GetUserHoldResult describes a hold read outcome.
+type GetUserHoldResult struct {
+	Hold UserHold
+}
+
+// ClearUserHoldResult describes an audited hold-clear outcome.
+type ClearUserHoldResult struct {
+	Hold  UserHold
+	Audit AuditMetadata
+}
+
+// CheckUserHoldResult describes a placement hold-gate read.
+type CheckUserHoldResult struct {
+	Hold UserHold
 }
 
 // UserStateStore persists Redis-backed user runtime operations.
@@ -555,6 +617,56 @@ func (r ClearUserBackendPinRequest) Validate() error {
 	return requireReason(operationUserBackendPinClear, r.Reason)
 }
 
+// Validate checks the hold set request against the configured duration ceiling.
+func (r SetUserHoldRequest) Validate(maxDuration time.Duration) error {
+	if err := r.Key.Validate(operationUserHoldSet); err != nil {
+		return err
+	}
+
+	if r.Duration <= 0 {
+		return newRuntimeError(ErrorKindInvalidRequest, operationUserHoldSet, "hold duration must be greater than zero")
+	}
+
+	if maxDuration <= 0 {
+		return newRuntimeError(ErrorKindUnavailable, operationUserHoldSet, "hold maximum duration unavailable")
+	}
+
+	if r.Duration > maxDuration {
+		return newRuntimeError(ErrorKindInvalidRequest, operationUserHoldSet, "hold duration exceeds configured maximum")
+	}
+
+	return requireReason(operationUserHoldSet, r.Reason)
+}
+
+// AuditMetadata creates secret-safe metadata for an accepted hold set.
+func (r SetUserHoldRequest) AuditMetadata(hold UserHold) (AuditMetadata, error) {
+	return userHoldAuditMetadata(AuditOperationUserHoldSet, r.Reason, r.Actor, hold)
+}
+
+// Validate checks the hold read request before state access.
+func (r GetUserHoldRequest) Validate() error {
+	return r.Key.Validate(operationUserHoldGet)
+}
+
+// Validate checks the hold clear request before state access.
+func (r ClearUserHoldRequest) Validate() error {
+	if err := r.Key.Validate(operationUserHoldClear); err != nil {
+		return err
+	}
+
+	return requireReason(operationUserHoldClear, r.Reason)
+}
+
+// AuditMetadata creates secret-safe metadata for an accepted hold clear.
+func (r ClearUserHoldRequest) AuditMetadata(hold UserHold) (AuditMetadata, error) {
+	return userHoldAuditMetadata(AuditOperationUserHoldClear, r.Reason, r.Actor, hold)
+}
+
+// Validate checks the placement hold-gate request before state access.
+func (r CheckUserHoldRequest) Validate() error {
+	return r.Key.Validate(operationUserHoldCheck)
+}
+
 // Validate checks derived backend-pin target facts before persistence.
 func (t UserBackendPinTarget) Validate(operation string) error {
 	if strings.TrimSpace(t.BackendIdentifier) == "" {
@@ -801,6 +913,48 @@ func userBackendPinAuditMetadata(
 		UserHash:          record.Key.AccountKey,
 		Fields:            backendPinAuditFields(record),
 	})
+}
+
+// userHoldAuditMetadata creates secret-safe audit metadata for placement holds.
+func userHoldAuditMetadata(operation AuditOperation, reason string, actor Actor, hold UserHold) (AuditMetadata, error) {
+	return NewAuditMetadata(AuditInput{
+		Operation:  operation,
+		Reason:     reason,
+		Actor:      actor,
+		Generation: strings.TrimSpace(hold.Generation),
+		ServerTime: userHoldAuditTime(hold),
+		UserHash:   hold.Key.UserHash,
+		Fields:     userHoldAuditFields(hold),
+	})
+}
+
+// userHoldAuditTime selects the most specific server-derived hold timestamp.
+func userHoldAuditTime(hold UserHold) time.Time {
+	switch {
+	case !hold.UpdatedAt.IsZero():
+		return hold.UpdatedAt
+	case !hold.CreatedAt.IsZero():
+		return hold.CreatedAt
+	default:
+		return time.Time{}
+	}
+}
+
+// userHoldAuditFields returns bounded placement-hold context without operator secrets.
+func userHoldAuditFields(hold UserHold) map[string]string {
+	fields := map[string]string{
+		auditFieldHoldPresent: boolAuditValue(hold.Present),
+	}
+
+	if hold.RequestedDuration > 0 {
+		fields[auditFieldHoldDuration] = strconv.FormatInt(int64(hold.RequestedDuration/time.Second), 10)
+	}
+
+	if !hold.ExpiresAt.IsZero() {
+		fields[auditFieldHoldExpiresAt] = hold.ExpiresAt.UTC().Format(time.RFC3339)
+	}
+
+	return fields
 }
 
 // backendPinAuditFields returns bounded backend-pin context without transport secrets.

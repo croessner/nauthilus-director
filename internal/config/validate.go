@@ -344,10 +344,29 @@ func validateDirector(director DirectorConfig, authorities map[string]AuthorityC
 	requirePositiveDuration("director.affinity.active_user_pinning.idle_grace", director.Affinity.ActiveUserPinning.IdleGrace, problems)
 	requirePositiveDuration("director.affinity.local_cache.ttl", director.Affinity.LocalCache.TTL, problems)
 	requirePositiveInt("director.affinity.local_cache.max_entries", director.Affinity.LocalCache.MaxEntries, problems)
+	validateUserHolds("director.affinity.user_holds", director.Affinity.UserHolds, problems)
 	requirePositiveDuration("director.health.interval", director.Health.Interval, problems)
 	requirePositiveDuration("director.health.timeout", director.Health.Timeout, problems)
 	requirePositiveDuration("director.maintenance.drain_timeout", director.Maintenance.DrainTimeout, problems)
 	requirePositiveDuration("director.maintenance.hard_kill_grace", director.Maintenance.HardKillGrace, problems)
+}
+
+// validateUserHolds enforces bounded placement holds and local waiter limits.
+func validateUserHolds(path string, holds UserHoldsConfig, problems *[]string) {
+	requirePositiveDuration(path+".max_duration", holds.MaxDuration, problems)
+	requirePositiveDuration(path+".max_wait", holds.MaxWait, problems)
+	requirePositiveDuration(path+".poll_interval", holds.PollInterval, problems)
+
+	if holds.PollInterval > holds.MaxWait {
+		addProblem(problems, path+".poll_interval must not exceed "+path+".max_wait")
+	}
+
+	requirePositiveInt(path+".max_local_waiters", holds.MaxLocalWaiters, problems)
+	requirePositiveInt(path+".max_local_waiters_per_user", holds.MaxLocalWaitersPerUser, problems)
+
+	if holds.MaxLocalWaitersPerUser > holds.MaxLocalWaiters {
+		addProblem(problems, path+".max_local_waiters_per_user must not exceed "+path+".max_local_waiters")
+	}
 }
 
 // validateMaintenanceMode rejects static backend maintenance modes that selectors cannot enforce.

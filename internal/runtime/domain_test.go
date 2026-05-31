@@ -33,6 +33,15 @@ import (
 const (
 	runtimeTestBackendIdentifier = "backend-a"
 	runtimeTestBackendPinReason  = "commission backend"
+	runtimeTestFieldBackendID    = "BackendIdentifier"
+	runtimeTestFieldToBackend    = "ToBackend"
+	runtimeTestFieldToBackendID  = "ToBackendIdentifier"
+	runtimeTestHoldActorClear    = "operator-b"
+	runtimeTestHoldActorSet      = "operator-a"
+	runtimeTestHoldGenerationSet = "hold-1"
+	runtimeTestHoldGenerationEnd = "hold-2"
+	runtimeTestHoldReason        = "hold user placement"
+	runtimeTestMTLSAuthMethod    = "mtls"
 	runtimeTestMoveReason        = "move user"
 	runtimeTestPinnedStatus      = "pinned"
 	runtimeTestSessionA          = "session-a"
@@ -162,6 +171,185 @@ func TestUserAndSessionRuntimeRequestsRejectEmptyReasons(t *testing.T) {
 			},
 		},
 	})
+}
+
+// TestUserHoldSetRejectsEmptyUserKey verifies holds require a normalized affinity key.
+func TestUserHoldSetRejectsEmptyUserKey(t *testing.T) {
+	err := SetUserHoldRequest{
+		Key:      UserKey{Tenant: runtimeTestTenant},
+		Duration: time.Minute,
+		Reason:   runtimeTestHoldReason,
+	}.Validate(30 * time.Minute)
+	if !IsErrorKind(err, ErrorKindInvalidRequest) {
+		t.Fatalf("Validate error = %v, want invalid_request", err)
+	}
+}
+
+// TestUserHoldSetRejectsMissingReason verifies mutating hold requests remain auditable.
+func TestUserHoldSetRejectsMissingReason(t *testing.T) {
+	err := SetUserHoldRequest{
+		Key:      UserKey{Tenant: runtimeTestTenant, UserHash: runtimeTestUserHash},
+		Duration: time.Minute,
+	}.Validate(30 * time.Minute)
+	if !IsErrorKind(err, ErrorKindInvalidRequest) {
+		t.Fatalf("Validate error = %v, want invalid_request", err)
+	}
+}
+
+// TestUserHoldSetRejectsInvalidDuration verifies hold lifetimes are bounded.
+func TestUserHoldSetRejectsInvalidDuration(t *testing.T) {
+	userKey := UserKey{Tenant: runtimeTestTenant, UserHash: runtimeTestUserHash}
+
+	for name, request := range map[string]SetUserHoldRequest{
+		"zero": {
+			Key:    userKey,
+			Reason: runtimeTestHoldReason,
+		},
+		"negative": {
+			Key:      userKey,
+			Duration: -time.Second,
+			Reason:   runtimeTestHoldReason,
+		},
+		"above maximum": {
+			Key:      userKey,
+			Duration: 31 * time.Minute,
+			Reason:   runtimeTestHoldReason,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := request.Validate(30 * time.Minute); !IsErrorKind(err, ErrorKindInvalidRequest) {
+				t.Fatalf("Validate error = %v, want invalid_request", err)
+			}
+		})
+	}
+}
+
+// TestUserHoldSetRejectsUnavailableMaximum verifies bad policy input fails closed.
+func TestUserHoldSetRejectsUnavailableMaximum(t *testing.T) {
+	err := SetUserHoldRequest{
+		Key:      UserKey{Tenant: runtimeTestTenant, UserHash: runtimeTestUserHash},
+		Duration: time.Minute,
+		Reason:   runtimeTestHoldReason,
+	}.Validate(0)
+	if !IsErrorKind(err, ErrorKindUnavailable) {
+		t.Fatalf("Validate error = %v, want unavailable", err)
+	}
+}
+
+// TestUserHoldClearRejectsMissingReason verifies hold clears stay auditable.
+func TestUserHoldClearRejectsMissingReason(t *testing.T) {
+	err := ClearUserHoldRequest{
+		Key: UserKey{Tenant: runtimeTestTenant, UserHash: runtimeTestUserHash},
+	}.Validate()
+	if !IsErrorKind(err, ErrorKindInvalidRequest) {
+		t.Fatalf("Validate error = %v, want invalid_request", err)
+	}
+}
+
+// TestUserHoldReadRequestsRejectEmptyUserKey verifies read paths still need affinity keys.
+func TestUserHoldReadRequestsRejectEmptyUserKey(t *testing.T) {
+	for name, validate := range map[string]func() error{
+		"get": func() error {
+			return GetUserHoldRequest{Key: UserKey{Tenant: runtimeTestTenant}}.Validate()
+		},
+		"check": func() error {
+			return CheckUserHoldRequest{Key: UserKey{Tenant: runtimeTestTenant}}.Validate()
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := validate(); !IsErrorKind(err, ErrorKindInvalidRequest) {
+				t.Fatalf("Validate error = %v, want invalid_request", err)
+			}
+		})
+	}
+}
+
+// TestUserHoldAuditMetadataIsBounded verifies hold audits carry actor without secrets.
+func TestUserHoldAuditMetadataIsBounded(t *testing.T) {
+	actor := Actor{ID: runtimeTestHoldActorSet, AuthMethod: runtimeTestMTLSAuthMethod, Authenticated: true}
+	hold := UserHold{
+		Present:           true,
+		Key:               UserKey{Tenant: runtimeTestTenant, UserHash: runtimeTestUserHash},
+		Generation:        runtimeTestHoldGenerationSet,
+		CreatedAt:         time.Unix(100, 0),
+		ExpiresAt:         time.Unix(700, 0),
+		RequestedDuration: 10 * time.Minute,
+		UpdatedAt:         time.Unix(101, 0),
+	}
+
+	audit, err := (SetUserHoldRequest{
+		Key:      hold.Key,
+		Duration: 10 * time.Minute,
+		Reason:   runtimeTestHoldReason,
+		Actor:    actor,
+	}).AuditMetadata(hold)
+	if err != nil {
+		t.Fatalf("AuditMetadata returned error: %v", err)
+	}
+
+	if audit.Operation != AuditOperationUserHoldSet ||
+		audit.Actor.ID != actor.ID ||
+		audit.Generation != runtimeTestHoldGenerationSet ||
+		audit.UserHash != runtimeTestUserHash {
+		t.Fatalf("hold audit metadata = %#v", audit)
+	}
+
+	fields := audit.SafeFields()
+	if fields[auditFieldHoldDuration] != "600" ||
+		fields[auditFieldHoldPresent] != auditValueTrue ||
+		fields[auditFieldHoldExpiresAt] == "" {
+		t.Fatalf("hold audit fields = %#v", fields)
+	}
+
+	rendered := strings.Join(mapValues(fields), "\n")
+	if strings.Contains(rendered, runtimeTestHoldReason) || strings.Contains(rendered, runtimeTestHoldActorSet) {
+		t.Fatalf("hold audit fields leaked reason or actor: %#v", fields)
+	}
+}
+
+// TestUserHoldClearAuditMetadataIncludesActor verifies clear audits carry operator context.
+func TestUserHoldClearAuditMetadataIncludesActor(t *testing.T) {
+	actor := Actor{ID: runtimeTestHoldActorClear, Authenticated: true}
+	hold := UserHold{
+		Key:        UserKey{Tenant: runtimeTestTenant, UserHash: runtimeTestUserHash},
+		Generation: runtimeTestHoldGenerationEnd,
+		UpdatedAt:  time.Unix(200, 0),
+	}
+
+	audit, err := (ClearUserHoldRequest{
+		Key:    hold.Key,
+		Reason: "migration complete",
+		Actor:  actor,
+	}).AuditMetadata(hold)
+	if err != nil {
+		t.Fatalf("AuditMetadata returned error: %v", err)
+	}
+
+	if audit.Operation != AuditOperationUserHoldClear ||
+		audit.Actor.ID != actor.ID ||
+		audit.Generation != runtimeTestHoldGenerationEnd ||
+		audit.Fields[auditFieldHoldPresent] != auditValueFalse {
+		t.Fatalf("clear audit metadata = %#v", audit)
+	}
+}
+
+// TestUserHoldTypesRemainTargetFree verifies holds do not carry routing targets.
+func TestUserHoldTypesRemainTargetFree(t *testing.T) {
+	types := []reflect.Type{
+		reflect.TypeFor[UserHold](),
+		reflect.TypeFor[SetUserHoldRequest](),
+		reflect.TypeFor[GetUserHoldRequest](),
+		reflect.TypeFor[ClearUserHoldRequest](),
+		reflect.TypeFor[CheckUserHoldRequest](),
+	}
+
+	for _, holdType := range types {
+		for _, field := range []string{"TargetShard", "ShardTag", runtimeTestFieldBackendID, runtimeTestFieldToBackend, runtimeTestFieldToBackendID} {
+			if _, ok := holdType.FieldByName(field); ok {
+				t.Fatalf("%s gained routing target field %s", holdType.Name(), field)
+			}
+		}
+	}
 }
 
 // TestUserBackendPinSetRejectsEmptyUserKey verifies pinning needs a normalized affinity key.
@@ -454,7 +642,7 @@ func TestExistingUserMoveValidationRemainsShardOnly(t *testing.T) {
 	}
 
 	moveType := reflect.TypeFor[MoveUserRequest]()
-	for _, field := range []string{"ToBackend", "ToBackendIdentifier", "BackendIdentifier"} {
+	for _, field := range []string{runtimeTestFieldToBackend, runtimeTestFieldToBackendID, runtimeTestFieldBackendID} {
 		if _, ok := moveType.FieldByName(field); ok {
 			t.Fatalf("MoveUserRequest gained backend field %s", field)
 		}

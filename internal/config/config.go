@@ -409,6 +409,7 @@ type AffinityConfig struct {
 	Mode              string                  `mapstructure:"mode" yaml:"mode" validate:"required"`
 	InitialPlacement  string                  `mapstructure:"initial_placement" yaml:"initial_placement" validate:"required"`
 	ActiveUserPinning ActiveUserPinningConfig `mapstructure:"active_user_pinning" yaml:"active_user_pinning" validate:"required"`
+	UserHolds         UserHoldsConfig         `mapstructure:"user_holds" yaml:"user_holds" validate:"required"`
 	LocalCache        LocalCacheConfig        `mapstructure:"local_cache" yaml:"local_cache" validate:"required"`
 }
 
@@ -431,6 +432,16 @@ type AffinityFailoverConfig struct {
 	AllowOnHardDown        bool `mapstructure:"allow_on_hard_down" yaml:"allow_on_hard_down"`
 	AllowOnHardMaintenance bool `mapstructure:"allow_on_hard_maintenance" yaml:"allow_on_hard_maintenance"`
 	Audit                  bool `mapstructure:"audit" yaml:"audit"`
+}
+
+// UserHoldsConfig bounds operator-set placement holds and local waiters.
+type UserHoldsConfig struct {
+	Enabled                bool     `mapstructure:"enabled" yaml:"enabled"`
+	MaxDuration            Duration `mapstructure:"max_duration" yaml:"max_duration"`
+	MaxWait                Duration `mapstructure:"max_wait" yaml:"max_wait"`
+	PollInterval           Duration `mapstructure:"poll_interval" yaml:"poll_interval"`
+	MaxLocalWaiters        int      `mapstructure:"max_local_waiters" yaml:"max_local_waiters"`
+	MaxLocalWaitersPerUser int      `mapstructure:"max_local_waiters_per_user" yaml:"max_local_waiters_per_user"`
 }
 
 type LocalCacheConfig struct {

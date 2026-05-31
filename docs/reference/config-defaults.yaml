@@ -74,6 +74,13 @@ director:
             max_entries: 100000
             ttl: 15m0s
         mode: active_user_pin
+        user_holds:
+            enabled: true
+            max_duration: 30m0s
+            max_local_waiters: 1024
+            max_local_waiters_per_user: 16
+            max_wait: 30s
+            poll_interval: 250ms
     backend_pools:
         imap-default:
             backends:

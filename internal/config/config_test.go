@@ -140,6 +140,106 @@ func TestRuntimeStateDefaultsValidate(t *testing.T) {
 	}
 }
 
+// TestUserHoldDefaultsValidate verifies placement-hold defaults are safe and documented.
+func TestUserHoldDefaultsValidate(t *testing.T) {
+	cfg := DefaultConfig()
+	holds := cfg.Director.Affinity.UserHolds
+
+	if !holds.Enabled {
+		t.Fatal("user hold capability should default to enabled")
+	}
+
+	if holds.MaxDuration != NewDuration(30*time.Minute) ||
+		holds.MaxWait != NewDuration(30*time.Second) ||
+		holds.PollInterval != NewDuration(250*time.Millisecond) {
+		t.Fatalf("user hold durations = %s/%s/%s, want 30m/30s/250ms", holds.MaxDuration, holds.MaxWait, holds.PollInterval)
+	}
+
+	if holds.MaxLocalWaiters != 1024 || holds.MaxLocalWaitersPerUser != 16 {
+		t.Fatalf("user hold waiter limits = %d/%d, want 1024/16", holds.MaxLocalWaiters, holds.MaxLocalWaitersPerUser)
+	}
+
+	dump, err := NewLoader().DumpDefaults(DumpOptions{Format: "yaml"})
+	if err != nil {
+		t.Fatalf("DumpDefaults: %v", err)
+	}
+
+	if !strings.Contains(string(dump), "user_holds:") {
+		t.Fatalf("default dump missing user_holds subtree:\n%s", dump)
+	}
+
+	if err := NewLoader().Validate(cfg); err != nil {
+		t.Fatalf("Validate rejected user-hold defaults: %v", err)
+	}
+}
+
+// TestUserHoldValidationRejectsInvalidDurations keeps hold waits finite.
+func TestUserHoldValidationRejectsInvalidDurations(t *testing.T) {
+	for name, item := range map[string]struct {
+		mutate func(*Config)
+		want   string
+	}{
+		"max_duration_zero": {
+			mutate: func(cfg *Config) { cfg.Director.Affinity.UserHolds.MaxDuration = 0 },
+			want:   "director.affinity.user_holds.max_duration",
+		},
+		"max_duration_negative": {
+			mutate: func(cfg *Config) { cfg.Director.Affinity.UserHolds.MaxDuration = NewDuration(-time.Second) },
+			want:   "director.affinity.user_holds.max_duration",
+		},
+		"max_wait_zero": {
+			mutate: func(cfg *Config) { cfg.Director.Affinity.UserHolds.MaxWait = 0 },
+			want:   "director.affinity.user_holds.max_wait",
+		},
+		"max_wait_negative": {
+			mutate: func(cfg *Config) { cfg.Director.Affinity.UserHolds.MaxWait = NewDuration(-time.Second) },
+			want:   "director.affinity.user_holds.max_wait",
+		},
+		"poll_interval_zero": {
+			mutate: func(cfg *Config) { cfg.Director.Affinity.UserHolds.PollInterval = 0 },
+			want:   "director.affinity.user_holds.poll_interval",
+		},
+		"poll_interval_negative": {
+			mutate: func(cfg *Config) { cfg.Director.Affinity.UserHolds.PollInterval = NewDuration(-time.Millisecond) },
+			want:   "director.affinity.user_holds.poll_interval",
+		},
+		"poll_interval_above_wait": {
+			mutate: func(cfg *Config) {
+				cfg.Director.Affinity.UserHolds.MaxWait = NewDuration(time.Second)
+				cfg.Director.Affinity.UserHolds.PollInterval = NewDuration(2 * time.Second)
+			},
+			want: "director.affinity.user_holds.poll_interval must not exceed director.affinity.user_holds.max_wait",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			item.mutate(&cfg)
+
+			expectValidationError(t, cfg, item.want)
+		})
+	}
+}
+
+// TestUserHoldValidationRejectsInvalidWaiterLimits keeps local queues bounded.
+func TestUserHoldValidationRejectsInvalidWaiterLimits(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Director.Affinity.UserHolds.MaxLocalWaiters = 0
+	expectValidationError(t, cfg, "director.affinity.user_holds.max_local_waiters")
+
+	cfg = DefaultConfig()
+	cfg.Director.Affinity.UserHolds.MaxLocalWaitersPerUser = 0
+	expectValidationError(t, cfg, "director.affinity.user_holds.max_local_waiters_per_user")
+
+	cfg = DefaultConfig()
+	cfg.Director.Affinity.UserHolds.MaxLocalWaiters = 10
+	cfg.Director.Affinity.UserHolds.MaxLocalWaitersPerUser = 11
+	expectValidationError(
+		t,
+		cfg,
+		"director.affinity.user_holds.max_local_waiters_per_user must not exceed director.affinity.user_holds.max_local_waiters",
+	)
+}
+
 // TestRuntimeStateValidationRejectsInvalidShardCounts keeps index fanout bounded.
 func TestRuntimeStateValidationRejectsInvalidShardCounts(t *testing.T) {
 	for name, mutate := range map[string]func(*Config){

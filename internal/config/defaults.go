@@ -313,6 +313,14 @@ func defaultDirector() DirectorConfig {
 				TTL:        NewDuration(15 * time.Minute),
 				MaxEntries: 100000,
 			},
+			UserHolds: UserHoldsConfig{
+				Enabled:                true,
+				MaxDuration:            NewDuration(30 * time.Minute),
+				MaxWait:                NewDuration(30 * time.Second),
+				PollInterval:           NewDuration(250 * time.Millisecond),
+				MaxLocalWaiters:        1024,
+				MaxLocalWaitersPerUser: 16,
+			},
 		},
 		RuntimeOverrides: RuntimeOverridesConfig{
 			Enabled: true,
