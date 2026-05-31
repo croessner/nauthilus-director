@@ -42,6 +42,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -72,6 +73,12 @@ const (
 	e2eProtocol         = "imap"
 	e2eProcessKeyPrefix = "nauthilus-director-e2e-process"
 	e2eService          = "imap"
+	e2eHoldAccountKey   = "hold-account-key-e2e"
+	e2eHoldLogin        = "hold-login@example.test"
+	e2eHoldOtherKey     = "hold-other-account-key-e2e"
+	e2eHoldOtherLogin   = "hold-other-login@example.test"
+	e2eHoldTimeoutKey   = "hold-timeout-account-key-e2e"
+	e2eHoldTimeoutLogin = "hold-timeout-login@example.test"
 	e2ePinnedAccountKey = "pin-account-key-e2e"
 	e2ePinnedLogin      = "pin-login@example.test"
 	e2eShardTagB        = "mailstore-b"
@@ -351,6 +358,158 @@ func TestServerBinaryBackendPinPublicIMAPFlow(t *testing.T) {
 	if strings.Contains(output, e2ePinnedLogin) {
 		t.Fatalf("process output leaked raw login name: %s", output)
 	}
+}
+
+// TestServerBinaryUserHoldPublicIMAPReleaseFlow proves user holds through public process boundaries.
+func TestServerBinaryUserHoldPublicIMAPReleaseFlow(t *testing.T) {
+	binary := e2eServerBinary(t)
+	ctl := buildDirectorctl(t)
+	redisFixture := startValkeySessionStore(t)
+	authority := startMappedFakeHTTPAuthority(t, map[string]map[string][]string{
+		e2eHoldLogin: {
+			"account":   {e2eHoldAccountKey},
+			"tenant":    {e2eTenant},
+			"mailShard": {e2eShardTag},
+		},
+		e2eHoldOtherLogin: {
+			"account":   {e2eHoldOtherKey},
+			"tenant":    {e2eTenant},
+			"mailShard": {e2eShardTag},
+		},
+	}, nil)
+	backendA := startFakeIMAPBackend(t, fakeBackendOptions{})
+	backendB := startFakeIMAPBackend(t, fakeBackendOptions{})
+	directorAddress := loopbackAddress(t)
+	controlAddress := loopbackAddress(t)
+	controlURL := "http://" + controlAddress
+	configPath := writeBackendPinProcessConfig(t, processConfigOptions{
+		RedisAddress:         redisFixture.addr,
+		AuthorityURL:         authority.URL(),
+		DirectorAddress:      directorAddress,
+		ControlAddress:       controlAddress,
+		ControlEnabled:       true,
+		BackendAuth:          masterUserBackendAuth(),
+		UserHoldMaxWait:      8 * time.Second,
+		UserHoldPollInterval: 25 * time.Millisecond,
+	}, []processBackendDefinition{
+		{Identifier: e2eBackendAID, Address: backendA.Address(), Shard: e2eShardTag, Weight: 100},
+		{Identifier: e2eBackendBID, Address: backendB.Address(), Shard: e2eShardTagB, Weight: 100},
+	})
+	process := startDirectorProcess(t, binary, configPath)
+
+	waitForDirectorGreeting(t, directorAddress, process)
+	waitForControlReady(t, controlURL, process)
+	assertNoRuntimePlacement(t, controlURL)
+
+	runDirectorctl(t, ctl, controlURL, "users", "hold", "set", e2eHoldAccountKey,
+		"--duration", "15s",
+		"--reason", "e2e hold migration")
+	holdShow := runDirectorctl(t, ctl, controlURL, "users", "hold", "show", e2eHoldAccountKey)
+	assertCLIOutputFields(t, holdShow, "user_key="+e2eHoldAccountKey, "present=true")
+	assertOutputOmits(t, holdShow, "e2e hold migration")
+
+	pending := beginIMAPLogin(t, directorAddress, e2eHoldLogin)
+	defer func() { _ = pending.client.Close() }()
+
+	expectNoIMAPLoginResult(t, pending, 150*time.Millisecond)
+	assertNoFakeBackendConnections(t, backendA, backendB)
+	assertNoRuntimePlacement(t, controlURL)
+
+	beforeLookup := getRuntimeSummary(t, controlURL)
+	routeStarted := time.Now()
+	heldRoute := lookupRoute(t, controlURL, e2eHoldAccountKey, true)
+	if time.Since(routeStarted) > 500*time.Millisecond {
+		t.Fatalf("route lookup waited behind hold for %s", time.Since(routeStarted))
+	}
+	assertRouteLookupUserHoldActive(t, heldRoute)
+	assertNoRuntimePlacement(t, controlURL)
+	afterLookup := getRuntimeSummary(t, controlURL)
+	if beforeLookup.ActiveSessions.Total.Count != afterLookup.ActiveSessions.Total.Count {
+		t.Fatalf("route lookup changed session count from %#v to %#v", beforeLookup.ActiveSessions.Total, afterLookup.ActiveSessions.Total)
+	}
+
+	otherClient, otherReader := loginIMAP(t, directorAddress, e2eHoldOtherLogin)
+	otherBackend := waitForRESTSessionCount(t, controlURL, 1)[0].Backend
+	backends := map[string]*fakeIMAPBackend{e2eBackendAID: backendA, e2eBackendBID: backendB}
+	expectBackendProxy(t, otherClient, otherReader, backends[otherBackend], "U002")
+	_ = otherClient.Close()
+	waitForRESTSessionCount(t, controlURL, 0)
+	expectNoIMAPLoginResult(t, pending, 150*time.Millisecond)
+
+	runDirectorctl(t, ctl, controlURL, "users", "backend-pin", "set", e2eHoldAccountKey,
+		"--backend", e2eBackendBID,
+		"--strategy", "kick_existing",
+		"--reason", "e2e hold target ready")
+	pinnedWhileHeld := lookupRoute(t, controlURL, e2eHoldAccountKey, true)
+	assertRouteLookupUserHoldActive(t, pinnedWhileHeld)
+	assertBackendPinRoute(t, pinnedWhileHeld, e2eBackendBID)
+
+	runDirectorctl(t, ctl, controlURL, "users", "hold", "clear", e2eHoldAccountKey, "--reason", "e2e hold release")
+	expectIMAPLoginResult(t, pending, "A001 OK Authentication completed\r\n")
+	expectBackendProxy(t, pending.client, pending.reader, backendB, "H002")
+	waitForRESTSessionCount(t, controlURL, 1)
+
+	runDirectorctl(t, ctl, controlURL, "users", "hold", "clear", e2eHoldAccountKey, "--reason", "e2e idempotent cleanup")
+	runDirectorctl(t, ctl, controlURL, "users", "backend-pin", "clear", e2eHoldAccountKey, "--reason", "e2e hold cleanup")
+	_ = pending.client.Close()
+	waitForRESTSessionCount(t, controlURL, 0)
+	runDirectorctl(t, ctl, controlURL, "users", "affinity", "clear", e2eHoldAccountKey, "--reason", "e2e hold affinity cleanup")
+
+	output := process.output.String()
+	assertNoSecretText(t, output)
+	assertOutputOmits(t, output, e2eHoldLogin, e2eHoldOtherLogin, "e2e hold migration", "e2e hold target ready")
+}
+
+// TestServerBinaryUserHoldPublicIMAPTimeoutFlow proves max_wait fails closed without placement.
+func TestServerBinaryUserHoldPublicIMAPTimeoutFlow(t *testing.T) {
+	binary := e2eServerBinary(t)
+	ctl := buildDirectorctl(t)
+	redisFixture := startValkeySessionStore(t)
+	authority := startMappedFakeHTTPAuthority(t, map[string]map[string][]string{
+		e2eHoldTimeoutLogin: {
+			"account":   {e2eHoldTimeoutKey},
+			"tenant":    {e2eTenant},
+			"mailShard": {e2eShardTag},
+		},
+	}, nil)
+	fakeBackend := startFakeIMAPBackend(t, fakeBackendOptions{})
+	directorAddress := loopbackAddress(t)
+	controlAddress := loopbackAddress(t)
+	controlURL := "http://" + controlAddress
+	configPath := writeProcessConfig(t, processConfigOptions{
+		RedisAddress:         redisFixture.addr,
+		AuthorityURL:         authority.URL(),
+		DirectorAddress:      directorAddress,
+		ControlAddress:       controlAddress,
+		ControlEnabled:       true,
+		BackendAddress:       fakeBackend.Address(),
+		BackendAuth:          masterUserBackendAuth(),
+		UserHoldMaxWait:      175 * time.Millisecond,
+		UserHoldPollInterval: 25 * time.Millisecond,
+	})
+	process := startDirectorProcess(t, binary, configPath)
+
+	waitForDirectorGreeting(t, directorAddress, process)
+	waitForControlReady(t, controlURL, process)
+
+	runDirectorctl(t, ctl, controlURL, "users", "hold", "set", e2eHoldTimeoutKey,
+		"--duration", "5s",
+		"--reason", "e2e hold timeout")
+	pending := beginIMAPLogin(t, directorAddress, e2eHoldTimeoutLogin)
+	defer func() { _ = pending.client.Close() }()
+
+	expectIMAPLoginResult(t, pending, "A001 NO [UNAVAILABLE] Authentication service temporarily unavailable\r\n")
+	assertNoFakeBackendConnections(t, fakeBackend)
+	assertNoRuntimePlacement(t, controlURL)
+
+	timedOutRoute := lookupRoute(t, controlURL, e2eHoldTimeoutKey, true)
+	assertRouteLookupUserHoldActive(t, timedOutRoute)
+
+	runDirectorctl(t, ctl, controlURL, "users", "hold", "clear", e2eHoldTimeoutKey, "--reason", "e2e hold timeout cleanup")
+
+	output := process.output.String()
+	assertNoSecretText(t, output)
+	assertOutputOmits(t, output, e2eHoldTimeoutLogin, "e2e hold timeout")
 }
 
 // TestServerBinaryRuntimePaginationUsesSeededRedisState proves generated REST and CLI pagination.
@@ -909,14 +1068,16 @@ type directorProcess struct {
 }
 
 type processConfigOptions struct {
-	RedisAddress    string
-	AuthorityURL    string
-	DirectorAddress string
-	ControlAddress  string
-	ControlEnabled  bool
-	BackendAddress  string
-	BackendTLS      config.BackendTLSConfig
-	BackendAuth     backend.AuthConfig
+	RedisAddress         string
+	AuthorityURL         string
+	DirectorAddress      string
+	ControlAddress       string
+	ControlEnabled       bool
+	BackendAddress       string
+	BackendTLS           config.BackendTLSConfig
+	BackendAuth          backend.AuthConfig
+	UserHoldMaxWait      time.Duration
+	UserHoldPollInterval time.Duration
 }
 
 type processBackendDefinition struct {
@@ -1071,6 +1232,7 @@ auth:
         basic_auth:
           password_file: "unused"
 director:
+%s
   listeners:
     imap:
       address: %q
@@ -1109,11 +1271,12 @@ director:
           allowed_mechanisms: [%s]
       health_check:
         enabled: false
-`, options.ControlEnabled,
+	`, options.ControlEnabled,
 		controlAddress,
 		e2eProcessKeyPrefix,
 		options.RedisAddress,
 		options.AuthorityURL,
+		processUserHoldConfigYAML(options),
 		options.DirectorAddress,
 		listenerCertPath,
 		listenerKeyPath,
@@ -1135,6 +1298,7 @@ director:
 		backendAuth.CredentialReplay.PreserveMechanism,
 		quotedYAMLStrings(backendAuth.CredentialReplay.AllowedMechanisms),
 	)
+	content = strings.ReplaceAll(content, "\t", "")
 
 	path := filepath.Join(t.TempDir(), "nauthilus-director.yml")
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
@@ -1212,6 +1376,7 @@ auth:
         basic_auth:
           password_file: "unused"
 director:
+%s
   listeners:
     imap:
       address: %q
@@ -1228,17 +1393,19 @@ director:
       selector: rendezvous_hash
       backends: [%s]
   backends:
-%s`, options.ControlEnabled,
+	%s`, options.ControlEnabled,
 		controlAddress,
 		e2eProcessKeyPrefix,
 		options.RedisAddress,
 		options.AuthorityURL,
+		processUserHoldConfigYAML(options),
 		options.DirectorAddress,
 		listenerCertPath,
 		listenerKeyPath,
 		quotedYAMLStrings(processBackendIdentifiers(backends)),
 		processBackendConfigYAML(backends, backendTLS, backendAuth),
 	)
+	content = strings.ReplaceAll(content, "\t", "")
 
 	path := filepath.Join(t.TempDir(), "nauthilus-director.yml")
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
@@ -1266,6 +1433,32 @@ func processBackendIdentifiers(backends []processBackendDefinition) []string {
 	}
 
 	return identifiers
+}
+
+// processUserHoldConfigYAML renders optional hold timing overrides for process E2E.
+func processUserHoldConfigYAML(options processConfigOptions) string {
+	if options.UserHoldMaxWait <= 0 && options.UserHoldPollInterval <= 0 {
+		return ""
+	}
+
+	maxWait := options.UserHoldMaxWait
+	if maxWait <= 0 {
+		maxWait = 30 * time.Second
+	}
+	pollInterval := options.UserHoldPollInterval
+	if pollInterval <= 0 {
+		pollInterval = 250 * time.Millisecond
+	}
+
+	return fmt.Sprintf(`  affinity:
+    user_holds:
+      enabled: true
+      max_duration: %q
+      max_wait: %q
+      poll_interval: %q
+      max_local_waiters: 1024
+      max_local_waiters_per_user: 16
+`, (30 * time.Minute).String(), maxWait.String(), pollInterval.String())
 }
 
 // processBackendConfigYAML renders backend definitions for the real-process fixture.
@@ -2263,6 +2456,20 @@ func lookupRoute(t *testing.T, baseURL string, userKey string, includeAffinity b
 	return response
 }
 
+// assertRouteLookupUserHoldActive verifies read-only hold diagnostics.
+func assertRouteLookupUserHoldActive(t *testing.T, response generated.RouteLookupResponse) {
+	t.Helper()
+
+	if !response.AffectedBy.UserHold ||
+		!response.UserHold.Present ||
+		!response.UserHold.PlacementDeferred ||
+		response.UserHold.Reason != "user_hold_active" ||
+		response.UserHold.RemainingSeconds == nil ||
+		*response.UserHold.RemainingSeconds <= 0 {
+		t.Fatalf("route lookup hold diagnostics = %#v, want active deferred hold", response.UserHold)
+	}
+}
+
 // routeHasBackendExclusion reports whether route lookup explained a backend exclusion.
 func routeHasBackendExclusion(response generated.RouteLookupResponse, backendID string, reason string) bool {
 	for _, summary := range response.Backends {
@@ -2303,6 +2510,32 @@ func getBackendDetail(t *testing.T, baseURL string, backendID string) generated.
 	requestJSON(t, http.MethodGet, baseURL+"/api/v1/backends/"+backendID, nil, http.StatusOK, &response)
 
 	return response
+}
+
+// getRuntimeSummary reads the public runtime summary.
+func getRuntimeSummary(t *testing.T, baseURL string) generated.RuntimeSummaryResponse {
+	t.Helper()
+
+	var response generated.RuntimeSummaryResponse
+	requestJSON(t, http.MethodGet, baseURL+"/api/v1/runtime/summary", nil, http.StatusOK, &response)
+
+	return response
+}
+
+// assertNoRuntimePlacement verifies no session or backend reservation was opened.
+func assertNoRuntimePlacement(t *testing.T, baseURL string) {
+	t.Helper()
+
+	waitForRESTSessionCount(t, baseURL, 0)
+	summary := getRuntimeSummary(t, baseURL)
+	if summary.ActiveSessions.Total.Count != 0 {
+		t.Fatalf("runtime active sessions = %#v, want none", summary.ActiveSessions.Total)
+	}
+	for _, capacity := range summary.BackendCapacity {
+		if capacity.ActiveSessions.Count != 0 || capacity.ReservedSessions.Count != 0 {
+			t.Fatalf("backend capacity = %#v, want no active or reserved sessions", capacity)
+		}
+	}
 }
 
 // getSessionListPage reads one generated session page through the public REST API.
@@ -2503,6 +2736,17 @@ func runDirectorctlStatus(t *testing.T, binary string, baseURL string, args ...s
 	return code, rendered
 }
 
+type pendingIMAPLogin struct {
+	client net.Conn
+	reader *bufio.Reader
+	done   chan imapLoginResult
+}
+
+type imapLoginResult struct {
+	line string
+	err  error
+}
+
 // repoRoot finds the repository root from the E2E package directory.
 func repoRoot(t *testing.T) string {
 	t.Helper()
@@ -2536,6 +2780,52 @@ func loginIMAP(t *testing.T, address string, account string) (net.Conn, *bufio.R
 	expectLine(t, reader, "A001 OK Authentication completed\r\n")
 
 	return client, reader
+}
+
+// beginIMAPLogin starts one public LOGIN command and leaves the tagged result pending.
+func beginIMAPLogin(t *testing.T, address string, account string) pendingIMAPLogin {
+	t.Helper()
+
+	client := dialPlain(t, address)
+	reader := bufio.NewReader(client)
+	expectLine(t, reader, "* OK nauthilus-director IMAP session ready\r\n")
+	writeLine(t, client, `A001 LOGIN "`+account+`" "`+e2ePassword+`"`)
+
+	pending := pendingIMAPLogin{client: client, reader: reader, done: make(chan imapLoginResult, 1)}
+	go func() {
+		line, err := reader.ReadString('\n')
+		pending.done <- imapLoginResult{line: line, err: err}
+	}()
+
+	return pending
+}
+
+// expectNoIMAPLoginResult verifies placement is still waiting without a tagged response.
+func expectNoIMAPLoginResult(t *testing.T, pending pendingIMAPLogin, duration time.Duration) {
+	t.Helper()
+
+	select {
+	case result := <-pending.done:
+		t.Fatalf("IMAP login completed while hold should block placement: line=%q err=%v", result.line, result.err)
+	case <-time.After(duration):
+	}
+}
+
+// expectIMAPLoginResult waits for one pending LOGIN result.
+func expectIMAPLoginResult(t *testing.T, pending pendingIMAPLogin, want string) {
+	t.Helper()
+
+	select {
+	case result := <-pending.done:
+		if result.err != nil {
+			t.Fatalf("IMAP login read failed: %v", result.err)
+		}
+		if result.line != want {
+			t.Fatalf("IMAP login line = %q, want %q", result.line, want)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatalf("timed out waiting for IMAP login result %q", want)
+	}
 }
 
 // expectIMAPLoginUnavailable verifies a public login fails closed before proxy mode.
@@ -2613,6 +2903,17 @@ func assertCLIOutputFields(t *testing.T, output string, fields ...string) {
 	}
 }
 
+// assertOutputOmits verifies output avoids sensitive or unsupported text.
+func assertOutputOmits(t *testing.T, output string, forbidden ...string) {
+	t.Helper()
+
+	for _, value := range forbidden {
+		if strings.TrimSpace(value) != "" && strings.Contains(output, value) {
+			t.Fatalf("output contained forbidden value %q: %s", value, output)
+		}
+	}
+}
+
 // waitForSessionIDs waits until the control reader sees the requested count.
 func waitForSessionIDs(t *testing.T, store *trackingSessionStore, count int) []string {
 	t.Helper()
@@ -2679,6 +2980,7 @@ type fakeHTTPAuthority struct {
 	server       *http.Server
 	listener     net.Listener
 	attributes   map[string][]string
+	identities   map[string]map[string][]string
 	requests     []map[string]any
 	requestsLock sync.Mutex
 }
@@ -2687,11 +2989,22 @@ type fakeHTTPAuthority struct {
 func startFakeHTTPAuthority(t *testing.T, attributes map[string][]string) *fakeHTTPAuthority {
 	t.Helper()
 
+	return startMappedFakeHTTPAuthority(t, nil, attributes)
+}
+
+// startMappedFakeHTTPAuthority starts an HTTP auth socket with per-login identities.
+func startMappedFakeHTTPAuthority(
+	t *testing.T,
+	identities map[string]map[string][]string,
+	fallback map[string][]string,
+) *fakeHTTPAuthority {
+	t.Helper()
+
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen fake HTTP authority: %v", err)
 	}
-	fake := &fakeHTTPAuthority{listener: ln, attributes: attributes}
+	fake := &fakeHTTPAuthority{listener: ln, attributes: fallback, identities: identities}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/auth/json", fake.handle)
 	fake.server = &http.Server{Handler: mux, ReadHeaderTimeout: time.Second}
@@ -2768,8 +3081,20 @@ func (f *fakeHTTPAuthority) handle(writer http.ResponseWriter, request *http.Req
 	_ = json.NewEncoder(writer).Encode(map[string]any{
 		"ok":            true,
 		"account_field": "account",
-		"attributes":    f.attributes,
+		"attributes":    f.attributesForRequest(body),
 	})
+}
+
+// attributesForRequest returns fixed or per-login Nauthilus attributes.
+func (f *fakeHTTPAuthority) attributesForRequest(body map[string]any) map[string][]string {
+	username, _ := body["username"].(string)
+	if f.identities != nil {
+		if attributes, ok := f.identities[username]; ok {
+			return attributes
+		}
+	}
+
+	return f.attributes
 }
 
 // newHTTPAuthenticator creates the real HTTP authority client used by IMAP sessions.
@@ -2875,6 +3200,7 @@ type fakeIMAPBackend struct {
 	listener     net.Listener
 	observations chan fakeBackendObservation
 	options      fakeBackendOptions
+	connections  atomic.Int64
 }
 
 type fakeBackendObservation struct {
@@ -2923,6 +3249,26 @@ func (b *fakeIMAPBackend) ExpectProxyLine(t *testing.T, want string) {
 	}
 }
 
+// ConnectionCount returns how many backend sockets were accepted.
+func (b *fakeIMAPBackend) ConnectionCount() int64 {
+	if b == nil {
+		return 0
+	}
+
+	return b.connections.Load()
+}
+
+// assertNoFakeBackendConnections verifies placement has not reached fake backends.
+func assertNoFakeBackendConnections(t *testing.T, backends ...*fakeIMAPBackend) {
+	t.Helper()
+
+	for _, backend := range backends {
+		if count := backend.ConnectionCount(); count != 0 {
+			t.Fatalf("fake backend %s accepted %d connections while hold should block placement", backend.Address(), count)
+		}
+	}
+}
+
 // accept serves backend connections until the listener closes.
 func (b *fakeIMAPBackend) accept() {
 	for {
@@ -2938,6 +3284,8 @@ func (b *fakeIMAPBackend) accept() {
 // serve executes a minimal IMAP backend auth and proxy script.
 func (b *fakeIMAPBackend) serve(conn net.Conn) {
 	defer func() { _ = conn.Close() }()
+
+	b.connections.Add(1)
 
 	var ok bool
 	conn, ok = b.prepareBackendConn(conn)

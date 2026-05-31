@@ -177,6 +177,7 @@ The demo also includes public-boundary affinity proofs:
 ```bash
 ./scripts/prove-affinity.sh
 ./scripts/prove-user-backend-pin.sh
+./scripts/prove-user-hold.sh
 ```
 
 `prove-affinity.sh` opens one IMAPS session for `alice@example.test`, injects a
@@ -186,9 +187,18 @@ Director control API that all IMAP sessions stay on the same backend.
 `prove-user-backend-pin.sh` sets a runtime backend pin for `dave@example.test`
 to `mailstore-a-imap`, repeats the same IMAPS plus SMTP/LMTP proof, and clears
 the pin afterwards. Set `DEMO_KEEP_BACKEND_PIN=1` to leave the runtime pin in
-place after the proof. Both scripts accept the same host and credential
-environment overrides as the smoke scripts, plus `DEMO_CONTROL_URL`,
-`DEMO_USER`, `DEMO_PIN_BACKEND` and `DEMO_FOLLOWUP_COUNT`.
+place after the proof. The affinity and backend-pin scripts accept the same
+host and credential environment overrides as the smoke scripts, plus
+`DEMO_CONTROL_URL`, `DEMO_USER`, `DEMO_PIN_BACKEND` and
+`DEMO_FOLLOWUP_COUNT`.
+`prove-user-hold.sh` sets a temporary placement hold for `dave@example.test`,
+starts a public IMAPS login that must wait without creating a runtime session,
+checks route lookup hold diagnostics, applies a backend pin as the migration
+target, clears only the hold, and verifies the waiting login resumes on the
+target backend. It accepts `DEMO_HOLD_DURATION_SECONDS`,
+`DEMO_HOLD_PROBE_SECONDS`, `DEMO_HOLD_TARGET_BACKEND`,
+`DEMO_KEEP_BACKEND_PIN`, `DEMO_CONTROL_URL` and the same host and credential
+overrides as the other proof scripts.
 
 The Stalwart pair is initialized from the command line by a one-shot Compose service. The same plan configures Stalwart storage to use the shared FoundationDB cluster file mounted at `/var/fdb/fdb.cluster`:
 

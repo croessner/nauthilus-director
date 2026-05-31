@@ -1,7 +1,7 @@
 # M3 User Placement Hold Follow-up
 
-Status: proposed. This follow-up defines the binding design for a temporary
-operator-controlled user placement hold. It has not been implemented yet.
+Status: completed. This follow-up defines and closes the binding design for a
+temporary operator-controlled user placement hold.
 
 This follow-up amends the completed M2/M3 backend runtime and control milestone
 with a migration workflow that can pause new backend placement for one user key
@@ -790,6 +790,81 @@ Run `make generate-openapi` after changing the OpenAPI spec, then run
 - `nauthilus-directorctl` uses the generated client SDK for every hold command.
 - Observability remains low-cardinality and secret-safe.
 - E2E proves externally visible protocol behavior through the production binary.
+
+## Completion Evidence
+
+Completed on 2026-05-31.
+
+Implemented and verified behavior:
+
+- Generated OpenAPI REST and generated-client-backed
+  `nauthilus-directorctl users hold show|set|clear` are implemented.
+- Redis-backed hold state stores bounded runtime metadata only, uses Redis
+  server time for expiry, and clear deletes only the hold hash.
+- IMAP and LMTP placement check the shared hold gate after identity resolution
+  and before backend selection, session or delivery-hold open, backend
+  reservation and backend connect.
+- Route lookup reports `user_hold_active` context without waiting, mutating
+  state, opening sessions or exposing operator reason text.
+- Public-boundary fake-service E2E now includes
+  `TestServerBinaryUserHoldPublicIMAPReleaseFlow` and
+  `TestServerBinaryUserHoldPublicIMAPTimeoutFlow`.
+- `contrib/demo-stack/scripts/prove-user-hold.sh` demonstrates the same
+  operator workflow against the Compose demo stack.
+- `docs/config/nauthilus-director.target.yml` and generated config reference
+  docs include `director.affinity.user_holds`.
+
+Verification run:
+
+```text
+NAUTHILUS_DIRECTOR_E2E_SERVER_BINARY=/private/tmp/nauthilus-director-e2e \
+  go test -mod=vendor -count=1 ./test/e2e \
+  -run 'TestServerBinaryUserHoldPublicIMAP(Release|Timeout)Flow' -v
+PASS
+
+make guardrails
+PASS
+
+cd contrib/demo-stack
+docker compose build director-a director-b
+docker compose up -d --no-deps --force-recreate director-a director-b
+docker compose exec -T director-a nauthilus-directorctl --address http://127.0.0.1:9090 status
+health=ok
+ready=ok
+version=demo
+api_version=v1
+docker compose exec -T director-b nauthilus-directorctl --address http://127.0.0.1:9090 status
+health=ok
+ready=ok
+version=demo
+api_version=v1
+./scripts/prove-user-hold.sh
+proof ok: mode=user-hold user=dave@example.test backend=mailstore-b-imap held_login_waited=true route_lookup_read_only=true
+```
+
+Director demo image IDs after the scoped rebuild:
+
+```text
+nauthilus-director-demo-director-a sha256:98d6aee5d6d3a2f477ca0a95fb395fd83c992edbf0e7a2d368eaa46e95aae5ef
+nauthilus-director-demo-director-b sha256:3219ec895f7551ef801be24532c9733f570846585a5e7a5e0d12c6a67d442e8b
+```
+
+`make e2e-interop` was not required for this closeout because the changed
+production behavior was already implemented before this slice; this slice added
+public fake-service E2E, demo-stack proof scripting and documentation without
+changing IMAP, LMTP, proxy or bootstrap production code.
+
+## Review und Ist/Soll-Abgleich
+
+| Area | Soll | Ist | Status | Notes |
+| --- | --- | --- | --- | --- |
+| E2E hold | Held user waits with no backend/session/reservation side effect | `TestServerBinaryUserHoldPublicIMAPReleaseFlow` starts a held public IMAP login, proves no fake backend connections, no REST sessions and no runtime reservations while the hold is active | OK | Route lookup is also checked while the login is waiting |
+| E2E release | Clear releases waiting placement to new target | The test sets `users backend-pin` to `mailstore-b-imap`, clears the hold through CLI and verifies the waiting login proxies to backend B | OK | Demo stack repeats this with `prove-user-hold.sh` |
+| E2E timeout | `max_wait` temporary-fails without backend placement | `TestServerBinaryUserHoldPublicIMAPTimeoutFlow` uses a short `max_wait`, receives IMAP `[UNAVAILABLE]` and proves no backend connection, session or reservation | OK | Route lookup still reports the active hold after timeout |
+| Route lookup | Hold diagnostics read-only and non-waiting | Route lookup returns active hold context in under the bounded probe window and does not change public session or runtime-summary counts | OK | DTO exposes bounded reason class, not operator text |
+| Docs | Manpages, developer docs, spec and roadmap match shipped behavior | CLI manpage, affinity developer doc, architecture roadmap and this closeout describe runtime-only temporary holds, explicit clear and route lookup diagnostics | OK | Unsupported list, renew, force-placement and target flags remain undocumented |
+| Generated | OpenAPI and config docs current | `make guardrails` includes `check-openapi` and `check-docs`; reference docs and target YAML include `director.affinity.user_holds` | OK | No generated drift after the closeout |
+| Guardrails | Full gate run and results recorded | `make guardrails` passed on 2026-05-31 | OK | E2E runner output includes user placement holds |
 
 ## Review Checklist
 

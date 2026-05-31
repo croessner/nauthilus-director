@@ -182,22 +182,27 @@ IMAP placement lives in `internal/protocol/imap/placement.go`.
    authenticated account facts.
 3. Missing route shard is filled from the immutable session context default.
    Incomplete routing fails before session state is opened.
-4. `sessionStore.OpenSession` opens or reuses the Redis affinity lease.
-5. The selected shard is the active affinity shard when present; otherwise it
+4. The shared placement gate reads any active user hold after identity
+   resolution and before backend selection, session open, backend reservation
+   or backend connect. If the hold clears or expires within `max_wait`, the
+   login continues and re-reads runtime state; otherwise the protocol returns a
+   temporary failure without opening placement state.
+5. `sessionStore.OpenSession` opens or reuses the Redis affinity lease.
+6. The selected shard is the active affinity shard when present; otherwise it
    is the routing result shard.
-6. A matching backend pin can replace the requested shard for a new affinity.
+7. A matching backend pin can replace the requested shard for a new affinity.
    If an existing active affinity is reused, `new_sessions_only` and
    `drain_existing` pins stay diagnostic and do not override the concrete
    selector target; `kick_existing` may apply after the control generation asks
    active sessions to close.
-7. Backend selection receives `ActiveAffinity` and the effective shard.
+8. Backend selection receives `ActiveAffinity` and the effective shard.
    Operator backend pins pass a concrete selector target only after protocol,
    backend pool and active-affinity strategy checks.
-8. Backend capacity is reserved before the selected backend is attached to the
+9. Backend capacity is reserved before the selected backend is attached to the
    session.
-9. If backend selection or attach fails after open, the opened session is
+10. If backend selection or attach fails after open, the opened session is
    closed as rollback.
-10. Proxy mode heartbeats the Redis lease and closes it when proxying ends.
+11. Proxy mode heartbeats the Redis lease and closes it when proxying ends.
 
 ```mermaid
 sequenceDiagram
@@ -215,6 +220,10 @@ sequenceDiagram
     Auth-->>IMAP: authenticated account facts
     IMAP->>Routing: Resolve routing request
     Routing-->>IMAP: complete routing result
+    IMAP->>Store: CheckUserHold
+    Store->>Redis: user_hold_get.lua
+    Redis-->>Store: absent or active hold
+    Store-->>IMAP: release or temporary failure
     IMAP->>Store: OpenSession
     Store->>Redis: open.lua
     Redis-->>Store: AffinityRecord

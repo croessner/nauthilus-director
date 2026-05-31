@@ -1201,6 +1201,22 @@ active-strategy behavior, route lookup diagnostics and fail-closed pinned
 backend failure. The detailed completion evidence lives in
 `docs/specs/implementation/M3_USER_BACKEND_PINNING_FOLLOWUP.md`.
 
+The M3 user placement-hold follow-up is complete. Operators can set, show and
+clear a bounded user placement hold through generated REST and
+`nauthilus-directorctl users hold` commands without rewriting YAML. Holds are
+temporary runtime gates after identity resolution and before backend selection;
+they do not choose a shard or backend, do not close existing sessions, and
+clear removes only the hold. Public-boundary E2E starts the production server
+binary with fake Nauthilus and fake IMAP backends, proves that a held login
+waits without backend connections, sessions or reservations, applies a backend
+pin as the migration target, clears the hold and verifies the waiting login
+resumes on the new target. The same lane proves unrelated IMAP traffic
+continues normally, route lookup reports active hold context without mutation
+or waiting, and `max_wait` temporary-fails without placement. The demo stack
+also carries `contrib/demo-stack/scripts/prove-user-hold.sh` for an operator
+proof against the Compose topology. The detailed completion evidence lives in
+`docs/specs/implementation/M3_USER_PLACEMENT_HOLD_FOLLOWUP.md`.
+
 The follow-up million-scale runtime-state pass is complete within the M2/M3
 scope. Runtime reads are cursor-paginated, reaping is due-time bounded, backend
 capacity uses Redis Cluster-safe reservations, aggregate summaries avoid full
@@ -1215,7 +1231,7 @@ outside normal guardrails. The detailed completion evidence lives in
 - backend list/show/maintenance/runtime operations
 - process-local listener list/show/drain/resume operations
 - session list/show/kill
-- user list/show/move/kick/affinity/backend-pin
+- user list/show/move/kick/affinity/backend-pin/hold
 - route lookup
 - reload
 - `nauthilus-directorctl`

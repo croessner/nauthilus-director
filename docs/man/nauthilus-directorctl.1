@@ -320,6 +320,10 @@ configured Nauthilus no-auth identity lookup path before explaining the dry-run
 route.
 Route lookup does not authenticate credentials, create sessions, refresh
 leases, connect to backends or mutate runtime state.
+When a user placement hold is active, route lookup reports bounded hold context
+such as presence, expiry and
+.B user_hold_active
+without waiting behind the hold or exposing the operator reason text.
 Credential-bearing attributes are rejected before the request is sent.
 .TP
 .B reload

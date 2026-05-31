@@ -4,7 +4,7 @@
 #
 # SPDX-License-Identifier: AGPL-3.0-only
 
-"""Prove demo-stack IMAP affinity and optional backend pinning."""
+"""Prove demo-stack IMAP affinity, backend pinning and user placement holds."""
 
 from __future__ import annotations
 
@@ -39,6 +39,8 @@ class DemoConfig:
     pin_backend: str
     pin_strategy: str
     keep_backend_pin: bool
+    hold_duration_seconds: int
+    hold_probe_seconds: float
     control_url: str
     imap_host: str
     imaps_port: int
@@ -57,6 +59,15 @@ class HeldSession:
     session_id: str
     backend: str
     client: imaplib.IMAP4_SSL
+
+
+@dataclass
+class PendingLogin:
+    """Track an IMAPS login command that should wait behind a placement hold."""
+
+    client: imaplib.IMAP4_SSL
+    thread: threading.Thread
+    errors: list[BaseException]
 
 
 def bool_env(name: str, default: bool = False) -> bool:
@@ -87,17 +98,19 @@ def load_config() -> DemoConfig:
     """Load runtime proof configuration from the shell environment."""
 
     mode = os.environ.get("DEMO_PROOF_MODE", "affinity").strip()
-    if mode not in {"affinity", "backend-pin"}:
-        raise ProofError("DEMO_PROOF_MODE must be affinity or backend-pin")
+    if mode not in {"affinity", "backend-pin", "user-hold"}:
+        raise ProofError("DEMO_PROOF_MODE must be affinity, backend-pin or user-hold")
 
     user = os.environ.get("DEMO_USER", "alice@example.test").strip()
     if not user:
         raise ProofError("DEMO_USER must not be empty")
 
     pin_backend = os.environ.get("DEMO_PIN_BACKEND", "").strip()
+    if mode == "user-hold" and not pin_backend:
+        pin_backend = os.environ.get("DEMO_HOLD_TARGET_BACKEND", "mailstore-b-imap").strip()
     expected_backend = os.environ.get("DEMO_EXPECTED_BACKEND", pin_backend).strip()
-    if mode == "backend-pin" and not pin_backend:
-        raise ProofError("DEMO_PIN_BACKEND is required for backend-pin mode")
+    if mode in {"backend-pin", "user-hold"} and not pin_backend:
+        raise ProofError("DEMO_PIN_BACKEND or DEMO_HOLD_TARGET_BACKEND is required")
 
     return DemoConfig(
         mode=mode,
@@ -107,6 +120,8 @@ def load_config() -> DemoConfig:
         pin_backend=pin_backend,
         pin_strategy=os.environ.get("DEMO_PIN_STRATEGY", "kick_existing").strip(),
         keep_backend_pin=bool_env("DEMO_KEEP_BACKEND_PIN", False),
+        hold_duration_seconds=int_env("DEMO_HOLD_DURATION_SECONDS", 30),
+        hold_probe_seconds=float(os.environ.get("DEMO_HOLD_PROBE_SECONDS", "2")),
         control_url=os.environ.get("DEMO_CONTROL_URL", "http://127.0.0.1:9090").rstrip("/"),
         imap_host=os.environ.get("DEMO_IMAP_HOST", "127.0.0.1"),
         imaps_port=int_env("DEMO_IMAPS_PORT", 8993),
@@ -195,6 +210,18 @@ def clear_backend_pin(config: DemoConfig, reason: str) -> None:
     )
 
 
+def clear_user_hold(config: DemoConfig, reason: str) -> None:
+    """Remove any existing placement hold for a repeatable demo run."""
+
+    request_json(
+        config,
+        "DELETE",
+        user_path(config, "/hold"),
+        {"reason": reason},
+        ok_statuses={202, 404},
+    )
+
+
 def clear_affinity(config: DemoConfig, reason: str) -> None:
     """Remove inactive affinity for a repeatable demo run."""
 
@@ -242,6 +269,60 @@ def set_backend_pin(config: DemoConfig) -> None:
     )
 
 
+def set_user_hold(config: DemoConfig) -> None:
+    """Set and verify one temporary placement hold through the control API."""
+
+    request_json(
+        config,
+        "PUT",
+        user_path(config, "/hold"),
+        {
+            "duration_seconds": config.hold_duration_seconds,
+            "reason": "demo user hold proof",
+        },
+        ok_statuses={202},
+    )
+    hold = request_json(config, "GET", user_path(config, "/hold"))
+    if not hold.get("present"):
+        raise ProofError(f"user hold was not visible after set: {hold}")
+    if "reason" in hold:
+        raise ProofError(f"user hold read leaked operator reason: {hold}")
+    print(
+        "user hold set: "
+        f"user={config.user} duration={config.hold_duration_seconds}s"
+    )
+
+
+def route_lookup(config: DemoConfig) -> dict[str, object]:
+    """Run one side-effect-free route lookup for the configured user."""
+
+    return request_json(
+        config,
+        "POST",
+        "/api/v1/route/lookup",
+        {
+            "protocol": "imap",
+            "listener": "imaps",
+            "user_key": config.user,
+            "include_affinity": True,
+        },
+    )
+
+
+def assert_route_lookup_hold_active(route: dict[str, object]) -> None:
+    """Verify route lookup reports a hold without exposing operator text."""
+
+    hold = route.get("user_hold")
+    if not isinstance(hold, dict):
+        raise ProofError(f"route lookup did not return user_hold: {route}")
+    if not hold.get("present") or not hold.get("placement_deferred"):
+        raise ProofError(f"route lookup did not report active placement hold: {hold}")
+    if hold.get("reason") != "user_hold_active":
+        raise ProofError(f"route lookup hold reason was not bounded: {hold}")
+    if "demo user hold proof" in json.dumps(route):
+        raise ProofError(f"route lookup leaked operator hold reason: {route}")
+
+
 def open_imap_client(config: DemoConfig) -> imaplib.IMAP4_SSL:
     """Open and authenticate one public IMAPS frontend session."""
 
@@ -261,6 +342,60 @@ def open_imap_client(config: DemoConfig) -> imaplib.IMAP4_SSL:
     if status != "OK":
         raise ProofError(f"could not select INBOX: {detail!r}")
     return client
+
+
+def start_pending_login(config: DemoConfig) -> PendingLogin:
+    """Start one login that should wait until the user hold clears."""
+
+    context = ssl.create_default_context()
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    client = imaplib.IMAP4_SSL(
+        config.imap_host,
+        config.imaps_port,
+        ssl_context=context,
+        timeout=config.wait_seconds,
+    )
+    errors: list[BaseException] = []
+
+    def login() -> None:
+        """Run the blocking IMAP login in a background thread."""
+
+        try:
+            status, detail = client.login(config.user, config.password)
+            if status != "OK":
+                raise ProofError(f"held IMAP login failed: {detail!r}")
+            status, detail = client.select("INBOX")
+            if status != "OK":
+                raise ProofError(f"held IMAP select failed: {detail!r}")
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    thread = threading.Thread(target=login, name="demo-user-hold-login")
+    thread.start()
+    return PendingLogin(client=client, thread=thread, errors=errors)
+
+
+def assert_login_waiting(pending: PendingLogin, seconds: float) -> None:
+    """Verify a held login has not completed during the proof window."""
+
+    pending.thread.join(timeout=seconds)
+    if pending.thread.is_alive():
+        return
+    if pending.errors:
+        raise ProofError(f"held login failed instead of waiting: {pending.errors[0]}")
+    raise ProofError("held login completed before the placement hold was cleared")
+
+
+def finish_pending_login(config: DemoConfig, pending: PendingLogin) -> imaplib.IMAP4_SSL:
+    """Wait for a held login to complete after hold clear."""
+
+    pending.thread.join(timeout=config.wait_seconds)
+    if pending.thread.is_alive():
+        raise ProofError("held login did not resume after placement hold clear")
+    if pending.errors:
+        raise ProofError(f"held login failed after hold clear: {pending.errors[0]}")
+    return pending.client
 
 
 def wait_for_new_imap_session(
@@ -368,10 +503,13 @@ def prepare_runtime(config: DemoConfig) -> None:
     """Prepare repeatable user runtime state for the requested proof mode."""
 
     ensure_no_active_imap_sessions(config)
+    clear_user_hold(config, "demo proof reset")
     clear_backend_pin(config, "demo proof reset")
     clear_affinity(config, "demo proof reset")
     if config.mode == "backend-pin":
         set_backend_pin(config)
+    elif config.mode == "user-hold":
+        print(f"runtime reset for user placement hold proof: user={config.user}")
     else:
         print(f"backend pin cleared: user={config.user}")
 
@@ -437,11 +575,68 @@ def prove_flow(config: DemoConfig) -> None:
             print(f"backend pin cleared after proof: user={config.user}")
 
 
+def prove_user_hold_flow(config: DemoConfig) -> None:
+    """Run the externally visible user placement-hold proof."""
+
+    prepare_runtime(config)
+    known_ids = {str(session.get("session_id")) for session in imap_sessions(config)}
+    pending: PendingLogin | None = None
+    held: list[HeldSession] = []
+
+    try:
+        set_user_hold(config)
+        pending = start_pending_login(config)
+        assert_login_waiting(pending, config.hold_probe_seconds)
+        if imap_sessions(config):
+            raise ProofError("held user opened an IMAP runtime session while hold was active")
+
+        route = route_lookup(config)
+        assert_route_lookup_hold_active(route)
+        if imap_sessions(config):
+            raise ProofError("route lookup mutated user runtime sessions")
+
+        set_backend_pin(config)
+        pinned_route = route_lookup(config)
+        assert_route_lookup_hold_active(pinned_route)
+
+        clear_user_hold(config, "demo user hold proof release")
+        client = finish_pending_login(config, pending)
+        record = wait_for_new_imap_session(config, known_ids)
+        session_id = str(record.get("session_id") or "")
+        backend = str(record.get("backend") or "")
+        if backend != config.expected_backend:
+            raise ProofError(
+                f"released session backend {backend} != expected {config.expected_backend}"
+            )
+        held.append(HeldSession(label="released IMAP", session_id=session_id, backend=backend, client=client))
+        print(
+            "proof ok: "
+            f"mode={config.mode} user={config.user} backend={backend} "
+            "held_login_waited=true route_lookup_read_only=true"
+        )
+    finally:
+        clear_user_hold(config, "demo user hold proof cleanup")
+        close_sessions(held)
+        if pending is not None and not held:
+            pending.thread.join(timeout=min(config.wait_seconds, 3))
+            try:
+                pending.client.logout()
+            except Exception:  # noqa: BLE001
+                pass
+        if not config.keep_backend_pin:
+            clear_backend_pin(config, "demo user hold proof cleanup")
+            print(f"backend pin cleared after hold proof: user={config.user}")
+
+
 def main() -> int:
     """Run the command-line proof and return a process exit code."""
 
     try:
-        prove_flow(load_config())
+        config = load_config()
+        if config.mode == "user-hold":
+            prove_user_hold_flow(config)
+        else:
+            prove_flow(config)
         return 0
     except ProofError as exc:
         print(f"proof failed: {exc}", file=sys.stderr)

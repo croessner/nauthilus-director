@@ -437,6 +437,14 @@ director:
       ttl: 15m
       max_entries: 100000
 
+    user_holds:
+      enabled: true
+      max_duration: 30m
+      max_wait: 30s
+      poll_interval: 250ms
+      max_local_waiters: 1024
+      max_local_waiters_per_user: 16
+
   runtime_overrides:
     enabled: true
     config_writable: false
