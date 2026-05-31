@@ -732,6 +732,49 @@ func TestUserHoldSetDoesNotCloseAttachedLocalSession(t *testing.T) {
 	}
 }
 
+// TestUserHoldOperationsRecordBoundedObservability verifies hold mutations emit safe events.
+func TestUserHoldOperationsRecordBoundedObservability(t *testing.T) {
+	recorder := &recordingRuntimeObservation{}
+	service := newObservedTestUserHoldService(t, newTestUserHoldStore(false), UserHoldServiceConfig{
+		Enabled:                true,
+		MaxDuration:            time.Minute,
+		MaxWait:                time.Second,
+		PollInterval:           10 * time.Millisecond,
+		MaxLocalWaiters:        2,
+		MaxLocalWaitersPerUser: 1,
+	}, recorder)
+
+	_, err := service.SetUserHold(context.Background(), SetUserHoldRequest{
+		Key:      UserKey{Tenant: runtimeTestTenant, UserHash: runtimeTestUserHash},
+		Duration: time.Minute,
+		Reason:   runtimeTestHoldReason,
+	})
+	if err != nil {
+		t.Fatalf("SetUserHold returned error: %v", err)
+	}
+
+	_, err = service.ClearUserHold(context.Background(), ClearUserHoldRequest{
+		Key:    UserKey{Tenant: runtimeTestTenant, UserHash: runtimeTestUserHash},
+		Reason: runtimeTestHoldReason,
+	})
+	if err != nil {
+		t.Fatalf("ClearUserHold returned error: %v", err)
+	}
+
+	events := recorder.eventsByName(observability.EventUserHold)
+	if len(events) != 2 {
+		t.Fatalf("user-hold events = %#v, want set and clear", recorder.events)
+	}
+
+	assertBackendPinObservation(t, events[0], operationUserHoldSet, runtimeObservationReasonUserHoldSet)
+	assertBackendPinObservation(t, events[1], operationUserHoldClear, runtimeObservationReasonUserHoldClear)
+
+	rendered := strings.Join(eventValues(events), "\n")
+	if strings.Contains(rendered, runtimeTestHoldReason) || strings.Contains(rendered, runtimeTestUserHash) {
+		t.Fatalf("user-hold observation leaked reason or user hash: %s", rendered)
+	}
+}
+
 // TestSessionKillClosesOnlyTargetLocalSession verifies session-specific acceleration.
 func TestSessionKillClosesOnlyTargetLocalSession(t *testing.T) {
 	registry := NewLocalSessionRegistry()

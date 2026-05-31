@@ -275,6 +275,7 @@ func representativeMetricEvents(t *testing.T) []Event {
 		newMetricEvent(t, EventSessionKill, nil, operationLabels("session_kill", reasonClassOK, reasonClassOK)),
 		newMetricEvent(t, EventUserMove, nil, operationLabels("user_move", reasonClassOK, reasonClassOK)),
 		newMetricEvent(t, EventUserKick, nil, operationLabels("user_kick", reasonClassOK, reasonClassOK)),
+		newMetricEvent(t, EventUserHold, nil, operationLabels("user_hold_wait", "wait_released", "user_hold_wait_released")),
 		newMetricEvent(t, EventRouteLookup, nil, backendLabels(reasonClassOK, reasonClassOK)),
 		newMetricEvent(t, EventSelectorExclusion, nil, operationLabels("selector_exclusion", "excluded", "runtime_out")),
 		newMetricEvent(t, EventSessionAttach, nil, operationLabels("session_attach", reasonClassOK, reasonClassOK)),

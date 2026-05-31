@@ -35,6 +35,8 @@ const (
 	runtimeObservationReasonBackendPinSet   = "backend_pin_set"
 	runtimeObservationReasonCleared         = "cleared"
 	runtimeObservationReasonOther           = "other"
+	runtimeObservationReasonUserHoldClear   = "user_hold_clear"
+	runtimeObservationReasonUserHoldSet     = "user_hold_set"
 
 	runtimeObservationResultEligible   = "eligible"
 	runtimeObservationResultExcluded   = "excluded"

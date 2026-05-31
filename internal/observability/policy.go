@@ -97,6 +97,8 @@ const (
 	reasonClassStaticHardMaintenance  = "static_hard_maintenance"
 	reasonClassStaticSoftMaintenance  = "static_soft_maintenance"
 	reasonClassTemporaryFailure       = "temporary_failure"
+	reasonClassUserHoldActive         = "user_hold_active"
+	reasonClassUserHoldWaiterLimit    = "user_hold_waiter_limit_exceeded"
 )
 
 var allowedMetricLabels = map[string]struct{}{
@@ -261,6 +263,16 @@ var allowedReasonClasses = map[string]struct{}{
 	"unsupported":                     {},
 	"unknown":                         {},
 	"unhealthy":                       {},
+	"user_hold_absent":                {},
+	reasonClassUserHoldActive:         {},
+	"user_hold_clear":                 {},
+	"user_hold_expired":               {},
+	"user_hold_read_failed":           {},
+	"user_hold_set":                   {},
+	"user_hold_wait_released":         {},
+	"user_hold_wait_started":          {},
+	"user_hold_wait_timeout":          {},
+	reasonClassUserHoldWaiterLimit:    {},
 	"weight_zero":                     {},
 }
 

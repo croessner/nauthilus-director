@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -39,6 +40,7 @@ const (
 	routeLookupBackendB       = "mailstore-b-imap"
 	routeLookupCanonicalLMTP  = "canonical@example.test"
 	routeLookupDefaultPool    = "imap-default"
+	routeLookupHoldGeneration = "hold-7"
 	routeLookupListener       = "imap"
 	routeLookupPoolLMTP       = "lmtp-default"
 	routeLookupProtocol       = "imap"
@@ -170,6 +172,82 @@ func TestRouteLookupResponseOmitsSecretBearingAttributeValues(t *testing.T) {
 	}
 
 	assertNoRouteLookupMutations(t, store)
+}
+
+// defaultRouteLookupRequest returns the common shard-scoped diagnostic request.
+func defaultRouteLookupRequest() RouteLookupRequest {
+	return RouteLookupRequest{
+		Protocol:   routeLookupProtocol,
+		AccountKey: routeLookupAccount,
+		Attributes: map[string][]string{
+			routeLookupAttributeShard: {routeLookupShardA},
+		},
+	}
+}
+
+// lookupDefaultRoute performs the common successful lookup assertion path.
+func lookupDefaultRoute(t *testing.T, service *RouteLookupService) RouteLookupResponse {
+	t.Helper()
+
+	response, err := service.Lookup(context.Background(), defaultRouteLookupRequest())
+	if err != nil {
+		t.Fatalf("Lookup returned error: %v", err)
+	}
+
+	return response
+}
+
+// lookupDefaultRouteError returns the expected common lookup failure.
+func lookupDefaultRouteError(t *testing.T, service *RouteLookupService) error {
+	t.Helper()
+
+	_, err := service.Lookup(context.Background(), defaultRouteLookupRequest())
+	if err == nil {
+		t.Fatal("Lookup returned nil error, want read failure")
+	}
+
+	return err
+}
+
+// assertRouteLookupObservationLabels verifies the bounded operation labels.
+func assertRouteLookupObservationLabels(t *testing.T, recorder *recordingRuntimeObservation, eventName string, operation string, reasonClass string, result string) observability.Event {
+	t.Helper()
+
+	event, ok := recorder.last(eventName)
+	if !ok {
+		t.Fatalf("%s observation missing: %#v", eventName, recorder.events)
+	}
+
+	if got := event.MetricLabels["operation"]; got != operation {
+		t.Fatalf("operation = %q, want %q", got, operation)
+	}
+
+	if got := event.MetricLabels["reason_class"]; got != reasonClass {
+		t.Fatalf("reason class = %q, want %q", got, reasonClass)
+	}
+
+	if got := event.MetricLabels["result"]; got != result {
+		t.Fatalf("result = %q, want %q", got, result)
+	}
+
+	return event
+}
+
+// assertActiveUserHoldContext verifies diagnostic hold deferral facts.
+func assertActiveUserHoldContext(t *testing.T, response RouteLookupResponse) {
+	t.Helper()
+
+	if !response.UserHold.Present ||
+		!response.UserHold.PlacementDeferred ||
+		response.UserHold.ReasonClass != routeLookupUserHoldActive ||
+		response.UserHold.Remaining != 5*time.Minute ||
+		response.UserHold.Generation != routeLookupHoldGeneration {
+		t.Fatalf("user hold = %#v, want active deferral context", response.UserHold)
+	}
+
+	if !response.Effects.UserHold {
+		t.Fatalf("effects = %#v, want user hold marked", response.Effects)
+	}
 }
 
 // TestRouteLookupReportsAbsentBackendPinContext verifies absent pin diagnostics.
@@ -369,18 +447,93 @@ func TestRouteLookupRecordsBackendPinReadFailure(t *testing.T) {
 		t.Fatal("Lookup returned nil error, want backend-pin read failure")
 	}
 
-	event, ok := recorder.last(observability.EventUserBackendPin)
-	if !ok {
-		t.Fatalf("backend-pin read failure observation missing: %#v", recorder.events)
+	assertRouteLookupObservationLabels(t, recorder, observability.EventUserBackendPin, operationUserBackendPinGet, routeLookupBackendPinReadFailed, runtimeObservationResultFailure)
+
+	assertNoRouteLookupMutations(t, store)
+}
+
+// TestRouteLookupReportsAbsentUserHoldContext verifies absent holds are explicit.
+func TestRouteLookupReportsAbsentUserHoldContext(t *testing.T) {
+	store := &countingRouteState{}
+	service := newRouteLookupTestService(t, store, false)
+
+	response := lookupDefaultRoute(t, service)
+
+	if response.UserHold.Present || response.UserHold.PlacementDeferred || response.UserHold.ReasonClass != routeLookupUserHoldAbsent {
+		t.Fatalf("user hold = %#v, want absent non-blocking context", response.UserHold)
 	}
 
-	if got := event.MetricLabels["operation"]; got != operationUserBackendPinGet {
-		t.Fatalf("operation = %q, want %q", got, operationUserBackendPinGet)
+	if store.userHoldCheckCalls != 1 {
+		t.Fatalf("hold checks = %d, want 1", store.userHoldCheckCalls)
 	}
 
-	if got := event.MetricLabels["reason_class"]; got != routeLookupBackendPinReadFailed {
-		t.Fatalf("reason class = %q, want %q", got, routeLookupBackendPinReadFailed)
+	assertNoRouteLookupMutations(t, store)
+}
+
+// TestRouteLookupReportsActiveUserHoldContext verifies holds defer placement diagnostically.
+func TestRouteLookupReportsActiveUserHoldContext(t *testing.T) {
+	now := time.Unix(1_780_000_000, 0).UTC()
+	store := &countingRouteState{
+		userHold: state.UserHoldRecord{
+			Present:           true,
+			Generation:        routeLookupHoldGeneration,
+			CreatedAt:         now.Add(-time.Minute),
+			ExpiresAt:         now.Add(5 * time.Minute),
+			RequestedDuration: 10 * time.Minute,
+			ServerTime:        now,
+		},
 	}
+	recorder := &recordingRuntimeObservation{}
+	service := newRouteLookupTestService(t, store, false, recorder)
+
+	response := lookupDefaultRoute(t, service)
+	assertActiveUserHoldContext(t, response)
+
+	event := assertRouteLookupObservationLabels(t, recorder, observability.EventUserHold, operationRouteLookup, routeLookupUserHoldActive, "affected")
+
+	rendered := fmt.Sprintf("%#v", event)
+	if strings.Contains(rendered, routeLookupAccount) {
+		t.Fatalf("user-hold observation leaked raw account: %s", rendered)
+	}
+
+	assertNoRouteLookupMutations(t, store)
+}
+
+// TestRouteLookupTreatsExpiredUserHoldAsNonBlocking verifies stale records do not defer.
+func TestRouteLookupTreatsExpiredUserHoldAsNonBlocking(t *testing.T) {
+	now := time.Unix(1_780_000_000, 0).UTC()
+	store := &countingRouteState{
+		userHold: state.UserHoldRecord{
+			Present:    true,
+			Generation: "hold-expired",
+			ExpiresAt:  now.Add(-time.Second),
+			ServerTime: now,
+		},
+	}
+	service := newRouteLookupTestService(t, store, false)
+
+	response := lookupDefaultRoute(t, service)
+
+	if response.UserHold.Present ||
+		response.UserHold.PlacementDeferred ||
+		response.UserHold.ReasonClass != routeLookupUserHoldExpired ||
+		response.Effects.UserHold {
+		t.Fatalf("user hold = %#v effects=%#v, want expired non-blocking context", response.UserHold, response.Effects)
+	}
+
+	assertNoRouteLookupMutations(t, store)
+}
+
+// TestRouteLookupRecordsUserHoldReadFailure verifies hold read errors are bounded.
+func TestRouteLookupRecordsUserHoldReadFailure(t *testing.T) {
+	store := &countingRouteState{
+		userHoldErr: newRuntimeError(ErrorKindUnavailable, operationUserHoldCheck, "hold read unavailable"),
+	}
+	recorder := &recordingRuntimeObservation{}
+	service := newRouteLookupTestService(t, store, false, recorder)
+
+	_ = lookupDefaultRouteError(t, service)
+	assertRouteLookupObservationLabels(t, recorder, observability.EventUserHold, operationUserHoldCheck, routeLookupUserHoldReadFailed, runtimeObservationResultFailure)
 
 	assertNoRouteLookupMutations(t, store)
 }
@@ -598,6 +751,7 @@ func newRouteLookupTestService(t *testing.T, store *countingRouteState, enforceH
 		BackendRead:    reader,
 		AffinityRead:   store,
 		BackendPinRead: store,
+		UserHoldRead:   store,
 		ListenerContexts: []RouteLookupListenerContext{
 			{
 				Name:        routeLookupListener,
@@ -662,6 +816,7 @@ func newLMTPRouteLookupTestService(t *testing.T, store *countingRouteState, iden
 		BackendRead:    reader,
 		AffinityRead:   store,
 		BackendPinRead: store,
+		UserHoldRead:   store,
 		ListenerContexts: []RouteLookupListenerContext{
 			{
 				Name:        routeLookupProtocolLMTP,
@@ -742,7 +897,10 @@ func assertNoRouteLookupMutations(t *testing.T, store *countingRouteState) {
 		store.releaseBackendCalls != 0 ||
 		store.reapBackendCalls != 0 ||
 		store.setBackendCalls != 0 ||
-		store.clearBackendCalls != 0 {
+		store.clearBackendCalls != 0 ||
+		store.userHoldSetCalls != 0 ||
+		store.userHoldClearCalls != 0 ||
+		store.waitForPlacementCalls != 0 {
 		t.Fatalf("route lookup used mutating state path: %#v", store)
 	}
 }
@@ -753,24 +911,30 @@ type countingRouteState struct {
 	affinity      state.AffinityRecord
 	backendPin    state.UserBackendPinRecord
 	backendPinErr error
+	userHold      state.UserHoldRecord
+	userHoldErr   error
 
-	backendSnapshotCalls int
-	lookupAffinityCalls  int
-	backendPinGetCalls   int
-	openSessionCalls     int
-	attachBackendCalls   int
-	heartbeatCalls       int
-	closeSessionCalls    int
-	reapCalls            int
-	moveUserCalls        int
-	kickUserCalls        int
-	clearUserCalls       int
-	killSessionCalls     int
-	reserveBackendCalls  int
-	releaseBackendCalls  int
-	reapBackendCalls     int
-	setBackendCalls      int
-	clearBackendCalls    int
+	backendSnapshotCalls  int
+	lookupAffinityCalls   int
+	backendPinGetCalls    int
+	userHoldCheckCalls    int
+	userHoldSetCalls      int
+	userHoldClearCalls    int
+	waitForPlacementCalls int
+	openSessionCalls      int
+	attachBackendCalls    int
+	heartbeatCalls        int
+	closeSessionCalls     int
+	reapCalls             int
+	moveUserCalls         int
+	kickUserCalls         int
+	clearUserCalls        int
+	killSessionCalls      int
+	reserveBackendCalls   int
+	releaseBackendCalls   int
+	reapBackendCalls      int
+	setBackendCalls       int
+	clearBackendCalls     int
 }
 
 type recordingRouteIdentityLookup struct {
@@ -801,16 +965,23 @@ func (r *recordingRouteIdentityLookup) singleRequest(t *testing.T) RouteLookupId
 }
 
 type recordingRuntimeObservation struct {
+	mu     sync.Mutex
 	events []observability.Event
 }
 
 // Record stores a runtime observation for assertions.
 func (r *recordingRuntimeObservation) Record(_ context.Context, event observability.Event) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
 	r.events = append(r.events, event)
 }
 
 // last returns the latest runtime event with the supplied name.
 func (r *recordingRuntimeObservation) last(name string) (observability.Event, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
 	for index := len(r.events) - 1; index >= 0; index-- {
 		if r.events[index].Name == name {
 			return r.events[index], true
@@ -822,6 +993,9 @@ func (r *recordingRuntimeObservation) last(name string) (observability.Event, bo
 
 // eventsByName returns recorded events with the supplied name.
 func (r *recordingRuntimeObservation) eventsByName(name string) []observability.Event {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
 	events := make([]observability.Event, 0)
 	for _, event := range r.events {
 		if event.Name == name {
@@ -862,6 +1036,42 @@ func (s *countingRouteState) GetUserBackendPin(_ context.Context, request state.
 	}
 
 	return pin, nil
+}
+
+// CheckUserHold records a read-only placement-hold lookup.
+func (s *countingRouteState) CheckUserHold(_ context.Context, request state.UserHoldCheckRequest) (state.UserHoldRecord, error) {
+	s.userHoldCheckCalls++
+	if s.userHoldErr != nil {
+		return state.UserHoldRecord{}, s.userHoldErr
+	}
+
+	hold := s.userHold
+	if hold.Key == (state.AffinityKey{}) {
+		hold.Key = request.Key
+	}
+
+	return hold, nil
+}
+
+// SetUserHold records an unexpected placement-hold mutation path.
+func (s *countingRouteState) SetUserHold(context.Context, state.UserHoldSetRequest) (state.UserHoldRecord, error) {
+	s.userHoldSetCalls++
+
+	return state.UserHoldRecord{}, nil
+}
+
+// ClearUserHold records an unexpected placement-hold clear path.
+func (s *countingRouteState) ClearUserHold(context.Context, state.UserHoldClearRequest) (state.UserHoldRecord, error) {
+	s.userHoldClearCalls++
+
+	return state.UserHoldRecord{}, nil
+}
+
+// WaitForPlacement records an unexpected placement waiter path.
+func (s *countingRouteState) WaitForPlacement(context.Context, PlacementGateRequest) (PlacementGateResult, error) {
+	s.waitForPlacementCalls++
+
+	return PlacementGateResult{}, nil
 }
 
 // OpenSession records an unexpected session-open mutation path.

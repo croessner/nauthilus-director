@@ -3259,7 +3259,7 @@ func writeRouteLine(writer io.Writer, route generated.RouteLookupResponse) {
 	}
 	_, _ = fmt.Fprintf(
 		writer,
-		"selected_backend=%s shard_tag=%s routing_source=%s healthy=%t maintenance=%t fail_closed=%t affected_health=%t affected_maintenance=%t affected_runtime=%t affected_max_connections=%t reason=%s routing_generation=%s",
+		"selected_backend=%s shard_tag=%s routing_source=%s healthy=%t maintenance=%t fail_closed=%t affected_health=%t affected_maintenance=%t affected_runtime=%t affected_max_connections=%t affected_user_hold=%t reason=%s routing_generation=%s",
 		fieldValue(route.SelectedBackend),
 		fieldValue(route.ShardTag),
 		fieldValue(route.Routing.Source),
@@ -3270,6 +3270,7 @@ func writeRouteLine(writer io.Writer, route generated.RouteLookupResponse) {
 		route.AffectedBy.Maintenance,
 		route.AffectedBy.RuntimeOverride,
 		route.AffectedBy.MaxConnections,
+		route.AffectedBy.UserHold,
 		fieldValue(route.Reason),
 		fieldValue(generation),
 	)
@@ -3311,6 +3312,22 @@ func writeRouteLine(writer io.Writer, route generated.RouteLookupResponse) {
 		fieldValue(pinPool),
 		fieldValue(pinShard),
 		fieldValue(route.BackendPin.Reason),
+	)
+	holdExpiresAt := timePointerValue(route.UserHold.ExpiresAt)
+	holdGeneration := stringPointerValue(route.UserHold.Generation)
+	holdRemainingSeconds := ""
+	if route.UserHold.RemainingSeconds != nil {
+		holdRemainingSeconds = strconv.Itoa(*route.UserHold.RemainingSeconds)
+	}
+	_, _ = fmt.Fprintf(
+		writer,
+		" user_hold_present=%t user_hold_deferred=%t user_hold_expires_at=%s user_hold_remaining_seconds=%s user_hold_reason=%s user_hold_generation=%s",
+		route.UserHold.Present,
+		route.UserHold.PlacementDeferred,
+		fieldValue(holdExpiresAt),
+		fieldValue(holdRemainingSeconds),
+		fieldValue(route.UserHold.Reason),
+		fieldValue(holdGeneration),
 	)
 	_, _ = fmt.Fprintln(writer)
 }

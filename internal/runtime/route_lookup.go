@@ -18,6 +18,7 @@ package runtime
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"time"
 
@@ -44,6 +45,7 @@ const (
 	routeLookupProtocolLMTP           = "lmtp"
 	routeLookupUserHoldAbsent         = "user_hold_absent"
 	routeLookupUserHoldActive         = "user_hold_active"
+	routeLookupUserHoldExpired        = "user_hold_expired"
 	routeLookupUserHoldReadFailed     = "user_hold_read_failed"
 )
 
@@ -325,7 +327,7 @@ func (s *RouteLookupService) Lookup(ctx context.Context, request RouteLookupRequ
 		return RouteLookupResponse{}, err
 	}
 
-	userHold, err := s.lookupUserHold(ctx, routingResult)
+	userHold, err := s.lookupUserHold(ctx, request, routingResult)
 	if err != nil {
 		s.recordRouteLookup(ctx, request, runtimeObservationResultFailure, routeLookupUserHoldReadFailed, RouteLookupResponse{
 			Routing: RouteLookupRoutingState{
@@ -720,11 +722,9 @@ func (s *RouteLookupService) lookupBackendPin(ctx context.Context, request Route
 		return pin, nil
 	}
 
+	key := routeLookupAffinityKey(result)
 	record, err := s.backendPinRead.GetUserBackendPin(ctx, state.UserBackendPinGetRequest{
-		Key: state.AffinityKey{
-			Tenant:     result.Tenant,
-			AccountKey: result.AccountKey,
-		},
+		Key: key,
 	})
 	if err != nil {
 		s.recordBackendPinReadFailure(ctx, request, result, err)
@@ -736,23 +736,37 @@ func (s *RouteLookupService) lookupBackendPin(ctx context.Context, request Route
 }
 
 // lookupUserHold reads placement-hold context without mutating or waiting.
-func (s *RouteLookupService) lookupUserHold(ctx context.Context, result routing.RoutingResult) (RouteLookupUserHoldState, error) {
+func (s *RouteLookupService) lookupUserHold(ctx context.Context, request RouteLookupRequest, result routing.RoutingResult) (RouteLookupUserHoldState, error) {
 	hold := RouteLookupUserHoldState{ReasonClass: routeLookupUserHoldAbsent}
 	if s == nil || s.userHoldRead == nil {
 		return hold, nil
 	}
 
-	record, err := s.userHoldRead.CheckUserHold(ctx, state.UserHoldCheckRequest{
-		Key: state.AffinityKey{
-			Tenant:     result.Tenant,
-			AccountKey: result.AccountKey,
-		},
-	})
+	return s.lookupReadableUserHold(ctx, request, result, hold)
+}
+
+// lookupReadableUserHold reads hold state after the optional reader is present.
+func (s *RouteLookupService) lookupReadableUserHold(ctx context.Context, request RouteLookupRequest, result routing.RoutingResult, hold RouteLookupUserHoldState) (RouteLookupUserHoldState, error) {
+	check := state.UserHoldCheckRequest{
+		Key: routeLookupAffinityKey(result),
+	}
+
+	record, err := s.userHoldRead.CheckUserHold(ctx, check)
 	if err != nil {
+		s.recordUserHoldReadFailure(ctx, request, result, err)
+
 		return hold, err
 	}
 
 	return routeLookupUserHoldFromRecord(record), nil
+}
+
+// routeLookupAffinityKey returns the runtime state key for route lookup reads.
+func routeLookupAffinityKey(result routing.RoutingResult) state.AffinityKey {
+	return state.AffinityKey{
+		Tenant:     result.Tenant,
+		AccountKey: result.AccountKey,
+	}
 }
 
 // routeLookupSelectionRequest builds the shared backend selector input.
@@ -801,19 +815,40 @@ func routeLookupBackendPinFromRecord(record state.UserBackendPinRecord) RouteLoo
 
 // routeLookupUserHoldFromRecord converts stored hold metadata into diagnostics.
 func routeLookupUserHoldFromRecord(record state.UserHoldRecord) RouteLookupUserHoldState {
-	hold := RouteLookupUserHoldState{
-		Present:           record.Present,
-		ExpiresAt:         record.ExpiresAt,
-		Remaining:         userHoldRemaining(record),
-		PlacementDeferred: record.Present,
-		ReasonClass:       routeLookupUserHoldAbsent,
-		Generation:        strings.TrimSpace(record.Generation),
+	present := record.Present
+	remaining := userHoldRemaining(record)
+	deferred := false
+	reason := routeLookupUserHoldAbsent
+
+	if present {
+		if userHoldRecordExpired(record) {
+			present = false
+			reason = routeLookupUserHoldExpired
+		} else {
+			deferred = true
+			reason = routeLookupUserHoldActive
+		}
 	}
-	if hold.Present {
-		hold.ReasonClass = routeLookupUserHoldActive
+
+	hold := RouteLookupUserHoldState{
+		Present:           present,
+		ExpiresAt:         record.ExpiresAt,
+		Remaining:         remaining,
+		PlacementDeferred: deferred,
+		ReasonClass:       reason,
+		Generation:        strings.TrimSpace(record.Generation),
 	}
 
 	return hold
+}
+
+// userHoldRecordExpired reports whether a sparse record is already non-blocking.
+func userHoldRecordExpired(record state.UserHoldRecord) bool {
+	if record.ExpiresAt.IsZero() || record.ServerTime.IsZero() {
+		return false
+	}
+
+	return !record.ExpiresAt.After(record.ServerTime)
 }
 
 // userHoldRemaining derives non-negative remaining hold time from Redis server time.
@@ -1105,9 +1140,54 @@ func (s *RouteLookupService) recordRouteLookup(
 
 	recordRuntimeObservation(ctx, s.recorder, observability.EventRouteLookup, observability.TraceBoundaryRESTRequest, operationRouteLookup, result, reasonClass, fields, labels, duration)
 
+	if response.UserHold.PlacementDeferred {
+		s.recordRouteLookupUserHold(ctx, request, response)
+	}
+
 	for _, state := range response.Backends {
 		s.recordRouteBackendState(ctx, request.Protocol, state)
 	}
+}
+
+// recordRouteLookupUserHold emits the hold-specific effect of one diagnostic lookup.
+func (s *RouteLookupService) recordRouteLookupUserHold(
+	ctx context.Context,
+	request RouteLookupRequest,
+	response RouteLookupResponse,
+) {
+	if s == nil {
+		return
+	}
+
+	fields := map[string]string{
+		auditFieldHoldPresent:                  boolAuditValue(response.UserHold.Present),
+		runtimeObservationFieldBackendPool:     request.BackendPool,
+		runtimeObservationFieldListener:        request.ListenerName,
+		runtimeObservationFieldProtocol:        request.Protocol,
+		runtimeObservationFieldSelectedPresent: boolAuditValue(strings.TrimSpace(response.SelectedBackend) != ""),
+		runtimeObservationFieldService:         request.ServiceName,
+		runtimeObservationFieldShardTag:        response.Routing.EffectiveShard,
+		runtimeObservationFieldUserHash:        response.Routing.AccountKey,
+	}
+	if !response.UserHold.ExpiresAt.IsZero() {
+		fields[auditFieldHoldExpiresAt] = response.UserHold.ExpiresAt.UTC().Format(time.RFC3339)
+	}
+
+	if response.UserHold.Remaining > 0 {
+		fields[auditFieldHoldDuration] = strconv.FormatInt(int64(response.UserHold.Remaining/time.Second), 10)
+	}
+
+	labels := map[string]string{
+		runtimeObservationFieldBackendPool: request.BackendPool,
+		runtimeObservationFieldListener:    request.ListenerName,
+		runtimeObservationFieldProtocol:    request.Protocol,
+		runtimeObservationFieldService:     request.ServiceName,
+	}
+	if response.Routing.EffectiveShard != "" {
+		labels[runtimeObservationFieldShardTag] = response.Routing.EffectiveShard
+	}
+
+	recordRuntimeObservation(ctx, s.recorder, observability.EventUserHold, observability.TraceBoundaryRESTRequest, operationRouteLookup, "affected", routeLookupUserHoldActive, fields, labels)
 }
 
 // recordRouteBackendState emits the effective candidate state observed by route lookup.
@@ -1170,5 +1250,28 @@ func (s *RouteLookupService) recordBackendPinReadFailure(
 		runtimeObservationFieldShardTag:          result.ShardTag,
 		runtimeObservationFieldUserHash:          result.AccountKey,
 		"backend_pin_error_present":              boolAuditValue(err != nil),
+	}, nil)
+}
+
+// recordUserHoldReadFailure emits bounded diagnostics for failed hold reads.
+func (s *RouteLookupService) recordUserHoldReadFailure(
+	ctx context.Context,
+	request RouteLookupRequest,
+	result routing.RoutingResult,
+	err error,
+) {
+	if s == nil {
+		return
+	}
+
+	recordRuntimeObservation(ctx, s.recorder, observability.EventUserHold, observability.TraceBoundaryRESTRequest, operationUserHoldCheck, runtimeObservationResultFailure, routeLookupUserHoldReadFailed, map[string]string{
+		runtimeObservationFieldAccountKeyPresent: boolAuditValue(strings.TrimSpace(result.AccountKey) != ""),
+		runtimeObservationFieldBackendPool:       request.BackendPool,
+		runtimeObservationFieldListener:          request.ListenerName,
+		runtimeObservationFieldProtocol:          request.Protocol,
+		runtimeObservationFieldService:           request.ServiceName,
+		runtimeObservationFieldShardTag:          result.ShardTag,
+		runtimeObservationFieldUserHash:          result.AccountKey,
+		"user_hold_error_present":                boolAuditValue(err != nil),
 	}, nil)
 }

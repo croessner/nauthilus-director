@@ -97,6 +97,8 @@ const (
 	EventUserKick = "user.kick"
 	// EventUserBackendPin records user backend-pin runtime operations.
 	EventUserBackendPin = "user.backend_pin"
+	// EventUserHold records user placement-hold runtime operations.
+	EventUserHold = "user.hold"
 	// EventAffinityClear records an operator affinity clear.
 	EventAffinityClear = "affinity.clear"
 	// EventRouteLookup records a side-effect-free route diagnostic.
@@ -174,6 +176,7 @@ func RuntimeEventNames() []string {
 		EventUserMove,
 		EventUserKick,
 		EventUserBackendPin,
+		EventUserHold,
 		EventAffinityClear,
 		EventRouteLookup,
 		EventReload,

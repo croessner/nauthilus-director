@@ -39,6 +39,7 @@ const (
 	operationUserHoldGet         = "user_hold_get"
 	operationUserHoldClear       = "user_hold_clear"
 	operationUserHoldCheck       = "user_hold_check"
+	operationUserHoldWait        = "user_hold_wait"
 	operationUserKick            = "user_kick"
 	operationUserMove            = "user_move"
 )
@@ -387,6 +388,8 @@ func (s *UserHoldService) SetUserHold(ctx context.Context, request SetUserHoldRe
 		Actor:       actorAuditValue(request.Actor),
 	})
 	if err != nil {
+		s.recordUserHoldOperation(ctx, operationUserHoldSet, runtimeObservationResultFailure, runtimeObservationReasonUserHoldSet, UserHold{Key: request.Key}, nil)
+
 		return SetUserHoldResult{}, err
 	}
 
@@ -396,6 +399,8 @@ func (s *UserHoldService) SetUserHold(ctx context.Context, request SetUserHoldRe
 	if err != nil {
 		return SetUserHoldResult{}, err
 	}
+
+	s.recordUserHoldOperation(ctx, operationUserHoldSet, runtimeObservationResultOK, runtimeObservationReasonUserHoldSet, hold, nil)
 
 	return SetUserHoldResult{Hold: hold, Audit: audit}, nil
 }
@@ -413,6 +418,10 @@ func (s *UserHoldService) GetUserHold(ctx context.Context, request GetUserHoldRe
 
 	record, err := s.store.GetUserHold(ctx, state.UserHoldGetRequest{Key: request.Key.affinityKey()})
 	if err != nil {
+		if ctx == nil || ctx.Err() == nil {
+			s.recordUserHoldOperation(ctx, operationUserHoldGet, runtimeObservationResultFailure, routeLookupUserHoldReadFailed, UserHold{Key: request.Key}, nil)
+		}
+
 		return GetUserHoldResult{}, err
 	}
 
@@ -436,6 +445,8 @@ func (s *UserHoldService) ClearUserHold(ctx context.Context, request ClearUserHo
 		Actor:  actorAuditValue(request.Actor),
 	})
 	if err != nil {
+		s.recordUserHoldOperation(ctx, operationUserHoldClear, runtimeObservationResultFailure, runtimeObservationReasonUserHoldClear, UserHold{Key: request.Key}, nil)
+
 		return ClearUserHoldResult{}, err
 	}
 
@@ -448,6 +459,8 @@ func (s *UserHoldService) ClearUserHold(ctx context.Context, request ClearUserHo
 	if err != nil {
 		return ClearUserHoldResult{}, err
 	}
+
+	s.recordUserHoldOperation(ctx, operationUserHoldClear, runtimeObservationResultOK, runtimeObservationReasonUserHoldClear, hold, nil)
 
 	return ClearUserHoldResult{Hold: hold, Audit: audit}, nil
 }
@@ -495,13 +508,16 @@ func (s *UserHoldService) WaitForPlacement(ctx context.Context, request Placemen
 		return PlacementGateResult{Outcome: PlacementGateOutcomeAllowed, Hold: hold}, nil
 	}
 
-	return s.waitForActiveUserHold(ctx, request)
+	s.recordPlacementDeferred(ctx, request, hold)
+
+	return s.waitForActiveUserHold(ctx, request, hold)
 }
 
 // waitForActiveUserHold waits locally after the initial hold check observed an active hold.
 func (s *UserHoldService) waitForActiveUserHold(
 	ctx context.Context,
 	request PlacementGateRequest,
+	initialHold UserHold,
 ) (PlacementGateResult, error) {
 	if s.waiters == nil {
 		return PlacementGateResult{}, newRuntimeError(ErrorKindUnavailable, operationUserHoldCheck, "user hold waiter registry required")
@@ -509,9 +525,13 @@ func (s *UserHoldService) waitForActiveUserHold(
 
 	waiter, err := s.waiters.register(request.Key)
 	if err != nil {
+		s.recordPlacementGateWait(ctx, request, UserHold{Key: request.Key}, runtimeObservationResultFailure, "user_hold_waiter_limit_exceeded")
+
 		return PlacementGateResult{}, newRuntimeError(ErrorKindUnavailable, operationUserHoldCheck, err.Error())
 	}
 	defer s.waiters.unregister(waiter)
+
+	s.recordPlacementGateWait(ctx, request, initialHold, "wait_started", "user_hold_wait_started")
 
 	waitCtx, cancel := s.placementWaitContext(ctx, request)
 	defer cancel()
@@ -520,6 +540,8 @@ func (s *UserHoldService) waitForActiveUserHold(
 		hold, err := s.checkUserHold(waitCtx, request.Key)
 		if err != nil {
 			if waitCtx.Err() != nil {
+				s.recordPlacementGateWait(ctx, request, initialHold, runtimeObservationResultFailure, userHoldWaitExitReason(ctx))
+
 				return PlacementGateResult{}, placementGateWaitError(ctx)
 			}
 
@@ -527,6 +549,8 @@ func (s *UserHoldService) waitForActiveUserHold(
 		}
 
 		if !hold.Present {
+			s.recordPlacementGateWait(ctx, request, hold, "wait_released", "user_hold_wait_released")
+
 			return PlacementGateResult{
 				Outcome:                     PlacementGateOutcomeReleased,
 				Hold:                        hold,
@@ -535,6 +559,8 @@ func (s *UserHoldService) waitForActiveUserHold(
 		}
 
 		if err := s.waitForHoldRecheck(waitCtx, waiter); err != nil {
+			s.recordPlacementGateWait(ctx, request, initialHold, runtimeObservationResultFailure, userHoldWaitExitReason(ctx))
+
 			return PlacementGateResult{}, placementGateWaitError(ctx)
 		}
 	}
@@ -1175,6 +1201,10 @@ func (s *UserHoldService) checkUserHold(ctx context.Context, key UserKey) (UserH
 
 	record, err := s.store.CheckUserHold(ctx, state.UserHoldCheckRequest{Key: key.affinityKey()})
 	if err != nil {
+		if ctx == nil || ctx.Err() == nil {
+			s.recordUserHoldOperation(ctx, operationUserHoldCheck, runtimeObservationResultFailure, routeLookupUserHoldReadFailed, UserHold{Key: key}, nil)
+		}
+
 		return UserHold{}, err
 	}
 
@@ -1540,4 +1570,97 @@ func (s *UserBackendPinService) recordBackendPinOperation(
 	}
 
 	recordRuntimeObservation(ctx, s.recorder, observability.EventUserBackendPin, observability.TraceBoundaryRESTRequest, operation, result, reasonClass, eventFields, nil)
+}
+
+// recordUserHoldOperation emits one secret-safe placement-hold observation.
+func (s *UserHoldService) recordUserHoldOperation(
+	ctx context.Context,
+	operation string,
+	result string,
+	reasonClass string,
+	hold UserHold,
+	fields map[string]string,
+) {
+	if s == nil {
+		return
+	}
+
+	eventFields := userHoldObservationFields(hold)
+	maps.Copy(eventFields, fields)
+
+	recordRuntimeObservation(ctx, s.recorder, observability.EventUserHold, observability.TraceBoundaryRESTRequest, operation, result, reasonClass, eventFields, nil)
+}
+
+// recordPlacementDeferred emits the placement-deferred user-hold event before waiting.
+func (s *UserHoldService) recordPlacementDeferred(ctx context.Context, request PlacementGateRequest, hold UserHold) {
+	fields, labels := userHoldPlacementObservation(request)
+	maps.Copy(fields, userHoldObservationFields(hold))
+
+	recordRuntimeObservation(ctx, s.recorder, observability.EventUserHold, observability.TraceBoundaryBackendSelect, operationUserHoldCheck, "deferred", routeLookupUserHoldActive, fields, labels)
+}
+
+// recordPlacementGateWait emits bounded wait lifecycle events for held placement.
+func (s *UserHoldService) recordPlacementGateWait(
+	ctx context.Context,
+	request PlacementGateRequest,
+	hold UserHold,
+	result string,
+	reasonClass string,
+) {
+	fields, labels := userHoldPlacementObservation(request)
+	maps.Copy(fields, userHoldObservationFields(hold))
+
+	recordRuntimeObservation(ctx, s.recorder, observability.EventUserHold, observability.TraceBoundaryBackendSelect, operationUserHoldWait, result, reasonClass, fields, labels)
+}
+
+// userHoldObservationFields returns bounded hold fields without raw operator reason text.
+func userHoldObservationFields(hold UserHold) map[string]string {
+	fields := map[string]string{
+		auditFieldHoldPresent:                    boolAuditValue(hold.Present),
+		runtimeObservationFieldRuntimeGeneration: strings.TrimSpace(hold.Generation),
+		runtimeObservationFieldServerTime:        boolAuditValue(!hold.UpdatedAt.IsZero()),
+		runtimeObservationFieldUserHash:          strings.TrimSpace(hold.Key.UserHash),
+	}
+
+	if hold.RequestedDuration > 0 {
+		fields[auditFieldHoldDuration] = strconv.FormatInt(int64(hold.RequestedDuration/time.Second), 10)
+	}
+
+	if !hold.ExpiresAt.IsZero() {
+		fields[auditFieldHoldExpiresAt] = hold.ExpiresAt.UTC().Format(time.RFC3339)
+	}
+
+	return fields
+}
+
+// userHoldPlacementObservation returns safe protocol dimensions for wait diagnostics.
+func userHoldPlacementObservation(request PlacementGateRequest) (map[string]string, map[string]string) {
+	fields := map[string]string{
+		runtimeObservationFieldListener: strings.TrimSpace(request.ListenerName),
+		runtimeObservationFieldProtocol: strings.TrimSpace(request.Protocol),
+		runtimeObservationFieldService:  strings.TrimSpace(request.ServiceName),
+	}
+
+	labels := map[string]string{}
+
+	for _, name := range []string{
+		runtimeObservationFieldListener,
+		runtimeObservationFieldProtocol,
+		runtimeObservationFieldService,
+	} {
+		if value := strings.TrimSpace(fields[name]); value != "" {
+			labels[name] = value
+		}
+	}
+
+	return fields, labels
+}
+
+// userHoldWaitExitReason classifies timeout and cancellation without raw errors.
+func userHoldWaitExitReason(ctx context.Context) string {
+	if ctx != nil && errors.Is(ctx.Err(), context.Canceled) {
+		return "canceled"
+	}
+
+	return "user_hold_wait_timeout"
 }

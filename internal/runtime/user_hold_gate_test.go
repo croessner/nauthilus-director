@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/croessner/nauthilus-director/internal/observability"
 	"github.com/croessner/nauthilus-director/internal/state"
 )
 
@@ -95,14 +96,15 @@ func TestPlacementGateActiveHoldDoesNotBlockUnrelatedUser(t *testing.T) {
 func TestPlacementGateLocalClearReleasesAndRequiresRecheck(t *testing.T) {
 	key := UserKey{Tenant: runtimeTestTenant, UserHash: runtimeTestUserHash}
 	store := newTestUserHoldStore(true)
-	service := newTestUserHoldService(t, store, UserHoldServiceConfig{
+	recorder := &recordingRuntimeObservation{}
+	service := newObservedTestUserHoldService(t, store, UserHoldServiceConfig{
 		Enabled:                true,
 		MaxDuration:            time.Minute,
 		MaxWait:                time.Second,
 		PollInterval:           500 * time.Millisecond,
 		MaxLocalWaiters:        2,
 		MaxLocalWaitersPerUser: 1,
-	})
+	}, recorder)
 
 	ctx := t.Context()
 
@@ -131,6 +133,9 @@ func TestPlacementGateLocalClearReleasesAndRequiresRecheck(t *testing.T) {
 		t.Fatalf("placement result = %#v, want released with runtime recheck", call.result)
 	}
 
+	assertUserHoldObservationReason(t, recorder, routeLookupUserHoldActive)
+	assertUserHoldObservationReason(t, recorder, "user_hold_wait_started")
+	assertUserHoldObservationReason(t, recorder, "user_hold_wait_released")
 	assertNoPlacementWaiters(t, service, key)
 }
 
@@ -204,20 +209,22 @@ func TestPlacementGatePollingReleaseWorksWithoutLocalWake(t *testing.T) {
 func TestPlacementGateTimeoutTemporaryFails(t *testing.T) {
 	key := UserKey{Tenant: runtimeTestTenant, UserHash: runtimeTestUserHash}
 	store := newTestUserHoldStore(true)
-	service := newTestUserHoldService(t, store, UserHoldServiceConfig{
+	recorder := &recordingRuntimeObservation{}
+	service := newObservedTestUserHoldService(t, store, UserHoldServiceConfig{
 		Enabled:                true,
 		MaxDuration:            time.Minute,
 		MaxWait:                25 * time.Millisecond,
 		PollInterval:           5 * time.Millisecond,
 		MaxLocalWaiters:        2,
 		MaxLocalWaitersPerUser: 1,
-	})
+	}, recorder)
 
 	_, err := service.WaitForPlacement(context.Background(), testPlacementGateRequest(key))
 	if !IsErrorKind(err, ErrorKindUnavailable) {
 		t.Fatalf("WaitForPlacement error = %v, want temporary unavailable", err)
 	}
 
+	assertUserHoldObservationReason(t, recorder, "user_hold_wait_timeout")
 	assertNoPlacementWaiters(t, service, key)
 }
 
@@ -226,14 +233,15 @@ func TestPlacementGateGlobalWaiterLimitRejectsWithoutQueuing(t *testing.T) {
 	firstKey := UserKey{Tenant: runtimeTestTenant, UserHash: runtimeTestUserHash}
 	secondKey := UserKey{Tenant: runtimeTestTenant, UserHash: runtimeTestOtherUserHash}
 	store := newTestUserHoldStore(true)
-	service := newTestUserHoldService(t, store, UserHoldServiceConfig{
+	recorder := &recordingRuntimeObservation{}
+	service := newObservedTestUserHoldService(t, store, UserHoldServiceConfig{
 		Enabled:                true,
 		MaxDuration:            time.Minute,
 		MaxWait:                time.Second,
 		PollInterval:           100 * time.Millisecond,
 		MaxLocalWaiters:        1,
 		MaxLocalWaitersPerUser: 1,
-	})
+	}, recorder)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -251,6 +259,8 @@ func TestPlacementGateGlobalWaiterLimitRejectsWithoutQueuing(t *testing.T) {
 	if !IsErrorKind(err, ErrorKindUnavailable) {
 		t.Fatalf("second WaitForPlacement error = %v, want waiter-limit temporary failure", err)
 	}
+
+	assertUserHoldObservationReason(t, recorder, "user_hold_waiter_limit_exceeded")
 
 	total, perUser := service.waiters.counts(secondKey)
 	if total != 1 || perUser != 0 {
@@ -348,6 +358,36 @@ func newTestUserHoldService(t *testing.T, store state.UserHoldStore, config User
 	}
 
 	return service
+}
+
+// newObservedTestUserHoldService builds a gate with a recording observability sink.
+func newObservedTestUserHoldService(
+	t *testing.T,
+	store state.UserHoldStore,
+	config UserHoldServiceConfig,
+	recorder *recordingRuntimeObservation,
+) *UserHoldService {
+	t.Helper()
+
+	service, err := NewUserHoldService(store, config, WithObservabilityRecorder(recorder))
+	if err != nil {
+		t.Fatalf("NewUserHoldService returned error: %v", err)
+	}
+
+	return service
+}
+
+// assertUserHoldObservationReason verifies at least one hold event has the expected reason.
+func assertUserHoldObservationReason(t *testing.T, recorder *recordingRuntimeObservation, reason string) {
+	t.Helper()
+
+	for _, event := range recorder.eventsByName(observability.EventUserHold) {
+		if event.MetricLabels["reason_class"] == reason {
+			return
+		}
+	}
+
+	t.Fatalf("user-hold events = %#v, want reason %q", recorder.events, reason)
 }
 
 // testPlacementGateRequest returns one valid protocol placement request.

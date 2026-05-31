@@ -28,6 +28,8 @@ const (
 	testReasonClassOther                  = "other"
 	testReasonClassRuntimeHardMaintenance = "runtime_hard_maintenance"
 	testReasonClassRuntimeOut             = "runtime_out"
+	testReasonClassUserHoldActive         = "user_hold_active"
+	testReasonClassUserHoldWaiterLimit    = "user_hold_waiter_limit_exceeded"
 )
 
 // TestMetricLabelAllowlistAcceptsDocumentedLabels verifies approved labels.
@@ -324,6 +326,7 @@ func TestRuntimeEventVocabularyCoversControlSurface(t *testing.T) {
 		EventUserMove:                    false,
 		EventUserKick:                    false,
 		EventUserBackendPin:              false,
+		EventUserHold:                    false,
 		EventAffinityClear:               false,
 		EventRouteLookup:                 false,
 		EventReload:                      false,
@@ -367,6 +370,8 @@ func TestReasonClassNormalizationKeepsMetricValuesBounded(t *testing.T) {
 		reasonClassRouting:                         reasonClassRouting,
 		"Runtime Hard Maintenance":                 testReasonClassRuntimeHardMaintenance,
 		reasonClassSameBackend:                     reasonClassSameBackend,
+		"user hold active":                         testReasonClassUserHoldActive,
+		testReasonClassUserHoldWaiterLimit:         testReasonClassUserHoldWaiterLimit,
 		"dial tcp 127.0.0.1:143: secret token":     testReasonClassOther,
 		"session_id":                               testReasonClassOther,
 		"custom per-user backend error alice@test": testReasonClassOther,

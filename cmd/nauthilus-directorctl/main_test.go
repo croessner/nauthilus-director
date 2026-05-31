@@ -848,6 +848,62 @@ func TestRouteLookupRecipient(t *testing.T) {
 	}
 }
 
+// TestRouteLookupTextOutputIncludesUserHoldDiagnostics keeps hold context visible.
+func TestRouteLookupTextOutputIncludesUserHoldDiagnostics(t *testing.T) {
+	fake := newFakeControlClient()
+	expiresAt := time.Date(2026, 5, 26, 12, 10, 0, 0, time.UTC)
+	remainingSeconds := 600
+	holdGeneration := "hold-gen-a"
+	fake.routeResponse = &generated.RouteLookupResponse{
+		AffectedBy: generated.RouteLookupEffects{
+			UserHold: true,
+		},
+		BackendPin: generated.RouteLookupBackendPin{
+			Applied: false,
+			Present: false,
+			Reason:  "backend_pin_absent",
+		},
+		Healthy:         true,
+		Reason:          "selected",
+		SelectedBackend: "backend-a",
+		ShardTag:        "shard-a",
+		Routing: generated.RouteLookupRouting{
+			Source: "auth_attribute",
+		},
+		UserHold: generated.RouteLookupUserHold{
+			ExpiresAt:         &expiresAt,
+			Generation:        &holdGeneration,
+			PlacementDeferred: true,
+			Present:           true,
+			Reason:            "user_hold_active",
+			RemainingSeconds:  &remainingSeconds,
+		},
+	}
+
+	stdout, stderr, code := runWithFakeClient([]string{
+		"route", "lookup",
+		"--protocol", "imap",
+		"--user", "user-a",
+	}, fake)
+	if code != 0 {
+		t.Fatalf("route lookup returned exit code %d, want 0; stderr=%q", code, stderr)
+	}
+
+	for _, want := range []string{
+		"affected_user_hold=true",
+		"user_hold_present=true",
+		"user_hold_deferred=true",
+		"user_hold_expires_at=2026-05-26T12:10:00Z",
+		"user_hold_remaining_seconds=600",
+		"user_hold_reason=user_hold_active",
+		"user_hold_generation=hold-gen-a",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("route lookup output missing %q:\n%s", want, stdout)
+		}
+	}
+}
+
 // TestHTTPStatusAndUsageExitCodes verifies stable local and remote failure mapping.
 func TestHTTPStatusAndUsageExitCodes(t *testing.T) {
 	fake := newFakeControlClient()
@@ -1173,6 +1229,7 @@ type fakeControlClient struct {
 	listUsersCalls         int
 	runtimeSummary         *generated.RuntimeSummaryResponse
 	routeRequest           generated.RouteLookupRequest
+	routeResponse          *generated.RouteLookupResponse
 	listenerDrainRequest   generated.ListenerDrainRequest
 	listenerResumeRequest  generated.ListenerResumeRequest
 	backendPinResponse     *generated.UserBackendPin
@@ -1600,20 +1657,30 @@ func (fake *fakeControlClient) LookupRouteWithResponse(_ context.Context, body g
 	fake.record("LookupRoute")
 	fake.routeRequest = body
 	generation := "route-gen-a"
+	route := &generated.RouteLookupResponse{
+		BackendPin: generated.RouteLookupBackendPin{
+			Applied: false,
+			Present: false,
+			Reason:  "backend_pin_absent",
+		},
+		Healthy:           true,
+		Reason:            "selected",
+		RoutingGeneration: &generation,
+		SelectedBackend:   "backend-a",
+		ShardTag:          "shard-a",
+		UserHold: generated.RouteLookupUserHold{
+			Present:           false,
+			PlacementDeferred: false,
+			Reason:            "user_hold_absent",
+		},
+	}
+	if fake.routeResponse != nil {
+		route = fake.routeResponse
+	}
+
 	return &generated.LookupRouteResponse{
 		HTTPResponse: httpResponse(http.StatusOK),
-		JSON200: &generated.RouteLookupResponse{
-			BackendPin: generated.RouteLookupBackendPin{
-				Applied: false,
-				Present: false,
-				Reason:  "backend_pin_absent",
-			},
-			Healthy:           true,
-			Reason:            "selected",
-			RoutingGeneration: &generation,
-			SelectedBackend:   "backend-a",
-			ShardTag:          "shard-a",
-		},
+		JSON200:      route,
 	}, nil
 }
 
