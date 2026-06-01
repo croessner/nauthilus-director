@@ -619,15 +619,16 @@ user-stateful protocol sessions route to the same backend shard.
 - Implement or adapt selector behavior for `recipient_hash`.
 - Preserve runtime health, maintenance, runtime out, drain, weight and
   max-connection constraints during LMTP placement.
-- If an active affinity already exists for the resolved account, LMTP must use
-  that shard before normal initial placement.
-- If no active affinity exists, LMTP must select an initial shard/backend and
-  open a delivery-scoped affinity hold before accepting the recipient.
+- If active or retained affinity already exists for the resolved account, LMTP
+  must use that backend node before normal initial placement.
+- If no active or retained affinity exists, LMTP must select an initial
+  shard/backend node/backend and open a delivery-scoped affinity hold before
+  accepting the recipient.
 - Delivery-scoped holds must be heartbeated while the transaction is active and
   closed after DATA final status, `BDAT ... LAST` final status, `RSET`, `QUIT`,
   connection close or error.
 - New IMAP sessions for the same account must observe LMTP delivery holds as
-  active affinity and route to the same shard.
+  active affinity and route to the same backend node, not merely the same shard.
 - The first accepted recipient establishes the transaction backend target.
 - Additional recipients are accepted only when the same resolver and selector
   pipeline selects the same concrete backend target.
@@ -1448,9 +1449,9 @@ M5 is complete only when all items below are true:
 - [x] Logs and traces do not contain raw recipients, message content, credentials,
       SASL blobs, bearer tokens, private keys or raw authorization headers.
 - [x] `make e2e` proves LMTP through public sockets, the production binary and
-      the delivery-hold-to-IMAP shard-consistency invariant.
+      the delivery-hold-to-IMAP backend-node consistency invariant.
 - [x] `make e2e-interop` proves real Postfix-to-Director-to-Dovecot LMTP delivery
-      on a Docker-capable environment, including the same shard-consistency
+      on a Docker-capable environment, including the backend-node consistency
       invariant or an equivalent real-binary proof.
 - [x] Existing IMAP interop coverage remains present.
 - [x] Config docs, generated references, OpenAPI artifacts and manpages are
@@ -1480,8 +1481,8 @@ multi-recipient success, different-backend stable `4xx` before message body,
 DATA forwarding, BDAT forwarding, suppressed `CHUNKING` when backend capability
 mediation forbids it, mixed same-backend per-recipient outcomes, route lookup
 dry-run behavior, runtime out/hard maintenance/soft maintenance effects,
-delivery-hold-to-IMAP shard consistency and secret-safe logs, metrics, traces
-and test output.
+delivery-hold-to-IMAP backend-node consistency and secret-safe logs, metrics,
+traces and test output.
 
 The real-server interoperability lane passed on a Docker-capable environment.
 It preserves the existing Dovecot IMAP interop coverage, starts real Dovecot
@@ -1490,9 +1491,9 @@ Redis-compatible state, starts real Postfix as the submitting peer and verifies
 end-to-end delivery into Dovecot. The LMTP interop proof includes
 `CHUNKING`/`BDAT` when advertised, same-backend multi-recipient behavior,
 different-backend recipient temporary failure before message body, concurrent
-LMTP delivery and IMAP placement on the same shard, `swaks` injection into
-Postfix from a tool container and `curl --url imap...` verification of a unique
-delivered message marker in the real Dovecot mailbox.
+LMTP delivery and IMAP placement on the same backend node, `swaks` injection
+into Postfix from a tool container and `curl --url imap...` verification of a
+unique delivered message marker in the real Dovecot mailbox.
 
 ## Required M5 Review Pass
 

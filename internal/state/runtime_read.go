@@ -404,8 +404,13 @@ func (s *RedisSessionStore) GetRuntimeUser(ctx context.Context, key AffinityKey)
 	return RuntimeUserReadRecord{
 		Key:                key,
 		ShardTag:           record.ShardTag,
+		BackendNode:        record.BackendNode,
 		ActiveSessionCount: record.ActiveSessionCount,
+		ActiveHolderCount:  record.ActiveHolderCount,
 		Generation:         record.Generation,
+		BindingGeneration:  record.BindingGeneration,
+		BindingStatus:      record.BindingStatus,
+		RetentionExpiresAt: record.RetentionExpiresAt,
 		UpdatedAt:          record.ServerTime,
 		Present:            true,
 	}, true, nil
@@ -778,6 +783,7 @@ func parseRuntimeSessionFields(sessionID string, fields map[string]string) (Runt
 		ListenerName:      strings.TrimSpace(fields["listener_name"]),
 		ServiceName:       strings.TrimSpace(fields["service_name"]),
 		ShardTag:          strings.TrimSpace(fields["shard_tag"]),
+		BackendNode:       strings.TrimSpace(fields["backend_node"]),
 		BackendIdentifier: strings.TrimSpace(fields["selected_backend_id"]),
 		DirectorInstance:  strings.TrimSpace(fields["director_instance_id"]),
 		ControlGeneration: strings.TrimSpace(fields["control_generation"]),

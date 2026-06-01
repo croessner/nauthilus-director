@@ -38,6 +38,8 @@ const (
 	testBackendPool         = "primary"
 	testBackendIMAP         = "mailstore-a-imap"
 	testBackendLMTP         = "mailstore-a-lmtp"
+	testBackendNodeA        = "mailstore-a-node"
+	testBackendNodeB        = "mailstore-b-node"
 	testHoldReason          = "hold user placement"
 	testKickSessionID       = "kick-session"
 	testKillSessionID       = "kill-session"
@@ -355,7 +357,10 @@ func TestAffinityMutationDeltaRequiresRepairFields(t *testing.T) {
 		scriptFieldStatus, testStatusCreated,
 		scriptFieldPresent, "1",
 		scriptFieldShardTag, testShardA,
+		scriptFieldBackendNode, testBackendNodeA,
 		scriptFieldGeneration, "1",
+		scriptFieldBindingGeneration, "1",
+		scriptFieldBindingStatus, string(BindingStatusActive),
 		scriptFieldControlGeneration, "0",
 		scriptFieldControlAction, "none",
 		scriptFieldBackendID, "",
@@ -369,8 +374,10 @@ func TestAffinityMutationDeltaRequiresRepairFields(t *testing.T) {
 		scriptFieldListenerName, testListenerIMAPS,
 		scriptFieldServiceName, testProtocolIMAP,
 		scriptFieldActiveSessionCount, "1",
+		scriptFieldActiveHolderCount, "1",
 		scriptFieldServerTimeMS, "1000",
 		scriptFieldExpiresAtMS, "3000",
+		scriptFieldRetentionExpiresAt, "0",
 		scriptFieldLeaseExpiresAtMS, "2000",
 		scriptFieldIdleExpiresAtMS, "3000",
 	}
@@ -384,8 +391,8 @@ func TestAffinityMutationDeltaRequiresRepairFields(t *testing.T) {
 		t.Fatalf("delta missing required fields: %#v", result.Delta)
 	}
 
-	withoutSessionID := replaceScriptField(t, fields, scriptFieldSessionID, "")
-	if _, err := parseAffinityMutationResult(key, withoutSessionID); !IsRedisErrorKind(err, RedisErrorKindAmbiguousState) {
+	withoutAffinityHash := replaceScriptField(t, fields, scriptFieldAffinityHash, "")
+	if _, err := parseAffinityMutationResult(key, withoutAffinityHash); !IsRedisErrorKind(err, RedisErrorKindAmbiguousState) {
 		t.Fatalf("missing session delta error = %v, want ambiguous_state", err)
 	}
 }
@@ -393,6 +400,7 @@ func TestAffinityMutationDeltaRequiresRepairFields(t *testing.T) {
 // TestKeyBuilderDoesNotRequireRawUsernameInKeys protects Redis key privacy.
 func TestKeyBuilderDoesNotRequireRawUsernameInKeys(t *testing.T) {
 	rawAccount := "User.Name+Secret@example.org"
+	rawRecipient := "RCPT TO:<User.Name+Secret@example.org>"
 	builder := mustKeyBuilder(t)
 
 	keys, err := builder.AffinityKeys(testTenantDefault, rawAccount)
@@ -401,7 +409,7 @@ func TestKeyBuilderDoesNotRequireRawUsernameInKeys(t *testing.T) {
 	}
 
 	for _, key := range []string{keys.State, keys.Sessions, keys.Override, keys.BackendPin, keys.Hold} {
-		if strings.Contains(key, rawAccount) || strings.Contains(key, strings.ToLower(rawAccount)) {
+		if strings.Contains(key, rawAccount) || strings.Contains(key, strings.ToLower(rawAccount)) || strings.Contains(key, rawRecipient) {
 			t.Fatalf("key %q leaked raw account %q", key, rawAccount)
 		}
 	}
@@ -411,7 +419,7 @@ func TestKeyBuilderDoesNotRequireRawUsernameInKeys(t *testing.T) {
 		t.Fatalf("SessionKey returned error: %v", err)
 	}
 
-	if strings.Contains(sessionKey, rawAccount) || strings.Contains(sessionKey, strings.ToLower(rawAccount)) {
+	if strings.Contains(sessionKey, rawAccount) || strings.Contains(sessionKey, strings.ToLower(rawAccount)) || strings.Contains(sessionKey, rawRecipient) {
 		t.Fatalf("session key %q leaked raw account %q", sessionKey, rawAccount)
 	}
 }
@@ -762,6 +770,116 @@ func TestRedisSessionLifecycleScripts(t *testing.T) {
 	assertAffinityRecord(t, closedSecond, "idle", testShardA, 0)
 }
 
+// TestRedisBackendBindingLifecycle verifies active and retained backend-node binding.
+//
+//nolint:funlen,gocyclo // The lifecycle sequence is intentionally linear to preserve state transitions.
+func TestRedisBackendBindingLifecycle(t *testing.T) {
+	store, client, builder := redisIntegrationStore(t)
+	key := AffinityKey{Tenant: "blue", AccountKey: "binding@example.test"}
+
+	const (
+		firstID    = "binding-first"
+		secondID   = "binding-second"
+		mismatchID = "binding-mismatch"
+		retainedID = "binding-retained"
+	)
+	cleanupAffinity(t, client, builder, key, firstID, secondID, mismatchID, retainedID)
+
+	first := testSessionRecord(key, firstID)
+	first.RetentionTTL = 150 * time.Millisecond
+
+	opened, err := store.OpenSession(context.Background(), first)
+	if err != nil {
+		t.Fatalf("OpenSession first returned error: %v", err)
+	}
+
+	assertBackendBinding(t, opened, testStatusCreated, BindingStatusActive, testShardA, testBackendNodeA, 1)
+	assertStoredBackendBinding(t, client, builder, key, testBackendNodeA, 1)
+
+	second := testSessionRecord(key, secondID)
+	second.ShardTag = testShardB
+	second.RetentionTTL = first.RetentionTTL
+
+	reused, err := store.OpenSession(context.Background(), second)
+	if err != nil {
+		t.Fatalf("OpenSession second returned error: %v", err)
+	}
+
+	assertBackendBinding(t, reused, "reused", BindingStatusActive, testShardA, testBackendNodeA, 2)
+
+	mismatch := testSessionRecord(key, mismatchID)
+	mismatch.BackendNode = testBackendNodeB
+	mismatch.RetentionTTL = first.RetentionTTL
+
+	rejected, err := store.OpenSession(context.Background(), mismatch)
+	if err != nil {
+		t.Fatalf("OpenSession backend-node mismatch returned error: %v", err)
+	}
+
+	assertBackendBinding(t, rejected, "backend_node_mismatch", BindingStatusBackendNodeMismatch, testShardA, testBackendNodeA, 2)
+	assertSessionAbsent(t, client, builder, key, mismatchID)
+
+	closedSecond, err := store.CloseSession(context.Background(), key, secondID)
+	if err != nil {
+		t.Fatalf("CloseSession second returned error: %v", err)
+	}
+
+	assertBackendBinding(t, closedSecond, "closed", BindingStatusActive, testShardA, testBackendNodeA, 1)
+
+	closedFirst, err := store.CloseSession(context.Background(), key, firstID)
+	if err != nil {
+		t.Fatalf("CloseSession first returned error: %v", err)
+	}
+
+	assertBackendBinding(t, closedFirst, "idle", BindingStatusRetained, testShardA, testBackendNodeA, 0)
+
+	if closedFirst.RetentionExpiresAt.IsZero() {
+		t.Fatalf("retention expiry missing after final close: %#v", closedFirst)
+	}
+
+	lookedUp, err := store.LookupAffinity(context.Background(), key)
+	if err != nil {
+		t.Fatalf("LookupAffinity retained returned error: %v", err)
+	}
+
+	assertBackendBinding(t, lookedUp, "retained", BindingStatusRetained, testShardA, testBackendNodeA, 0)
+
+	retained := testSessionRecord(key, retainedID)
+	retained.ShardTag = testShardB
+	retained.RetentionTTL = first.RetentionTTL
+
+	reopened, err := store.OpenSession(context.Background(), retained)
+	if err != nil {
+		t.Fatalf("OpenSession retained returned error: %v", err)
+	}
+
+	assertBackendBinding(t, reopened, "retained", BindingStatusActive, testShardA, testBackendNodeA, 1)
+
+	if _, err = store.CloseSession(context.Background(), key, retainedID); err != nil {
+		t.Fatalf("CloseSession retained returned error: %v", err)
+	}
+
+	time.Sleep(220 * time.Millisecond)
+
+	reaped, err := store.ReapSessions(context.Background(), ReapRequest{Limit: 10, MaxPassDuration: time.Second})
+	if err != nil {
+		t.Fatalf("ReapSessions after retention expiry returned error: %v", err)
+	}
+
+	if reaped.ExpiredSessions != 0 {
+		t.Fatalf("retained-only reap expired sessions = %d, want 0", reaped.ExpiredSessions)
+	}
+
+	expired, err := store.LookupAffinity(context.Background(), key)
+	if err != nil {
+		t.Fatalf("LookupAffinity after retention expiry returned error: %v", err)
+	}
+
+	if expired.Present || (expired.BindingStatus != BindingStatusNone && expired.BindingStatus != BindingStatusExpired) {
+		t.Fatalf("expired retained binding = %#v, want missing or expired", expired)
+	}
+}
+
 // TestRuntimeAggregatesAreIdempotentAndUnderflowSafe verifies repairable counters do not drift on repeats.
 func TestRuntimeAggregatesAreIdempotentAndUnderflowSafe(t *testing.T) {
 	store, _, builder := redisIntegrationStore(t)
@@ -1090,6 +1208,8 @@ func TestRedisDeliveryHoldPinsAffinityWithoutSessionListing(t *testing.T) {
 	assertIMAPReusesDeliveryHold(t, store, key, imapID)
 	closeStateSession(t, store, key, imapID, "IMAP")
 	closeStateSession(t, store, key, deliveryID, "delivery")
+	assertDeliveryCloseRetainsBinding(t, store, key)
+	assertDeliveryHoldNotListed(t, store, deliveryID)
 }
 
 // openDeliveryHoldForTest opens and attaches one delivery-scoped lease.
@@ -1112,6 +1232,7 @@ func openDeliveryHoldForTest(t *testing.T, store *RedisSessionStore, key Affinit
 		Key:               key,
 		SessionID:         deliveryID,
 		BackendIdentifier: testBackendLMTP,
+		BackendNode:       testBackendNodeA,
 		ReservationID:     reservation.ReservationID,
 		MaxConnections:    10,
 	}); err != nil {
@@ -1132,7 +1253,11 @@ func assertDeliveryAffinityPin(t *testing.T, store *RedisSessionStore, key Affin
 		t.Fatalf("LookupAffinity returned error: %v", err)
 	}
 
-	if !affinity.Present || affinity.ActiveSessionCount != 1 || affinity.ShardTag != testShardA {
+	if !affinity.Present ||
+		affinity.ActiveHolderCount != 1 ||
+		affinity.BindingStatus != BindingStatusActive ||
+		affinity.ShardTag != testShardA ||
+		affinity.BackendNode != testBackendNodeA {
 		t.Fatalf("delivery affinity = %#v, want active shard pin", affinity)
 	}
 }
@@ -1152,6 +1277,25 @@ func assertDeliveryHoldNotListed(t *testing.T, store *RedisSessionStore, deliver
 
 	if _, ok, err := store.GetRuntimeSession(context.Background(), deliveryID); err != nil || ok {
 		t.Fatalf("GetRuntimeSession delivery returned ok=%t err=%v", ok, err)
+	}
+}
+
+// assertDeliveryCloseRetainsBinding verifies final delivery close leaves node retention.
+func assertDeliveryCloseRetainsBinding(t *testing.T, store *RedisSessionStore, key AffinityKey) {
+	t.Helper()
+
+	affinity, err := store.LookupAffinity(context.Background(), key)
+	if err != nil {
+		t.Fatalf("LookupAffinity after delivery close returned error: %v", err)
+	}
+
+	if !affinity.Present ||
+		affinity.ActiveHolderCount != 0 ||
+		affinity.BindingStatus != BindingStatusRetained ||
+		affinity.ShardTag != testShardA ||
+		affinity.BackendNode != testBackendNodeA ||
+		affinity.RetentionExpiresAt.IsZero() {
+		t.Fatalf("delivery close affinity = %#v, want retained backend binding", affinity)
 	}
 }
 
@@ -2667,8 +2811,28 @@ func TestRedisBackendPinStrategiesControlExistingSessions(t *testing.T) {
 
 			if testCase.strategy != moveStrategyKickExisting {
 				assertDeferredBackendPinOpenUsesActiveShard(t, store, key, sessionID+"-second")
+			} else {
+				assertKickExistingBackendPinReleasesBinding(t, store, key, sessionID)
 			}
 		})
+	}
+}
+
+// assertKickExistingBackendPinReleasesBinding verifies completed kicks do not retain stale backend nodes.
+func assertKickExistingBackendPinReleasesBinding(t *testing.T, store *RedisSessionStore, key AffinityKey, sessionID string) {
+	t.Helper()
+
+	if _, err := store.CloseSession(context.Background(), key, sessionID); err != nil {
+		t.Fatalf("CloseSession kicked backend-pin session returned error: %v", err)
+	}
+
+	affinity, err := store.LookupAffinity(context.Background(), key)
+	if err != nil {
+		t.Fatalf("LookupAffinity after backend-pin kick returned error: %v", err)
+	}
+
+	if affinity.BackendNode != "" || affinity.BindingStatus != BindingStatusNone {
+		t.Fatalf("affinity after backend-pin kick = %#v, want no retained backend-node binding", affinity)
 	}
 }
 
@@ -3459,10 +3623,21 @@ func openAttachedSession(
 		Key:               key,
 		SessionID:         sessionID,
 		BackendIdentifier: backendID,
+		BackendNode:       backendNodeForTest(backendID),
 		ReservationID:     reservation.ReservationID,
 		MaxConnections:    10,
 	}); err != nil {
 		t.Fatalf("AttachSelectedBackend returned error: %v", err)
+	}
+}
+
+// backendNodeForTest maps protocol-specific fixture backends onto a backend node.
+func backendNodeForTest(backendID string) string {
+	switch backendID {
+	case testBackendIMAP, testBackendLMTP:
+		return testBackendNodeA
+	default:
+		return strings.TrimSpace(backendID) + "-node"
 	}
 }
 
@@ -3475,9 +3650,11 @@ func testSessionRecord(key AffinityKey, sessionID string) SessionRecord {
 		ListenerName:       testListenerIMAPS,
 		ServiceName:        testProtocolIMAP,
 		ShardTag:           testShardA,
+		BackendNode:        testBackendNodeA,
 		DirectorInstanceID: "director-test",
 		LeaseTTL:           2 * time.Second,
 		IdleGrace:          time.Second,
+		RetentionTTL:       time.Second,
 	}
 }
 
@@ -3503,6 +3680,86 @@ func assertAffinityRecord(t *testing.T, record AffinityRecord, status string, sh
 
 	if record.ServerTime.IsZero() || record.ExpiresAt.IsZero() {
 		t.Fatalf("record times missing: %#v", record)
+	}
+}
+
+// assertBackendBinding verifies backend-node binding fields on affinity results.
+func assertBackendBinding(
+	t *testing.T,
+	record AffinityRecord,
+	status string,
+	bindingStatus BindingStatus,
+	shard string,
+	backendNode string,
+	activeCount int,
+) {
+	t.Helper()
+
+	assertAffinityRecord(t, record, status, shard, activeCount)
+
+	if record.ActiveHolderCount != activeCount {
+		t.Fatalf("active holder count = %d, want %d in %#v", record.ActiveHolderCount, activeCount, record)
+	}
+
+	if record.BackendNode != backendNode {
+		t.Fatalf("backend node = %q, want %q in %#v", record.BackendNode, backendNode, record)
+	}
+
+	if record.BindingStatus != bindingStatus {
+		t.Fatalf("binding status = %q, want %q in %#v", record.BindingStatus, bindingStatus, record)
+	}
+
+	if record.BindingGeneration == "" {
+		t.Fatalf("binding generation missing in %#v", record)
+	}
+}
+
+// assertStoredBackendBinding verifies Redis stores concrete backend binding metadata.
+func assertStoredBackendBinding(t *testing.T, client *redis.Client, builder KeyBuilder, key AffinityKey, backendNode string, activeCount int) {
+	t.Helper()
+
+	keys, err := builder.AffinityKeys(key.Tenant, key.AccountKey)
+	if err != nil {
+		t.Fatalf("AffinityKeys returned error: %v", err)
+	}
+
+	fields := client.HGetAll(context.Background(), keys.State).Val()
+	for name, want := range map[string]string{
+		scriptFieldShardTag:           testShardA,
+		scriptFieldBackendNode:        backendNode,
+		scriptFieldActiveHolderCount:  strconv.Itoa(activeCount),
+		scriptFieldActiveSessionCount: strconv.Itoa(activeCount),
+	} {
+		if got := fields[name]; got != want {
+			t.Fatalf("state field %s = %q, want %q in %#v", name, got, want, fields)
+		}
+	}
+
+	if fields[scriptFieldBindingGeneration] == "" {
+		t.Fatalf("state binding generation missing in %#v", fields)
+	}
+}
+
+// assertSessionAbsent verifies rejected proposals did not create a holder record.
+func assertSessionAbsent(t *testing.T, client *redis.Client, builder KeyBuilder, key AffinityKey, sessionID string) {
+	t.Helper()
+
+	sessionKey, err := builder.SessionKey(key.Tenant, key.AccountKey, sessionID)
+	if err != nil {
+		t.Fatalf("SessionKey returned error: %v", err)
+	}
+
+	if exists := client.Exists(context.Background(), sessionKey).Val(); exists != 0 {
+		t.Fatalf("session key %s exists after rejected proposal", sessionKey)
+	}
+
+	keys, err := builder.AffinityKeys(key.Tenant, key.AccountKey)
+	if err != nil {
+		t.Fatalf("AffinityKeys returned error: %v", err)
+	}
+
+	if score := client.ZScore(context.Background(), keys.Sessions, sessionID).Val(); score != 0 {
+		t.Fatalf("session %s score = %f, want absent", sessionID, score)
 	}
 }
 

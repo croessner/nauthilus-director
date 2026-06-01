@@ -319,6 +319,7 @@ func sessionRuntimeStateFromRedis(record state.RuntimeSessionRecord) SessionRunt
 		ListenerName:      record.ListenerName,
 		ServiceName:       record.ServiceName,
 		EffectiveShardTag: record.ShardTag,
+		BackendNode:       record.BackendNode,
 		BackendIdentifier: record.BackendIdentifier,
 		DirectorInstance:  record.DirectorInstance,
 		OpenedAt:          record.OpenedAt,
@@ -336,9 +337,27 @@ func userRuntimeStateFromRedisRead(record state.RuntimeUserReadRecord) UserRunti
 			UserHash: record.Key.AccountKey,
 		}.Normalize(),
 		ActiveShard:        record.ShardTag,
+		BackendNode:        record.BackendNode,
 		ActiveSessionCount: record.ActiveSessionCount,
+		ActiveHolderCount:  record.ActiveHolderCount,
 		Generation:         record.Generation,
+		BindingGeneration:  record.BindingGeneration,
+		BindingStatus:      string(record.BindingStatus),
+		BindingSource:      runtimeUserBindingSource(record),
+		RetentionExpiresAt: record.RetentionExpiresAt,
 		UpdatedAt:          record.UpdatedAt,
+	}
+}
+
+// runtimeUserBindingSource returns a bounded affinity binding source.
+func runtimeUserBindingSource(record state.RuntimeUserReadRecord) string {
+	switch {
+	case record.BindingStatus == state.BindingStatusRetained:
+		return routeLookupSourceRetainedBinding
+	case record.BindingStatus == state.BindingStatusActive || record.ActiveHolderCount > 0 || record.ActiveSessionCount > 0:
+		return routeLookupSourceActiveAffinity
+	default:
+		return routeLookupBindingSourceNone
 	}
 }
 

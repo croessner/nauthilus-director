@@ -42,26 +42,49 @@ const (
 	HolderKindDelivery = "delivery"
 )
 
+// BindingStatus reports whether a backend-node binding is active, retained or absent.
+type BindingStatus string
+
+const (
+	// BindingStatusNone means no backend binding exists for the affinity key.
+	BindingStatusNone BindingStatus = "none"
+	// BindingStatusActive means at least one holder currently protects the binding.
+	BindingStatusActive BindingStatus = "active_binding"
+	// BindingStatusRetained means the binding has no active holders but remains authoritative.
+	BindingStatusRetained BindingStatus = "retained_binding"
+	// BindingStatusExpired means a stale physical binding has passed its retention deadline.
+	BindingStatusExpired BindingStatus = "expired_binding"
+	// BindingStatusBackendNodeMismatch means Redis preserved an existing binding over a proposal.
+	BindingStatusBackendNodeMismatch BindingStatus = "backend_node_mismatch"
+)
+
 // AffinityKey identifies a user affinity record without requiring raw usernames in keys.
 type AffinityKey struct {
 	Tenant     string
 	AccountKey string
 }
 
-// AffinityRecord stores the logical shard pin for active sessions.
+// AffinityRecord stores the Redis-visible backend binding for active or retained affinity.
 type AffinityRecord struct {
 	Key                AffinityKey
 	ShardTag           string
+	BackendNode        string
 	Generation         string
 	ActiveSessionCount int
+	ActiveHolderCount  int
 	ExpiresAt          time.Time
 	LeaseExpiresAt     time.Time
+	RetentionExpiresAt time.Time
 	ServerTime         time.Time
 	Status             string
 	Present            bool
 	ControlAction      ControlAction
 	ControlGeneration  string
 	BackendIdentifier  string
+	BindingGeneration  string
+	BindingStatus      BindingStatus
+	MoveTargetShard    string
+	MoveStrategy       string
 }
 
 // SessionRecord describes one lease-backed frontend session.
@@ -73,9 +96,11 @@ type SessionRecord struct {
 	ListenerName       string
 	ServiceName        string
 	ShardTag           string
+	BackendNode        string
 	DirectorInstanceID string
 	LeaseTTL           time.Duration
 	IdleGrace          time.Duration
+	RetentionTTL       time.Duration
 }
 
 // SessionBackendAttachment describes selected-backend registration after placement.
@@ -83,6 +108,7 @@ type SessionBackendAttachment struct {
 	Key               AffinityKey
 	SessionID         string
 	BackendIdentifier string
+	BackendNode       string
 	ReservationID     string
 	MaxConnections    int
 }
@@ -91,6 +117,7 @@ type SessionBackendAttachment struct {
 type SessionBackendRecord struct {
 	Status             string
 	BackendIdentifier  string
+	BackendNode        string
 	ReservationID      string
 	BackendActiveCount int
 	ServerTime         time.Time
@@ -137,6 +164,7 @@ type RuntimeSessionRecord struct {
 	ListenerName      string
 	ServiceName       string
 	ShardTag          string
+	BackendNode       string
 	BackendIdentifier string
 	DirectorInstance  string
 	OpenedAt          time.Time
@@ -149,8 +177,13 @@ type RuntimeSessionRecord struct {
 type RuntimeUserReadRecord struct {
 	Key                AffinityKey
 	ShardTag           string
+	BackendNode        string
 	ActiveSessionCount int
+	ActiveHolderCount  int
 	Generation         string
+	BindingGeneration  string
+	BindingStatus      BindingStatus
+	RetentionExpiresAt time.Time
 	UpdatedAt          time.Time
 	Present            bool
 }

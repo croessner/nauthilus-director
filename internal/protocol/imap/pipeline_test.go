@@ -34,11 +34,14 @@ import (
 	"github.com/croessner/nauthilus-director/internal/backend"
 	"github.com/croessner/nauthilus-director/internal/config"
 	"github.com/croessner/nauthilus-director/internal/nauthilus"
+	"github.com/croessner/nauthilus-director/internal/placement"
 	"github.com/croessner/nauthilus-director/internal/proxy"
 	"github.com/croessner/nauthilus-director/internal/routing"
 	runtimectl "github.com/croessner/nauthilus-director/internal/runtime"
 	"github.com/croessner/nauthilus-director/internal/state"
 )
+
+const affinityStatusReused = "reused"
 
 // TestIMAPHTTPAuthBodyUsesProtocolAndClientID verifies IMAP auth reaches the HTTP authority safely.
 func TestIMAPHTTPAuthBodyUsesProtocolAndClientID(t *testing.T) {
@@ -228,6 +231,87 @@ func TestAuthenticatedPathBuildsRoutingAndPlacement(t *testing.T) {
 	assertAuthenticatedPipelineCalls(t, authenticator, router, store, selector)
 }
 
+// TestAuthenticatedPathReusesActiveLMTPBackendNode verifies IMAP honors active cross-protocol binding.
+func TestAuthenticatedPathReusesActiveLMTPBackendNode(t *testing.T) {
+	authenticator := &recordingAuthenticator{result: nauthilus.AuthResult{Decision: nauthilus.DecisionAuthenticated, Account: "alice@example.test"}}
+	router := &recordingRoutingResolver{
+		result: routing.RoutingResult{
+			AccountKey: "alice@example.test",
+			Tenant:     defaultTenantName,
+			ShardTag:   "mailstore-a",
+		},
+	}
+	store := &recordingSessionStore{
+		result: state.AffinityRecord{
+			Present:            true,
+			Status:             "found",
+			ShardTag:           "mailstore-a",
+			BackendNode:        "mailstore-c-node-1",
+			BindingStatus:      state.BindingStatusActive,
+			ActiveHolderCount:  1,
+			ActiveSessionCount: 0,
+		},
+	}
+	selector := &recordingBackendSelector{}
+	harness := startTestSession(t, pipelineSessionConfig(authenticator, router, store, selector))
+
+	harness.expectLine(t, greetingLine)
+	harness.write(t, `A001 LOGIN "alice@example.test" "secret-password"`+"\r\n")
+	harness.expectLine(t, "A001 OK Authentication completed\r\n")
+
+	if selector.selectCalls != 0 || selector.nodeCalls != 1 {
+		t.Fatalf("selector calls select=%d node=%d, want backend-node reuse only", selector.selectCalls, selector.nodeCalls)
+	}
+	if got := store.attachment.BackendIdentifier; got != "mailstore-c-imap" {
+		t.Fatalf("attached backend = %q, want IMAP endpoint in active LMTP backend node", got)
+	}
+	if got := store.record.BackendNode; got != "mailstore-c-node-1" {
+		t.Fatalf("opened backend node = %q, want active LMTP node", got)
+	}
+}
+
+// TestAuthenticatedPathReusesRetainedLMTPBackendNode verifies idle delivery retention remains authoritative.
+func TestAuthenticatedPathReusesRetainedLMTPBackendNode(t *testing.T) {
+	authenticator := &recordingAuthenticator{result: nauthilus.AuthResult{Decision: nauthilus.DecisionAuthenticated, Account: "alice@example.test"}}
+	router := &recordingRoutingResolver{
+		result: routing.RoutingResult{
+			AccountKey: "alice@example.test",
+			Tenant:     defaultTenantName,
+			ShardTag:   "mailstore-a",
+		},
+	}
+	store := &recordingSessionStore{
+		result: state.AffinityRecord{
+			Present:            true,
+			Status:             "retained",
+			ShardTag:           "mailstore-a",
+			BackendNode:        "mailstore-c-node-1",
+			BindingStatus:      state.BindingStatusRetained,
+			RetentionExpiresAt: time.Now().Add(time.Minute),
+		},
+	}
+	selector := &recordingBackendSelector{}
+	harness := startTestSession(t, pipelineSessionConfig(authenticator, router, store, selector))
+
+	harness.expectLine(t, greetingLine)
+	harness.write(t, `A001 LOGIN "alice@example.test" "secret-password"`+"\r\n")
+	harness.expectLine(t, "A001 OK Authentication completed\r\n")
+
+	if selector.selectCalls != 0 || selector.nodeCalls != 1 {
+		t.Fatalf("selector calls select=%d node=%d, want retained backend-node reuse only", selector.selectCalls, selector.nodeCalls)
+	}
+	if got := store.attachment.BackendIdentifier; got != "mailstore-c-imap" {
+		t.Fatalf("attached backend = %q, want IMAP endpoint in retained LMTP backend node", got)
+	}
+	placed, ok := harness.session.Placement()
+	if !ok {
+		t.Fatal("session did not retain placement")
+	}
+	if placed.Binding.Source != placement.BindingSourceRetainedBinding {
+		t.Fatalf("binding source = %q, want retained backend binding", placed.Binding.Source)
+	}
+}
+
 // TestAuthenticatedPathPassesApplicableOperatorBackendPin verifies IMAP pin scoping.
 func TestAuthenticatedPathPassesApplicableOperatorBackendPin(t *testing.T) {
 	authenticator := &recordingAuthenticator{
@@ -318,7 +402,7 @@ func TestAuthenticatedPathIgnoresCrossShardOperatorBackendPin(t *testing.T) {
 	}
 }
 
-// TestAuthenticatedPathKeepsActiveBackendSeparateFromOperatorPin verifies active pins win.
+// TestAuthenticatedPathKeepsActiveBackendSeparateFromOperatorPin verifies mismatched pins fail closed.
 func TestAuthenticatedPathKeepsActiveBackendSeparateFromOperatorPin(t *testing.T) {
 	authenticator := &recordingAuthenticator{result: nauthilus.AuthResult{Decision: nauthilus.DecisionAuthenticated, Account: "alice@example.test"}}
 	router := &recordingRoutingResolver{
@@ -348,14 +432,10 @@ func TestAuthenticatedPathKeepsActiveBackendSeparateFromOperatorPin(t *testing.T
 
 	harness.expectLine(t, greetingLine)
 	harness.write(t, `A001 LOGIN "alice@example.test" "secret-password"`+"\r\n")
-	harness.expectLine(t, "A001 OK Authentication completed\r\n")
+	harness.expectLine(t, "A001 NO [UNAVAILABLE] Authentication service temporarily unavailable\r\n")
 
-	if selector.request.PinnedBackendIdentifier != "mailstore-b-imap" {
-		t.Fatalf("active backend pin = %q, want mailstore-b-imap", selector.request.PinnedBackendIdentifier)
-	}
-
-	if selector.request.OperatorBackendIdentifier != "" {
-		t.Fatalf("operator backend pin = %q, want inactive while active backend is present", selector.request.OperatorBackendIdentifier)
+	if selector.calls != 0 {
+		t.Fatalf("selector calls = %d, want fail-closed before backend-node override", selector.calls)
 	}
 }
 
@@ -485,10 +565,61 @@ func TestAuthenticatedPathDefersOperatorPinDuringActiveAffinity(t *testing.T) {
 
 	harness.expectLine(t, greetingLine)
 	harness.write(t, `A001 LOGIN "alice@example.test" "secret-password"`+"\r\n")
-	harness.expectLine(t, "A001 OK Authentication completed\r\n")
+	harness.expectLine(t, "A001 NO [UNAVAILABLE] Authentication service temporarily unavailable\r\n")
 
-	if selector.request.OperatorBackendIdentifier != "" {
-		t.Fatalf("operator backend pin = %q, want deferred during active affinity", selector.request.OperatorBackendIdentifier)
+	if selector.calls != 0 {
+		t.Fatalf("selector calls = %d, want fail-closed before backend-node override", selector.calls)
+	}
+}
+
+// TestBackendSetupFailureClosesLeaseBeforeFrontendAuthSuccess verifies IMAP OK waits for backend readiness.
+func TestBackendSetupFailureClosesLeaseBeforeFrontendAuthSuccess(t *testing.T) {
+	testCases := []struct {
+		name      string
+		connector *recordingBackendConnector
+	}{
+		{
+			name:      "connect",
+			connector: &recordingBackendConnector{err: errors.New("connect failed")},
+		},
+		{
+			name:      "backend auth",
+			connector: &recordingBackendConnector{authResponse: "NO backend auth rejected"},
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			authenticator := &recordingAuthenticator{result: nauthilus.AuthResult{Decision: nauthilus.DecisionAuthenticated, Account: "alice@example.test"}}
+			router := &recordingRoutingResolver{
+				result: routing.RoutingResult{
+					AccountKey: "alice@example.test",
+					Tenant:     defaultTenantName,
+					ShardTag:   "mailstore-a",
+				},
+			}
+			store := &recordingSessionStore{}
+			selector := &recordingBackendSelector{}
+			runner := &recordingProxyRunner{}
+			config := pipelineSessionConfig(authenticator, router, store, selector)
+			config.BackendConnector = testCase.connector
+			config.ProxyRunner = runner
+			harness := startTestSession(t, config)
+
+			harness.expectLine(t, greetingLine)
+			harness.write(t, `A001 LOGIN "alice@example.test" "secret-password"`+"\r\n")
+			harness.expectLine(t, "A001 NO [UNAVAILABLE] Authentication service temporarily unavailable\r\n")
+
+			if store.reserveCalls != 1 || store.attachCalls != 1 || store.closeCalls != 1 {
+				t.Fatalf("placement accounting reserve=%d attach=%d close=%d, want backend setup rollback", store.reserveCalls, store.attachCalls, store.closeCalls)
+			}
+			if testCase.connector.calls != 1 {
+				t.Fatalf("backend connector calls = %d, want 1", testCase.connector.calls)
+			}
+			if runner.calls != 0 {
+				t.Fatalf("proxy calls = %d, want none before frontend auth success", runner.calls)
+			}
+		})
 	}
 }
 
@@ -777,8 +908,8 @@ func assertSessionOpenRequest(t *testing.T, store *recordingSessionStore) {
 		t.Fatalf("session affinity key = %#v", store.record.Key)
 	}
 
-	if store.record.ShardTag != "mailstore-a" {
-		t.Fatalf("session shard = %q, want routing shard mailstore-a", store.record.ShardTag)
+	if store.record.ShardTag != "mailstore-b" {
+		t.Fatalf("session shard = %q, want active binding shard mailstore-b", store.record.ShardTag)
 	}
 
 	if store.attachCalls != 1 {
@@ -992,8 +1123,42 @@ func (s *recordingSessionStore) OpenSession(_ context.Context, record state.Sess
 	if s.result.ShardTag == "" {
 		s.result.ShardTag = record.ShardTag
 	}
+	if s.result.BackendNode == "" {
+		s.result.BackendNode = record.BackendNode
+	}
+	if s.result.ActiveHolderCount == 0 && s.result.ActiveSessionCount > 0 {
+		s.result.ActiveHolderCount = s.result.ActiveSessionCount
+	}
 
 	return s.result, s.err
+}
+
+// LookupAffinity records a read-only active or retained binding lookup.
+func (s *recordingSessionStore) LookupAffinity(_ context.Context, key state.AffinityKey) (state.AffinityRecord, error) {
+	if !s.result.Present && s.result.BindingStatus == "" && s.result.Status != affinityStatusReused && s.result.ShardTag == "" {
+		return state.AffinityRecord{Key: key, BindingStatus: state.BindingStatusNone}, nil
+	}
+
+	record := s.result
+	record.Key = key
+	record.Present = true
+	if record.ShardTag == "" {
+		record.ShardTag = "mailstore-a"
+	}
+	if record.BackendNode == "" {
+		record.BackendNode = pipelineBackendNode(record.BackendIdentifier, record.ShardTag)
+	}
+	if record.BindingStatus == "" {
+		record.BindingStatus = state.BindingStatusActive
+	}
+	if record.ActiveSessionCount == 0 && record.ActiveHolderCount == 0 && record.BindingStatus != state.BindingStatusRetained {
+		record.ActiveSessionCount = 1
+	}
+	if record.ActiveHolderCount == 0 {
+		record.ActiveHolderCount = record.ActiveSessionCount
+	}
+
+	return record, nil
 }
 
 // GetUserBackendPin records a read-only backend-pin lookup for placement tests.
@@ -1081,10 +1246,12 @@ func (s *recordingSessionStore) CloseSession(context.Context, state.AffinityKey,
 }
 
 type recordingBackendSelector struct {
-	calls   int
-	request backend.SelectionRequest
-	result  backend.SelectionResult
-	err     error
+	calls       int
+	selectCalls int
+	nodeCalls   int
+	request     backend.SelectionRequest
+	result      backend.SelectionResult
+	err         error
 }
 
 type recordingPlacementGate struct {
@@ -1098,12 +1265,58 @@ type recordingPlacementGate struct {
 // Select records the selector request and returns the configured backend result.
 func (s *recordingBackendSelector) Select(_ context.Context, request backend.SelectionRequest) (backend.SelectionResult, error) {
 	s.calls++
+	s.selectCalls++
 	s.request = request
-	if s.result.Backend.Protocol == "" {
-		s.result.Backend = defaultPipelineBackend(s.result.Backend.Identifier)
-	}
+	s.result.Backend = completePipelineBackend(s.result.Backend, request)
 
 	return s.result, s.err
+}
+
+// SelectInBackendNode records backend-node constrained selection input.
+func (s *recordingBackendSelector) SelectInBackendNode(_ context.Context, request backend.NodeSelectionRequest) (backend.SelectionResult, error) {
+	s.calls++
+	s.nodeCalls++
+
+	identifier := request.OperatorBackendIdentifier
+	if identifier == "" {
+		identifier = pipelineBackendForNode(request.BackendNode, request.Protocol)
+	}
+	if strings.TrimSpace(identifier) == "" {
+		identifier = s.result.Backend.Identifier
+	}
+
+	s.request = backend.SelectionRequest{
+		AccountKey:                request.AccountKey,
+		Tenant:                    request.Tenant,
+		ShardTag:                  request.ShardTag,
+		Protocol:                  request.Protocol,
+		BackendPool:               request.BackendPool,
+		ActiveAffinity:            true,
+		PinnedBackendIdentifier:   identifier,
+		OperatorBackendIdentifier: request.OperatorBackendIdentifier,
+	}
+
+	selected := completePipelineBackend(backend.Backend{Identifier: identifier}, s.request)
+	reason := backend.SelectionReasonBackendBinding
+	if request.OperatorBackendIdentifier != "" {
+		reason = backend.SelectionReasonOperatorBackendPin
+	}
+
+	return backend.SelectionResult{
+		Backend: selected,
+		EffectiveBackend: backend.EffectiveBackendState{
+			Backend:           selected,
+			Identifier:        selected.Identifier,
+			Protocol:          selected.Protocol,
+			BackendPool:       selected.BackendPool,
+			EffectiveShardTag: selected.ShardTag,
+			MaxConnections:    selected.MaxConnections,
+			AllowsNewSessions: true,
+			AllowsActivePins:  true,
+		},
+		Reason:         reason,
+		ActiveAffinity: true,
+	}, s.err
 }
 
 // WaitForPlacement records the shared hold gate request and returns the configured result.
@@ -1136,11 +1349,25 @@ func pipelineSessionConfig(
 	config.Authenticator = authenticator
 	config.RoutingResolver = resolver
 	config.SessionStore = sessionStore
-	config.BackendSelector = selector
+	if recordingStore, ok := sessionStore.(*recordingSessionStore); ok {
+		if recordingSelector, ok := selector.(*recordingBackendSelector); ok {
+			config.PlacementService = mustPipelinePlacementService(recordingStore, recordingSelector)
+		}
+	}
 	config.BackendConnector = &recordingBackendConnector{}
 	config.ProxyRunner = &recordingProxyRunner{}
 
 	return config
+}
+
+// mustPipelinePlacementService creates the shared placement service used by pipeline tests.
+func mustPipelinePlacementService(store *recordingSessionStore, selector *recordingBackendSelector) placement.SessionPlacer {
+	service, err := placement.NewService(pipelineBackendRegistry{}, selector, store)
+	if err != nil {
+		panic(err)
+	}
+
+	return service
 }
 
 // defaultPipelineBackend fills successful pipeline tests with explicit backend auth policy.
@@ -1152,6 +1379,9 @@ func defaultPipelineBackend(identifier string) backend.Backend {
 	return backend.Backend{
 		Identifier:     identifier,
 		Protocol:       backendProtocol,
+		BackendPool:    "imap-default",
+		ShardTag:       pipelineBackendShard(identifier),
+		BackendNode:    pipelineBackendNode(identifier, pipelineBackendShard(identifier)),
 		Address:        "127.0.0.1:1143",
 		MaxConnections: 100,
 		TLS: backend.TLSConfig{
@@ -1169,6 +1399,125 @@ func defaultPipelineBackend(identifier string) backend.Backend {
 			},
 		},
 	}
+}
+
+// completePipelineBackend fills selector fixture backend fields from the request.
+func completePipelineBackend(candidate backend.Backend, request backend.SelectionRequest) backend.Backend {
+	if strings.TrimSpace(candidate.Identifier) == "" {
+		candidate.Identifier = "selected-imap"
+	}
+	if strings.TrimSpace(candidate.Protocol) == "" {
+		candidate.Protocol = request.Protocol
+	}
+	if strings.TrimSpace(candidate.Protocol) == "" {
+		candidate.Protocol = backendProtocol
+	}
+	if strings.TrimSpace(candidate.BackendPool) == "" {
+		candidate.BackendPool = request.BackendPool
+	}
+	if strings.TrimSpace(candidate.BackendPool) == "" {
+		candidate.BackendPool = "imap-default"
+	}
+	if strings.TrimSpace(candidate.ShardTag) == "" {
+		candidate.ShardTag = request.ShardTag
+	}
+	if strings.TrimSpace(candidate.ShardTag) == "" {
+		candidate.ShardTag = pipelineBackendShard(candidate.Identifier)
+	}
+	if strings.TrimSpace(candidate.BackendNode) == "" {
+		candidate.BackendNode = pipelineBackendNode(candidate.Identifier, candidate.ShardTag)
+	}
+	if strings.TrimSpace(candidate.Address) == "" {
+		candidate = defaultPipelineBackend(candidate.Identifier)
+		candidate.Protocol = request.Protocol
+		candidate.BackendPool = request.BackendPool
+		candidate.ShardTag = request.ShardTag
+		candidate.BackendNode = pipelineBackendNode(candidate.Identifier, candidate.ShardTag)
+	}
+
+	return candidate
+}
+
+// pipelineBackendShard returns the deterministic shard fixture for one backend.
+func pipelineBackendShard(identifier string) string {
+	switch {
+	case strings.Contains(identifier, "mailstore-b"):
+		return "mailstore-b"
+	case strings.Contains(identifier, "mailstore-c"):
+		return "mailstore-a"
+	default:
+		return "mailstore-a"
+	}
+}
+
+// pipelineBackendNode returns the deterministic backend-node fixture for one backend.
+func pipelineBackendNode(identifier string, shardTag string) string {
+	switch {
+	case strings.Contains(identifier, "mailstore-b"):
+		return "mailstore-b-node-1"
+	case strings.Contains(identifier, "mailstore-c"):
+		return "mailstore-c-node-1"
+	case strings.TrimSpace(shardTag) == "mailstore-b":
+		return "mailstore-b-node-1"
+	default:
+		return "mailstore-a-node-1"
+	}
+}
+
+// pipelineBackendForNode returns the IMAP backend fixture inside one backend node.
+func pipelineBackendForNode(backendNode string, protocol string) string {
+	switch backendNode {
+	case "mailstore-b-node-1":
+		return "mailstore-b-" + protocol
+	case "mailstore-c-node-1":
+		return "mailstore-c-" + protocol
+	default:
+		return "mailstore-a-" + protocol
+	}
+}
+
+// pipelineBackendRegistry supplies backend lookup facts for placement tests.
+type pipelineBackendRegistry struct{}
+
+// AllBackends returns the configured fake backend inventory.
+func (pipelineBackendRegistry) AllBackends(context.Context) ([]backend.Backend, error) {
+	return []backend.Backend{
+		defaultPipelineBackend("mailstore-a-imap"),
+		defaultPipelineBackend("mailstore-b-imap"),
+		defaultPipelineBackend("mailstore-c-imap"),
+	}, nil
+}
+
+// BackendsForShard returns fake backends matching one shard.
+func (pipelineBackendRegistry) BackendsForShard(_ context.Context, request backend.RegistryRequest) ([]backend.Backend, error) {
+	backends := []backend.Backend{}
+	for _, identifier := range []string{"mailstore-a-imap", "mailstore-b-imap", "mailstore-c-imap"} {
+		candidate := defaultPipelineBackend(identifier)
+		if candidate.Protocol == request.Protocol && candidate.BackendPool == request.BackendPool && candidate.ShardTag == request.ShardTag {
+			backends = append(backends, candidate)
+		}
+	}
+
+	if len(backends) == 0 {
+		return nil, &backend.Error{Kind: backend.ErrorKindNoBackend, Operation: "test_registry", Message: "no shard backend"}
+	}
+
+	return backends, nil
+}
+
+// Lookup returns one fake backend by identifier.
+func (pipelineBackendRegistry) Lookup(_ context.Context, identifier string) (backend.Backend, error) {
+	return defaultPipelineBackend(identifier), nil
+}
+
+// LookupInBackendNode resolves the fake protocol endpoint inside a backend node.
+func (pipelineBackendRegistry) LookupInBackendNode(_ context.Context, request backend.NodeLookupRequest) (backend.Backend, error) {
+	return defaultPipelineBackend(pipelineBackendForNode(request.BackendNode, request.Protocol)), nil
+}
+
+// Pool returns one fake backend pool.
+func (pipelineBackendRegistry) Pool(_ context.Context, name string) (backend.Pool, error) {
+	return backend.Pool{Name: name, Protocol: protocolIMAP, Selector: "rendezvous_hash", Backends: []string{"mailstore-a-imap", "mailstore-b-imap"}}, nil
 }
 
 // testReplayPipelineBackend returns a credential-replay backend for transition tests.

@@ -14,6 +14,7 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
+//nolint:goconst // Runtime read fixtures repeat stable diagnostic values.
 package runtime
 
 import (
@@ -142,6 +143,10 @@ func TestRedisRuntimeReaderListUsersUsesPagedStore(t *testing.T) {
 		t.Fatalf("users = %#v, want deterministic key order", result.Users)
 	}
 
+	if result.Users[0].BackendNode != "mailstore-a-node-1" || result.Users[0].ActiveHolderCount != 2 || result.Users[0].BindingSource != routeLookupSourceActiveAffinity {
+		t.Fatalf("user affinity diagnostics = %#v, want backend-node binding context", result.Users[0])
+	}
+
 	if result.NextCursor == "" {
 		t.Fatal("next cursor was empty")
 	}
@@ -268,6 +273,7 @@ func runtimeReaderSessionRecord(sessionID string) state.RuntimeSessionRecord {
 		Key:               state.AffinityKey{Tenant: defaultTenant, AccountKey: runtimeReaderUserA},
 		Protocol:          listenerTestIMAPName,
 		ShardTag:          runtimeReaderShardTag,
+		BackendNode:       "mailstore-a-node-1",
 		BackendIdentifier: runtimeTestBackendIdentifier,
 		LeaseExpiresAt:    time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC),
 		Status:            "active",
@@ -279,7 +285,11 @@ func runtimeReaderUserRecord(tenant string, accountKey string) state.RuntimeUser
 	return state.RuntimeUserReadRecord{
 		Key:                state.AffinityKey{Tenant: tenant, AccountKey: accountKey},
 		ShardTag:           runtimeReaderShardTag,
+		BackendNode:        "mailstore-a-node-1",
 		ActiveSessionCount: 1,
+		ActiveHolderCount:  2,
+		BindingGeneration:  "binding-gen-a",
+		BindingStatus:      state.BindingStatusActive,
 		Present:            true,
 	}
 }
@@ -311,6 +321,10 @@ func assertSessionListResult(t *testing.T, result SessionListResult, wantFirst s
 		result.Sessions[0].SessionID != wantFirst ||
 		result.Sessions[1].SessionID != wantSecond {
 		t.Fatalf("sessions = %#v, want deterministic session-id order", result.Sessions)
+	}
+
+	if result.Sessions[0].BackendNode != "mailstore-a-node-1" {
+		t.Fatalf("session backend node = %q, want mailstore-a-node-1", result.Sessions[0].BackendNode)
 	}
 }
 

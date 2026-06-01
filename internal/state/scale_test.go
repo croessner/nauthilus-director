@@ -366,12 +366,18 @@ func runtimeRecordIndexKeys(
 func runtimeStateHash(record seededRuntimeRecord, idleExpiresAt time.Time) map[string]any {
 	return map[string]any{
 		aggregateDimensionShardTag:    testShardA,
+		scriptFieldBackendNode:        testBackendNodeA,
 		"generation":                  "1",
+		scriptFieldBindingGeneration:  "1",
+		scriptFieldBindingStatus:      string(BindingStatusActive),
 		scriptFieldControlGeneration:  "0",
 		"control_action":              string(ControlActionNone),
 		scriptFieldActiveSessionCount: "1",
+		scriptFieldActiveHolderCount:  "1",
+		scriptFieldRetentionExpiresAt: "0",
 		scriptFieldExpiresAtMS:        idleExpiresAt.UnixMilli(),
 		"idle_grace_ms":               int64(time.Hour / time.Millisecond),
+		scriptFieldRetentionTTL:       int64(time.Hour / time.Millisecond),
 		scriptFieldAffinityHash:       record.affinityHash,
 	}
 }
@@ -396,9 +402,11 @@ func runtimeSessionHash(
 		"listener_name":              testListenerIMAPS,
 		"service_name":               testProtocolIMAP,
 		aggregateDimensionShardTag:   testShardA,
+		scriptFieldBackendNode:       testBackendNodeA,
 		"selected_backend_id":        seededRuntimeBackendID,
 		"director_instance_id":       "scale-test-director",
 		"backend_counted":            "0",
+		scriptFieldRetentionTTL:      int64(time.Hour / time.Millisecond),
 		scriptFieldControlGeneration: "0",
 		scriptFieldStatus:            seededRuntimeLabelActive,
 		"opened_at_ms":               leaseExpiresAt.Add(-time.Hour).UnixMilli(),

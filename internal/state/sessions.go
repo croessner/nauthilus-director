@@ -39,13 +39,17 @@ const (
 
 const (
 	scriptFieldAccountKey         = "account_key"
+	scriptFieldActiveHolderCount  = "active_holder_count"
 	scriptFieldActiveSessionCount = "active_session_count"
 	scriptFieldAffinityHash       = "affinity_hash"
 	scriptFieldBackendCounted     = "backend_counted"
 	scriptFieldBackendID          = "backend_id"
 	scriptFieldBackendMaxConn     = "backend_max_connections"
+	scriptFieldBackendNode        = "backend_node"
 	scriptFieldBackendPool        = "backend_pool"
 	scriptFieldBackendReservation = "backend_reservation_id"
+	scriptFieldBindingGeneration  = "binding_generation"
+	scriptFieldBindingStatus      = "binding_status"
 	scriptFieldControlAction      = "control_action"
 	scriptFieldControlGeneration  = "control_generation"
 	scriptFieldCreatedAtMS        = "created_at_ms"
@@ -57,6 +61,8 @@ const (
 	scriptFieldListenerName       = "listener_name"
 	scriptFieldPresent            = "present"
 	scriptFieldProtocol           = "protocol"
+	scriptFieldRetentionExpiresAt = "retention_expires_at_ms"
+	scriptFieldRetentionTTL       = "retention_ttl_ms"
 	scriptFieldServerTimeMS       = "server_time_ms"
 	scriptFieldServiceName        = "service_name"
 	scriptFieldSessionID          = "session_id"
@@ -65,6 +71,7 @@ const (
 	scriptFieldShardTag           = "shard_tag"
 	scriptFieldStatus             = "status"
 	scriptFieldStrategy           = "strategy"
+	scriptFieldTargetShard        = "target_shard"
 	scriptFieldTenant             = "tenant"
 	scriptFieldRequestedDuration  = "requested_duration_ms"
 	scriptFieldUpdatedAtMS        = "updated_at_ms"
@@ -84,8 +91,9 @@ type RedisSessionStore struct {
 
 // affinityMutationResult keeps authoritative affinity state and repair deltas together.
 type affinityMutationResult struct {
-	Record AffinityRecord
-	Delta  sessionMutationDelta
+	Record   AffinityRecord
+	Delta    sessionMutationDelta
+	HasDelta bool
 }
 
 // sessionMutationDelta describes idempotent secondary work after an affinity mutation.
@@ -99,6 +107,7 @@ type sessionMutationDelta struct {
 	ListenerName       string
 	ServiceName        string
 	ShardTag           string
+	BackendNode        string
 	BackendIdentifier  string
 	BackendReservation string
 	BackendMaxConn     int
@@ -171,6 +180,8 @@ func (s *RedisSessionStore) OpenSession(ctx context.Context, record SessionRecor
 		normalizedStateValue(record.ServiceName),
 		normalizedStateValue(record.DirectorInstanceID),
 		normalizedHolderKind(record.HolderKind),
+		normalizedStateValue(record.BackendNode),
+		nonNegativeDurationMilliseconds(recordRetentionTTL(record)),
 	)
 	if err != nil {
 		return AffinityRecord{}, err
@@ -179,6 +190,10 @@ func (s *RedisSessionStore) OpenSession(ctx context.Context, record SessionRecor
 	result, err := parseAffinityMutationResult(record.Key, value)
 	if err != nil {
 		return AffinityRecord{}, err
+	}
+
+	if !result.HasDelta {
+		return result.Record, nil
 	}
 
 	s.writeRepairableOpenIndexes(ctx, result.Delta, sessionKey)
@@ -211,6 +226,7 @@ func (s *RedisSessionStore) AttachSelectedBackend(
 		attachment.BackendIdentifier,
 		attachment.ReservationID,
 		attachment.MaxConnections,
+		normalizedStateValue(attachment.BackendNode),
 	)
 	if err != nil {
 		return SessionBackendRecord{}, err
@@ -365,7 +381,7 @@ func (s *RedisSessionStore) attachSelectedBackendScriptKeys(key AffinityKey, ses
 
 // lookupAffinityScriptKeys returns the same-slot key list for read-only affinity lookup.
 func (s *RedisSessionStore) lookupAffinityScriptKeys(keys AffinityKeys) []string {
-	return []string{keys.State, keys.Sessions}
+	return []string{keys.State, keys.Sessions, keys.Override}
 }
 
 // sessionKeys returns the per-affinity key group plus the session lease key.
@@ -485,6 +501,10 @@ func validateSessionRecord(record SessionRecord) error {
 		return newStateError(RedisErrorKindAmbiguousState, scriptOpen, "idle grace must not be negative", nil)
 	}
 
+	if record.RetentionTTL < 0 {
+		return newStateError(RedisErrorKindAmbiguousState, scriptOpen, "retention ttl must not be negative", nil)
+	}
+
 	return nil
 }
 
@@ -498,6 +518,15 @@ func normalizedHolderKind(value string) string {
 	default:
 		return ""
 	}
+}
+
+// recordRetentionTTL returns the explicit backend retention window for a session open.
+func recordRetentionTTL(record SessionRecord) time.Duration {
+	if record.RetentionTTL > 0 {
+		return record.RetentionTTL
+	}
+
+	return record.IdleGrace
 }
 
 // validateSessionBackendAttachment checks fields needed for backend count registration.
@@ -543,22 +572,29 @@ func parseAffinityMutationResult(key AffinityKey, value any) (affinityMutationRe
 		return affinityMutationResult{}, err
 	}
 
+	if strings.TrimSpace(fields[scriptFieldSessionID]) == "" {
+		return affinityMutationResult{Record: record}, nil
+	}
+
 	delta, err := parseSessionMutationDelta(fields)
 	if err != nil {
 		return affinityMutationResult{}, err
 	}
 
-	return affinityMutationResult{Record: record, Delta: delta}, nil
+	return affinityMutationResult{Record: record, Delta: delta, HasDelta: true}, nil
 }
 
 // parseAffinityRecordFields converts script fields into a typed affinity snapshot.
 func parseAffinityRecordFields(key AffinityKey, fields map[string]string) (AffinityRecord, error) {
 	record := AffinityRecord{
-		Key:        key,
-		Status:     fields[scriptFieldStatus],
-		ShardTag:   fields[scriptFieldShardTag],
-		Generation: fields[scriptFieldGeneration],
-		Present:    fields[scriptFieldPresent] == "1",
+		Key:               key,
+		Status:            fields[scriptFieldStatus],
+		ShardTag:          fields[scriptFieldShardTag],
+		BackendNode:       strings.TrimSpace(fields[scriptFieldBackendNode]),
+		Generation:        fields[scriptFieldGeneration],
+		Present:           fields[scriptFieldPresent] == "1",
+		BindingGeneration: strings.TrimSpace(fields[scriptFieldBindingGeneration]),
+		BindingStatus:     BindingStatus(strings.TrimSpace(fields[scriptFieldBindingStatus])),
 	}
 
 	if record.Status == "" {
@@ -569,11 +605,24 @@ func parseAffinityRecordFields(key AffinityKey, fields map[string]string) (Affin
 		return AffinityRecord{}, newStateError(RedisErrorKindAmbiguousState, "script_result", "shard tag required", nil)
 	}
 
+	if record.BindingStatus == "" {
+		record.BindingStatus = BindingStatusNone
+	}
+
 	var err error
 
 	record.ActiveSessionCount, err = parseIntField(fields, scriptFieldActiveSessionCount)
 	if err != nil {
 		return AffinityRecord{}, err
+	}
+
+	record.ActiveHolderCount, err = parseOptionalIntField(fields, scriptFieldActiveHolderCount)
+	if err != nil {
+		return AffinityRecord{}, err
+	}
+
+	if record.ActiveHolderCount == 0 {
+		record.ActiveHolderCount = record.ActiveSessionCount
 	}
 
 	record.ServerTime, err = parseTimeField(fields, scriptFieldServerTimeMS)
@@ -591,6 +640,11 @@ func parseAffinityRecordFields(key AffinityKey, fields map[string]string) (Affin
 		return AffinityRecord{}, err
 	}
 
+	record.RetentionExpiresAt, err = parseOptionalTimeField(fields, scriptFieldRetentionExpiresAt)
+	if err != nil {
+		return AffinityRecord{}, err
+	}
+
 	record.ControlAction, err = parseOptionalControlAction(fields[scriptFieldControlAction])
 	if err != nil {
 		return AffinityRecord{}, err
@@ -598,6 +652,8 @@ func parseAffinityRecordFields(key AffinityKey, fields map[string]string) (Affin
 
 	record.ControlGeneration = fields[scriptFieldControlGeneration]
 	record.BackendIdentifier = fields[scriptFieldBackendID]
+	record.MoveTargetShard = strings.TrimSpace(fields[scriptFieldTargetShard])
+	record.MoveStrategy = strings.TrimSpace(fields[scriptFieldStrategy])
 
 	return record, nil
 }
@@ -614,6 +670,7 @@ func parseSessionMutationDelta(fields map[string]string) (sessionMutationDelta, 
 		ListenerName:       strings.TrimSpace(fields[scriptFieldListenerName]),
 		ServiceName:        strings.TrimSpace(fields[scriptFieldServiceName]),
 		ShardTag:           strings.TrimSpace(fields[scriptFieldShardTag]),
+		BackendNode:        strings.TrimSpace(fields[scriptFieldBackendNode]),
 		BackendIdentifier:  strings.TrimSpace(fields[scriptFieldBackendID]),
 		BackendReservation: strings.TrimSpace(fields[scriptFieldBackendReservation]),
 		Generation:         strings.TrimSpace(fields[scriptFieldGeneration]),
@@ -693,6 +750,7 @@ func parseSessionBackendRecord(value any) (SessionBackendRecord, error) {
 	record := SessionBackendRecord{
 		Status:            parsed.Status,
 		BackendIdentifier: parsed.BackendIdentifier,
+		BackendNode:       strings.TrimSpace(parsed.Fields[scriptFieldBackendNode]),
 		ReservationID:     parsed.Fields[scriptFieldBackendReservation],
 		ServerTime:        parsed.ServerTime,
 		ControlGeneration: parsed.Fields[scriptFieldControlGeneration],
@@ -1092,6 +1150,16 @@ func parseTimeField(fields map[string]string, name string) (time.Time, error) {
 	}
 
 	return time.UnixMilli(parsed).UTC(), nil
+}
+
+// parseOptionalTimeField extracts an optional millisecond Unix timestamp.
+func parseOptionalTimeField(fields map[string]string, name string) (time.Time, error) {
+	value, ok := fields[name]
+	if !ok || value == "" {
+		return time.Time{}, nil
+	}
+
+	return parseTimeField(map[string]string{name: value}, name)
 }
 
 // parseOptionalControlAction normalizes and validates script control actions.

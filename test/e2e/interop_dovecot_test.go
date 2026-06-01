@@ -116,6 +116,7 @@ func TestDovecotCredentialReplayInterop(t *testing.T) {
 
 	reader := bufio.NewReader(client)
 	expectLine(t, reader, "* OK nauthilus-director IMAP session ready\r\n")
+	client, reader = upgradeIMAPStartTLS(t, client, reader)
 	writeLine(t, client, `A001 LOGIN "`+e2eAccount+`" "`+e2ePassword+`"`)
 	expectLine(t, reader, "A001 OK Authentication completed\r\n")
 	writeLine(t, client, "A002 NOOP")
@@ -193,11 +194,11 @@ func TestDovecotClusterRuntimeInterop(t *testing.T) {
 	}
 	waitForDirectorctlSessions(t, ctl, controlAURL, 0)
 
-	firstClient, firstReader := loginIMAP(t, directorAAddress, interopShard1User)
+	firstClient, firstReader := loginProcessIMAP(t, directorAAddress, interopShard1User)
 	defer func() { _ = firstClient.Close() }()
 	expectDovecotNOOP(t, firstClient, firstReader, "A002")
 
-	secondClient, secondReader := loginIMAP(t, directorBAddress, interopShard1User)
+	secondClient, secondReader := loginProcessIMAP(t, directorBAddress, interopShard1User)
 	defer func() { _ = secondClient.Close() }()
 	expectDovecotNOOP(t, secondClient, secondReader, "B002")
 
@@ -238,7 +239,7 @@ func TestDovecotClusterRuntimeInterop(t *testing.T) {
 	expectSessionClosed(t, remainingClient, remainingReader)
 	waitForDirectorctlSessions(t, ctl, controlAURL, 0)
 
-	defaultClient, defaultReader := loginIMAP(t, directorCAddress, interopDefaultUser)
+	defaultClient, defaultReader := loginProcessIMAP(t, directorCAddress, interopDefaultUser)
 	defer func() { _ = defaultClient.Close() }()
 	expectDovecotNOOP(t, defaultClient, defaultReader, "D002")
 	defaultSessions := waitForDirectorctlSessions(t, ctl, controlAURL, 1)
@@ -248,7 +249,7 @@ func TestDovecotClusterRuntimeInterop(t *testing.T) {
 	waitForDirectorctlSessions(t, ctl, controlAURL, 0)
 
 	runDirectorctl(t, ctl, controlAURL, "users", "move", interopMovedUser, "--to-shard", interopShard2, "--strategy", "new_sessions_only", "--reason", "cluster move proof")
-	movedClient, movedReader := loginIMAP(t, directorBAddress, interopMovedUser)
+	movedClient, movedReader := loginProcessIMAP(t, directorBAddress, interopMovedUser)
 	defer func() { _ = movedClient.Close() }()
 	expectDovecotNOOP(t, movedClient, movedReader, "C002")
 
@@ -260,7 +261,7 @@ func TestDovecotClusterRuntimeInterop(t *testing.T) {
 	expectSessionClosed(t, movedClient, movedReader)
 	waitForDirectorctlSessions(t, ctl, controlAURL, 0)
 
-	shard2Client, shard2Reader := loginIMAP(t, directorCAddress, interopShard2User)
+	shard2Client, shard2Reader := loginProcessIMAP(t, directorCAddress, interopShard2User)
 	defer func() { _ = shard2Client.Close() }()
 	expectDovecotNOOP(t, shard2Client, shard2Reader, "E002")
 	shard2Sessions := waitForDirectorctlSessions(t, ctl, controlAURL, 1)

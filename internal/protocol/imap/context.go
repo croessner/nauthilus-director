@@ -24,6 +24,7 @@ import (
 	"github.com/croessner/nauthilus-director/internal/backend"
 	"github.com/croessner/nauthilus-director/internal/nauthilus"
 	"github.com/croessner/nauthilus-director/internal/observability"
+	"github.com/croessner/nauthilus-director/internal/placement"
 	"github.com/croessner/nauthilus-director/internal/proxy"
 	"github.com/croessner/nauthilus-director/internal/routing"
 	runtimectl "github.com/croessner/nauthilus-director/internal/runtime"
@@ -46,6 +47,7 @@ type Placement struct {
 	Routing          routing.RoutingResult
 	Affinity         state.AffinityRecord
 	Backend          backend.SelectionResult
+	Binding          placement.BackendBinding
 	SelectedShardTag string
 }
 
@@ -75,6 +77,7 @@ type SessionConfig struct {
 	RequireIDBeforeAuth    bool
 	SessionLeaseTTL        time.Duration
 	SessionIdleGrace       time.Duration
+	BackendRetentionTTL    time.Duration
 	PreauthTimeout         time.Duration
 	AuthTimeout            time.Duration
 	BackendConnectTimeout  time.Duration
@@ -85,7 +88,7 @@ type SessionConfig struct {
 	Authenticator          nauthilus.Authenticator
 	RoutingResolver        routing.RoutingResolver
 	SessionStore           state.SessionStore
-	BackendSelector        backend.Selector
+	PlacementService       placement.SessionPlacer
 	BackendConnector       BackendConnector
 	ProxyRunner            proxy.Runner
 	LocalSessions          *runtimectl.LocalSessionRegistry
@@ -122,6 +125,7 @@ type Context struct {
 	RequireIDBeforeAuth    bool
 	SessionLeaseTTL        time.Duration
 	SessionIdleGrace       time.Duration
+	BackendRetentionTTL    time.Duration
 }
 
 // StartTLSAvailable reports whether this session can later expose STARTTLS.

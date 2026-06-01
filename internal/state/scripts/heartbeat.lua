@@ -69,6 +69,9 @@ require_value(redis.call("HGET", state_key, "generation"), "state_generation_req
 
 local session_shard = require_value(redis.call("HGET", session_key, "shard_tag"), "session_shard_required")
 local idle_grace_ms = tonumber(require_value(redis.call("HGET", session_key, "idle_grace_ms"), "idle_grace_required"))
+local retention_ttl_ms = tonumber(redis.call("HGET", session_key, "retention_ttl_ms") or redis.call("HGET", state_key, "retention_ttl_ms") or tostring(idle_grace_ms))
+local backend_node = tostring(redis.call("HGET", state_key, "backend_node") or redis.call("HGET", session_key, "backend_node") or "")
+local session_backend_node = tostring(redis.call("HGET", session_key, "backend_node") or "")
 local affinity_hash = require_value(redis.call("HGET", session_key, "affinity_hash"), "affinity_hash_required")
 local tenant = require_value(redis.call("HGET", session_key, "tenant"), "tenant_required")
 local account_key = require_value(redis.call("HGET", session_key, "account_key"), "account_key_required")
@@ -80,6 +83,10 @@ local move_strategy = redis.call("HGET", state_key, "move_strategy") or ""
 
 if idle_grace_ms == nil or idle_grace_ms < 0 then
 	return ambiguous("idle_grace_invalid")
+end
+
+if retention_ttl_ms == nil or retention_ttl_ms < 0 then
+	return ambiguous("retention_ttl_invalid")
 end
 
 local existing_score = tonumber(require_value(redis.call("ZSCORE", sessions_key, session_id), "session_score_required"))
@@ -116,6 +123,10 @@ if session_shard ~= shard and control_action == "none" and move_strategy ~= "dra
 	return ambiguous("session_shard_conflict")
 end
 
+if backend_node ~= "" and session_backend_node ~= "" and backend_node ~= session_backend_node then
+	return ambiguous("session_backend_node_conflict")
+end
+
 redis.call("ZREMRANGEBYSCORE", sessions_key, "-inf", now)
 redis.call("ZADD", sessions_key, lease_expires_at, session_id)
 redis.call("HSET", session_key,
@@ -127,15 +138,18 @@ if control_action == "none" and control_generation > observed_generation then
 end
 
 local active_count = redis.call("ZCARD", sessions_key)
-local state_expires_at = max_session_expiry(lease_expires_at) + idle_grace_ms
+local state_expires_at = max_session_expiry(lease_expires_at) + retention_ttl_ms
 local generation = redis.call("HINCRBY", state_key, "generation", 1)
-local session_retention_ms = idle_grace_ms
+local session_retention_ms = retention_ttl_ms
 if session_retention_ms < lease_ms then
 	session_retention_ms = lease_ms
 end
 
 redis.call("HSET", state_key,
 	"active_session_count", active_count,
+	"active_holder_count", active_count,
+	"retention_expires_at_ms", 0,
+	"retention_ttl_ms", retention_ttl_ms,
 	"updated_at_ms", now,
 	"expires_at_ms", state_expires_at)
 redis.call("PEXPIREAT", state_key, state_expires_at)
@@ -146,7 +160,10 @@ return {
 	"status", "heartbeat",
 	"present", "1",
 	"shard_tag", shard,
+	"backend_node", backend_node,
 	"generation", tostring(generation),
+	"binding_generation", tostring(redis.call("HGET", state_key, "binding_generation") or "0"),
+	"binding_status", "active_binding",
 	"control_generation", tostring(control_generation),
 	"control_action", control_action,
 	"backend_id", tostring(redis.call("HGET", session_key, "selected_backend_id") or ""),
@@ -162,8 +179,10 @@ return {
 	"listener_name", listener_name,
 	"service_name", service_name,
 	"active_session_count", tostring(active_count),
+	"active_holder_count", tostring(active_count),
 	"server_time_ms", tostring(now),
 	"expires_at_ms", tostring(state_expires_at),
+	"retention_expires_at_ms", "0",
 	"lease_expires_at_ms", tostring(lease_expires_at),
 	"idle_expires_at_ms", tostring(state_expires_at)
 }

@@ -1171,11 +1171,18 @@ components:
         - backends
         - affected_by
         - fail_closed
+        - source
       properties:
         selected_backend:
           type: string
         reason:
           type: string
+        source:
+          type: string
+          description: >
+            Bounded backend-binding source such as active_affinity,
+            retained_backend_binding, operator_backend_pin,
+            movement_override, initial_placement or fail_closed.
         healthy:
           type: boolean
         maintenance:
@@ -1368,6 +1375,8 @@ components:
         - present
         - active
         - active_sessions
+        - active_holders
+        - binding_source
       properties:
         requested:
           type: boolean
@@ -1377,13 +1386,30 @@ components:
           type: boolean
         shard_tag:
           type: string
+        backend_node:
+          type: string
         backend_id:
           type: string
         generation:
           type: string
+        binding_generation:
+          type: string
+        binding_status:
+          type: string
+        binding_source:
+          type: string
+          description: >
+            Bounded binding source; never contains raw user, recipient or Redis
+            key material.
         active_sessions:
           type: integer
           minimum: 0
+        active_holders:
+          type: integer
+          minimum: 0
+        retention_expires_at:
+          type: string
+          format: date-time
     RouteLookupBackendPin:
       type: object
       additionalProperties: false
@@ -1425,6 +1451,8 @@ components:
         protocol:
           type: string
         backend_pool:
+          type: string
+        backend_node:
           type: string
         shard_tag:
           type: string
@@ -1535,6 +1563,7 @@ components:
         - user_key
         - protocol
         - backend
+        - backend_node
         - shard_tag
         - expires_at
       properties:
@@ -1545,6 +1574,8 @@ components:
         protocol:
           type: string
         backend:
+          type: string
+        backend_node:
           type: string
         shard_tag:
           type: string
@@ -1584,17 +1615,33 @@ components:
         - user_key
         - shard_tag
         - active_sessions
+        - active_holders
+        - binding_source
       properties:
         user_key:
           type: string
         shard_tag:
           type: string
+        backend_node:
+          type: string
         generation:
+          type: string
+        binding_generation:
+          type: string
+        binding_status:
+          type: string
+        binding_source:
           type: string
         active_sessions:
           type: integer
           minimum: 0
+        active_holders:
+          type: integer
+          minimum: 0
         expires_at:
+          type: string
+          format: date-time
+        retention_expires_at:
           type: string
           format: date-time
     AffinityUpdateRequest:

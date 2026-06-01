@@ -30,6 +30,7 @@ import (
 	"github.com/croessner/nauthilus-director/internal/backend"
 	"github.com/croessner/nauthilus-director/internal/nauthilus"
 	"github.com/croessner/nauthilus-director/internal/observability"
+	placementpkg "github.com/croessner/nauthilus-director/internal/placement"
 	"github.com/croessner/nauthilus-director/internal/routing"
 	runtimectl "github.com/croessner/nauthilus-director/internal/runtime"
 	"github.com/croessner/nauthilus-director/internal/state"
@@ -54,16 +55,16 @@ type RecipientPlacement struct {
 	Routing          routing.RoutingResult
 	Affinity         state.AffinityRecord
 	Backend          backend.SelectionResult
+	Binding          placementpkg.BackendBinding
 	SelectedShardTag string
 	HoldID           string
 	BackendCounted   bool
 	hold             *deliveryHold
-	selectionRequest backend.SelectionRequest
 }
 
 type deliveryHold struct {
-	key       state.AffinityKey
 	sessionID string
+	lease     placementpkg.LeaseHandle
 	cancel    context.CancelFunc
 	closeOnce sync.Once
 	done      chan struct{}
@@ -121,16 +122,20 @@ func (s *Session) handleRecipientPlacement(ctx context.Context, recipient Recipi
 		return RecipientPlacement{}, err
 	}
 
-	backendPin, err := s.lookupOperatorBackendPin(ctx, routingResult)
-	if err != nil {
-		return RecipientPlacement{}, err
-	}
-
 	selectCtx, selectSpan := s.startObservationSpan(ctx, observability.TraceBoundaryBackendSelect, lmtpObservationOperationBackendSelect, lmtpObservationResultStart, "", map[string]string{
 		lmtpObsFieldShardTag: routingResult.ShardTag,
 	})
 	selectStarted := time.Now()
-	initialRequest, initial, err := s.selectRecipientBackend(selectCtx, routingResult, state.AffinityRecord{}, backendPin)
+
+	placementRequest, err := s.deliveryPlacementRequest(routingResult)
+	if err != nil {
+		s.recordBackendSelect(selectCtx, lmtpObservationResultFailure, lmtpReasonClass(err), routingResult.ShardTag, time.Since(selectStarted))
+		selectSpan.End(lmtpObservationResultFailure, lmtpReasonClass(err))
+
+		return RecipientPlacement{}, err
+	}
+
+	lease, err := s.placementService.PlaceDeliveryHold(selectCtx, placementRequest)
 
 	selectDuration := time.Since(selectStarted)
 	if err != nil {
@@ -140,15 +145,9 @@ func (s *Session) handleRecipientPlacement(ctx context.Context, recipient Recipi
 		return RecipientPlacement{}, err
 	}
 
-	placement, err := s.openRecipientHold(ctx, recipient, routingResult, initialRequest, initial, backendPin)
-	if err != nil {
-		s.recordBackendSelect(selectCtx, lmtpObservationResultFailure, lmtpReasonClass(err), routingResult.ShardTag, time.Since(selectStarted))
-		selectSpan.End(lmtpObservationResultFailure, lmtpReasonClass(err))
+	placement := s.recipientPlacementFromLease(ctx, recipient, routingResult, lease)
 
-		return RecipientPlacement{}, err
-	}
-
-	if !s.transaction.acceptsBackend(placement.Backend.Backend.Identifier) {
+	if !s.transaction.acceptsConcreteBackend(placement.Backend.Backend) {
 		_ = s.closeRecipientPlacement(ctx, &placement)
 		s.recordBackendSelect(selectCtx, lmtpObservationResultTempfail, lmtpReasonSameBackend, placement.SelectedShardTag, time.Since(selectStarted))
 		selectSpan.End(lmtpObservationResultTempfail, lmtpReasonSameBackend)
@@ -164,7 +163,7 @@ func (s *Session) handleRecipientPlacement(ctx context.Context, recipient Recipi
 		return RecipientPlacement{}, err
 	}
 
-	if !s.transaction.acceptsBackend(placement.Backend.Backend.Identifier) {
+	if !s.transaction.acceptsConcreteBackend(placement.Backend.Backend) {
 		_ = s.closeRecipientPlacement(ctx, &placement)
 		s.recordBackendSelect(selectCtx, lmtpObservationResultTempfail, lmtpReasonSameBackend, placement.SelectedShardTag, time.Since(selectStarted))
 		selectSpan.End(lmtpObservationResultTempfail, lmtpReasonSameBackend)
@@ -174,15 +173,13 @@ func (s *Session) handleRecipientPlacement(ctx context.Context, recipient Recipi
 
 	selectSpan.SetAttributes(map[string]string{
 		lmtpObsFieldBackendIdentifier: placement.Backend.Backend.Identifier,
+		lmtpObsFieldBackendNode:       placement.Backend.Backend.BackendNode,
 		lmtpObsFieldShardTag:          placement.SelectedShardTag,
 	})
 
-	selectionReason := lmtpReasonOK
-	if placement.Backend.Reason == lmtpReasonOperatorPin {
-		selectionReason = placement.Backend.Reason
-	}
+	selectionReason := observability.BackendBindingReasonClass(string(placement.Binding.Source))
 
-	s.recordBackendSelect(selectCtx, lmtpObservationResultOK, selectionReason, placement.SelectedShardTag, time.Since(selectStarted))
+	s.recordBackendSelectWithNode(selectCtx, lmtpObservationResultOK, selectionReason, placement.SelectedShardTag, placement.Backend.Backend.BackendNode, time.Since(selectStarted))
 	selectSpan.End(lmtpObservationResultOK, selectionReason)
 
 	return placement, nil
@@ -198,12 +195,8 @@ func (s *Session) ensureRecipientPlacementDependencies() error {
 		return errors.New("lmtp: routing resolver unavailable")
 	}
 
-	if s.sessionStore == nil {
-		return errors.New("lmtp: session store unavailable")
-	}
-
-	if s.backendSelector == nil {
-		return errors.New("lmtp: backend selector unavailable")
+	if s.placementService == nil {
+		return errors.New("lmtp: placement service unavailable")
 	}
 
 	return nil
@@ -300,76 +293,54 @@ func (s *Session) waitForPlacementGate(ctx context.Context, result routing.Routi
 	return err
 }
 
-// selectRecipientBackend selects through the shared runtime-aware backend selector.
-func (s *Session) selectRecipientBackend(
-	ctx context.Context,
-	result routing.RoutingResult,
-	affinity state.AffinityRecord,
-	backendPin state.UserBackendPinRecord,
-) (backend.SelectionRequest, backend.SelectionResult, error) {
-	selectedShard := s.selectedPlacementShard(result, affinity)
-	operatorBackend := s.operatorBackendPinIdentifier(backendPin, selectedShard, affinity)
-	request := s.selectionRequest(result, selectedShard, affinity, operatorBackend)
+// deliveryPlacementRequest builds the shared placement-domain input.
+func (s *Session) deliveryPlacementRequest(result routing.RoutingResult) (placementpkg.DeliveryRequest, error) {
+	holdID, err := newDeliveryHoldID()
+	if err != nil {
+		return placementpkg.DeliveryRequest{}, err
+	}
 
-	selected, err := s.backendSelector.Select(ctx, request)
-
-	return request, selected, err
+	return placementpkg.DeliveryRequest{
+		Key: state.AffinityKey{
+			Tenant:     normalizedRoutingFact(result.Tenant),
+			AccountKey: normalizedAccount(result.AccountKey),
+		},
+		SessionID:          holdID,
+		Protocol:           protocolLMTP,
+		BackendPool:        s.backendPool,
+		ShardTag:           normalizedRoutingFact(result.ShardTag),
+		ListenerName:       s.listenerName,
+		ServiceName:        s.serviceName,
+		DirectorInstanceID: s.directorInstanceID,
+		HolderKind:         state.HolderKindDelivery,
+		LeaseTTL:           s.sessionLeaseTTL,
+		IdleGrace:          s.sessionIdleGrace,
+		RetentionTTL:       s.backendRetentionTTL,
+	}, nil
 }
 
-// openRecipientHold creates and attaches a delivery-scoped active-affinity hold.
-func (s *Session) openRecipientHold(
+// recipientPlacementFromLease adapts a placement lease to LMTP transaction state.
+func (s *Session) recipientPlacementFromLease(
 	ctx context.Context,
 	recipient RecipientPath,
 	result routing.RoutingResult,
-	initialRequest backend.SelectionRequest,
-	initial backend.SelectionResult,
-	backendPin state.UserBackendPinRecord,
-) (RecipientPlacement, error) {
-	holdID, err := newDeliveryHoldID()
-	if err != nil {
-		return RecipientPlacement{}, err
-	}
-
-	record := s.deliverySessionRecord(result, holdID)
-
-	affinity, err := s.sessionStore.OpenSession(ctx, record)
-	if err != nil {
-		return RecipientPlacement{}, err
-	}
-
-	if affinity.Key == (state.AffinityKey{}) {
-		affinity.Key = record.Key
-	}
-
-	selected := initial
-	selectedShard := s.selectedPlacementShard(result, affinity)
-
-	operatorBackend := s.operatorBackendPinIdentifier(backendPin, selectedShard, affinity)
-
-	selectionRequest := s.selectionRequest(result, selectedShard, affinity, operatorBackend)
-	if !samePlacementSelectionRequest(initialRequest, selectionRequest) {
-		selected, err = s.backendSelector.Select(ctx, selectionRequest)
-		if err != nil {
-			_, _ = s.sessionStore.CloseSession(context.Background(), record.Key, holdID)
-
-			return RecipientPlacement{}, err
-		}
-	}
-
-	hold := s.startDeliveryHeartbeat(ctx, record.Key, holdID)
+	lease placementpkg.LeaseHandle,
+) RecipientPlacement {
+	binding := lease.Binding()
+	hold := s.startDeliveryHeartbeat(ctx, lease)
 
 	return RecipientPlacement{
 		Recipient:        recipient,
 		AccountKey:       normalizedAccount(result.AccountKey),
 		Tenant:           normalizedRoutingFact(result.Tenant),
 		Routing:          result.Clone(),
-		Affinity:         affinity,
-		Backend:          selected,
-		SelectedShardTag: selectedShard,
-		HoldID:           holdID,
+		Affinity:         lease.Affinity(),
+		Backend:          lease.Backend(),
+		Binding:          binding,
+		SelectedShardTag: binding.ShardTag,
+		HoldID:           lease.SessionID(),
 		hold:             hold,
-		selectionRequest: selectionRequest,
-	}, nil
+	}
 }
 
 // accountRecipientBackend attaches exactly one delivery hold to backend active-use state.
@@ -382,249 +353,27 @@ func (s *Session) accountRecipientBackend(ctx context.Context, placement *Recipi
 		return nil
 	}
 
-	selectionRequest := placement.selectionRequest
-	if selectionRequest.AccountKey == "" {
-		selectionRequest = s.selectionRequest(placement.Routing, placement.SelectedShardTag, placement.Affinity, "")
-	}
-
-	selected, err := s.attachSelectedBackend(ctx, placement.hold.key, selectionRequest, placement.Backend, placement.HoldID, defaultDeliveryLease(s.sessionLeaseTTL))
-	if err != nil {
+	if err := placement.hold.lease.AttachBackend(ctx); err != nil {
 		return err
 	}
 
-	placement.Backend = selected
+	placement.Backend = placement.hold.lease.Backend()
 	placement.BackendCounted = true
 	s.transaction.backendAccountedHoldID = placement.HoldID
 
 	return nil
 }
 
-// attachSelectedBackend registers backend counts and retries same-shard placement on attach races.
-func (s *Session) attachSelectedBackend(
-	ctx context.Context,
-	key state.AffinityKey,
-	request backend.SelectionRequest,
-	initial backend.SelectionResult,
-	holdID string,
-	reservationTTL time.Duration,
-) (backend.SelectionResult, error) {
-	if err := s.reserveAndAttachSelectedBackend(ctx, key, initial, holdID, reservationTTL); err != nil {
-		if request.OperatorBackendIdentifier != "" {
-			return backend.SelectionResult{}, err
-		}
-
-		retrySelector, ok := s.backendSelector.(interface {
-			RetryAfterAttachFailure(context.Context, backend.SelectionRequest, string) (backend.SelectionResult, error)
-		})
-		if !ok {
-			return backend.SelectionResult{}, err
-		}
-
-		retry, retryErr := retrySelector.RetryAfterAttachFailure(ctx, request, initial.Backend.Identifier)
-		if retryErr != nil {
-			return backend.SelectionResult{}, retryErr
-		}
-
-		if attachErr := s.reserveAndAttachSelectedBackend(ctx, key, retry, holdID, reservationTTL); attachErr != nil {
-			return backend.SelectionResult{}, attachErr
-		}
-
-		return retry, nil
-	}
-
-	return initial, nil
-}
-
-// reserveAndAttachSelectedBackend claims backend capacity before storing a delivery pin.
-func (s *Session) reserveAndAttachSelectedBackend(
-	ctx context.Context,
-	key state.AffinityKey,
-	selected backend.SelectionResult,
-	holdID string,
-	reservationTTL time.Duration,
-) error {
-	reservations, ok := s.sessionStore.(state.BackendReservationStore)
-	if !ok {
-		return errors.New("lmtp: backend reservation store unavailable")
-	}
-
-	reservation, err := reservations.ReserveBackendCapacity(ctx, state.BackendReservationRequest{
-		BackendIdentifier: selected.Backend.Identifier,
-		ReservationID:     holdID,
-		MaxConnections:    selected.Backend.MaxConnections,
-		LeaseTTL:          reservationTTL,
-	})
-	if err != nil {
-		return err
-	}
-
-	if _, err = s.sessionStore.AttachSelectedBackend(ctx, state.SessionBackendAttachment{
-		Key:               key,
-		SessionID:         holdID,
-		BackendIdentifier: selected.Backend.Identifier,
-		ReservationID:     reservation.ReservationID,
-		MaxConnections:    selected.Backend.MaxConnections,
-	}); err != nil {
-		_, _ = reservations.ReleaseBackendReservation(context.Background(), state.BackendReservationReleaseRequest{
-			BackendIdentifier: selected.Backend.Identifier,
-			ReservationID:     reservation.ReservationID,
-		})
-
-		return err
-	}
-
-	return nil
-}
-
-// deliverySessionRecord builds the Redis lease used for one delivery hold.
-func (s *Session) deliverySessionRecord(result routing.RoutingResult, holdID string) state.SessionRecord {
-	return state.SessionRecord{
-		ID: holdID,
-		Key: state.AffinityKey{
-			Tenant:     normalizedRoutingFact(result.Tenant),
-			AccountKey: normalizedAccount(result.AccountKey),
-		},
-		HolderKind:         state.HolderKindDelivery,
-		Protocol:           protocolLMTP,
-		ListenerName:       s.listenerName,
-		ServiceName:        s.serviceName,
-		ShardTag:           s.selectedPlacementShard(result, state.AffinityRecord{}),
-		DirectorInstanceID: s.directorInstanceID,
-		LeaseTTL:           s.sessionLeaseTTL,
-		IdleGrace:          s.sessionIdleGrace,
-	}
-}
-
-// selectionRequest builds backend selector input from recipient routing facts.
-func (s *Session) selectionRequest(
-	result routing.RoutingResult,
-	shardTag string,
-	affinity state.AffinityRecord,
-	operatorBackend string,
-) backend.SelectionRequest {
-	return backend.SelectionRequest{
-		AccountKey:                normalizedAccount(result.AccountKey),
-		Tenant:                    normalizedRoutingFact(result.Tenant),
-		ShardTag:                  normalizedRoutingFact(shardTag),
-		Protocol:                  protocolLMTP,
-		BackendPool:               s.backendPool,
-		ActiveAffinity:            affinityActiveForSelection(result, affinity),
-		PinnedBackendIdentifier:   normalizedRoutingFact(affinity.BackendIdentifier),
-		OperatorBackendIdentifier: normalizedRoutingFact(operatorBackend),
-	}
-}
-
-type backendPinReader interface {
-	GetUserBackendPin(context.Context, state.UserBackendPinGetRequest) (state.UserBackendPinRecord, error)
-}
-
-// lookupOperatorBackendPin reads a concrete user backend pin when the store supports it.
-func (s *Session) lookupOperatorBackendPin(ctx context.Context, result routing.RoutingResult) (state.UserBackendPinRecord, error) {
-	reader, ok := s.sessionStore.(backendPinReader)
-	if !ok {
-		return state.UserBackendPinRecord{}, nil
-	}
-
-	return reader.GetUserBackendPin(ctx, state.UserBackendPinGetRequest{
-		Key: state.AffinityKey{
-			Tenant:     normalizedRoutingFact(result.Tenant),
-			AccountKey: normalizedAccount(result.AccountKey),
-		},
-	})
-}
-
-// selectedPlacementShard applies active affinity before the routed shard.
-func (s *Session) selectedPlacementShard(
-	result routing.RoutingResult,
-	affinity state.AffinityRecord,
-) string {
-	if shardTag := normalizedRoutingFact(affinity.ShardTag); shardTag != "" {
-		return shardTag
-	}
-
-	return normalizedRoutingFact(result.ShardTag)
-}
-
-// operatorBackendPinIdentifier returns the exact backend target for this selection.
-func (s *Session) operatorBackendPinIdentifier(backendPin state.UserBackendPinRecord, shardTag string, affinity state.AffinityRecord) string {
-	if !backendPinMatchesScope(backendPin, protocolLMTP, s.backendPool) {
-		return ""
-	}
-
-	if normalizedRoutingFact(backendPin.ShardTag) != normalizedRoutingFact(shardTag) {
-		return ""
-	}
-
-	if normalizedRoutingFact(affinity.BackendIdentifier) != "" {
-		return ""
-	}
-
-	if activeAffinityBlocksOperatorBackendPin(backendPin, affinity) {
-		return ""
-	}
-
-	return normalizedRoutingFact(backendPin.BackendIdentifier)
-}
-
-// activeAffinityBlocksOperatorBackendPin preserves active placement for deferred pin strategies.
-func activeAffinityBlocksOperatorBackendPin(backendPin state.UserBackendPinRecord, affinity state.AffinityRecord) bool {
-	if normalizedRoutingFact(backendPin.Strategy) == "kick_existing" {
-		return false
-	}
-
-	return affinity.Status == affinityStatusReused || affinity.ActiveSessionCount > 1
-}
-
-// samePlacementSelectionRequest reports whether an opened hold needs reselection.
-func samePlacementSelectionRequest(left backend.SelectionRequest, right backend.SelectionRequest) bool {
-	return left.AccountKey == right.AccountKey &&
-		left.Tenant == right.Tenant &&
-		left.ShardTag == right.ShardTag &&
-		left.Protocol == right.Protocol &&
-		left.BackendPool == right.BackendPool &&
-		left.ActiveAffinity == right.ActiveAffinity &&
-		left.PinnedBackendIdentifier == right.PinnedBackendIdentifier &&
-		left.OperatorBackendIdentifier == right.OperatorBackendIdentifier
-}
-
-// backendPinMatchesScope checks protocol and pool before applying a concrete pin.
-func backendPinMatchesScope(backendPin state.UserBackendPinRecord, protocol string, backendPool string) bool {
-	return backendPin.Present &&
-		normalizedRoutingFact(backendPin.BackendIdentifier) != "" &&
-		strings.EqualFold(normalizedRoutingFact(backendPin.Protocol), normalizedRoutingFact(protocol)) &&
-		normalizedRoutingFact(backendPin.BackendPool) == normalizedRoutingFact(backendPool) &&
-		normalizedRoutingFact(backendPin.ShardTag) != ""
-}
-
-// selectedAffinityShard applies active affinity precedence over recipient routing.
-func selectedAffinityShard(result routing.RoutingResult, affinity state.AffinityRecord) string {
-	if shardTag := normalizedRoutingFact(affinity.ShardTag); shardTag != "" {
-		return shardTag
-	}
-
-	return normalizedRoutingFact(result.ShardTag)
-}
-
-// affinityActiveForSelection reports whether Redis returned an existing active pin.
-func affinityActiveForSelection(result routing.RoutingResult, affinity state.AffinityRecord) bool {
-	switch affinity.Status {
-	case deliveryStatusCreated, "":
-		return normalizedRoutingFact(affinity.ShardTag) != "" && normalizedRoutingFact(affinity.ShardTag) != normalizedRoutingFact(result.ShardTag)
-	default:
-		return affinity.Present
-	}
-}
-
 // startDeliveryHeartbeat refreshes a delivery hold until it is closed.
-func (s *Session) startDeliveryHeartbeat(ctx context.Context, key state.AffinityKey, holdID string) *deliveryHold {
+func (s *Session) startDeliveryHeartbeat(ctx context.Context, lease placementpkg.LeaseHandle) *deliveryHold {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 
 	heartbeatCtx, cancel := context.WithCancel(ctx)
 	hold := &deliveryHold{
-		key:       key,
-		sessionID: holdID,
+		sessionID: lease.SessionID(),
+		lease:     lease,
 		cancel:    cancel,
 		done:      make(chan struct{}),
 	}
@@ -646,12 +395,12 @@ func (s *Session) heartbeatDeliveryHold(ctx context.Context, hold *deliveryHold)
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			_, _ = s.sessionStore.HeartbeatSession(ctx, hold.key, hold.sessionID, s.sessionLeaseTTL)
+			_, _ = hold.lease.Heartbeat(ctx, s.sessionLeaseTTL)
 		}
 	}
 }
 
-// closeRecipientPlacement releases a placement with access to the session store.
+// closeRecipientPlacement releases a placement through its shared placement lease.
 func (s *Session) closeRecipientPlacement(ctx context.Context, placement *RecipientPlacement) error {
 	if placement == nil || placement.hold == nil {
 		return nil
@@ -662,7 +411,9 @@ func (s *Session) closeRecipientPlacement(ctx context.Context, placement *Recipi
 	placement.hold.closeOnce.Do(func() {
 		placement.hold.cancel()
 		<-placement.hold.done
-		_, closeErr = s.sessionStore.CloseSession(ctx, placement.hold.key, placement.hold.sessionID)
+		closeErr = placement.hold.lease.Close(ctx)
+		affinity := placement.hold.lease.Affinity()
+		s.recordDeliveryHoldClose(ctx, lmtpResultLabel(closeErr), lmtpCloseReasonClass(closeErr, affinity), placement.SelectedShardTag, placement.Binding.BackendNode)
 		if placement.BackendCounted && placement.HoldID == s.transaction.backendAccountedHoldID {
 			s.transaction.backendAccountedHoldID = ""
 			placement.BackendCounted = false

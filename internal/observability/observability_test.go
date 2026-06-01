@@ -14,6 +14,7 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
+//nolint:goconst // Expected-value tables intentionally repeat public policy strings.
 package observability
 
 import "testing"
@@ -21,6 +22,7 @@ import "testing"
 const (
 	testDiagnosticAccount     = "alice@example.org"
 	testDiagnosticBackendID   = "mailstore-a-imap"
+	testDiagnosticBackendNode = "mailstore-a-node-1"
 	testOperationAuthenticate = "authenticate"
 )
 
@@ -216,6 +218,7 @@ func TestEventNormalizationRejectsForbiddenMetricLabels(t *testing.T) {
 func TestTraceAttributesApplyDiagnosticPolicy(t *testing.T) {
 	fields := SanitizeTraceFields(map[string]string{
 		fieldBackendIdentifier: testDiagnosticBackendID,
+		fieldBackendNode:       testDiagnosticBackendNode,
 		fieldClientIP:          "192.0.2.10",
 		fieldPassword:          "secret",
 		fieldRawError:          "dial tcp 192.0.2.10:143: secret",
@@ -231,6 +234,10 @@ func TestTraceAttributesApplyDiagnosticPolicy(t *testing.T) {
 
 	if fields[fieldBackendIdentifier] != testDiagnosticBackendID {
 		t.Fatalf("backend identifier trace attribute = %q", fields[fieldBackendIdentifier])
+	}
+
+	if fields[fieldBackendNode] != testDiagnosticBackendNode {
+		t.Fatalf("backend node trace attribute = %q", fields[fieldBackendNode])
 	}
 
 	for _, name := range []string{fieldClientIP, fieldRawError, fieldRecipient, fieldRedisKey, fieldUsername} {
@@ -252,7 +259,11 @@ func TestMailContentFieldsCollapseBeforeLogsAndTraces(t *testing.T) {
 		fieldMessageBody:         "Subject: private\r\n\r\nsecret body",
 		fieldMessageContent:      "DATA private text",
 		fieldMessageID:           "<private-message@example.test>",
+		fieldOperatorHoldReason:  "manual migration for alice@example.test",
+		fieldPostAuthCommandBody: "PUTSCRIPT secret",
 		fieldRecipient:           testDiagnosticAccount,
+		fieldScriptContent:       "require [\"fileinto\"];",
+		fieldScriptName:          "private-filter",
 		fieldSubject:             "private subject",
 	}
 
@@ -287,22 +298,31 @@ func TestMailContentFieldsCollapseBeforeLogsAndTraces(t *testing.T) {
 	if _, err := NewEvent(EventLMTPDataStream, TraceBoundaryLMTPTransaction, nil, map[string]string{fieldMessageBody: "private body"}); err == nil {
 		t.Fatal("NewEvent accepted message_body as a metric label")
 	}
+
+	if _, err := NewEvent(EventProxyPipe, TraceBoundaryProxyPipe, nil, map[string]string{fieldScriptName: "private-filter"}); err == nil {
+		t.Fatal("NewEvent accepted script_name as a metric label")
+	}
 }
 
-// TestBackendIdentifierPolicyDiffersBySink keeps logs/traces separate from metrics.
-func TestBackendIdentifierPolicyDiffersBySink(t *testing.T) {
-	if err := ValidateMetricLabels(fieldBackendIdentifier); err == nil {
-		t.Fatal("backend_identifier was accepted as a metric label")
-	}
+// TestBackendDiagnosticsPolicyDiffersBySink keeps logs/traces separate from metrics.
+func TestBackendDiagnosticsPolicyDiffersBySink(t *testing.T) {
+	for name, value := range map[string]string{
+		fieldBackendIdentifier: testDiagnosticBackendID,
+		fieldBackendNode:       testDiagnosticBackendNode,
+	} {
+		if err := ValidateMetricLabels(name); err == nil {
+			t.Fatalf("%s was accepted as a metric label", name)
+		}
 
-	logFields := SanitizeLogFields(map[string]string{fieldBackendIdentifier: testDiagnosticBackendID})
-	if logFields[fieldBackendIdentifier] != testDiagnosticBackendID {
-		t.Fatalf("backend identifier log field = %q", logFields[fieldBackendIdentifier])
-	}
+		logFields := SanitizeLogFields(map[string]string{name: value})
+		if logFields[name] != value {
+			t.Fatalf("%s log field = %q", name, logFields[name])
+		}
 
-	traceFields := SanitizeTraceFields(map[string]string{fieldBackendIdentifier: testDiagnosticBackendID})
-	if traceFields[fieldBackendIdentifier] != testDiagnosticBackendID {
-		t.Fatalf("backend identifier trace field = %q", traceFields[fieldBackendIdentifier])
+		traceFields := SanitizeTraceFields(map[string]string{name: value})
+		if traceFields[name] != value {
+			t.Fatalf("%s trace field = %q", name, traceFields[name])
+		}
 	}
 }
 
@@ -359,8 +379,17 @@ func TestRuntimeEventVocabularyCoversControlSurface(t *testing.T) {
 func TestReasonClassNormalizationKeepsMetricValuesBounded(t *testing.T) {
 	tests := map[string]string{
 		testReasonClassRuntimeOut:                  testReasonClassRuntimeOut,
+		"active affinity":                          "active_affinity",
+		"active backend binding":                   "active_backend_binding",
 		reasonClassBackendPinApplied:               reasonClassBackendPinApplied,
 		"backend pin mismatch":                     reasonClassBackendPinMismatch,
+		"backend node missing protocol":            "backend_node_missing_protocol",
+		"backend node unusable":                    "backend_node_unusable",
+		"backend node mismatch":                    "backend_node_mismatch",
+		"binding invalidated hard down":            "binding_invalidated_hard_down",
+		"binding retained":                         "binding_retained",
+		"binding expired":                          "binding_expired",
+		"retained backend binding":                 "retained_backend_binding",
 		reasonClassOperatorBackendPin:              reasonClassOperatorBackendPin,
 		reasonClassAuth:                            reasonClassAuth,
 		reasonClassBackendStatus:                   reasonClassBackendStatus,
@@ -380,6 +409,27 @@ func TestReasonClassNormalizationKeepsMetricValuesBounded(t *testing.T) {
 	for input, want := range tests {
 		if got := NormalizeReasonClass(input); got != want {
 			t.Fatalf("NormalizeReasonClass(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+// TestBackendBindingReasonClassMapsSources verifies binding reasons stay stable.
+func TestBackendBindingReasonClassMapsSources(t *testing.T) {
+	tests := map[string]string{
+		"":                              reasonClassOK,
+		"active_affinity":               "active_backend_binding",
+		"backend_binding":               "active_backend_binding",
+		"retained_backend_binding":      "retained_backend_binding",
+		"operator_backend_pin":          "operator_backend_pin",
+		"binding_invalidated_hard_down": "binding_invalidated_hard_down",
+		"movement_override":             "movement_override",
+		"initial_placement":             "initial_placement",
+		"raw backend failure alice":     reasonClassOther,
+	}
+
+	for source, want := range tests {
+		if got := BackendBindingReasonClass(source); got != want {
+			t.Fatalf("BackendBindingReasonClass(%q) = %q, want %q", source, got, want)
 		}
 	}
 }

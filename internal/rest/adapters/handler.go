@@ -1533,6 +1533,7 @@ func routeLookupResponse(result runtime.RouteLookupResponse) generated.RouteLook
 		RoutingGeneration: generationPtr,
 		SelectedBackend:   result.SelectedBackend,
 		ShardTag:          result.Routing.EffectiveShard,
+		Source:            nonEmptyString(result.Source, "initial_placement"),
 		UserHold:          routeLookupUserHold(result.UserHold),
 	}
 }
@@ -1581,13 +1582,19 @@ func routeLookupAffinity(affinity runtime.RouteLookupAffinityState) *generated.R
 	}
 
 	return &generated.RouteLookupAffinity{
-		Active:         affinity.Active,
-		ActiveSessions: affinity.ActiveSessions,
-		BackendID:      stringPtrIfNotEmpty(affinity.BackendID),
-		Generation:     stringPtrIfNotEmpty(affinity.Generation),
-		Present:        affinity.Present,
-		Requested:      affinity.Requested,
-		ShardTag:       stringPtrIfNotEmpty(affinity.ShardTag),
+		Active:             affinity.Active,
+		ActiveHolders:      affinity.ActiveHolders,
+		ActiveSessions:     affinity.ActiveSessions,
+		BackendID:          stringPtrIfNotEmpty(affinity.BackendID),
+		BackendNode:        stringPtrIfNotEmpty(affinity.BackendNode),
+		BindingGeneration:  stringPtrIfNotEmpty(affinity.BindingGeneration),
+		BindingSource:      nonEmptyString(affinity.BindingSource, "none"),
+		BindingStatus:      stringPtrIfNotEmpty(affinity.BindingStatus),
+		Generation:         stringPtrIfNotEmpty(affinity.Generation),
+		Present:            affinity.Present,
+		Requested:          affinity.Requested,
+		RetentionExpiresAt: timePtrIfPresent(affinity.RetentionExpiresAt),
+		ShardTag:           stringPtrIfNotEmpty(affinity.ShardTag),
 	}
 }
 
@@ -1598,6 +1605,7 @@ func routeLookupBackends(backends []runtime.RouteLookupBackendState) []generated
 		summaries = append(summaries, generated.RouteLookupBackendSummary{
 			AllowsActivePins:  entry.AllowsActivePins,
 			AllowsNewSessions: entry.AllowsNewSessions,
+			BackendNode:       stringPtrIfNotEmpty(entry.BackendNode),
 			BackendPool:       entry.BackendPool,
 			Eligible:          entry.Eligible,
 			Exclusions:        routeLookupExclusions(entry.Exclusions),
@@ -1645,12 +1653,13 @@ func sessionDetail(session runtime.SessionRuntimeState) generated.SessionDetail 
 	}
 
 	return generated.SessionDetail{
-		Backend:   session.BackendIdentifier,
-		ExpiresAt: expiresAt.UTC(),
-		Protocol:  session.Protocol,
-		SessionID: session.SessionID,
-		ShardTag:  session.EffectiveShardTag,
-		UserKey:   formatUserKey(runtime.UserKey{Tenant: session.Tenant, UserHash: session.UserHash}),
+		Backend:     session.BackendIdentifier,
+		BackendNode: session.BackendNode,
+		ExpiresAt:   expiresAt.UTC(),
+		Protocol:    session.Protocol,
+		SessionID:   session.SessionID,
+		ShardTag:    session.EffectiveShardTag,
+		UserKey:     formatUserKey(runtime.UserKey{Tenant: session.Tenant, UserHash: session.UserHash}),
 	}
 }
 
@@ -1757,11 +1766,17 @@ func userAffinity(user runtime.UserRuntimeState) generated.UserAffinity {
 	}
 
 	return generated.UserAffinity{
-		ActiveSessions: user.ActiveSessionCount,
-		ExpiresAt:      expiresAt,
-		Generation:     generationPtr,
-		ShardTag:       user.ActiveShard,
-		UserKey:        formatUserKey(user.Key),
+		ActiveHolders:      user.ActiveHolderCount,
+		ActiveSessions:     user.ActiveSessionCount,
+		BackendNode:        stringPtrIfNotEmpty(user.BackendNode),
+		BindingGeneration:  stringPtrIfNotEmpty(user.BindingGeneration),
+		BindingSource:      nonEmptyString(user.BindingSource, "none"),
+		BindingStatus:      stringPtrIfNotEmpty(user.BindingStatus),
+		ExpiresAt:          expiresAt,
+		Generation:         generationPtr,
+		RetentionExpiresAt: timePtrIfPresent(user.RetentionExpiresAt),
+		ShardTag:           user.ActiveShard,
+		UserKey:            formatUserKey(user.Key),
 	}
 }
 
@@ -1983,6 +1998,16 @@ func nonEmptyStringPointer(value string) *string {
 	}
 
 	return &value
+}
+
+// nonEmptyString returns fallback when response text is absent.
+func nonEmptyString(value string, fallback string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return fallback
+	}
+
+	return value
 }
 
 // pointerBool unwraps optional generated boolean fields.

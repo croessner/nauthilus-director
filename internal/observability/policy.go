@@ -45,6 +45,7 @@ const (
 	fieldAuthorization       = "authorization"
 	fieldAuthorizationHeader = "authorization_header"
 	fieldBackendIdentifier   = "backend_identifier"
+	fieldBackendNode         = "backend_node"
 	fieldBearer              = "bearer"
 	fieldBDATContent         = "bdat_content"
 	fieldBody                = "body"
@@ -58,8 +59,10 @@ const (
 	fieldMessageContent      = "message_content"
 	fieldMessageID           = "message_id"
 	fieldOAuth               = "oauth"
+	fieldOperatorHoldReason  = "operator_hold_reason"
 	fieldPasswd              = "passwd"
 	fieldPassword            = "password"
+	fieldPostAuthCommandBody = "post_auth_command_body"
 	fieldPrivateKey          = "private_key"
 	fieldProtected           = "protected"
 	fieldRawError            = "raw_error"
@@ -70,6 +73,8 @@ const (
 	fieldSASL                = "sasl"
 	fieldSASLBlob            = "sasl_blob"
 	fieldSaltFile            = "salt_file"
+	fieldScriptContent       = "script_content"
+	fieldScriptName          = "script_name"
 	fieldSecret              = "secret"
 	fieldSessionID           = "session_id"
 	fieldSpanID              = "span_id"
@@ -81,15 +86,27 @@ const (
 	fieldUsername            = "username"
 
 	reasonClassOK                     = "ok"
+	reasonClassActiveAffinity         = "active_affinity"
+	reasonClassActiveBackendBinding   = "active_backend_binding"
 	reasonClassAuth                   = "auth"
+	reasonClassBackendBinding         = "backend_binding"
+	reasonClassBackendNodeMismatch    = "backend_node_mismatch"
+	reasonClassBackendNodeMissing     = "backend_node_missing_protocol"
+	reasonClassBackendNodeUnusable    = "backend_node_unusable"
 	reasonClassBackendPinApplied      = "backend_pin_applied"
 	reasonClassBackendPinMismatch     = "backend_pin_mismatch"
 	reasonClassBackendStatus          = "backend_status"
 	reasonClassBDAT                   = "bdat"
+	reasonClassBindingExpired         = "binding_expired"
+	reasonClassBindingInvalidated     = "binding_invalidated_hard_down"
+	reasonClassBindingRetained        = "binding_retained"
 	reasonClassData                   = "data"
+	reasonClassInitialPlacement       = "initial_placement"
+	reasonClassMovementOverride       = "movement_override"
 	reasonClassOperatorBackendPin     = "operator_backend_pin"
 	reasonClassOther                  = "other"
 	reasonClassParser                 = "parser"
+	reasonClassRetainedBackendBinding = "retained_backend_binding"
 	reasonClassRouting                = "routing"
 	reasonClassRuntimeHardMaintenance = "runtime_hard_maintenance"
 	reasonClassRuntimeOut             = "runtime_out"
@@ -122,21 +139,26 @@ var allowedMetricLabels = map[string]struct{}{
 }
 
 var forbiddenMetricLabels = map[string]struct{}{
-	fieldBackendIdentifier: {},
-	fieldClientIP:          {},
-	fieldPassword:          {},
-	fieldRawError:          {},
-	fieldRecipient:         {},
-	fieldRemoteAddr:        {},
-	fieldRequestID:         {},
-	fieldRedisKey:          {},
-	fieldSASLBlob:          {},
-	fieldSessionID:         {},
-	fieldSpanID:            {},
-	fieldToken:             {},
-	fieldTraceID:           {},
-	fieldUserHash:          {},
-	fieldUsername:          {},
+	fieldBackendIdentifier:   {},
+	fieldBackendNode:         {},
+	fieldClientIP:            {},
+	fieldOperatorHoldReason:  {},
+	fieldPassword:            {},
+	fieldPostAuthCommandBody: {},
+	fieldRawError:            {},
+	fieldRecipient:           {},
+	fieldRemoteAddr:          {},
+	fieldRequestID:           {},
+	fieldRedisKey:            {},
+	fieldSASLBlob:            {},
+	fieldScriptContent:       {},
+	fieldScriptName:          {},
+	fieldSessionID:           {},
+	fieldSpanID:              {},
+	fieldToken:               {},
+	fieldTraceID:             {},
+	fieldUserHash:            {},
+	fieldUsername:            {},
 }
 
 var collapsedLogFields = map[string]struct{}{
@@ -152,12 +174,16 @@ var collapsedLogFields = map[string]struct{}{
 	fieldMessageBody:         {},
 	fieldMessageContent:      {},
 	fieldMessageID:           {},
+	fieldOperatorHoldReason:  {},
+	fieldPostAuthCommandBody: {},
 	fieldRawError:            {},
 	fieldRecipient:           {},
 	fieldRemoteAddr:          {},
 	fieldRequestID:           {},
 	fieldRedisKey:            {},
 	fieldSASLBlob:            {},
+	fieldScriptContent:       {},
+	fieldScriptName:          {},
 	fieldSessionID:           {},
 	fieldSubject:             {},
 	fieldUserHash:            {},
@@ -167,6 +193,7 @@ var collapsedLogFields = map[string]struct{}{
 
 var diagnosticLogFields = map[string]struct{}{
 	fieldBackendIdentifier: {},
+	fieldBackendNode:       {},
 	fieldSpanID:            {},
 	fieldTraceID:           {},
 }
@@ -186,11 +213,16 @@ var secretFieldFragments = []string{
 }
 
 var allowedReasonClasses = map[string]struct{}{
-	"active_affinity":                 {},
+	reasonClassActiveAffinity:         {},
+	reasonClassActiveBackendBinding:   {},
 	"ambiguous_state":                 {},
 	reasonClassAuth:                   {},
 	"attach_retry":                    {},
 	"backend_auth_failed":             {},
+	reasonClassBackendBinding:         {},
+	reasonClassBackendNodeMismatch:    {},
+	reasonClassBackendNodeMissing:     {},
+	reasonClassBackendNodeUnusable:    {},
 	"backend_pin_absent":              {},
 	reasonClassBackendPinApplied:      {},
 	"backend_pin_clear":               {},
@@ -203,6 +235,9 @@ var allowedReasonClasses = map[string]struct{}{
 	reasonClassBackendStatus:          {},
 	reasonClassBDAT:                   {},
 	"bind_failed":                     {},
+	reasonClassBindingExpired:         {},
+	reasonClassBindingInvalidated:     {},
+	reasonClassBindingRetained:        {},
 	"canceled":                        {},
 	"backend_runtime":                 {},
 	"cleared":                         {},
@@ -220,7 +255,7 @@ var allowedReasonClasses = map[string]struct{}{
 	"hard_maintenance":                {},
 	"http_error":                      {},
 	"incomplete":                      {},
-	"initial_placement":               {},
+	reasonClassInitialPlacement:       {},
 	"invalid_request":                 {},
 	"kicked":                          {},
 	"literal":                         {},
@@ -228,12 +263,14 @@ var allowedReasonClasses = map[string]struct{}{
 	"malformed":                       {},
 	"malformed_response":              {},
 	"moved":                           {},
+	reasonClassMovementOverride:       {},
 	"no_backend":                      {},
 	"not_found":                       {},
 	reasonClassOK:                     {},
 	reasonClassOperatorBackendPin:     {},
 	reasonClassOther:                  {},
 	reasonClassParser:                 {},
+	reasonClassRetainedBackendBinding: {},
 	"protocol":                        {},
 	"protected_config":                {},
 	"reap":                            {},
@@ -366,6 +403,32 @@ func NormalizeReasonClass(value string) string {
 	}
 
 	return reasonClassOther
+}
+
+// BackendBindingReasonClass maps binding sources into stable observable reasons.
+func BackendBindingReasonClass(source string) string {
+	switch NormalizeReasonClass(source) {
+	case reasonClassActiveAffinity, reasonClassBackendBinding:
+		return reasonClassActiveBackendBinding
+	case reasonClassRetainedBackendBinding:
+		return reasonClassRetainedBackendBinding
+	case reasonClassOperatorBackendPin:
+		return reasonClassOperatorBackendPin
+	case reasonClassBindingInvalidated:
+		return reasonClassBindingInvalidated
+	case reasonClassMovementOverride:
+		return reasonClassMovementOverride
+	case reasonClassInitialPlacement:
+		return reasonClassInitialPlacement
+	case reasonClassOther:
+		if strings.TrimSpace(source) == "" {
+			return reasonClassOK
+		}
+
+		return reasonClassOther
+	default:
+		return NormalizeReasonClass(source)
+	}
 }
 
 // normalizeFieldName canonicalizes diagnostic field names for policy checks.

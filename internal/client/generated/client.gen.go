@@ -354,13 +354,21 @@ type MaintenanceRequest struct {
 
 // RouteLookupAffinity defines model for RouteLookupAffinity.
 type RouteLookupAffinity struct {
-	Active         bool    `json:"active"`
-	ActiveSessions int     `json:"active_sessions"`
-	BackendID      *string `json:"backend_id,omitempty"`
-	Generation     *string `json:"generation,omitempty"`
-	Present        bool    `json:"present"`
-	Requested      bool    `json:"requested"`
-	ShardTag       *string `json:"shard_tag,omitempty"`
+	Active            bool    `json:"active"`
+	ActiveHolders     int     `json:"active_holders"`
+	ActiveSessions    int     `json:"active_sessions"`
+	BackendID         *string `json:"backend_id,omitempty"`
+	BackendNode       *string `json:"backend_node,omitempty"`
+	BindingGeneration *string `json:"binding_generation,omitempty"`
+
+	// BindingSource Bounded binding source; never contains raw user, recipient or Redis key material.
+	BindingSource      string     `json:"binding_source"`
+	BindingStatus      *string    `json:"binding_status,omitempty"`
+	Generation         *string    `json:"generation,omitempty"`
+	Present            bool       `json:"present"`
+	Requested          bool       `json:"requested"`
+	RetentionExpiresAt *time.Time `json:"retention_expires_at,omitempty"`
+	ShardTag           *string    `json:"shard_tag,omitempty"`
 }
 
 // RouteLookupBackendExclusion defines model for RouteLookupBackendExclusion.
@@ -385,6 +393,7 @@ type RouteLookupBackendPin struct {
 type RouteLookupBackendSummary struct {
 	AllowsActivePins  bool                          `json:"allows_active_pins"`
 	AllowsNewSessions bool                          `json:"allows_new_sessions"`
+	BackendNode       *string                       `json:"backend_node,omitempty"`
 	BackendPool       string                        `json:"backend_pool"`
 	Eligible          bool                          `json:"eligible"`
 	Exclusions        []RouteLookupBackendExclusion `json:"exclusions"`
@@ -444,7 +453,10 @@ type RouteLookupResponse struct {
 	RoutingGeneration  *string                        `json:"routing_generation,omitempty"`
 	SelectedBackend    string                         `json:"selected_backend"`
 	ShardTag           string                         `json:"shard_tag"`
-	UserHold           RouteLookupUserHold            `json:"user_hold"`
+
+	// Source Bounded backend-binding source such as active_affinity, retained_backend_binding, operator_backend_pin, movement_override, initial_placement or fail_closed.
+	Source   string              `json:"source"`
+	UserHold RouteLookupUserHold `json:"user_hold"`
 }
 
 // RouteLookupRouting defines model for RouteLookupRouting.
@@ -537,12 +549,13 @@ type RuntimeWeightRequest struct {
 
 // SessionDetail defines model for SessionDetail.
 type SessionDetail struct {
-	Backend   string    `json:"backend"`
-	ExpiresAt time.Time `json:"expires_at"`
-	Protocol  string    `json:"protocol"`
-	SessionID string    `json:"session_id"`
-	ShardTag  string    `json:"shard_tag"`
-	UserKey   string    `json:"user_key"`
+	Backend     string    `json:"backend"`
+	BackendNode string    `json:"backend_node"`
+	ExpiresAt   time.Time `json:"expires_at"`
+	Protocol    string    `json:"protocol"`
+	SessionID   string    `json:"session_id"`
+	ShardTag    string    `json:"shard_tag"`
+	UserKey     string    `json:"user_key"`
 }
 
 // SessionListResponse defines model for SessionListResponse.
@@ -559,11 +572,17 @@ type StatusResponse struct {
 
 // UserAffinity defines model for UserAffinity.
 type UserAffinity struct {
-	ActiveSessions int        `json:"active_sessions"`
-	ExpiresAt      *time.Time `json:"expires_at,omitempty"`
-	Generation     *string    `json:"generation,omitempty"`
-	ShardTag       string     `json:"shard_tag"`
-	UserKey        string     `json:"user_key"`
+	ActiveHolders      int        `json:"active_holders"`
+	ActiveSessions     int        `json:"active_sessions"`
+	BackendNode        *string    `json:"backend_node,omitempty"`
+	BindingGeneration  *string    `json:"binding_generation,omitempty"`
+	BindingSource      string     `json:"binding_source"`
+	BindingStatus      *string    `json:"binding_status,omitempty"`
+	ExpiresAt          *time.Time `json:"expires_at,omitempty"`
+	Generation         *string    `json:"generation,omitempty"`
+	RetentionExpiresAt *time.Time `json:"retention_expires_at,omitempty"`
+	ShardTag           string     `json:"shard_tag"`
+	UserKey            string     `json:"user_key"`
 }
 
 // UserBackendPin defines model for UserBackendPin.

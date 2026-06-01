@@ -56,6 +56,9 @@ are managed through
 .BR nauthilus-directorctl (1)
 against the running control API.
 Those runtime state changes do not rewrite YAML configuration files.
+User-stateful routing keeps active and retained affinity in Redis at the
+backend-node level; the shard tag is not by itself the mailbox-index safety
+boundary.
 Listener runtime drain and resume state is process-local and non-persistent;
 after restart, configured frontend listeners are started from the typed config
 snapshot.
@@ -79,6 +82,11 @@ When no subcommand is supplied this is the default behavior.
 .TP
 .B config dump -d|--defaults
 Print canonical default configuration for the server process.
+The default dump includes backend-node affinity retention under
+.B director.affinity.backend_retention
+with the safe
+.B 15m
+retention window.
 .TP
 .B config dump -n|--non-default
 Print non-default effective configuration after loading the selected config

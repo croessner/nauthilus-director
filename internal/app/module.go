@@ -35,6 +35,7 @@ func Module() fx.Option {
 			provideRedisStore,
 			provideBackendRegistry,
 			provideRuntimeSelector,
+			providePlacementService,
 			provideRoutingResolver,
 			provideLocalSessionRegistry,
 			provideUserHoldService,

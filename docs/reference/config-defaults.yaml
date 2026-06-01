@@ -68,6 +68,10 @@ director:
                 - imap
                 - pop3
                 - sieve
+        backend_retention:
+            default_ttl: 15m0s
+            enabled: true
+            max_ttl: 24h0m0s
         initial_placement: rendezvous_hash
         local_cache:
             enabled: true
@@ -120,6 +124,7 @@ director:
                     password_file: ""
                     require_tls: false
                     username: ""
+            backend_node: mailstore-a-node-1
             haproxy:
                 enabled: false
             health_check:
@@ -161,6 +166,7 @@ director:
                     password_file: <redacted>
                     require_tls: true
                     username: nauthilus-director-lmtp
+            backend_node: mailstore-a-node-1
             haproxy:
                 enabled: false
             health_check:
@@ -206,6 +212,7 @@ director:
                     password_file: ""
                     require_tls: false
                     username: ""
+            backend_node: mailstore-b-node-1
             haproxy:
                 enabled: false
             health_check:
@@ -247,6 +254,7 @@ director:
                     password_file: <redacted>
                     require_tls: true
                     username: nauthilus-director-lmtp
+            backend_node: mailstore-b-node-1
             haproxy:
                 enabled: false
             health_check:

@@ -404,8 +404,8 @@ The director's routing pipeline is:
 ```text
 auth result + listener context
   -> RoutingResolver resolves tenant, normalized account and shard_tag
-  -> active affinity may pin or override shard_tag while sessions are open
-  -> backend selector resolves shard_tag + protocol + backend pool
+  -> active affinity may pin or override shard_tag and selected backend identity
+  -> backend binding resolves the concrete protocol backend for this account
   -> health, maintenance, limits and runtime overrides are applied
   -> concrete backend_identifier is selected
 ```
@@ -421,7 +421,7 @@ Director-owned routing inputs include:
 - backend pool configuration
 - backend health and maintenance state
 - max connection limits and weights
-- Redis-backed active affinity and runtime override state
+- Redis-backed active affinity, backend binding and runtime override state
 
 ## 8. Routing and backend selection
 
@@ -430,7 +430,7 @@ Backend selection must be deterministic, observable and safe.
 The director has two separate responsibilities:
 
 1. Resolve a logical routing target, normally `tenant + normalized_account -> shard_tag`.
-2. Resolve the concrete protocol backend, normally `shard_tag + protocol + backend_pool -> backend_identifier`.
+2. Resolve the account's concrete backend binding, normally `tenant + normalized_account + shard_tag -> backend_node`, then select the protocol-specific endpoint from that bound backend node.
 
 The first step is owned by a routing resolver. The second step is owned by the backend selector and registry.
 
@@ -464,7 +464,7 @@ type RoutingResult struct {
 }
 ```
 
-The resolver returns routing facts only. It must not return a concrete backend identifier for normal user-stateful protocol routing. Concrete backend selection remains in the backend selector so health, maintenance, protocol mapping, weights, connection limits, active affinity and runtime overrides are enforced uniformly.
+The resolver returns routing facts only. It must not return a concrete backend identifier for normal user-stateful protocol routing. Concrete backend selection remains in the backend selector and backend-affinity domain so health, maintenance, protocol mapping, weights, connection limits, active affinity, retained backend binding and runtime overrides are enforced uniformly.
 
 Initial resolver strategy candidates:
 
@@ -496,7 +496,7 @@ director:
       strategy: same_shard_then_any_healthy
 ```
 
-The director then maps the logical shard to protocol-specific backend entries:
+The director then maps the logical shard to protocol-specific backend entries. Entries that represent the same physical mailstore index authority must share a stable `backend_node` in addition to the same `shard_tag`:
 
 ```yaml
 director:
@@ -511,20 +511,23 @@ director:
     mailstore-a-imap:
       protocol: imap
       shard_tag: mailstore-a
+      backend_node: mailstore-a-node-1
       address: "10.0.0.11:143"
 
     mailstore-a-sieve:
       protocol: sieve
       shard_tag: mailstore-a
+      backend_node: mailstore-a-node-1
       address: "10.0.0.11:4190"
 
     mailstore-a-lmtp:
       protocol: lmtp
       shard_tag: mailstore-a
+      backend_node: mailstore-a-node-1
       address: "10.0.0.11:24"
 ```
 
-This separation lets the same account route to the same logical mailstore while still using protocol-specific backend entries, ports, TLS settings and health checks.
+This separation lets the same account route to the same concrete mailstore authority while still using protocol-specific backend entries, ports, TLS settings and health checks. The `shard_tag` is a placement and failover boundary; `backend_node` is the cross-protocol user-index safety boundary. For stateful mailbox access, active and retained affinity must preserve the bound backend node, not merely the shard.
 
 Supported selector strategy candidates:
 
@@ -536,34 +539,48 @@ Supported selector strategy candidates:
 
 Backend connection addressing and TLS identity are separate concerns. A backend `address` may be an IP address or another routable endpoint, while `tls.server_name` is the DNS name used for TLS SNI and certificate hostname verification. When backend TLS is enabled and the TCP address is not the certificate name, `tls.server_name` must be configured explicitly. The implementation must not silently disable verification to make IP-address backends work; `insecure_skip_verify` remains false by default.
 
-For IMAP/POP3/ManageSieve the default is active-user sticky routing, not merely deterministic hashing. For LMTP the default should be recipient-based and should use the same resolver model for recipient mailbox identity where practical.
+For IMAP/POP3/ManageSieve the default is active-user sticky routing, not merely deterministic hashing. For LMTP the default should be recipient-based and should use the same resolver model for recipient mailbox identity where practical. All stateful mailbox protocols must converge on the same concrete backend node for a given account while active or retained backend affinity exists.
 
 ## 9. Session affinity and Redis state
 
-Session affinity is mandatory production behavior for user-stateful protocols.
+Session affinity is mandatory production behavior for user-stateful protocols and delivery flows that mutate mailbox state.
 
 Hard invariant:
 
-- Once a user has an authenticated active frontend session, the director must keep an active affinity record.
-- Any new frontend session with the same affinity key must be routed to the same backend shard while that active affinity record exists.
+- Once a user has an authenticated active frontend session or an accepted LMTP delivery hold, the director must keep an active affinity record.
+- Any new frontend session or delivery for the same affinity key must be routed to the same bound backend node while that active affinity record exists.
 - The initial placement strategy, for example rendezvous hashing, is used only when no active affinity record exists.
 - Active affinity takes precedence over normal hashing, weights and least-connection style balancing.
-- If backend entries are protocol-specific, the active pin binds to `shard_tag` first and then resolves to the protocol-specific backend identifier for the requested protocol.
-- The affinity record is released only after the last matching frontend session closes, plus an optional short grace period.
-- Failover away from an active pin is allowed only for hard-down backends, hard maintenance, explicit administrative kill/drain, or a documented fail-closed condition. Such movement must be logged, traced and counted.
+- If backend entries are protocol-specific, the active pin binds to the selected `backend_node` and `shard_tag`; the requested protocol then resolves to the entry in the same backend node for its protocol and backend pool.
+- If the bound backend node is authoritatively hard-down according to the configured health model, the director must invalidate or supersede that binding and select a new healthy backend node through the configured failover policy.
+- If the matching protocol-specific backend entry is missing or unusable but the backend node is not authoritatively hard-down, the director must fail closed unless an explicit operator-controlled failover policy permits a safe backend-node change.
+- The active session count reaches zero only after the last matching frontend session or delivery hold closes. The backend binding then remains retained for a configurable grace window before normal initial placement may choose another backend node.
+- Failover away from an active or retained backend binding is allowed only for health-authoritative hard-down backends, hard maintenance, explicit administrative kill/drain, or a documented fail-closed condition. A single client connection failure or ambiguous health state is not enough to abandon a binding. Such movement must be logged, traced and counted.
 
 Production affinity key:
 
 ```text
-tenant + normalized_username -> shard_tag + active_session_count + expiry_after_last_close
+tenant + normalized_username -> shard_tag + backend_node + active_session_count + retention_expires_at
 ```
 
 Protocol-specific backend resolution:
 
 ```text
-tenant + normalized_username -> shard_tag
-shard_tag + protocol -> backend_identifier
+tenant + normalized_username -> shard_tag + backend_node
+backend_node + protocol + backend_pool -> backend_identifier
 ```
+
+Retained backend binding:
+
+- Backend binding retention protects mailbox index convergence after the final visible session or delivery operation has completed.
+- The default retention window is 15 minutes.
+- The retention window must be configurable under `director.affinity.backend_retention` or an equivalent central affinity config path, not under a protocol-specific subtree.
+- The retained binding must use the same tenant plus normalized account key as active affinity and must stay in Redis so multiple director instances observe it consistently.
+- LMTP must retain the selected backend node after final `DATA` or `BDAT ... LAST` status, `RSET`, `QUIT`, connection close or error, because the backend may need time to sync mailbox index state after accepting delivery.
+- IMAP, ManageSieve and POP3 must also leave the retained binding in place after logout, proxy close or connection loss.
+- A new connection during the retention window must route to the retained backend node even when there are no active sessions.
+- A retained binding may expire naturally after the configured window. It may be cleared or moved only through explicit runtime control with audit metadata.
+- Route lookup must report whether backend selection came from active affinity, retained backend binding, operator backend pin, movement override or initial placement.
 
 Redis is the central production state store for active affinity and session coordination. Local in-process state may be used as a cache or fast path, but it must not be the source of truth for production active-user stickiness when multiple director instances exist.
 
@@ -664,8 +681,9 @@ fall back to the old backend.
 Backend pins apply to POP3 only when the pin's protocol and backend pool match
 the POP3 placement request. A pin for an IMAP, LMTP or ManageSieve backend must
 not name the concrete POP3 backend. Cross-protocol consistency comes from the
-shared shard tag and active affinity; after the shard is known, POP3 resolves a
-protocol-specific backend entry.
+shared backend node stored in active or retained affinity; after the backend
+node is known, POP3 resolves the protocol-specific POP3 backend entry in that
+node.
 
 After placement succeeds, proxy transparently.
 
@@ -683,7 +701,11 @@ The director uses a same-backend-only recipient routing strategy:
 - Additional recipients are accepted only if they resolve to the same backend target.
 - Recipients that resolve to another backend are rejected or temporary-failed before `DATA`, so the sending side can retry them in a separate transaction.
 - `DATA` is forwarded only to the single selected backend for the accepted recipient set.
-- The director must not spool one message body for replay to multiple backend groups.
+- The director must not spool one message body for replay to multiple backend nodes.
+- After final delivery status or transaction abort, LMTP retains the selected
+  backend node for the account for the configured affinity backend-retention
+  window. This protects mailbox indexes while the backend completes storage or
+  index synchronization after accepting the delivery.
 
 LMTP must return per-recipient status. Multi-recipient routing must be safe, explicit and observable.
 
@@ -699,21 +721,25 @@ closed before sockets bind or before they are advertised.
 
 Sieve itself is the mail filtering language, but clients usually talk to a ManageSieve service to upload and manage Sieve scripts. For this project, `nauthilus-director` should not execute Sieve scripts. It should proxy ManageSieve to the correct backend.
 
-The useful feature is routing a user to the same mailstore for IMAP and ManageSieve.
+The useful feature is routing a user to the same concrete mailstore backend node
+for IMAP, LMTP, ManageSieve and later POP3.
 
 After authentication:
 
 ```text
 ManageSieve client
   -> director authenticates via Nauthilus
-  -> director resolves the same shard_tag as IMAP for the user
-  -> director selects the protocol-specific ManageSieve backend
+  -> director resolves the same backend_node as IMAP or LMTP for the user
+  -> director selects the protocol-specific ManageSieve backend in that node
   -> director connects to backend ManageSieve service
   -> director establishes backend auth/trust
   -> transparent proxy mode
 ```
 
-Decision: use separate backend entries per protocol and connect them through the same `shard_tag`. This avoids assuming IMAP, LMTP and ManageSieve ports live on identical host/port definitions while preserving user affinity.
+Decision: use separate backend entries per protocol and connect them through the
+same `backend_node` and `shard_tag`. This avoids assuming IMAP, LMTP and
+ManageSieve ports live on identical host/port definitions while preserving the
+concrete backend authority that protects user mailbox indexes.
 
 ManageSieve must check a user placement hold after Nauthilus has authenticated
 the user and produced canonical tenant plus account facts, but before backend
@@ -729,8 +755,8 @@ the old backend.
 Backend pins apply to ManageSieve only when the pin's protocol and backend pool
 match the ManageSieve placement request. A pin for an IMAP, LMTP or POP3 backend
 must not name the concrete ManageSieve backend. Cross-protocol consistency comes
-from the shared shard tag and active affinity; after the shard is known,
-ManageSieve resolves a protocol-specific backend entry.
+from the shared backend node stored in active or retained affinity; after the
+backend node is known, ManageSieve resolves the protocol-specific backend entry.
 
 Sieve script contents, script names and command bodies should not be logged or used as high-cardinality metrics labels.
 
@@ -960,6 +986,7 @@ request_id
 client_ip
 remote_addr
 backend_identifier
+backend_node
 token
 password
 sasl_blob
@@ -968,7 +995,10 @@ raw_error
 
 Prometheus metrics should include sessions, auth totals/durations, routing resolver totals/durations, backend selection totals, backend health, backend maintenance, proxy bytes/durations, LMTP transaction totals/durations, LMTP recipient route/status totals, LMTP same-backend policy failures, LMTP DATA/BDAT stream totals/durations, LMTP backend status classes, REST requests and Redis operation health.
 
-`backend_pool` and `shard_tag` are acceptable labels; raw backend identifiers are not metrics labels. Per-backend details belong in REST, logs and traces.
+`backend_pool` and `shard_tag` are acceptable labels; raw backend identifiers
+and backend nodes are not metrics labels. Per-backend and backend-node details
+belong only in REST diagnostics, logs and traces where the operator-diagnostic
+policy permits them.
 LMTP observability must also keep raw recipients, envelope senders, message identifiers, subjects and DATA/BDAT content out of logs, traces and metric labels.
 
 ## 18. Health checks and maintenance
@@ -1095,6 +1125,14 @@ E2E tests:
 - verify TLS/STARTTLS and backend TLS/SNI behavior with test certificates
 - scrape Prometheus metrics and optionally receive OTLP traces where the test environment provides collectors
 - keep credentials and SASL bearer material out of test logs
+- keep `contrib/demo-stack` aligned with externally visible protocol,
+  topology, packaging and runtime-control changes; every future E2E or
+  interoperability slice must explicitly decide whether demo-stack config,
+  images, bootstrap data, backend wiring, proof scripts or docs need updates
+- use the demo stack as the final operator-facing proof for completed protocol
+  milestones whenever Docker/Compose is available; deterministic fake-service
+  E2E remains required for edge cases, but it is not a substitute for proving
+  the runnable demo topology
 
 Docker interoperability smoke tests:
 
@@ -1106,6 +1144,9 @@ Docker interoperability smoke tests:
 - use real Redis or the same Redis-compatible service policy as the guardrail lane
 - skip with an explicit, stable message when Docker is unavailable or the corresponding production protocol entrypoint does not exist yet
 - prove interoperability with real server behavior, packaging assumptions, listener exposure and TLS/backend-auth settings, while fake services continue to prove edge cases and deterministic director semantics
+- must either run through `contrib/demo-stack` or update that stack and its
+  proof scripts in the same change when a separate interop lane discovers
+  required operator-facing topology, packaging or bootstrap behavior
 
 Local quality gate:
 
@@ -1211,7 +1252,7 @@ they do not choose a shard or backend, do not close existing sessions, and
 clear removes only the hold. Public-boundary E2E starts the production server
 binary with fake Nauthilus and fake IMAP backends, proves that a held login
 waits without backend connections, sessions or reservations, applies a backend
-pin as the same-shard migration target, clears the hold and verifies the waiting
+pin as the migration target, clears the hold and verifies the waiting
 login resumes on the target backend. The same lane proves unrelated IMAP traffic
 continues normally, route lookup reports active hold context without mutation
 or waiting, and `max_wait` temporary-fails without placement. The demo stack
@@ -1263,7 +1304,9 @@ state machine, DATA/BDAT backend forwarding, peer authentication, recipient
 identity lookup, runtime-aware same-backend placement, delivery-scoped
 affinity, route lookup integration, observability coverage, deterministic
 fake-service E2E proof and real Postfix-to-Director-to-Dovecot interop lane are
-in place. The detailed completion evidence lives in
+in place. A follow-up is required to lift the completed shard-level LMTP/IMAP
+affinity behavior to concrete cross-protocol backend-node affinity and retained
+post-activity backend binding. The detailed M5 completion evidence lives in
 `docs/specs/implementation/M5_LMTP_PRODUCTION_SPEC.md`.
 
 - production-ready LMTP and LMTPS entrypoints within the M5 scope
@@ -1273,7 +1316,8 @@ in place. The detailed completion evidence lives in
   CHUNKING/BDAT boundaries
 - recipient identity lookup through Nauthilus and routing through the resolver
   model
-- delivery-scoped active-affinity holds for concurrent user-stateful placement
+- delivery-scoped active-affinity holds for concurrent user-stateful placement;
+  follow-up work must retain the concrete backend node after delivery close
 - single-backend transaction support
 - same-backend-only multi-recipient handling
 - per-recipient status mapping
@@ -1286,7 +1330,7 @@ in place. The detailed completion evidence lives in
 - Nauthilus auth
 - user placement hold gate after authoritative auth and before backend
   selection, backend connect, backend auth or proxy mode
-- same-shard backend selection
+- same backend-node selection for existing active or retained affinity
 - protocol/backend-pool-scoped backend-pin handling after the hold gate; do not
   reuse an IMAP or LMTP backend identifier as the concrete ManageSieve backend
 - transparent proxying
@@ -1302,6 +1346,7 @@ in place. The detailed completion evidence lives in
   before login success, backend selection, backend connect, backend auth or
   proxy mode
 - backend selection
+- same backend-node selection for existing active or retained affinity
 - protocol/backend-pool-scoped backend-pin handling after the hold gate; do not
   treat a client-supplied `USER` value as authoritative identity for hold
   enforcement

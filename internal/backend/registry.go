@@ -35,6 +35,7 @@ type Backend struct {
 	Protocol        string
 	BackendPool     string
 	ShardTag        string
+	BackendNode     string
 	Address         string
 	TLS             TLSConfig
 	Auth            AuthConfig
@@ -51,6 +52,7 @@ type PlacementFacts struct {
 	Protocol          string
 	BackendPool       string
 	EffectiveShard    string
+	BackendNode       string
 }
 
 // TLSConfig describes the transport security policy for one backend connection.
@@ -125,6 +127,7 @@ func (b Backend) PlacementFacts() PlacementFacts {
 		Protocol:          normalizeProtocol(b.Protocol),
 		BackendPool:       strings.TrimSpace(b.BackendPool),
 		EffectiveShard:    strings.TrimSpace(b.ShardTag),
+		BackendNode:       strings.TrimSpace(b.BackendNode),
 	}
 }
 
@@ -133,6 +136,7 @@ type Registry interface {
 	AllBackends(ctx context.Context) ([]Backend, error)
 	BackendsForShard(ctx context.Context, request RegistryRequest) ([]Backend, error)
 	Lookup(ctx context.Context, identifier string) (Backend, error)
+	LookupInBackendNode(ctx context.Context, request NodeLookupRequest) (Backend, error)
 	Pool(ctx context.Context, name string) (Pool, error)
 }
 
@@ -141,6 +145,13 @@ type RegistryRequest struct {
 	Protocol    string
 	BackendPool string
 	ShardTag    string
+}
+
+// NodeLookupRequest resolves one protocol-specific entry inside a backend node.
+type NodeLookupRequest struct {
+	BackendNode string
+	Protocol    string
+	BackendPool string
 }
 
 // ErrorKind classifies fail-closed backend registry and selector failures.
@@ -204,16 +215,24 @@ func IsErrorKind(err error, kind ErrorKind) bool {
 
 // StaticRegistry indexes backend config by protocol, pool and shard.
 type StaticRegistry struct {
-	mu       sync.RWMutex
-	pools    map[string]Pool
-	backends map[string]Backend
-	byShard  map[registryKey][]Backend
+	mu         sync.RWMutex
+	pools      map[string]Pool
+	backends   map[string]Backend
+	byShard    map[registryKey][]Backend
+	byNode     map[backendNodeKey]Backend
+	nodeShards map[string]string
 }
 
 type registryKey struct {
 	protocol    string
 	backendPool string
 	shardTag    string
+}
+
+type backendNodeKey struct {
+	backendNode string
+	protocol    string
+	backendPool string
 }
 
 // NewStaticRegistry builds a fail-closed static backend registry from typed config.
@@ -238,6 +257,8 @@ func (r *StaticRegistry) Reload(director config.DirectorConfig) error {
 	r.pools = next.pools
 	r.backends = next.backends
 	r.byShard = next.byShard
+	r.byNode = next.byNode
+	r.nodeShards = next.nodeShards
 
 	return nil
 }
@@ -247,11 +268,14 @@ func buildStaticRegistry(director config.DirectorConfig) (*StaticRegistry, error
 	director = director.Normalize()
 
 	registry := &StaticRegistry{
-		pools:    make(map[string]Pool, len(director.BackendPools)),
-		backends: make(map[string]Backend, len(director.Backends)),
-		byShard:  make(map[registryKey][]Backend),
+		pools:      make(map[string]Pool, len(director.BackendPools)),
+		backends:   make(map[string]Backend, len(director.Backends)),
+		byShard:    make(map[registryKey][]Backend),
+		byNode:     make(map[backendNodeKey]Backend),
+		nodeShards: make(map[string]string),
 	}
 
+	allowDerivedBackendNode := hasSingleConfiguredPoolProtocol(director.BackendPools)
 	poolNames := sortedPoolNames(director.BackendPools)
 	for _, poolName := range poolNames {
 		poolConfig := director.BackendPools[poolName]
@@ -269,7 +293,7 @@ func buildStaticRegistry(director config.DirectorConfig) (*StaticRegistry, error
 				return nil, newBackendError(ErrorKindConfig, "registry", "pool references unknown backend", nil)
 			}
 
-			entry, err := newBackend(pool.Name, backendID, backendConfig, director.Maintenance.DefaultMode)
+			entry, err := newBackend(pool.Name, backendID, backendConfig, director.Maintenance.DefaultMode, allowDerivedBackendNode)
 			if err != nil {
 				return nil, err
 			}
@@ -290,12 +314,44 @@ func buildStaticRegistry(director config.DirectorConfig) (*StaticRegistry, error
 				shardTag:    entry.ShardTag,
 			}
 			registry.byShard[key] = append(registry.byShard[key], entry)
+
+			if err := registry.indexBackendNode(entry); err != nil {
+				return nil, err
+			}
 		}
 	}
 
 	registry.sort()
 
 	return registry, nil
+}
+
+// indexBackendNode records concrete protocol endpoints inside one backend-node identity.
+func (r *StaticRegistry) indexBackendNode(entry Backend) error {
+	backendNode := strings.TrimSpace(entry.BackendNode)
+	if backendNode == "" {
+		return newBackendError(ErrorKindConfig, "registry", "backend node required", nil)
+	}
+
+	shardTag := strings.TrimSpace(entry.ShardTag)
+	if existingShard, exists := r.nodeShards[backendNode]; exists && existingShard != shardTag {
+		return newBackendError(ErrorKindAmbiguous, "registry", "backend node maps to multiple shards", nil)
+	}
+
+	r.nodeShards[backendNode] = shardTag
+
+	key := backendNodeKey{
+		backendNode: backendNode,
+		protocol:    entry.Protocol,
+		backendPool: entry.BackendPool,
+	}
+	if _, exists := r.byNode[key]; exists {
+		return newBackendError(ErrorKindAmbiguous, "registry", "duplicate backend node protocol pool mapping", nil)
+	}
+
+	r.byNode[key] = entry
+
+	return nil
 }
 
 // AllBackends returns every configured backend in deterministic order.
@@ -361,6 +417,28 @@ func (r *StaticRegistry) Lookup(_ context.Context, identifier string) (Backend, 
 	backend, ok := r.backends[identifier]
 	if !ok {
 		return Backend{}, newBackendError(ErrorKindNoBackend, "registry", "backend not found", nil)
+	}
+
+	return backend, nil
+}
+
+// LookupInBackendNode resolves one requested protocol and pool inside a backend node.
+func (r *StaticRegistry) LookupInBackendNode(_ context.Context, request NodeLookupRequest) (Backend, error) {
+	if r == nil {
+		return Backend{}, newBackendError(ErrorKindConfig, "registry", "registry unavailable", nil)
+	}
+
+	key, err := newBackendNodeKey(request)
+	if err != nil {
+		return Backend{}, err
+	}
+
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	backend, ok := r.byNode[key]
+	if !ok {
+		return Backend{}, newBackendError(ErrorKindNoBackend, "registry", "backend node protocol entry not found", nil)
 	}
 
 	return backend, nil
@@ -441,7 +519,13 @@ func newBackendPool(name string, pool config.BackendPoolConfig) (Pool, error) {
 }
 
 // newBackend normalizes one configured backend entry.
-func newBackend(poolName string, identifier string, backend config.BackendConfig, defaultMode string) (Backend, error) {
+func newBackend(
+	poolName string,
+	identifier string,
+	backend config.BackendConfig,
+	defaultMode string,
+	allowDerivedBackendNode bool,
+) (Backend, error) {
 	identifier = strings.TrimSpace(identifier)
 	if identifier == "" {
 		return Backend{}, newBackendError(ErrorKindConfig, "registry", "backend identifier required", nil)
@@ -455,6 +539,11 @@ func newBackend(poolName string, identifier string, backend config.BackendConfig
 	shardTag := strings.TrimSpace(backend.ShardTag)
 	if shardTag == "" {
 		return Backend{}, newBackendError(ErrorKindConfig, "registry", "backend shard required", nil)
+	}
+
+	backendNode, err := normalizeBackendNode(identifier, backend.BackendNode, allowDerivedBackendNode)
+	if err != nil {
+		return Backend{}, err
 	}
 
 	mode, err := normalizeMaintenanceMode(backend.Maintenance, defaultMode)
@@ -480,6 +569,7 @@ func newBackend(poolName string, identifier string, backend config.BackendConfig
 		Protocol:        protocol,
 		BackendPool:     poolName,
 		ShardTag:        shardTag,
+		BackendNode:     backendNode,
 		Address:         address,
 		TLS:             newBackendTLSConfig(backend.TLS),
 		Auth:            newBackendAuthConfig(backend.Auth),
@@ -489,6 +579,24 @@ func newBackend(poolName string, identifier string, backend config.BackendConfig
 		HealthEnabled:   backend.HealthCheck.Enabled,
 		Health:          newBackendHealthConfig(backend.HealthCheck),
 	}, nil
+}
+
+// normalizeBackendNode validates a configured backend-node identity.
+func normalizeBackendNode(identifier string, backendNode string, allowDerived bool) (string, error) {
+	backendNode = strings.TrimSpace(backendNode)
+	if backendNode == "" {
+		if allowDerived {
+			backendNode = strings.TrimSpace(identifier)
+		} else {
+			return "", newBackendError(ErrorKindConfig, "registry", "backend node required", nil)
+		}
+	}
+
+	if !validBackendNodeIdentifier(backendNode) {
+		return "", newBackendError(ErrorKindConfig, "registry", "backend node must be a non-secret identifier, not an address or hostname", nil)
+	}
+
+	return backendNode, nil
 }
 
 // normalizeMaintenanceMode applies the default mode and validates known static states.
@@ -529,6 +637,42 @@ func newRegistryKey(request RegistryRequest) (registryKey, error) {
 	return key, nil
 }
 
+// newBackendNodeKey normalizes a backend-node protocol lookup request.
+func newBackendNodeKey(request NodeLookupRequest) (backendNodeKey, error) {
+	key := backendNodeKey{
+		backendNode: strings.TrimSpace(request.BackendNode),
+		protocol:    normalizeProtocol(request.Protocol),
+		backendPool: strings.TrimSpace(request.BackendPool),
+	}
+
+	if key.backendNode == "" {
+		return backendNodeKey{}, newBackendError(ErrorKindInvalidRequest, "registry", "backend node required", nil)
+	}
+
+	if key.protocol == "" {
+		return backendNodeKey{}, newBackendError(ErrorKindInvalidRequest, "registry", "protocol required", nil)
+	}
+
+	if key.backendPool == "" {
+		return backendNodeKey{}, newBackendError(ErrorKindInvalidRequest, "registry", "backend pool required", nil)
+	}
+
+	return key, nil
+}
+
+// hasSingleConfiguredPoolProtocol reports whether legacy node derivation is allowed.
+func hasSingleConfiguredPoolProtocol(pools map[string]config.BackendPoolConfig) bool {
+	protocols := make(map[string]struct{}, len(pools))
+	for _, pool := range pools {
+		protocol := normalizeProtocol(pool.Protocol)
+		if protocol != "" {
+			protocols[protocol] = struct{}{}
+		}
+	}
+
+	return len(protocols) == 1
+}
+
 // sortedPoolNames returns backend pool names in deterministic order.
 func sortedPoolNames(pools map[string]config.BackendPoolConfig) []string {
 	names := make([]string, 0, len(pools))
@@ -544,6 +688,76 @@ func sortedPoolNames(pools map[string]config.BackendPoolConfig) []string {
 // normalizeProtocol makes protocol matching case-insensitive at the boundary.
 func normalizeProtocol(protocol string) string {
 	return strings.ToLower(strings.TrimSpace(protocol))
+}
+
+// validBackendNodeIdentifier rejects endpoint-shaped, secret-shaped and host-like values.
+func validBackendNodeIdentifier(value string) bool {
+	value = strings.TrimSpace(value)
+	if backendNodeIdentifierHasForbiddenShape(value) {
+		return false
+	}
+
+	return backendNodeIdentifierCharactersValid(value)
+}
+
+// backendNodeIdentifierHasForbiddenShape rejects empty, endpoint-like or secret-like values.
+func backendNodeIdentifierHasForbiddenShape(value string) bool {
+	if value == "" || strings.Contains(value, ".") || strings.Contains(value, ":") {
+		return true
+	}
+
+	if strings.Contains(value, "/") || strings.Contains(value, "\\") || strings.Contains(value, "@") {
+		return true
+	}
+
+	if _, err := netip.ParseAddr(value); err == nil {
+		return true
+	}
+
+	return looksLikeSecretBearingIdentifier(value)
+}
+
+// backendNodeIdentifierCharactersValid checks the stable identifier alphabet.
+func backendNodeIdentifierCharactersValid(value string) bool {
+	for index, char := range value {
+		if !backendNodeIdentifierCharacterValid(index, char) {
+			return false
+		}
+	}
+
+	last := value[len(value)-1]
+
+	return last != '-' && last != '_'
+}
+
+// backendNodeIdentifierCharacterValid checks one rune in a backend-node identifier.
+func backendNodeIdentifierCharacterValid(index int, char rune) bool {
+	switch {
+	case char >= 'a' && char <= 'z':
+		return true
+	case char >= 'A' && char <= 'Z':
+		return true
+	case char >= '0' && char <= '9':
+		return true
+	case char == '-' || char == '_':
+		return index != 0
+	default:
+		return false
+	}
+}
+
+// looksLikeSecretBearingIdentifier rejects values that describe credential material.
+func looksLikeSecretBearingIdentifier(value string) bool {
+	lower := strings.ToLower(value)
+
+	secretMarkers := []string{"password", "passwd", "secret", "token", "credential", "bearer", "privatekey", "private-key"}
+	for _, marker := range secretMarkers {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // normalizeTCPAddress rejects Unix-socket paths before runtime backend dialing.

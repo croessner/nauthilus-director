@@ -30,6 +30,7 @@ const (
 	testBackendID      = "mailstore-a-imap"
 	testBackendIDLMTP  = "mailstore-a-lmtp"
 	testBackendIDBLMTP = "mailstore-b-lmtp"
+	testBackendNode    = "mailstore-a-node-1"
 	testPoolIMAP       = "imap-default"
 	testPoolLMTP       = "lmtp-default"
 	testProtocolLMTP   = "lmtp"
@@ -58,6 +59,10 @@ func TestStaticRegistryIndexesByProtocolPoolAndShard(t *testing.T) {
 		t.Fatalf("backend index fields = %#v", backends[0])
 	}
 
+	if backends[0].BackendNode != testBackendNode {
+		t.Fatalf("backend node = %q, want %q", backends[0].BackendNode, testBackendNode)
+	}
+
 	if backends[0].TLS.Mode != "starttls" || backends[0].TLS.ServerName != "mailstore-a.example.org" {
 		t.Fatalf("backend TLS fields = %#v", backends[0].TLS)
 	}
@@ -73,6 +78,121 @@ func TestStaticRegistryIndexesByProtocolPoolAndShard(t *testing.T) {
 	})
 	if !IsErrorKind(err, ErrorKindNoBackend) {
 		t.Fatalf("missing shard error = %v, want no_backend", err)
+	}
+}
+
+// TestStaticRegistryResolvesProtocolEntryInsideBackendNode verifies node-local lookup.
+func TestStaticRegistryResolvesProtocolEntryInsideBackendNode(t *testing.T) {
+	registry := mustStaticRegistry(t, config.DefaultConfig())
+
+	backend, err := registry.LookupInBackendNode(context.Background(), NodeLookupRequest{
+		BackendNode: testBackendNode,
+		Protocol:    testProtocolLMTP,
+		BackendPool: testPoolLMTP,
+	})
+	if err != nil {
+		t.Fatalf("LookupInBackendNode returned error: %v", err)
+	}
+
+	if backend.Identifier != testBackendIDLMTP {
+		t.Fatalf("backend = %q, want %q", backend.Identifier, testBackendIDLMTP)
+	}
+
+	_, err = registry.LookupInBackendNode(context.Background(), NodeLookupRequest{
+		BackendNode: testBackendNode,
+		Protocol:    testProtocolLMTP,
+		BackendPool: "missing-pool",
+	})
+	if !IsErrorKind(err, ErrorKindNoBackend) {
+		t.Fatalf("missing node protocol entry error = %v, want no_backend", err)
+	}
+}
+
+// TestStaticRegistryDerivesBackendNodeForSingleProtocolCompatibility keeps narrow legacy config support.
+func TestStaticRegistryDerivesBackendNodeForSingleProtocolCompatibility(t *testing.T) {
+	cfg := singleBackendConfig(string(MaintenanceModeDisabled), 100)
+	backendConfig := cfg.Director.Backends[testBackendID]
+	backendConfig.BackendNode = ""
+	cfg.Director.Backends[testBackendID] = backendConfig
+
+	registry := mustStaticRegistry(t, cfg)
+
+	backend, err := registry.Lookup(context.Background(), testBackendID)
+	if err != nil {
+		t.Fatalf("Lookup returned error: %v", err)
+	}
+
+	if backend.BackendNode != testBackendID {
+		t.Fatalf("derived backend node = %q, want backend identifier %q", backend.BackendNode, testBackendID)
+	}
+}
+
+// TestStaticRegistryRequiresBackendNodeForMultiProtocolConfig rejects ambiguous cross-protocol configs.
+func TestStaticRegistryRequiresBackendNodeForMultiProtocolConfig(t *testing.T) {
+	cfg := config.DefaultConfig()
+	backendConfig := cfg.Director.Backends[testBackendID]
+	backendConfig.BackendNode = ""
+	cfg.Director.Backends[testBackendID] = backendConfig
+
+	_, err := NewStaticRegistry(cfg.Director)
+	if !IsErrorKind(err, ErrorKindConfig) {
+		t.Fatalf("NewStaticRegistry error = %v, want config", err)
+	}
+}
+
+// TestStaticRegistryRejectsBackendNodeShardMismatch keeps node affinity shard-stable.
+func TestStaticRegistryRejectsBackendNodeShardMismatch(t *testing.T) {
+	cfg := config.DefaultConfig()
+	lmtpPool := cfg.Director.BackendPools[testPoolLMTP]
+	lmtpPool.Backends = []string{testBackendIDBLMTP}
+	cfg.Director.BackendPools[testPoolLMTP] = lmtpPool
+	delete(cfg.Director.Backends, testBackendIDLMTP)
+
+	backendConfig := cfg.Director.Backends[testBackendIDBLMTP]
+	backendConfig.BackendNode = testBackendNode
+	cfg.Director.Backends[testBackendIDBLMTP] = backendConfig
+
+	_, err := NewStaticRegistry(cfg.Director)
+	if !IsErrorKind(err, ErrorKindAmbiguous) {
+		t.Fatalf("NewStaticRegistry error = %v, want ambiguous", err)
+	}
+}
+
+// TestStaticRegistryRejectsDuplicateBackendNodeProtocolPool prevents unsafe endpoint ambiguity.
+func TestStaticRegistryRejectsDuplicateBackendNodeProtocolPool(t *testing.T) {
+	cfg := config.DefaultConfig()
+	backendConfig := cfg.Director.Backends["mailstore-b-imap"]
+	backendConfig.BackendNode = testBackendNode
+	backendConfig.ShardTag = testShardTag
+	cfg.Director.Backends["mailstore-b-imap"] = backendConfig
+
+	_, err := NewStaticRegistry(cfg.Director)
+	if !IsErrorKind(err, ErrorKindAmbiguous) {
+		t.Fatalf("NewStaticRegistry error = %v, want ambiguous", err)
+	}
+}
+
+// TestStaticRegistryRejectsUnsafeBackendNodeIdentifiers keeps node values non-secret and non-endpoint-shaped.
+func TestStaticRegistryRejectsUnsafeBackendNodeIdentifiers(t *testing.T) {
+	for name, value := range map[string]string{
+		"ip_address":     "127.0.0.1",
+		"hostname":       "mailstore-a.example.org",
+		"host_port":      "mailstore-a:143",
+		"credential_uri": "user:pass@mailstore-a",
+		"placeholder":    "${BACKEND_SECRET}",
+		"secret_marker":  "mailstore-password",
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := config.DefaultConfig()
+			backendConfig := cfg.Director.Backends[testBackendID]
+			backendConfig.BackendNode = value
+			cfg.Director.Backends[testBackendID] = backendConfig
+
+			_, err := NewStaticRegistry(cfg.Director)
+			if !IsErrorKind(err, ErrorKindConfig) {
+				t.Fatalf("NewStaticRegistry error = %v, want config", err)
+			}
+		})
 	}
 }
 

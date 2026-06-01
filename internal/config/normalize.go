@@ -69,6 +69,8 @@ func (d DirectorConfig) Normalize() DirectorConfig {
 			backend.ShardTag = d.Routing.DefaultShard
 		}
 
+		backend.BackendNode = strings.TrimSpace(backend.BackendNode)
+
 		backends[name] = backend
 	}
 

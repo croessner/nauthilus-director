@@ -67,6 +67,12 @@ func TestTargetConfigDecodesAndValidates(t *testing.T) {
 	if snapshot.Config.Director.Routing.AuthAttributes.ShardTag != "mailShard" {
 		t.Fatalf("routing auth shard attribute = %q, want mailShard", snapshot.Config.Director.Routing.AuthAttributes.ShardTag)
 	}
+	if snapshot.Config.Director.Backends["mailstore-a-imap"].BackendNode != "mailstore-a-node-1" {
+		t.Fatalf("mailstore-a-imap backend_node = %q, want mailstore-a-node-1", snapshot.Config.Director.Backends["mailstore-a-imap"].BackendNode)
+	}
+	if snapshot.Config.Director.Affinity.BackendRetention.DefaultTTL != NewDuration(15*time.Minute) {
+		t.Fatalf("backend retention default ttl = %s, want 15m0s", snapshot.Config.Director.Affinity.BackendRetention.DefaultTTL)
+	}
 }
 
 // TestDemoStackConfigDecodesAndValidates keeps the public demo aligned with typed config.
@@ -171,6 +177,59 @@ func TestUserHoldDefaultsValidate(t *testing.T) {
 	if err := NewLoader().Validate(cfg); err != nil {
 		t.Fatalf("Validate rejected user-hold defaults: %v", err)
 	}
+}
+
+// TestBackendRetentionDefaultsValidate verifies safe backend-node retention defaults.
+func TestBackendRetentionDefaultsValidate(t *testing.T) {
+	cfg := DefaultConfig()
+	retention := cfg.Director.Affinity.BackendRetention
+
+	if !retention.Enabled {
+		t.Fatal("backend retention should default to enabled")
+	}
+
+	if retention.DefaultTTL != NewDuration(15*time.Minute) {
+		t.Fatalf("backend retention default ttl = %s, want 15m0s", retention.DefaultTTL)
+	}
+
+	if retention.MaxTTL != NewDuration(24*time.Hour) {
+		t.Fatalf("backend retention max ttl = %s, want 24h0m0s", retention.MaxTTL)
+	}
+
+	dump, err := NewLoader().DumpDefaults(DumpOptions{Format: "yaml"})
+	if err != nil {
+		t.Fatalf("DumpDefaults: %v", err)
+	}
+
+	if !strings.Contains(string(dump), "backend_retention:") || !strings.Contains(string(dump), "default_ttl: 15m0s") {
+		t.Fatalf("default dump missing backend retention defaults:\n%s", dump)
+	}
+
+	if err := NewLoader().Validate(cfg); err != nil {
+		t.Fatalf("Validate rejected backend-retention defaults: %v", err)
+	}
+}
+
+// TestBackendRetentionValidationRequiresExplicitZeroTTLDisable keeps zero retention opt-in.
+func TestBackendRetentionValidationRequiresExplicitZeroTTLDisable(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Director.Affinity.BackendRetention.DefaultTTL = 0
+	expectValidationError(t, cfg, "director.affinity.backend_retention.default_ttl")
+
+	cfg = DefaultConfig()
+	cfg.Director.Affinity.BackendRetention.Enabled = false
+	cfg.Director.Affinity.BackendRetention.DefaultTTL = 0
+	if err := NewLoader().Validate(cfg); err != nil {
+		t.Fatalf("Validate rejected explicit backend-retention disable: %v", err)
+	}
+
+	cfg = DefaultConfig()
+	cfg.Director.Affinity.BackendRetention.DefaultTTL = NewDuration(25 * time.Hour)
+	expectValidationError(
+		t,
+		cfg,
+		"director.affinity.backend_retention.default_ttl must not exceed director.affinity.backend_retention.max_ttl",
+	)
 }
 
 // TestUserHoldValidationRejectsInvalidDurations keeps hold waits finite.

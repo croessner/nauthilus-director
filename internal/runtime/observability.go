@@ -48,6 +48,7 @@ const (
 	runtimeObservationFieldActiveSessions    = "active_sessions"
 	runtimeObservationFieldAppliedChanges    = "applied_changes"
 	runtimeObservationFieldBackendID         = "backend_identifier"
+	runtimeObservationFieldBackendNode       = "backend_node"
 	runtimeObservationFieldBackendPool       = "backend_pool"
 	runtimeObservationFieldExclusionDetail   = "exclusion_detail"
 	runtimeObservationFieldExclusionSource   = "exclusion_source"

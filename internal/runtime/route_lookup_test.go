@@ -14,6 +14,7 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
+//nolint:goconst // Route lookup fixtures repeat public diagnostic strings intentionally.
 package runtime
 
 import (
@@ -67,9 +68,12 @@ func TestRouteLookupUsesResolverSelectorAndReadOnlyAffinity(t *testing.T) {
 			Present:            true,
 			Status:             "found",
 			ShardTag:           routeLookupShardB,
+			BackendNode:        "mailstore-b-node-1",
 			BackendIdentifier:  routeLookupBackendB,
 			Generation:         "affinity-7",
+			BindingStatus:      state.BindingStatusActive,
 			ActiveSessionCount: 2,
+			ActiveHolderCount:  2,
 		},
 	}
 	service := newRouteLookupTestService(t, store, false)
@@ -99,12 +103,88 @@ func TestRouteLookupUsesResolverSelectorAndReadOnlyAffinity(t *testing.T) {
 		t.Fatalf("selected %q shard %q, want active affinity backend %q shard %q", response.SelectedBackend, response.Routing.EffectiveShard, routeLookupBackendB, routeLookupShardB)
 	}
 
+	if response.Source != routeLookupSourceActiveAffinity || response.Affinity.BackendNode != "mailstore-b-node-1" || response.Affinity.ActiveHolders != 2 {
+		t.Fatalf("source/affinity = %q/%#v, want active backend-node binding", response.Source, response.Affinity)
+	}
+
 	if store.lookupAffinityCalls != 1 {
 		t.Fatalf("LookupAffinity calls = %d, want 1", store.lookupAffinityCalls)
 	}
 
 	if store.backendSnapshotCalls == 0 {
 		t.Fatal("BackendSnapshot was not read")
+	}
+
+	assertNoRouteLookupMutations(t, store)
+}
+
+// TestRouteLookupReportsRetainedBackendBinding verifies retained backend-node reuse is diagnostic only.
+func TestRouteLookupReportsRetainedBackendBinding(t *testing.T) {
+	retentionExpiresAt := time.Now().Add(15 * time.Minute).UTC()
+	store := &countingRouteState{
+		affinity: state.AffinityRecord{
+			Present:            true,
+			Status:             "retained",
+			ShardTag:           routeLookupShardA,
+			BackendNode:        "mailstore-a-node-1",
+			BindingStatus:      state.BindingStatusRetained,
+			ActiveSessionCount: 0,
+			ActiveHolderCount:  0,
+			RetentionExpiresAt: retentionExpiresAt,
+			ServerTime:         time.Now().UTC(),
+		},
+	}
+	service := newRouteLookupTestService(t, store, false)
+
+	response, err := service.Lookup(context.Background(), RouteLookupRequest{
+		Protocol:        routeLookupProtocol,
+		AccountKey:      routeLookupAccount,
+		IncludeAffinity: true,
+		Attributes: map[string][]string{
+			routeLookupAttributeShard: {routeLookupShardB},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Lookup returned error: %v", err)
+	}
+
+	if response.SelectedBackend != routeLookupBackendA || response.Source != routeLookupSourceRetainedBinding {
+		t.Fatalf("selected/source = %q/%q, want retained binding on %s", response.SelectedBackend, response.Source, routeLookupBackendA)
+	}
+
+	if !response.Affinity.Retained || !response.Affinity.RetentionExpiresAt.Equal(retentionExpiresAt) {
+		t.Fatalf("affinity = %#v, want retained expiry context", response.Affinity)
+	}
+
+	assertNoRouteLookupMutations(t, store)
+}
+
+// TestRouteLookupFailClosesWhenBoundBackendNodeLacksProtocol verifies no same-shard fallback occurs.
+func TestRouteLookupFailClosesWhenBoundBackendNodeLacksProtocol(t *testing.T) {
+	store := &countingRouteState{
+		affinity: state.AffinityRecord{
+			Present:       true,
+			Status:        "retained",
+			ShardTag:      routeLookupShardA,
+			BackendNode:   "missing-node",
+			BindingStatus: state.BindingStatusRetained,
+			ServerTime:    time.Now().UTC(),
+		},
+	}
+	service := newRouteLookupTestService(t, store, false)
+
+	response, err := service.Lookup(context.Background(), RouteLookupRequest{
+		Protocol:        routeLookupProtocol,
+		AccountKey:      routeLookupAccount,
+		BackendPool:     routeLookupDefaultPool,
+		IncludeAffinity: true,
+	})
+	if err != nil {
+		t.Fatalf("Lookup returned error: %v", err)
+	}
+
+	if !response.FailClosed || response.Source != routeLookupSourceFailClosed || response.ReasonClass != routeLookupReasonBindingMissing {
+		t.Fatalf("response = %#v, want fail-closed missing backend-node protocol", response)
 	}
 
 	assertNoRouteLookupMutations(t, store)
@@ -320,7 +400,11 @@ func TestRouteLookupDefersBackendPinDuringActiveAffinity(t *testing.T) {
 			Present:            true,
 			Status:             "found",
 			ShardTag:           routeLookupShardA,
+			BackendNode:        "mailstore-a-node-1",
+			BackendIdentifier:  routeLookupBackendA,
+			BindingStatus:      state.BindingStatusActive,
 			ActiveSessionCount: 1,
+			ActiveHolderCount:  1,
 		},
 		backendPin: state.UserBackendPinRecord{
 			Present:           true,
@@ -459,6 +543,45 @@ func TestRouteLookupReportsBackendPinExclusion(t *testing.T) {
 
 	if !response.FailClosed || response.BackendPin.Applied || response.BackendPin.ReasonClass != string(backend.EffectiveExclusionRuntimeOut) {
 		t.Fatalf("response = %#v, want fail-closed runtime_out pin exclusion", response)
+	}
+
+	assertNoRouteLookupMutations(t, store)
+}
+
+// TestRouteLookupReportsBackendPinMismatchAgainstRetainedBinding verifies pins cannot move retained nodes silently.
+func TestRouteLookupReportsBackendPinMismatchAgainstRetainedBinding(t *testing.T) {
+	store := &countingRouteState{
+		affinity: state.AffinityRecord{
+			Present:       true,
+			Status:        "retained",
+			ShardTag:      routeLookupShardA,
+			BackendNode:   "mailstore-a-node-1",
+			BindingStatus: state.BindingStatusRetained,
+			ServerTime:    time.Now().UTC(),
+		},
+		backendPin: state.UserBackendPinRecord{
+			Present:           true,
+			BackendIdentifier: routeLookupBackendB,
+			Protocol:          routeLookupProtocol,
+			BackendPool:       routeLookupDefaultPool,
+			ShardTag:          routeLookupShardA,
+			Strategy:          string(MoveStrategyKickExisting),
+			Generation:        "pin-retained",
+		},
+	}
+	service := newRouteLookupTestService(t, store, false)
+
+	response, err := service.Lookup(context.Background(), RouteLookupRequest{
+		Protocol:        routeLookupProtocol,
+		AccountKey:      routeLookupAccount,
+		IncludeAffinity: true,
+	})
+	if err != nil {
+		t.Fatalf("Lookup returned error: %v", err)
+	}
+
+	if !response.FailClosed || response.BackendPin.ReasonClass != routeLookupReasonBindingMismatch {
+		t.Fatalf("response = %#v, want backend pin backend-node mismatch", response)
 	}
 
 	assertNoRouteLookupMutations(t, store)

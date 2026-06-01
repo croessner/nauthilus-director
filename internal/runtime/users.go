@@ -66,12 +66,18 @@ type UserKey struct {
 type UserRuntimeState struct {
 	Key                UserKey
 	ActiveShard        string
+	BackendNode        string
 	PendingShard       string
 	MoveStrategy       MoveStrategy
 	ActiveSessionCount int
+	ActiveHolderCount  int
 	KickGeneration     string
 	MoveGeneration     string
 	Generation         string
+	BindingGeneration  string
+	BindingStatus      string
+	BindingSource      string
+	RetentionExpiresAt time.Time
 	UpdatedAt          time.Time
 }
 

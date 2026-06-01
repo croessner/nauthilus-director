@@ -25,6 +25,8 @@ import (
 	"time"
 
 	"github.com/croessner/nauthilus-director/internal/observability"
+	placementpkg "github.com/croessner/nauthilus-director/internal/placement"
+	"github.com/croessner/nauthilus-director/internal/state"
 )
 
 const (
@@ -59,6 +61,8 @@ const (
 	lmtpReasonBackendConnect   = "backend_connect"
 	lmtpReasonBackendStatus    = "backend_status"
 	lmtpReasonBDAT             = "bdat"
+	lmtpReasonBindingExpired   = "binding_expired"
+	lmtpReasonBindingRetained  = "binding_retained"
 	lmtpReasonCanceled         = "canceled"
 	lmtpReasonCredentialInput  = "credential_input"
 	lmtpReasonDATA             = "data"
@@ -82,6 +86,7 @@ const (
 
 const (
 	lmtpObsFieldBackendIdentifier = "backend_identifier"
+	lmtpObsFieldBackendNode       = "backend_node"
 	lmtpObsFieldBackendPool       = "backend_pool"
 	lmtpObsFieldListener          = "listener"
 	lmtpObsFieldMechanism         = "mechanism"
@@ -146,6 +151,14 @@ func (s *Session) recordBackendSelect(ctx context.Context, result string, reason
 	}, duration)
 }
 
+// recordBackendSelectWithNode emits backend-node-aware selection diagnostics.
+func (s *Session) recordBackendSelectWithNode(ctx context.Context, result string, reason string, shardTag string, backendNode string, duration time.Duration) {
+	s.recordObservation(ctx, observability.EventBackendSelect, observability.TraceBoundaryBackendSelect, lmtpObservationOperationBackendSelect, result, reason, map[string]string{
+		lmtpObsFieldBackendNode: strings.TrimSpace(backendNode),
+		lmtpObsFieldShardTag:    strings.TrimSpace(shardTag),
+	}, duration)
+}
+
 // recordRecipientRoute emits one per-recipient routing result without the raw recipient.
 func (s *Session) recordRecipientRoute(ctx context.Context, result string, reason string, shardTag string) {
 	s.recordObservation(ctx, observability.EventLMTPRecipientRoute, observability.TraceBoundaryRoutingResolve, lmtpObservationOperationRecipientRoute, result, reason, map[string]string{
@@ -161,19 +174,29 @@ func (s *Session) recordSameBackendPolicy(ctx context.Context, shardTag string) 
 }
 
 // recordBackendConnect emits one backend connect observation.
-func (s *Session) recordBackendConnect(ctx context.Context, result string, reason string, backendID string, shardTag string, duration time.Duration) {
+func (s *Session) recordBackendConnect(ctx context.Context, result string, reason string, backendID string, backendNode string, shardTag string, duration time.Duration) {
 	s.recordObservation(ctx, observability.EventBackendConnect, observability.TraceBoundaryBackendConnect, lmtpObservationOperationBackendConnect, result, reason, map[string]string{
 		lmtpObsFieldBackendIdentifier: strings.TrimSpace(backendID),
+		lmtpObsFieldBackendNode:       strings.TrimSpace(backendNode),
 		lmtpObsFieldShardTag:          strings.TrimSpace(shardTag),
 	}, duration)
 }
 
 // recordBackendAuth emits one backend authentication observation.
-func (s *Session) recordBackendAuth(ctx context.Context, result string, reason string, mechanism string, backendID string, shardTag string) {
+func (s *Session) recordBackendAuth(ctx context.Context, result string, reason string, mechanism string, backendID string, backendNode string, shardTag string) {
 	s.recordObservation(ctx, observability.EventBackendAuth, observability.TraceBoundaryBackendConnect, lmtpObservationOperationBackendAuth, result, reason, map[string]string{
 		lmtpObsFieldBackendIdentifier: strings.TrimSpace(backendID),
+		lmtpObsFieldBackendNode:       strings.TrimSpace(backendNode),
 		lmtpObsFieldMechanism:         strings.ToLower(strings.TrimSpace(mechanism)),
 		lmtpObsFieldShardTag:          strings.TrimSpace(shardTag),
+	})
+}
+
+// recordDeliveryHoldClose emits hidden delivery-hold closure without raw recipients.
+func (s *Session) recordDeliveryHoldClose(ctx context.Context, result string, reason string, shardTag string, backendNode string) {
+	s.recordObservation(ctx, observability.EventSessionClose, observability.TraceBoundaryLMTPTransaction, "delivery_hold_close", result, reason, map[string]string{
+		lmtpObsFieldBackendNode: strings.TrimSpace(backendNode),
+		lmtpObsFieldShardTag:    strings.TrimSpace(shardTag),
 	})
 }
 
@@ -347,8 +370,9 @@ func (s *Session) observationFields(operation string, result string, reason stri
 		fields[lmtpObsFieldReasonClass] = reason
 	}
 
-	if backendID, shardTag := s.currentBackendDiagnostics(); backendID != "" || shardTag != "" {
+	if backendID, backendNode, shardTag := s.currentBackendDiagnostics(); backendID != "" || backendNode != "" || shardTag != "" {
 		fields[lmtpObsFieldBackendIdentifier] = backendID
+		fields[lmtpObsFieldBackendNode] = backendNode
 		fields[lmtpObsFieldShardTag] = shardTag
 	}
 
@@ -381,7 +405,7 @@ func (s *Session) observationLabels(operation string, result string, reason stri
 
 	if shardTag := strings.TrimSpace(extraFields[lmtpObsFieldShardTag]); shardTag != "" {
 		labels[lmtpObsFieldShardTag] = shardTag
-	} else if _, currentShard := s.currentBackendDiagnostics(); currentShard != "" {
+	} else if _, _, currentShard := s.currentBackendDiagnostics(); currentShard != "" {
 		labels[lmtpObsFieldShardTag] = currentShard
 	}
 
@@ -393,16 +417,16 @@ func (s *Session) observationLabels(operation string, result string, reason stri
 }
 
 // currentBackendDiagnostics returns bounded backend diagnostics for logs and traces.
-func (s *Session) currentBackendDiagnostics() (string, string) {
+func (s *Session) currentBackendDiagnostics() (string, string, string) {
 	if s.transaction.backend != nil {
-		return strings.TrimSpace(s.transaction.backend.target.Identifier), strings.TrimSpace(s.transaction.backend.target.ShardTag)
+		return strings.TrimSpace(s.transaction.backend.target.Identifier), strings.TrimSpace(s.transaction.backend.target.BackendNode), strings.TrimSpace(s.transaction.backend.target.ShardTag)
 	}
 
 	for _, recipient := range s.transaction.recipients {
-		return strings.TrimSpace(recipient.Backend.Backend.Identifier), strings.TrimSpace(recipient.SelectedShardTag)
+		return strings.TrimSpace(recipient.Backend.Backend.Identifier), strings.TrimSpace(recipient.Backend.Backend.BackendNode), strings.TrimSpace(recipient.SelectedShardTag)
 	}
 
-	return "", ""
+	return "", "", ""
 }
 
 // lmtpResultLabel turns an error into a bounded result value.
@@ -433,8 +457,34 @@ func lmtpReasonClass(err error) string {
 		return lmtpReasonUnsupported
 	case errors.Is(err, errDifferentBackendRecipient):
 		return lmtpReasonSameBackend
+	case placementpkg.IsErrorKind(err, placementpkg.ErrorKindBackendNodeMissingProtocol):
+		return string(placementpkg.ErrorKindBackendNodeMissingProtocol)
+	case placementpkg.IsErrorKind(err, placementpkg.ErrorKindBackendNodeMismatch):
+		return string(placementpkg.ErrorKindBackendNodeMismatch)
+	case placementpkg.IsErrorKind(err, placementpkg.ErrorKindBackendNodeUnusable):
+		return string(placementpkg.ErrorKindBackendNodeUnusable)
 	default:
 		return lmtpReasonProtocol
+	}
+}
+
+// lmtpCloseReasonClass maps successful delivery-hold close state into retention classes.
+func lmtpCloseReasonClass(err error, record state.AffinityRecord) string {
+	if err != nil {
+		return lmtpReasonClass(err)
+	}
+
+	switch record.BindingStatus {
+	case state.BindingStatusRetained:
+		return lmtpReasonBindingRetained
+	case state.BindingStatusExpired:
+		return lmtpReasonBindingExpired
+	default:
+		if record.ActiveHolderCount == 0 && !record.RetentionExpiresAt.IsZero() {
+			return lmtpReasonBindingRetained
+		}
+
+		return lmtpReasonOK
 	}
 }
 

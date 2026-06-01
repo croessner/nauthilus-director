@@ -432,6 +432,13 @@ director:
         allow_on_hard_maintenance: true
         audit: true
 
+    backend_retention:
+      # Retained backend-node affinity protects mailbox index convergence after
+      # the final visible session or delivery hold closes.
+      enabled: true
+      default_ttl: 15m
+      max_ttl: 24h
+
     local_cache:
       enabled: true
       ttl: 15m
@@ -496,6 +503,7 @@ director:
     mailstore-a-imap:
       protocol: imap
       shard_tag: mailstore-a
+      backend_node: mailstore-a-node-1
       address: "127.0.0.1:1143"
       weight: 100
       max_connections: 1000
@@ -536,6 +544,7 @@ director:
     mailstore-b-imap:
       protocol: imap
       shard_tag: mailstore-b
+      backend_node: mailstore-b-node-1
       address: "127.0.0.1:2143"
       weight: 100
       max_connections: 1000
@@ -575,6 +584,7 @@ director:
     mailstore-a-lmtp:
       protocol: lmtp
       shard_tag: mailstore-a
+      backend_node: mailstore-a-node-1
       address: "127.0.0.1:2424"
       weight: 100
       max_connections: 1000
@@ -612,6 +622,7 @@ director:
     mailstore-b-lmtp:
       protocol: lmtp
       shard_tag: mailstore-b
+      backend_node: mailstore-b-node-1
       address: "127.0.0.1:3424"
       weight: 100
       max_connections: 1000

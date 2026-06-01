@@ -198,13 +198,14 @@ normal shard routing and active-affinity rules.
 
 The target backend's effective shard is a scope check, not a user move target.
 The concrete backend pin is an additional selector constraint inside the
-already selected shard, not a replacement for shard affinity. Cross-shard
-movement remains owned by `users move --to-shard`.
+already selected shard and compatible active or retained backend-node binding,
+not a replacement for affinity. Cross-shard movement remains owned by
+`users move --to-shard`.
 
 A backend pin must never select a backend outside the matching placement
-request's selected shard. If the pinned backend's effective shard does not
-match the selected shard, the pin is reported as a bounded mismatch and is not
-applied.
+request's selected shard or active/retained backend-node binding. If the pinned
+backend's effective shard or backend node does not match the selected binding,
+the pin is reported as a bounded mismatch and is not applied.
 
 Strategy behavior:
 
@@ -536,11 +537,11 @@ Closeout evidence:
 | --- | --- |
 | REST and CLI | `GET`, `PUT` and `DELETE /api/v1/users/{user_key}/backend-pin` are generated from OpenAPI and adapted through `internal/rest/adapters`. `nauthilus-directorctl users backend-pin show/set/clear` uses the generated client SDK and keeps `users move` shard-targeted. |
 | Redis runtime state | Backend pins are stored under the per-affinity `backend_pin` hash with tenant, account key, backend identifier, protocol, backend pool, effective shard, strategy and generation. No backend transport details or credentials are stored. |
-| Selector behavior | `operator_backend_pin` selection validates protocol, backend pool and effective shard, bypasses only `weight_zero`, fails closed for all other effective exclusions and disables attach-retry failover for explicit operator pins. |
+| Selector behavior | `operator_backend_pin` selection validates protocol, backend pool, effective shard and active/retained backend-node binding, bypasses only `weight_zero`, fails closed for all other effective exclusions and disables attach-retry failover for explicit operator pins. |
 | Active affinity strategies | `new_sessions_only` and backend-pin `drain_existing` preserve active placement while sessions are active. `kick_existing` updates the control generation and closes active sessions through the runtime action path. |
 | Route lookup | Route lookup reads backend-pin context without Nauthilus authentication or runtime mutation, reports applied, mismatch, active-affinity and fail-closed exclusion reasons, and keeps pin output bounded. |
 | Public-boundary E2E | `TestServerBinaryBackendPinPublicIMAPFlow` starts the production `nauthilus-director` binary with three fake IMAP backends in one pool, configures `mailstore-c-imap` with weight `0`, uses `nauthilus-directorctl` against the public control API, proves public IMAP proxying to the pinned backend, proves normal users avoid the weight-zero backend, proves non-zero backend pinning, proves fail-closed runtime-out behavior and verifies route lookup does not create sessions. |
-| Documentation | `docs/man/nauthilus-directorctl.1` documents backend-pin scope, weight-zero commissioning, explicit clear semantics and the shard-only `users move` boundary. `docs/developer/AFFINITY_SESSION_HANDLING.md` documents the Redis key layout and backend-pin strategy behavior. |
+| Documentation | `docs/man/nauthilus-directorctl.1` documents backend-pin scope, weight-zero commissioning, explicit clear semantics and the shard-targeted `users move` boundary. `docs/developer/AFFINITY_SESSION_HANDLING.md` documents the Redis key layout and backend-pin strategy behavior. |
 | Guardrails | `make check-openapi`, `make check-docs`, `make test`, `make race`, `make e2e`, `make build-check` and `make guardrails` passed on 2026-05-30. |
 
 Validation evidence from the closeout run:
@@ -578,8 +579,9 @@ Validation evidence from the closeout run:
 2. A backend pin targets one concrete configured backend identifier.
 3. Protocol, backend pool and effective shard are derived from the backend
    registry, not trusted from operator input.
-4. A backend pin applies only when the session protocol, backend pool and
-   already selected shard match the pinned backend.
+4. A backend pin applies only when the session protocol, backend pool, already
+   selected shard and active/retained backend-node binding match the pinned
+   backend.
 5. The pinned backend may be selected with effective weight `0`.
 6. The pinned backend must still pass all non-weight safety checks.
 7. A pinned backend failure fails closed and does not silently fail over.

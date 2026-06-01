@@ -58,10 +58,19 @@ if redis.call("EXISTS", state_key) == 1 then
 
 	if strategy == "kick_existing" then
 		shard = target_shard
-		control_action = "move_generation_changed"
-		redis.call("HSET", state_key,
-			"shard_tag", target_shard,
-			"control_action", control_action)
+		if active_count > 0 then
+			control_action = "move_generation_changed"
+			redis.call("HSET", state_key,
+				"shard_tag", target_shard,
+				"control_action", control_action)
+		else
+			redis.call("HINCRBY", state_key, "binding_generation", 1)
+			redis.call("HSET", state_key,
+				"shard_tag", target_shard,
+				"backend_node", "",
+				"retention_expires_at_ms", 0,
+				"control_action", "none")
+		end
 	elseif strategy == "drain_existing" then
 		control_action = "none"
 		redis.call("HSET", override_key,

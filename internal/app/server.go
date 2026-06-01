@@ -29,6 +29,7 @@ import (
 	"github.com/croessner/nauthilus-director/internal/listener"
 	"github.com/croessner/nauthilus-director/internal/nauthilus"
 	"github.com/croessner/nauthilus-director/internal/observability"
+	"github.com/croessner/nauthilus-director/internal/placement"
 	"github.com/croessner/nauthilus-director/internal/protocol/imap"
 	"github.com/croessner/nauthilus-director/internal/protocol/lmtp"
 	"github.com/croessner/nauthilus-director/internal/proxy"
@@ -242,6 +243,15 @@ func provideRuntimeSelector(
 	return backend.NewRuntimeSelector(registry, store, selectionPolicy(cfg))
 }
 
+// providePlacementService builds the shared cross-protocol placement boundary.
+func providePlacementService(
+	registry *backend.StaticRegistry,
+	selector *backend.RuntimeSelector,
+	store *state.RedisSessionStore,
+) (*placement.Service, error) {
+	return placement.NewService(registry, selector, store)
+}
+
 // provideRoutingResolver builds the shared account-to-shard resolver chain.
 func provideRoutingResolver(cfg config.Config, registry *backend.StaticRegistry) (routing.RoutingResolver, error) {
 	return routingResolver(cfg, registry)
@@ -258,6 +268,7 @@ func provideListenerManager(
 	resolver routing.RoutingResolver,
 	store *state.RedisSessionStore,
 	selector *backend.RuntimeSelector,
+	placementService *placement.Service,
 	userHolds *runtimectl.UserHoldService,
 	localSessions *runtimectl.LocalSessionRegistry,
 	recorder observability.Recorder,
@@ -266,7 +277,7 @@ func provideListenerManager(
 		cfg,
 		listener.WithLocalSessionRegistry(localSessions),
 		listener.WithObservabilityRecorder(recorder),
-		listener.WithSessionHandlerFactory(sessionHandlerFactory(resolver, store, selector, selector, userHolds, recorder)),
+		listener.WithSessionHandlerFactory(sessionHandlerFactory(resolver, store, selector, selector, placementService, backendRetentionTTL(cfg), userHolds, recorder)),
 	)
 }
 
@@ -519,19 +530,31 @@ func sessionHandlerFactory(
 	store state.SessionStore,
 	selector backend.Selector,
 	capabilities backendCapabilityReader,
+	placementService *placement.Service,
+	retentionTTL time.Duration,
 	placementGate runtimectl.PlacementGate,
 	recorder observability.Recorder,
 ) listener.SessionHandlerFactory {
 	return func(options listener.SessionOptions) listener.SessionHandler {
 		switch strings.ToLower(strings.TrimSpace(options.Config.Protocol)) {
 		case protocolIMAP:
-			return imapSessionHandler(options, resolver, store, selector, placementGate, recorder)
+			return imapSessionHandler(options, resolver, store, placementService, retentionTTL, placementGate, recorder)
 		case protocolLMTP:
-			return lmtpSessionHandler(options, resolver, store, selector, capabilities, placementGate)
+			return lmtpSessionHandler(options, resolver, store, selector, capabilities, placementService, retentionTTL, placementGate)
 		default:
 			return unsupportedProtocolHandler{protocol: options.Config.Protocol}
 		}
 	}
+}
+
+// backendRetentionTTL returns the central retained-binding TTL for new holders.
+func backendRetentionTTL(cfg config.Config) time.Duration {
+	retention := cfg.Director.Affinity.BackendRetention
+	if !retention.Enabled {
+		return 0
+	}
+
+	return retention.DefaultTTL.Std()
 }
 
 type unsupportedProtocolHandler struct {
@@ -548,7 +571,8 @@ func imapSessionHandler(
 	options listener.SessionOptions,
 	resolver routing.RoutingResolver,
 	store state.SessionStore,
-	selector backend.Selector,
+	placementService placement.SessionPlacer,
+	retentionTTL time.Duration,
 	placementGate runtimectl.PlacementGate,
 	recorder observability.Recorder,
 ) listener.SessionHandler {
@@ -571,6 +595,7 @@ func imapSessionHandler(
 		RequireIDBeforeAuth:    requireID,
 		SessionLeaseTTL:        options.SessionLeaseTTL,
 		SessionIdleGrace:       options.SessionIdleGrace,
+		BackendRetentionTTL:    retentionTTL,
 		PreauthTimeout:         options.Timeouts.Preauth.Std(),
 		AuthTimeout:            options.Timeouts.Auth.Std(),
 		BackendConnectTimeout:  options.Timeouts.BackendConnect.Std(),
@@ -581,7 +606,7 @@ func imapSessionHandler(
 		Authenticator:          options.Authenticator,
 		RoutingResolver:        resolver,
 		SessionStore:           store,
-		BackendSelector:        selector,
+		PlacementService:       placementService,
 		BackendConnector:       imap.NewTCPBackendConnector(nil),
 		ProxyRunner:            proxy.NewPipe(),
 		LocalSessions:          options.LocalSessions,
@@ -597,6 +622,8 @@ func lmtpSessionHandler(
 	store state.SessionStore,
 	selector backend.Selector,
 	capabilityReader backendCapabilityReader,
+	placementService placement.DeliveryPlacer,
+	retentionTTL time.Duration,
 	placementGate runtimectl.PlacementGate,
 ) listener.SessionHandler {
 	var (
@@ -626,6 +653,7 @@ func lmtpSessionHandler(
 		BackendConnectTimeout:   options.Timeouts.BackendConnect.Std(),
 		SessionLeaseTTL:         options.SessionLeaseTTL,
 		SessionIdleGrace:        options.SessionIdleGrace,
+		BackendRetentionTTL:     retentionTTL,
 		MaxLineBytes:            options.Security.MaxPreauthLineBytes,
 		MaxBearerTokenBytes:     options.BearerTokenMaxBytes,
 		RequirePeerAuth:         peerAuth.Required,
@@ -637,6 +665,7 @@ func lmtpSessionHandler(
 		RoutingResolver:         resolver,
 		SessionStore:            store,
 		BackendSelector:         selector,
+		PlacementService:        placementService,
 		BackendConnector:        lmtp.NewTCPBackendConnector(nil),
 		PlacementGate:           placementGate,
 		BackendChunkingAllowed:  lmtpBackendChunkingAllowed(capabilityReader, options.Config.BackendPool),

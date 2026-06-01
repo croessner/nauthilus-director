@@ -854,9 +854,29 @@ func TestRouteLookupTextOutputIncludesUserHoldDiagnostics(t *testing.T) {
 	expiresAt := time.Date(2026, 5, 26, 12, 10, 0, 0, time.UTC)
 	remainingSeconds := 600
 	holdGeneration := "hold-gen-a"
+	affinityBackend := "backend-a"
+	affinityNode := "mailstore-a-node-1"
+	affinityShard := "shard-a"
+	bindingGeneration := "binding-gen-a"
+	bindingStatus := "retained_binding"
+	retentionExpiresAt := time.Date(2026, 5, 26, 12, 25, 0, 0, time.UTC)
 	fake.routeResponse = &generated.RouteLookupResponse{
 		AffectedBy: generated.RouteLookupEffects{
 			UserHold: true,
+		},
+		Affinity: &generated.RouteLookupAffinity{
+			Active:             false,
+			ActiveHolders:      0,
+			ActiveSessions:     0,
+			BackendID:          &affinityBackend,
+			BackendNode:        &affinityNode,
+			BindingGeneration:  &bindingGeneration,
+			BindingSource:      "retained_backend_binding",
+			BindingStatus:      &bindingStatus,
+			Present:            true,
+			Requested:          true,
+			RetentionExpiresAt: &retentionExpiresAt,
+			ShardTag:           &affinityShard,
 		},
 		BackendPin: generated.RouteLookupBackendPin{
 			Applied: false,
@@ -866,6 +886,7 @@ func TestRouteLookupTextOutputIncludesUserHoldDiagnostics(t *testing.T) {
 		Healthy:         true,
 		Reason:          "selected",
 		SelectedBackend: "backend-a",
+		Source:          "retained_backend_binding",
 		ShardTag:        "shard-a",
 		Routing: generated.RouteLookupRouting{
 			Source: "auth_attribute",
@@ -891,6 +912,13 @@ func TestRouteLookupTextOutputIncludesUserHoldDiagnostics(t *testing.T) {
 
 	for _, want := range []string{
 		"affected_user_hold=true",
+		"source=retained_backend_binding",
+		"affinity_backend_node=mailstore-a-node-1",
+		"affinity_backend=backend-a",
+		"affinity_binding_source=retained_backend_binding",
+		"affinity_binding_status=retained_binding",
+		"affinity_binding_generation=binding-gen-a",
+		"affinity_retention_expires_at=2026-05-26T12:25:00Z",
 		"user_hold_present=true",
 		"user_hold_deferred=true",
 		"user_hold_expires_at=2026-05-26T12:10:00Z",

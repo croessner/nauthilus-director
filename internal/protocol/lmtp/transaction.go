@@ -74,6 +74,7 @@ func (s *Session) ensureBackendTransaction(ctx context.Context, target backend.B
 
 	connectCtx, connectSpan := s.startObservationSpan(s.transactionContext(ctx), observability.TraceBoundaryBackendConnect, lmtpObservationOperationBackendConnect, lmtpObservationResultStart, "", map[string]string{
 		lmtpObsFieldBackendIdentifier: target.Identifier,
+		lmtpObsFieldBackendNode:       target.BackendNode,
 		lmtpObsFieldShardTag:          target.ShardTag,
 	})
 	connectStarted := time.Now()
@@ -81,7 +82,7 @@ func (s *Session) ensureBackendTransaction(ctx context.Context, target backend.B
 
 	connectDuration := time.Since(connectStarted)
 	if err != nil {
-		s.recordBackendConnect(connectCtx, lmtpObservationResultFailure, lmtpReasonBackendConnect, target.Identifier, target.ShardTag, connectDuration)
+		s.recordBackendConnect(connectCtx, lmtpObservationResultFailure, lmtpReasonBackendConnect, target.Identifier, target.BackendNode, target.ShardTag, connectDuration)
 		connectSpan.End(lmtpObservationResultFailure, lmtpReasonBackendConnect)
 
 		return err
@@ -90,15 +91,15 @@ func (s *Session) ensureBackendTransaction(ctx context.Context, target backend.B
 	if err := AuthenticateBackend(connection, target); err != nil {
 		_ = connection.Conn().Close()
 
-		s.recordBackendConnect(connectCtx, lmtpObservationResultOK, lmtpReasonOK, target.Identifier, target.ShardTag, connectDuration)
-		s.recordBackendAuth(connectCtx, lmtpObservationResultFailure, lmtpReasonBackendAuth, backendAuthObservationMechanism(target), target.Identifier, target.ShardTag)
+		s.recordBackendConnect(connectCtx, lmtpObservationResultOK, lmtpReasonOK, target.Identifier, target.BackendNode, target.ShardTag, connectDuration)
+		s.recordBackendAuth(connectCtx, lmtpObservationResultFailure, lmtpReasonBackendAuth, backendAuthObservationMechanism(target), target.Identifier, target.BackendNode, target.ShardTag)
 		connectSpan.End(lmtpObservationResultFailure, lmtpReasonBackendAuth)
 
 		return err
 	}
 
-	s.recordBackendConnect(connectCtx, lmtpObservationResultOK, lmtpReasonOK, target.Identifier, target.ShardTag, connectDuration)
-	s.recordBackendAuth(connectCtx, lmtpObservationResultOK, lmtpReasonOK, backendAuthObservationMechanism(target), target.Identifier, target.ShardTag)
+	s.recordBackendConnect(connectCtx, lmtpObservationResultOK, lmtpReasonOK, target.Identifier, target.BackendNode, target.ShardTag, connectDuration)
+	s.recordBackendAuth(connectCtx, lmtpObservationResultOK, lmtpReasonOK, backendAuthObservationMechanism(target), target.Identifier, target.BackendNode, target.ShardTag)
 	connectSpan.End(lmtpObservationResultOK, lmtpReasonOK)
 
 	transaction := &backendTransaction{
@@ -154,7 +155,8 @@ func (t *backendTransaction) sameTarget(target backend.Backend) bool {
 		return false
 	}
 
-	return strings.TrimSpace(t.target.Identifier) == strings.TrimSpace(target.Identifier)
+	return strings.TrimSpace(t.target.Identifier) == strings.TrimSpace(target.Identifier) &&
+		strings.TrimSpace(t.target.BackendNode) == strings.TrimSpace(target.BackendNode)
 }
 
 // sendMAIL forwards the frontend sender path to the selected backend.

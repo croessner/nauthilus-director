@@ -27,6 +27,7 @@ import (
 	"github.com/croessner/nauthilus-director/internal/backend"
 	"github.com/croessner/nauthilus-director/internal/nauthilus"
 	"github.com/croessner/nauthilus-director/internal/observability"
+	"github.com/croessner/nauthilus-director/internal/placement"
 	"github.com/croessner/nauthilus-director/internal/routing"
 	runtimectl "github.com/croessner/nauthilus-director/internal/runtime"
 	"github.com/croessner/nauthilus-director/internal/state"
@@ -62,6 +63,7 @@ type SessionConfig struct {
 	BackendConnectTimeout   time.Duration
 	SessionLeaseTTL         time.Duration
 	SessionIdleGrace        time.Duration
+	BackendRetentionTTL     time.Duration
 	MaxLineBytes            int
 	MaxBearerTokenBytes     int
 	RequirePeerAuth         bool
@@ -76,6 +78,7 @@ type SessionConfig struct {
 	RoutingResolver         routing.RoutingResolver
 	SessionStore            state.SessionStore
 	BackendSelector         backend.Selector
+	PlacementService        placement.DeliveryPlacer
 	BackendConnector        BackendConnector
 	PlacementGate           runtimectl.PlacementGate
 	MessageSink             MessageSink

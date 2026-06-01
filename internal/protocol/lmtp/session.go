@@ -29,6 +29,7 @@ import (
 	"github.com/croessner/nauthilus-director/internal/backend"
 	"github.com/croessner/nauthilus-director/internal/nauthilus"
 	"github.com/croessner/nauthilus-director/internal/observability"
+	"github.com/croessner/nauthilus-director/internal/placement"
 	"github.com/croessner/nauthilus-director/internal/routing"
 	runtimectl "github.com/croessner/nauthilus-director/internal/runtime"
 	"github.com/croessner/nauthilus-director/internal/state"
@@ -78,6 +79,7 @@ type Session struct {
 	backendConnectTimeout      time.Duration
 	sessionLeaseTTL            time.Duration
 	sessionIdleGrace           time.Duration
+	backendRetentionTTL        time.Duration
 	maxLineBytes               int
 	maxBearerTokenBytes        int
 	requirePeerAuth            bool
@@ -87,6 +89,7 @@ type Session struct {
 	routingResolver            routing.RoutingResolver
 	sessionStore               state.SessionStore
 	backendSelector            backend.Selector
+	placementService           placement.DeliveryPlacer
 	placementGate              runtimectl.PlacementGate
 	observability              observability.Recorder
 
@@ -162,6 +165,7 @@ func NewSession(config SessionConfig, conn net.Conn) (*Session, error) {
 		backendConnectTimeout:      config.BackendConnectTimeout,
 		sessionLeaseTTL:            defaultDeliveryLease(config.SessionLeaseTTL),
 		sessionIdleGrace:           defaultDeliveryGrace(config.SessionIdleGrace, config.SessionLeaseTTL),
+		backendRetentionTTL:        config.BackendRetentionTTL,
 		maxLineBytes:               maxLineBytes,
 		maxBearerTokenBytes:        config.MaxBearerTokenBytes,
 		requirePeerAuth:            config.RequirePeerAuth,
@@ -171,6 +175,7 @@ func NewSession(config SessionConfig, conn net.Conn) (*Session, error) {
 		routingResolver:            config.RoutingResolver,
 		sessionStore:               config.SessionStore,
 		backendSelector:            config.BackendSelector,
+		placementService:           config.PlacementService,
 		placementGate:              config.PlacementGate,
 		observability:              observability.NormalizeRecorder(config.Observability),
 		tlsActive:                  config.TLSMode == TLSModeImplicit,
@@ -486,20 +491,24 @@ func (t *transactionState) reset() {
 	t.observationStarted = time.Time{}
 }
 
-// acceptsBackend reports whether a recipient can join the current transaction.
-func (t *transactionState) acceptsBackend(identifier string) bool {
-	identifier = strings.TrimSpace(identifier)
-	if identifier == "" {
+// acceptsConcreteBackend reports whether a recipient can join the current transaction target.
+func (t *transactionState) acceptsConcreteBackend(target backend.Backend) bool {
+	identifier := strings.TrimSpace(target.Identifier)
+
+	backendNode := strings.TrimSpace(target.BackendNode)
+	if identifier == "" || backendNode == "" {
 		return false
 	}
 
 	for _, recipient := range t.recipients {
 		existing := strings.TrimSpace(recipient.Backend.Backend.Identifier)
-		if existing == "" {
+
+		existingNode := strings.TrimSpace(recipient.Backend.Backend.BackendNode)
+		if existing == "" || existingNode == "" {
 			continue
 		}
 
-		return existing == identifier
+		return existing == identifier && existingNode == backendNode
 	}
 
 	return true

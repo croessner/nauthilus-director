@@ -29,9 +29,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/croessner/nauthilus-director/internal/backend"
 	"github.com/croessner/nauthilus-director/internal/nauthilus"
 	"github.com/croessner/nauthilus-director/internal/observability"
+	"github.com/croessner/nauthilus-director/internal/placement"
 	"github.com/croessner/nauthilus-director/internal/proxy"
 	"github.com/croessner/nauthilus-director/internal/routing"
 	runtimectl "github.com/croessner/nauthilus-director/internal/runtime"
@@ -83,18 +83,19 @@ type Session struct {
 	authenticator    nauthilus.Authenticator
 	routingResolver  routing.RoutingResolver
 	sessionStore     state.SessionStore
-	backendSelector  backend.Selector
+	placementService placement.SessionPlacer
 	backendConnector BackendConnector
 	proxyRunner      proxy.Runner
 	localSessions    *runtimectl.LocalSessionRegistry
 	placementGate    runtimectl.PlacementGate
 	observability    observability.Recorder
 
-	tlsActive     bool
-	clientID      string
-	authenticated bool
-	placement     Placement
-	placed        bool
+	tlsActive      bool
+	clientID       string
+	authenticated  bool
+	placement      Placement
+	placementLease placement.LeaseHandle
+	placed         bool
 }
 
 // NewSession creates a bounded IMAP session context for an accepted connection.
@@ -149,6 +150,7 @@ func NewSession(config SessionConfig, conn net.Conn) (*Session, error) {
 			RequireIDBeforeAuth:    config.RequireIDBeforeAuth,
 			SessionLeaseTTL:        leaseTTL,
 			SessionIdleGrace:       defaultSessionIdleGrace(config.SessionIdleGrace, leaseTTL),
+			BackendRetentionTTL:    config.BackendRetentionTTL,
 		},
 		conn:             conn,
 		reader:           bufio.NewReaderSize(conn, config.MaxPreauthLineBytes+1),
@@ -156,7 +158,7 @@ func NewSession(config SessionConfig, conn net.Conn) (*Session, error) {
 		authenticator:    config.Authenticator,
 		routingResolver:  config.RoutingResolver,
 		sessionStore:     config.SessionStore,
-		backendSelector:  config.BackendSelector,
+		placementService: config.PlacementService,
 		backendConnector: backendConnector,
 		proxyRunner:      proxyRunner,
 		localSessions:    config.LocalSessions,

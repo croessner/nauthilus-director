@@ -34,6 +34,7 @@ M6 is governed by:
 - `docs/specs/implementation/M3_USER_PLACEMENT_HOLD_FOLLOWUP.md`
 - `docs/specs/implementation/M4_OBSERVABILITY_SPEC.md`
 - `docs/specs/implementation/M5_LMTP_PRODUCTION_SPEC.md`
+- `docs/specs/implementation/M5_CROSS_PROTOCOL_BACKEND_AFFINITY_FOLLOWUP.md`
 - `docs/config/nauthilus-director.target.yml`
 - `docs/reference/config-defaults.yaml`
 - `docs/reference/config-paths.md`
@@ -43,6 +44,8 @@ M6 is governed by:
 - `docs/man/nauthilus-director.yaml.5`
 - `test/e2e/README.md`
 - `test/e2e/interop/README.md`
+- `contrib/demo-stack/`
+- `contrib/demo-stack/scripts/`
 - `Makefile`
 - RFC 5804, `A Protocol for Remotely Managing Sieve Scripts`
 
@@ -81,14 +84,15 @@ post-auth ManageSieve traffic as opaque bytes. Script names, script contents,
 post-auth command bodies and backend script diagnostics belong to the backend
 ManageSieve service, not to director routing, metrics or logs.
 
-The hard invariant is same-shard user-stateful routing. ManageSieve uses the
-same authoritative tenant and normalized account key as IMAP active affinity,
-user movement, user placement holds, user backend pins and LMTP
-delivery-scoped active-affinity holds. If an IMAP session or LMTP delivery hold
-already pins the account to a shard, a new ManageSieve session for the same
-account must select the ManageSieve backend entry for that active shard. If no
-active affinity exists, ManageSieve establishes it for user-stateful placement
-just like IMAP.
+The hard invariant is same-backend-node user-stateful routing. ManageSieve uses
+the same authoritative tenant and normalized account key as IMAP active affinity,
+retained backend binding, user movement, user placement holds, user backend pins
+and LMTP delivery-scoped active-affinity holds. If an IMAP session, retained
+IMAP binding, LMTP delivery hold or retained LMTP binding already pins the
+account to a backend node, a new ManageSieve session for the same account must
+select the ManageSieve backend entry for that backend node. If no active or
+retained affinity exists, ManageSieve establishes backend-node placement just
+like IMAP.
 
 ## Delivery Shape
 
@@ -101,16 +105,17 @@ Implement M6 as explicit implementation slices:
 5. Post-auth proxy handoff, buffered-byte handling and session cleanup.
 6. Runtime state, maintenance, reload and route-lookup integration.
 7. ManageSieve observability, documentation and generated reference updates.
-8. Fake-service E2E, real Dovecot ManageSieve interoperability and closeout
-   review.
+8. Fake-service E2E, real Dovecot ManageSieve interoperability, demo-stack
+   proof and closeout review.
 
 The slices may be committed separately, but M6 is not complete until the
 production `nauthilus-director` binary starts configured ManageSieve listeners,
-authenticates through public sockets, proves same-shard behavior with existing
-IMAP and LMTP active-affinity state, proxies script-management traffic without
+authenticates through public sockets, proves backend-node behavior with existing
+IMAP and LMTP active or retained affinity state, proxies script-management traffic without
 inspecting it, keeps script and credential material out of unsafe telemetry,
 passes deterministic `make e2e` coverage and passes a real-server
-interoperability lane with a real ManageSieve backend.
+interoperability lane with a real ManageSieve backend plus the final
+`contrib/demo-stack` operator proof when Docker/Compose is available.
 
 ## Global Scope
 
@@ -153,9 +158,10 @@ In scope:
   authentication and routing fact resolution, but before frontend auth success,
   backend selection, backend capacity reservation, backend connect, backend
   auth/trust or proxy mode.
-- Use the shared routing resolver and active-affinity model. Existing IMAP
-  sessions and LMTP delivery holds for the same account must influence
-  ManageSieve placement through the shared shard affinity.
+- Use the shared routing resolver and backend-node affinity model. Existing
+  IMAP sessions, retained IMAP bindings, LMTP delivery holds and retained LMTP
+  bindings for the same account must influence ManageSieve placement through
+  the shared backend node.
 - Apply backend pins only when the pin's protocol and backend pool match the
   ManageSieve placement request. A pin for an IMAP, LMTP or later POP3 backend
   must never name the concrete ManageSieve backend.
@@ -578,8 +584,8 @@ internal/protocol/sieve/*_test.go
 ### Purpose
 
 Route authenticated ManageSieve users through the same director-owned placement
-model as IMAP, including user placement holds, active affinity, backend pins and
-runtime-aware selection.
+model as IMAP and LMTP, including user placement holds, active and retained
+backend-node affinity, backend pins and runtime-aware selection.
 
 ### In Scope
 
@@ -590,23 +596,25 @@ runtime-aware selection.
 - Apply the shared user placement hold gate after auth and routing, before
   frontend auth success and before backend selection.
 - If the hold clears or expires within the bounded wait budget, re-read active
-  affinity, movement overrides, backend-pin state, backend health and capacity
-  before selecting.
+  affinity, retained backend binding, movement overrides, backend-pin state,
+  backend health and capacity before selecting.
 - If the hold remains active past the wait budget, return a generic
   `NO (TRYLATER)` temporary failure and do not fall back to the old backend.
-- Open Redis-backed active affinity/session state for ManageSieve sessions.
+- Open Redis-backed active affinity/session state for ManageSieve sessions,
+  including the selected backend node and retained-binding expiry.
 - Treat ManageSieve sessions as user-stateful active sessions visible through
   session APIs with protocol `sieve`, but without script names or command
   payloads.
 - Select a concrete ManageSieve backend from
-  `effective_shard_tag + protocol=sieve + backend_pool`.
-- Apply operator backend pins only when protocol, backend pool and selected
-  shard match.
+  `backend_node + protocol=sieve + backend_pool`.
+- Apply operator backend pins only when protocol, backend pool, selected shard
+  and backend node match.
 - Let explicit backend pins bypass `weight_zero` for the pinned backend only,
   while preserving every other fail-closed exclusion.
 - Reuse backend attach/capacity reservation behavior and rollback on placement,
   connect or backend-auth failure.
-- Preserve existing active affinity from IMAP sessions and LMTP delivery holds.
+- Preserve existing active and retained backend-node affinity from IMAP sessions
+  and LMTP delivery holds.
 
 ### Out of Scope
 
@@ -637,9 +645,9 @@ test/e2e/
   service names from the frontend session context.
 - ManageSieve session records should use the same normalized affinity key model
   as IMAP. Raw usernames must not be Redis key material.
-- If active affinity already exists for the user, it chooses the shard. The
-  ManageSieve selector then resolves that shard to a protocol-specific
-  `sieve` backend entry.
+- If active or retained affinity already exists for the user, it chooses the
+  backend node. The ManageSieve selector then resolves that backend node to a
+  protocol-specific `sieve` backend entry.
 - If a backend pin is present for another protocol or backend pool, report the
   mismatch in route lookup but ignore it for live placement.
 - If a matching backend pin names an unusable backend, fail closed. Do not
@@ -651,9 +659,10 @@ test/e2e/
 - Placement hold wait runs after auth/routing and before backend selection.
 - Hold timeout returns `NO (TRYLATER)` and does not open a session, reserve
   backend capacity, connect to a backend or send auth success.
-- Existing IMAP active affinity controls ManageSieve selected shard.
-- Existing LMTP delivery-scoped active affinity controls ManageSieve selected
-  shard.
+- Existing IMAP active or retained affinity controls ManageSieve selected
+  backend node.
+- Existing LMTP delivery-scoped active or retained affinity controls ManageSieve
+  selected backend node.
 - ManageSieve opens and heartbeats a visible user session after placement.
 - Backend pins apply only for matching `protocol=sieve` and backend pool.
 - Cross-protocol backend pins do not name the concrete ManageSieve backend.
@@ -664,9 +673,10 @@ test/e2e/
 
 ### Required Integration or E2E Tests
 
-- Public ManageSieve login routes to the same shard as an active IMAP session.
-- Public ManageSieve login routes to the same shard as an in-flight LMTP
-  delivery hold for the same resolved account.
+- Public ManageSieve login routes to the same backend node as an active or
+  retained IMAP binding.
+- Public ManageSieve login routes to the same backend node as an in-flight or
+  retained LMTP delivery binding for the same resolved account.
 - `nauthilus-directorctl users hold set` causes a public ManageSieve auth to
   wait and then temporary-fail without backend connect when the hold remains
   active.
@@ -679,7 +689,7 @@ test/e2e/
 - ManageSieve placement uses the same active-affinity and runtime-control model
   as IMAP.
 - Holds and backend pins are enforced at the correct boundary.
-- Same-shard cross-protocol behavior is proven through public sockets.
+- Same-backend-node cross-protocol behavior is proven through public sockets.
 
 ### Review Checklist
 
@@ -776,7 +786,8 @@ internal/protocol/sieve/*_test.go
 - Fake ManageSieve backend forces auth, greeting, STARTTLS and capability
   failures so the director fails closed and cleans up runtime state.
 - Health runner marks ManageSieve backends healthy/unhealthy through public
-  runtime diagnostics without exposing backend identifiers as metric labels.
+  runtime diagnostics without exposing backend identifiers or backend nodes as
+  metric labels.
 
 ### Acceptance Criteria
 
@@ -891,9 +902,9 @@ parallel management surface.
   proxy sessions unexpectedly.
 - Extend route lookup for `protocol: sieve` using the existing
   side-effect-free route lookup service.
-- Route lookup must report routing source, selected shard, active affinity,
-  backend-pin context, user-hold context, backend eligibility and fail-closed
-  reasons.
+- Route lookup must report routing source, selected shard, selected backend
+  node, active or retained affinity, backend-pin context, user-hold context,
+  backend eligibility and fail-closed reasons.
 - Route lookup must not authenticate credentials, create sessions, refresh
   leases, wait on holds, connect to backends, perform backend auth or inspect
   scripts.
@@ -924,9 +935,10 @@ docs/man/nauthilus-directorctl.1
 - The CLI should support `nauthilus-directorctl route lookup --protocol sieve`
   with the same user-key and attribute model as IMAP.
 - Route lookup output must not include operator hold reason text, raw backend
-  identifiers as metric labels or script names.
-- Runtime APIs should expose backend identifiers in REST diagnostics where the
-  existing policy permits them, but never as Prometheus labels.
+  identifiers or backend nodes as metric labels or script names.
+- Runtime APIs should expose backend identifiers and backend nodes in REST
+  diagnostics where the existing policy permits them, but never as Prometheus
+  labels.
 
 ### Required Unit Tests
 
@@ -996,8 +1008,8 @@ nauthilus_director.sieve.pre_auth
   - proxy start/end
 - Add Prometheus observations using only approved labels.
 - Use bounded status classes and reason classes, not raw backend text.
-- Allow backend identifiers in logs/traces only where the existing policy
-  permits operator diagnostics.
+- Allow backend identifiers and backend nodes in logs/traces only where the
+  existing policy permits operator diagnostics.
 - Keep script names, script contents, post-auth command bodies, raw usernames,
   passwords, bearer tokens, SASL blobs and private keys out of logs, metrics
   and traces.
@@ -1057,6 +1069,7 @@ request_id
 client_ip
 remote_addr
 backend_identifier
+backend_node
 token
 password
 sasl_blob
@@ -1081,6 +1094,20 @@ ManageSieve metrics should cover:
 - backend selection/connect/auth outcomes
 - active session counts and durations
 - proxy bytes and durations
+
+Backend-binding reason classes used by ManageSieve and shared placement must
+remain bounded. The shared set includes:
+
+```text
+active_backend_binding
+retained_backend_binding
+backend_node_missing_protocol
+backend_node_unusable
+backend_node_mismatch
+binding_invalidated_hard_down
+binding_retained
+binding_expired
+```
 
 ### Required Unit Tests
 
@@ -1112,7 +1139,7 @@ ManageSieve metrics should cover:
 
 - Verify no ManageSieve metric label violates the allowlist.
 - Verify script contents are not logged even in test failure paths.
-- Verify backend identifiers remain forbidden as metric labels.
+- Verify backend identifiers and backend nodes remain forbidden as metric labels.
 
 ## M6.8 E2E, Interoperability, Documentation and Guardrails
 
@@ -1134,6 +1161,11 @@ interop lanes.
   active-affinity and edge cases must be forced deterministically.
 - Use Dovecot project-provided assets as the real ManageSieve backend where
   practical.
+- Update `contrib/demo-stack` config, images, bootstrap data, backend wiring,
+  proof scripts and operator docs when M6 changes operator-visible topology or
+  protocol behavior.
+- Use the demo stack as the final operator-facing proof for M6 whenever
+  Docker/Compose is available.
 - Update docs, manpages and generated config references when ManageSieve
   behavior or config changes.
 - Run `make check-openapi` after any OpenAPI or generated REST/client change.
@@ -1170,9 +1202,11 @@ Deterministic fake-service E2E should:
 - exercise `sieve` STARTTLS and `sieves` implicit TLS;
 - authenticate with password and bearer mechanisms;
 - force routing to multiple shards;
-- prove active IMAP affinity influences ManageSieve placement;
-- prove an in-flight LMTP delivery hold influences ManageSieve placement;
-- prove ManageSieve active affinity influences a concurrent IMAP login;
+- prove active and retained IMAP affinity influences ManageSieve placement;
+- prove an in-flight and retained LMTP delivery hold influences ManageSieve
+  placement;
+- prove ManageSieve active and retained affinity influences a concurrent or
+  subsequent IMAP login;
 - prove user placement hold timeout returns `NO (TRYLATER)` before backend
   connect;
 - prove backend-pin matching, mismatch and fail-closed behavior;
@@ -1188,9 +1222,20 @@ Real-server interop should:
 - authenticate through the director to the real backend;
 - perform at least one real script-management operation through the director,
   such as `LISTSCRIPTS`, `PUTSCRIPT`, `SETACTIVE` and `GETSCRIPT`;
-- prove the same account routes to the same shard for ManageSieve and IMAP;
+- prove the same account routes to the same backend node for ManageSieve and
+  IMAP;
 - skip with an explicit stable message when Docker or the real backend tool
   container is unavailable.
+
+Demo-stack proof should:
+
+- keep existing demo-stack IMAP and LMTP proof scripts working;
+- add or update ManageSieve demo-stack services, listeners, backend wiring and
+  proof scripts as needed;
+- rebuild the director image before proving M6 behavior when code, config or
+  packaging changes affect the image;
+- prove ManageSieve through `contrib/demo-stack` after the stack is updated;
+- record a stable skip reason when Docker/Compose is unavailable.
 
 ### Required Unit Tests
 
@@ -1202,10 +1247,13 @@ Real-server interop should:
 
 - `make e2e` proves ManageSieve public listener behavior, auth, routing, hold
   gate, backend-pin scoping, proxy handoff and script-data secrecy.
-- `make e2e` proves ManageSieve and IMAP same-shard consistency.
-- `make e2e` proves LMTP delivery-hold-to-ManageSieve shard consistency.
+- `make e2e` proves ManageSieve and IMAP same-backend-node consistency.
+- `make e2e` proves LMTP delivery-hold-to-ManageSieve backend-node
+  consistency.
 - `make e2e-interop` proves real Dovecot ManageSieve access through the
   director on a Docker-capable environment.
+- `contrib/demo-stack` is updated and proves the M6 operator path on a
+  Docker/Compose-capable environment.
 - Existing IMAP and LMTP interop scenarios remain available and are not removed
   or weakened by the ManageSieve changes.
 
@@ -1214,6 +1262,8 @@ Real-server interop should:
 - Deterministic fake-service E2E covers forced ManageSieve edge cases.
 - Real-server ManageSieve interop passes before M6 is considered complete.
 - Existing IMAP and LMTP interop coverage is preserved.
+- Demo-stack topology, config, proof scripts and docs are updated for M6 and
+  pass their final proof, or skip with an explicit environment reason.
 - Documentation and generated references match supported ManageSieve behavior.
 
 ### Review Checklist
@@ -1222,6 +1272,8 @@ Real-server interop should:
   interop.
 - Verify real interop is skipped only with stable environment-related reasons.
 - Verify E2E proves cross-protocol active-affinity behavior.
+- Verify `contrib/demo-stack` was checked and updated in the same change when
+  M6 topology, images, config, backend wiring or proof scripts changed.
 - Verify docs/manpages describe protocol value `sieve` and not a second
   `managesieve` config value.
 
@@ -1254,16 +1306,16 @@ M6 is complete only when all items below are true:
       the old backend.
 - [ ] ManageSieve placement consumes health, maintenance, runtime out, drain,
       weight, max-connection and backend-pin state.
-- [ ] Backend pins apply only when protocol, backend pool and selected shard
-      match the ManageSieve placement request.
+- [ ] Backend pins apply only when protocol, backend pool, selected shard and
+      backend node match the ManageSieve placement request.
 - [ ] An IMAP, LMTP or later POP3 backend pin never names the concrete
       ManageSieve backend.
-- [ ] Existing IMAP active affinity influences ManageSieve placement for the
-      same account.
-- [ ] Existing LMTP delivery-scoped active affinity influences ManageSieve
-      placement for the same account.
-- [ ] Active ManageSieve sessions influence later user-stateful placement for
-      the same account.
+- [ ] Existing IMAP active or retained affinity influences ManageSieve
+      placement for the same account and backend node.
+- [ ] Existing LMTP delivery-scoped active or retained affinity influences
+      ManageSieve placement for the same account and backend node.
+- [ ] Active or retained ManageSieve sessions influence later user-stateful
+      placement for the same account and backend node.
 - [ ] Backend ManageSieve connect, TLS, capability discovery and configured
       backend auth are implemented.
 - [ ] Backend deep health proves connect, TLS, greeting, `CAPABILITY`,
@@ -1280,6 +1332,9 @@ M6 is complete only when all items below are true:
 - [ ] `make e2e-interop` proves real Dovecot ManageSieve access through the
       director on a Docker-capable environment while preserving existing IMAP
       and LMTP lanes.
+- [ ] `contrib/demo-stack` carries M6 topology/config/proof updates and proves
+      the final operator-facing ManageSieve path on a Docker/Compose-capable
+      environment.
 - [ ] Config docs, generated references, OpenAPI artifacts and manpages are
       updated when behavior changes.
 - [ ] `make guardrails` is the final local gate before any commit or pull
@@ -1294,32 +1349,38 @@ Before closing M6, perform this review:
    13, 17, 18, 20, 21, 22 and 23.
 3. Re-read `docs/specs/implementation/M1_IMAP_MVP_SPEC.md`.
 4. Re-read `docs/specs/implementation/M5_LMTP_PRODUCTION_SPEC.md`.
-5. Re-read `docs/specs/implementation/M3_USER_PLACEMENT_HOLD_FOLLOWUP.md`.
-6. Re-read `docs/specs/implementation/M3_USER_BACKEND_PINNING_FOLLOWUP.md`.
-7. Re-read `docs/specs/implementation/M4_OBSERVABILITY_SPEC.md`.
-8. Re-read `docs/config/nauthilus-director.target.yml`.
-9. Re-read `docs/reference/config-paths.md`.
-10. Re-read `docs/specs/openapi/nauthilus-director.yaml` if route lookup,
+5. Re-read `docs/specs/implementation/M5_CROSS_PROTOCOL_BACKEND_AFFINITY_FOLLOWUP.md`.
+6. Re-read `docs/specs/implementation/M3_USER_PLACEMENT_HOLD_FOLLOWUP.md`.
+7. Re-read `docs/specs/implementation/M3_USER_BACKEND_PINNING_FOLLOWUP.md`.
+8. Re-read `docs/specs/implementation/M4_OBSERVABILITY_SPEC.md`.
+9. Re-read `docs/config/nauthilus-director.target.yml`.
+10. Re-read `docs/reference/config-paths.md`.
+11. Re-read `docs/specs/openapi/nauthilus-director.yaml` if route lookup,
     session listing or REST diagnostics changed.
-11. Re-read RFC 5804 sections for capabilities, pre-auth commands, STARTTLS,
+12. Re-read `contrib/demo-stack` and `contrib/demo-stack/scripts` for required
+    M6 topology, config, bootstrap and proof-script updates.
+13. Re-read RFC 5804 sections for capabilities, pre-auth commands, STARTTLS,
     AUTHENTICATE and response codes.
-12. Compare implementation and docs against this specification and the source
+14. Compare implementation and docs against this specification and the source
     documents.
-13. Fix drift, false capability advertisement, IMAP-only selector assumptions,
+15. Fix drift, false capability advertisement, IMAP-only selector assumptions,
     LMTP-only delivery-hold assumptions, active-affinity misuse, unsafe script
     logging, buffered proxy handoff mistakes and unsupported config
     documentation.
-14. Run `make check-openapi` after any OpenAPI schema or generated-code change.
-15. Run `make check-docs` after any typed config, config metadata or generated
+16. Run `make check-openapi` after any OpenAPI schema or generated-code change.
+17. Run `make check-docs` after any typed config, config metadata or generated
     docs change.
-16. Run targeted ManageSieve, listener, config, routing, backend, state,
+18. Run targeted ManageSieve, listener, config, routing, backend, state,
     runtime, observability and REST tests.
-17. Run `make e2e` and record the ManageSieve proof, including IMAP and LMTP
+19. Run `make e2e` and record the ManageSieve proof, including IMAP and LMTP
     active-affinity interaction.
-18. Run `make e2e-interop` on a Docker-capable environment and record the real
+20. Run `make e2e-interop` on a Docker-capable environment and record the real
     ManageSieve proof plus existing IMAP and LMTP lane status.
-19. Run `make guardrails` before any commit or pull request.
-20. Record `git status --short` and exact validation results in the M6 closeout.
+21. Rebuild/update `contrib/demo-stack`, run its M6 proof on a
+    Docker/Compose-capable environment and record the existing IMAP and LMTP
+    proof status.
+22. Run `make guardrails` before any commit or pull request.
+23. Record `git status --short` and exact validation results in the M6 closeout.
 
 ## Decisions and Open Questions
 
@@ -1366,8 +1427,9 @@ code.
 6. Decision: backend pins are protocol/backend-pool scoped.
 
    A backend pin naming an IMAP or LMTP backend is not a concrete ManageSieve
-   target. Cross-protocol consistency comes from shared shard affinity. After
-   the shard is known, ManageSieve resolves a protocol-specific backend entry.
+   target. Cross-protocol consistency comes from shared backend-node affinity.
+   After the backend node is known, ManageSieve resolves a protocol-specific
+   backend entry.
 
 7. Decision: ManageSieve sessions are active user sessions.
 
@@ -1407,7 +1469,7 @@ code.
     ManageSieve operations to the correct backend while keeping script material
     opaque. The required interop lane must prove operations such as
     `PUTSCRIPT`, `SETACTIVE`, `LISTSCRIPTS` and `GETSCRIPT` through the
-    director, plus same-shard consistency with IMAP. Proving that an uploaded
+    director, plus same-backend-node consistency with IMAP. Proving that an uploaded
     script later changes LMTP delivery behavior exercises backend Sieve
     execution and may be useful as a later demo-stack or hardening proof, but it
     is not an M6 acceptance criterion.

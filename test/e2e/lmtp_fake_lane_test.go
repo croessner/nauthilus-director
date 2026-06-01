@@ -59,6 +59,7 @@ const (
 	e2eLMTPRecipientA       = "same-a@example.test"
 	e2eLMTPRecipientASecond = "same-a-alt@example.test"
 	e2eLMTPRecipientB       = "other-b@example.test"
+	e2eLMTPRecipientMaint   = "maintenance-a@example.test"
 	e2eLMTPRecipientMixed   = "temp-a@example.test"
 	e2eLMTPMessageSecret    = "top-secret-message-body"
 )
@@ -85,12 +86,13 @@ func TestServerBinaryPublicLMTPProductionFlow(t *testing.T) {
 	controlAddress := loopbackAddress(t)
 	publishHealthyLMTPBackends(t, redisFixture, []string{e2eLMTPBackendAID, e2eLMTPBackendBID}, "CHUNKING")
 	configPath := writeLMTPProcessConfig(t, lmtpProcessConfigOptions{
-		RedisAddress:   redisFixture.addr,
-		AuthorityURL:   authority.URL(),
-		LMTPAddress:    lmtpAddress,
-		LMTPSAddress:   lmtpsAddress,
-		IMAPAddress:    imapAddress,
-		ControlAddress: controlAddress,
+		RedisAddress:        redisFixture.addr,
+		AuthorityURL:        authority.URL(),
+		LMTPAddress:         lmtpAddress,
+		LMTPSAddress:        lmtpsAddress,
+		IMAPAddress:         imapAddress,
+		ControlAddress:      controlAddress,
+		BackendRetentionTTL: "2s",
 		LMTPBackends: map[string]string{
 			e2eLMTPBackendAID: fakeLMTPA.Address(),
 			e2eLMTPBackendBID: fakeLMTPB.Address(),
@@ -226,8 +228,9 @@ func exerciseStartTLSLMTPFlow(
 	client.ExpectLine("250 2.0.0 Recipient accepted\r\n")
 	assertNoLMTPSessionsListed(t, ctl, controlURL)
 	imapClient, imapReader := loginProcessIMAP(t, imapAddress, e2eLMTPRecipientA)
-	defer func() { _ = imapClient.Close() }()
 	expectBackendProxy(t, imapClient, imapReader, fakeIMAPA, "A002")
+	_ = imapClient.Close()
+	waitForRESTSessionCount(t, controlURL, 0)
 	client.WriteLine("RCPT TO:<" + e2eLMTPRecipientASecond + ">")
 	client.ExpectLine("250 2.0.0 Recipient accepted\r\n")
 	client.WriteLine("RCPT TO:<" + e2eLMTPRecipientB + ">")
@@ -241,6 +244,20 @@ func exerciseStartTLSLMTPFlow(
 	assertLMTPBackendObservation(t, observation, []string{lmtpPath(e2eLMTPRecipientA), lmtpPath(e2eLMTPRecipientASecond)}, false)
 	if !strings.Contains(observation.Body, e2eLMTPMessageSecret) {
 		t.Fatalf("fake backend did not receive DATA body")
+	}
+	retainedRouteOutput := waitForLMTPRouteSource(t, ctl, controlURL, e2eLMTPRecipientA, "retained_backend_binding")
+	if !strings.Contains(retainedRouteOutput, "selected_backend="+e2eLMTPBackendAID) ||
+		!strings.Contains(retainedRouteOutput, "affinity_binding_source=retained_backend_binding") {
+		t.Fatalf("retained LMTP route lookup output = %q, want retained backend-node binding", retainedRouteOutput)
+	}
+	retainedClient, retainedReader := loginProcessIMAP(t, imapAddress, e2eLMTPRecipientA)
+	expectBackendProxy(t, retainedClient, retainedReader, fakeIMAPA, "R002")
+	_ = retainedClient.Close()
+	waitForRESTSessionCount(t, controlURL, 0)
+	time.Sleep(3 * time.Second)
+	expiredRouteOutput := waitForLMTPRouteSource(t, ctl, controlURL, e2eLMTPRecipientA, "initial_placement")
+	if strings.Contains(expiredRouteOutput, "affinity_binding_source=retained_backend_binding") {
+		t.Fatalf("expired LMTP route lookup output = %q, want initial placement after retention expiry", expiredRouteOutput)
 	}
 	authority.ExpectLookupMode(t, e2eLMTPRecipientA, "no-auth")
 	authority.ExpectLookupMode(t, e2eLMTPRecipientASecond, "no-auth")
@@ -316,7 +333,7 @@ func exerciseLMTPMaintenanceEffects(t *testing.T, address string, controlURL str
 	defer rejected.Close()
 	rejected.WriteLine("MAIL FROM:<sender@example.test>")
 	rejected.ExpectLine("250 2.0.0 Sender accepted\r\n")
-	rejected.WriteLine("RCPT TO:<" + e2eLMTPRecipientA + ">")
+	rejected.WriteLine("RCPT TO:<" + e2eLMTPRecipientMaint + ">")
 	rejected.ExpectLine("451 4.3.0 Recipient lookup temporarily unavailable\r\n")
 	runDirectorctl(t, ctl, controlURL, "backends", "maintenance", "disable", e2eLMTPBackendAID, "--reason", "lmtp soft maintenance proof complete")
 }
@@ -361,6 +378,7 @@ type lmtpProcessConfigOptions struct {
 	LMTPSAddress                string
 	IMAPAddress                 string
 	ControlAddress              string
+	BackendRetentionTTL         string
 	LMTPBackends                map[string]string
 	IMAPBackends                map[string]string
 	TLS                         lmtpPeerTLSBundle
@@ -389,6 +407,10 @@ func writeLMTPProcessConfig(t *testing.T, options lmtpProcessConfigOptions) stri
 		lmtpBackendTLSMode = "plaintext"
 	}
 	lmtpPeerAuthRequired := !options.DisableLMTPPeerAuth
+	backendRetentionTTL := strings.TrimSpace(options.BackendRetentionTTL)
+	if backendRetentionTTL == "" {
+		backendRetentionTTL = "15m"
+	}
 
 	content := fmt.Sprintf(`patch:
   - op: remove
@@ -428,6 +450,11 @@ auth:
         basic_auth:
           password_file: "unused"
 director:
+  affinity:
+    backend_retention:
+      enabled: true
+      default_ttl: %q
+      max_ttl: 24h
   routing:
     default_selector: rendezvous_hash
     default_shard: %q
@@ -518,6 +545,7 @@ director:
     mailstore-a-imap:
       protocol: imap
       shard_tag: %q
+      backend_node: mailstore-a-node
       address: %q
       weight: 100
       max_connections: 100
@@ -546,6 +574,7 @@ director:
     mailstore-b-imap:
       protocol: imap
       shard_tag: %q
+      backend_node: mailstore-b-node
       address: %q
       weight: 100
       max_connections: 100
@@ -574,6 +603,7 @@ director:
     mailstore-a-lmtp:
       protocol: lmtp
       shard_tag: %q
+      backend_node: mailstore-a-node
       address: %q
       weight: 100
       max_connections: 100
@@ -593,6 +623,7 @@ director:
     mailstore-b-lmtp:
       protocol: lmtp
       shard_tag: %q
+      backend_node: mailstore-b-node
       address: %q
       weight: 100
       max_connections: 100
@@ -612,6 +643,7 @@ director:
 `, options.ControlAddress,
 		options.RedisAddress,
 		options.AuthorityURL,
+		backendRetentionTTL,
 		e2eShardTag,
 		options.IMAPAddress,
 		options.TLS.ServerCertPath,
@@ -838,6 +870,7 @@ func lmtpAuthorityIdentities() map[string]lmtpAuthorityIdentity {
 		e2eLMTPSSubmitter:       {Account: e2eLMTPSSubmitter, Tenant: e2eTenant, Shard: e2eShardTag},
 		e2eLMTPRecipientA:       {Account: e2eLMTPRecipientA, Tenant: e2eTenant, Shard: e2eShardTag},
 		e2eLMTPRecipientASecond: {Account: e2eLMTPRecipientASecond, Tenant: e2eTenant, Shard: e2eShardTag},
+		e2eLMTPRecipientMaint:   {Account: e2eLMTPRecipientMaint, Tenant: e2eTenant, Shard: e2eShardTag},
 		e2eLMTPRecipientMixed:   {Account: e2eLMTPRecipientMixed, Tenant: e2eTenant, Shard: e2eShardTag},
 		e2eLMTPRecipientB:       {Account: e2eLMTPRecipientB, Tenant: e2eTenant, Shard: e2eShardTagB},
 	}
@@ -1007,6 +1040,25 @@ func assertNoLMTPSessionsListed(t *testing.T, ctl string, controlURL string) {
 	}
 }
 
+// waitForLMTPRouteSource polls the public CLI route lookup until the expected source is visible.
+func waitForLMTPRouteSource(t *testing.T, ctl string, controlURL string, recipient string, source string) string {
+	t.Helper()
+
+	var output string
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		output = runDirectorctl(t, ctl, controlURL, "route", "lookup", "--protocol", e2eLMTPProtocol, "--recipient", recipient, "--listener", e2eLMTPListenerName, "--include-affinity")
+		if strings.Contains(output, "source="+source) {
+			return output
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	t.Fatalf("LMTP route lookup output = %q, want source=%s", output, source)
+
+	return output
+}
+
 // waitForLMTPGreeting waits until the process exposes its public LMTP socket.
 func waitForLMTPGreeting(t *testing.T, address string, process *directorProcess) {
 	t.Helper()
@@ -1076,6 +1128,7 @@ func assertLMTPProcessOutputSafe(t *testing.T, output string) {
 		e2eLMTPRecipientA,
 		e2eLMTPRecipientASecond,
 		e2eLMTPRecipientB,
+		e2eLMTPRecipientMaint,
 		e2eLMTPRecipientMixed,
 		e2eLMTPMessageSecret,
 		"maintenance-body",

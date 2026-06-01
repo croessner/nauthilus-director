@@ -69,6 +69,10 @@ for _, session_id in ipairs(due_sessions) do
 			if idle_grace_ms == nil or idle_grace_ms < 0 then
 				idle_grace_ms = 0
 			end
+			local retention_ttl_ms = tonumber(redis.call("HGET", session_key, "retention_ttl_ms") or redis.call("HGET", state_key, "retention_ttl_ms") or tostring(idle_grace_ms))
+			if retention_ttl_ms == nil or retention_ttl_ms < 0 then
+				retention_ttl_ms = 0
+			end
 
 			local holder_kind = tostring(redis.call("HGET", session_key, "holder_kind") or "session")
 			local affinity_hash = redis.call("HGET", session_key, "affinity_hash")
@@ -101,19 +105,25 @@ for _, session_id in ipairs(due_sessions) do
 
 			local active_count = redis.call("ZCARD", sessions_key)
 			if redis.call("EXISTS", state_key) == 1 then
-				if active_count == 0 and idle_grace_ms == 0 then
+				if active_count == 0 and retention_ttl_ms == 0 then
 					redis.call("DEL", state_key)
 					redis.call("DEL", sessions_key)
 				else
-					local expires_at = now + idle_grace_ms
+					local expires_at = now + retention_ttl_ms
+					local retention_expires_at = expires_at
 					if active_count > 0 then
 						local top = redis.call("ZREVRANGE", sessions_key, 0, 0, "WITHSCORES")
 						expires_at = tonumber(top[2]) or now
-					elseif affinity_hash ~= false and affinity_hash ~= nil and affinity_hash ~= "" and idle_grace_ms > 0 then
+						expires_at = expires_at + retention_ttl_ms
+						retention_expires_at = 0
+					elseif affinity_hash ~= false and affinity_hash ~= nil and affinity_hash ~= "" and retention_ttl_ms > 0 then
 						table.insert(idle_affinities, affinity_hash .. "\t" .. tostring(expires_at))
 					end
 					redis.call("HSET", state_key,
 						"active_session_count", active_count,
+						"active_holder_count", active_count,
+						"retention_ttl_ms", retention_ttl_ms,
+						"retention_expires_at_ms", retention_expires_at,
 						"updated_at_ms", now,
 						"expires_at_ms", expires_at)
 					redis.call("PEXPIREAT", state_key, expires_at)

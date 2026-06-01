@@ -409,6 +409,7 @@ type AffinityConfig struct {
 	Mode              string                  `mapstructure:"mode" yaml:"mode" validate:"required"`
 	InitialPlacement  string                  `mapstructure:"initial_placement" yaml:"initial_placement" validate:"required"`
 	ActiveUserPinning ActiveUserPinningConfig `mapstructure:"active_user_pinning" yaml:"active_user_pinning" validate:"required"`
+	BackendRetention  BackendRetentionConfig  `mapstructure:"backend_retention" yaml:"backend_retention" validate:"required"`
 	UserHolds         UserHoldsConfig         `mapstructure:"user_holds" yaml:"user_holds" validate:"required"`
 	LocalCache        LocalCacheConfig        `mapstructure:"local_cache" yaml:"local_cache" validate:"required"`
 }
@@ -432,6 +433,13 @@ type AffinityFailoverConfig struct {
 	AllowOnHardDown        bool `mapstructure:"allow_on_hard_down" yaml:"allow_on_hard_down"`
 	AllowOnHardMaintenance bool `mapstructure:"allow_on_hard_maintenance" yaml:"allow_on_hard_maintenance"`
 	Audit                  bool `mapstructure:"audit" yaml:"audit"`
+}
+
+// BackendRetentionConfig protects concrete backend-node affinity after holders close.
+type BackendRetentionConfig struct {
+	Enabled    bool     `mapstructure:"enabled" yaml:"enabled"`
+	DefaultTTL Duration `mapstructure:"default_ttl" yaml:"default_ttl"`
+	MaxTTL     Duration `mapstructure:"max_ttl" yaml:"max_ttl"`
 }
 
 // UserHoldsConfig bounds operator-set placement holds and local waiters.
@@ -497,6 +505,7 @@ type BackendPoolConfig struct {
 type BackendConfig struct {
 	Protocol       string              `mapstructure:"protocol" yaml:"protocol" validate:"required"`
 	ShardTag       string              `mapstructure:"shard_tag" yaml:"shard_tag"`
+	BackendNode    string              `mapstructure:"backend_node" yaml:"backend_node"`
 	Address        string              `mapstructure:"address" yaml:"address" validate:"required"`
 	Weight         int                 `mapstructure:"weight" yaml:"weight"`
 	MaxConnections int                 `mapstructure:"max_connections" yaml:"max_connections"`

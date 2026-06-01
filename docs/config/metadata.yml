@@ -28,7 +28,7 @@ paths:
     description: Director-owned routing selector, shard default, hash-key, and failover behavior.
   director.affinity.**:
     stability: stable
-    description: Active user affinity, placement holds, pinning, failover, and local-cache behavior.
+    description: Active and retained backend-node affinity, placement holds, pinning, failover, and local-cache behavior.
   director.runtime_overrides.**:
     stability: stable
     description: Operator-controlled runtime override permissions and safety envelopes.
@@ -43,4 +43,4 @@ paths:
     description: Backend pool protocol, selector, and member backend configuration.
   director.backends.**:
     stability: stable
-    description: Backend protocol, shard, transport, authentication, health, and runtime baseline settings.
+    description: Backend protocol, shard, backend-node identity, transport, authentication, health, and runtime baseline settings.

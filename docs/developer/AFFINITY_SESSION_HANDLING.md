@@ -34,13 +34,16 @@ The key identifies an account-level runtime affinity without storing a raw
 username in Redis key names. `KeyBuilder.AffinityHash` hashes the normalized
 tenant and account key as `sha256(tenant + NUL + account_key)`.
 
-The authoritative user-level shard pin is the shard tag in
-`AffinityRecord.ShardTag`. Concrete backend identity for active traffic is
-stored on attached session records and backend reservation state. Operator
-backend pins use a separate per-affinity `backend_pin` hash under the same Redis
-Cluster hash tag. Operator placement holds use a separate per-affinity `hold`
-hash that gates future placement without choosing a shard or backend. The
-user-affinity record itself does not store backend transport details.
+The authoritative user-level binding is the shard tag plus backend node stored
+in `AffinityRecord.ShardTag` and `AffinityRecord.BackendNode`. The shard tag is
+the logical placement and failover boundary; the backend node is the concrete
+mailstore authority that protects mailbox-index consistency across IMAP, LMTP,
+ManageSieve and later POP3. Concrete protocol endpoint identity remains on
+attached session records and backend reservation state. Operator backend pins
+use a separate per-affinity `backend_pin` hash under the same Redis Cluster hash
+tag. Operator placement holds use a separate per-affinity `hold` hash that
+gates future placement without choosing a shard or backend. The user-affinity
+record stores only bounded binding facts, not backend transport details.
 
 `SessionRecord` represents one lease-backed holder under an affinity key. The
 code uses two holder kinds:
@@ -52,12 +55,12 @@ code uses two holder kinds:
 flowchart TB
     A["AffinityKey<br/>tenant + account_key"] --> H["Affinity hash<br/>sha256(tenant NUL account_key)"]
     H --> G["Redis Cluster tag<br/>{aff:hash}"]
-    G --> S["state hash<br/>shard, generation, control, expiry"]
+    G --> S["state hash<br/>shard, backend_node, generation, control, retention"]
     G --> Z["sessions zset<br/>session id -> lease expiry"]
     G --> O["override hash<br/>future move target"]
     G --> P["backend_pin hash<br/>bounded operator backend override"]
     G --> Q["hold hash<br/>bounded placement gate"]
-    G --> K["session hash<br/>protocol, holder_kind, shard, backend attachment"]
+    G --> K["session hash<br/>protocol, holder_kind, shard, backend_node, backend attachment"]
 ```
 
 ## Redis Key Families
@@ -186,20 +189,26 @@ IMAP placement lives in `internal/protocol/imap/placement.go`.
    or backend connect. If the hold clears or expires within `max_wait`, the
    login continues and re-reads runtime state; otherwise the protocol returns a
    temporary failure without opening placement state.
-5. `sessionStore.OpenSession` opens or reuses the Redis affinity lease.
-6. The selected shard is the active affinity shard when present; otherwise it
-   is the routing result shard.
+5. The shared placement service reads active or retained affinity and any
+   scoped backend pin before it selects a backend.
+6. Existing active or retained affinity selects the bound backend node. Without
+   an authoritative binding, initial placement selects a backend in the routed
+   shard and atomically persists that backend node before backend side effects.
 7. A matching backend pin can pass a concrete backend target only when the
-   selected shard already matches the pinned backend's effective shard. It never
-   replaces the requested shard for a new affinity.
-8. Backend selection receives `ActiveAffinity` and the effective shard.
-   Operator backend pins pass a concrete selector target only after protocol,
-   backend pool and active-affinity strategy checks.
+   pin's protocol, backend pool, shard and backend node agree with the current
+   placement request. It never silently changes an active or retained backend
+   node.
+8. Backend selection resolves the requested protocol endpoint inside the bound
+   backend node. Missing protocol entries, unusable node-local entries and
+   backend-node mismatches fail closed unless an explicit audited movement path
+   applies.
 9. Backend capacity is reserved before the selected backend is attached to the
    session.
 10. If backend selection or attach fails after open, the opened session is
    closed as rollback.
 11. Proxy mode heartbeats the Redis lease and closes it when proxying ends.
+   Closing the final holder leaves a retained backend-node binding for the
+   configured backend-retention window.
 
 ```mermaid
 sequenceDiagram
@@ -221,12 +230,15 @@ sequenceDiagram
     Store->>Redis: user_hold_get.lua
     Redis-->>Store: absent or active hold
     Store-->>IMAP: release or temporary failure
-    IMAP->>Store: OpenSession
+    IMAP->>Store: LookupAffinity
+    Store->>Redis: lookup.lua
+    Redis-->>Store: active, retained or absent binding
+    IMAP->>Selector: Select or resolve inside backend_node
+    Selector-->>IMAP: selected backend node and endpoint
+    IMAP->>Store: OpenSession with backend_node
     Store->>Redis: open.lua
     Redis-->>Store: AffinityRecord
-    Store-->>IMAP: active or created shard
-    IMAP->>Selector: Select with ActiveAffinity context
-    Selector-->>IMAP: selected backend
+    Store-->>IMAP: active or retained binding
     IMAP->>Store: ReserveBackendCapacity
     Store->>Redis: backend_reserve.lua
     IMAP->>Store: AttachSelectedBackend
@@ -238,6 +250,7 @@ sequenceDiagram
     end
     Proxy->>Store: CloseSession
     Store->>Redis: close.lua
+    Redis-->>Store: retained binding expiry
 ```
 
 `sessionLeaseLifecycle.Heartbeat` converts heartbeat control actions
@@ -254,6 +267,8 @@ delivery-scoped holder:
 
 - `deliverySessionRecord` sets `HolderKindDelivery` and protocol `lmtp`.
 - The hold uses the same affinity key model as login sessions.
+- Active or retained bindings select the backend node first, then the LMTP
+  endpoint is resolved inside that node.
 - `startDeliveryHeartbeat` refreshes the hold until it is closed.
 - Runtime session reads hide delivery holds by checking `holder_kind`.
 
@@ -269,8 +284,11 @@ The transaction accounts backend capacity through one delivery hold only:
 - `attachSelectedBackend` reserves backend capacity before attach and releases
   the reservation on attach failure.
 - `handleRecipientPlacement` rejects a transaction whose accepted recipients do
-  not agree on one backend identifier.
+  not agree on one backend node and concrete LMTP backend identifier.
 - `closeTransactionHolds` releases all accepted recipient holds.
+  After the final accepted delivery status, `RSET`, `QUIT`, connection close or
+  error, the close leaves the retained backend binding for the configured
+  backend-retention TTL.
 
 ```mermaid
 sequenceDiagram
@@ -285,11 +303,14 @@ sequenceDiagram
     Identity-->>LMTP: canonical account facts
     LMTP->>Routing: Resolve recipient route
     Routing-->>LMTP: complete recipient routing
-    LMTP->>Selector: initial backend selection
-    Selector-->>LMTP: candidate backend
-    LMTP->>Store: OpenSession holder_kind=delivery
+    LMTP->>Store: LookupAffinity
+    Store->>Redis: lookup.lua
+    Redis-->>Store: active, retained or absent binding
+    LMTP->>Selector: select or resolve inside backend_node
+    Selector-->>LMTP: candidate backend node and LMTP endpoint
+    LMTP->>Store: OpenSession holder_kind=delivery backend_node
     Store->>Redis: open.lua
-    LMTP->>Selector: reselect if active affinity changed shard
+    LMTP->>Selector: reselect inside existing backend_node if Redis reports one
     Selector-->>LMTP: selected backend
     alt first accounted hold in transaction
         LMTP->>Store: ReserveBackendCapacity
@@ -305,6 +326,7 @@ sequenceDiagram
     end
     LMTP->>Store: CloseSession
     Store->>Redis: close.lua
+    Redis-->>Store: retained binding expiry
 ```
 
 ## Open, Heartbeat and Close
@@ -313,10 +335,11 @@ sequenceDiagram
 
 - uses Redis server time,
 - removes expired members from the per-affinity sessions zset,
-- creates state when no active state exists,
-- reuses the existing shard when affinity is active,
+- creates state with `shard_tag` and `backend_node` when no active or retained
+  state exists,
+- reuses the existing backend node when affinity is active or retained,
 - applies pending move overrides for future sessions,
-- rejects protocol or shard conflicts for an existing session id,
+- rejects protocol, shard or backend-node conflicts for an existing session id,
 - writes the session hash and updates state/session TTLs.
 
 `heartbeat.lua`:
@@ -332,10 +355,10 @@ sequenceDiagram
 
 - removes the session from the per-affinity zset and deletes the session hash,
 - keeps the affinity state while other active sessions exist,
-- keeps idle affinity state until idle grace expires when no active sessions
-  remain and idle grace is positive,
-- deletes affinity state and sessions zset immediately when no sessions remain
-  and idle grace is zero,
+- keeps retained backend-node affinity until the configured backend-retention
+  TTL expires when no active holders remain,
+- deletes affinity state and sessions zset immediately when no holders remain
+  and retention is explicitly disabled,
 - returns backend reservation metadata so the Go store can release capacity.
 
 ```mermaid
@@ -345,8 +368,9 @@ stateDiagram-v2
     Active --> Active: HeartbeatSession
     Active --> Closing: heartbeat observes kick/drain/move
     Closing --> Closed: CloseSession
-    Active --> Idle: CloseSession leaves no active sessions with idle grace
-    Idle --> [*]: state TTL expires or clear removes inactive affinity
+    Active --> Retained: CloseSession leaves no active holders
+    Retained --> Active: OpenSession reuses backend_node
+    Retained --> [*]: retention TTL expires or clear removes inactive binding
     Active --> Expired: lease passes without close
     Expired --> [*]: ReapSessions repairs state and indexes
 ```
@@ -468,12 +492,17 @@ Runtime session and user lists are cursor-paginated:
   `holder_kind == delivery`.
 
 `LookupAffinity` runs `lookup.lua`, which reads state without refreshing leases
-or key TTLs. `RouteLookupService.Lookup` is a diagnostic path: it resolves
-identity/routing information, optionally reads active affinity, and explains
-backend selection without opening, heartbeating, closing or attaching sessions.
-For LMTP route diagnostics with a recipient and no supplied account key, route
-lookup first tries an existing active affinity for the normalized recipient
-lookup name, then falls back to the configured identity lookup.
+or key TTLs. It can return active, retained, expired or absent backend-binding
+state. `RouteLookupService.Lookup` is a diagnostic path: it resolves
+identity/routing information, optionally reads active or retained affinity, and
+explains backend-node selection without opening, heartbeating, closing or
+attaching sessions. Its bounded source and reason classes distinguish active
+backend binding, retained backend binding, missing protocol entries, unusable
+backend nodes, backend-node mismatches, operator pins, movement overrides,
+initial placement and fail-closed decisions. For LMTP route diagnostics with a
+recipient and no supplied account key, route lookup first tries an existing
+active affinity for the normalized recipient lookup name, then falls back to the
+configured identity lookup.
 
 ## Developer Rules
 
@@ -486,3 +515,6 @@ lookup name, then falls back to the configured identity lookup.
 - Keep new runtime reads cursor-bounded and shard-aware.
 - Do not store raw usernames, session secrets or bearer material in Redis key
   names, logs, metrics labels or operator output.
+- Do not add backend identifiers or backend nodes as metric labels. They may
+  appear only in operator diagnostics where the shared observability policy
+  permits them.

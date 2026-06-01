@@ -30,6 +30,7 @@ const (
 	testClientIP           = "192.0.2.44"
 	testDebugSecret        = "debug-secret"
 	testLogBackendID       = "mailstore-a-imap"
+	testLogBackendNode     = "mailstore-a-node-1"
 	testLogOperationLookup = "lookup"
 	testPrivateKey         = "-----BEGIN PRIVATE KEY-----secret"
 	testProtectedValue     = "/run/secrets/username-hash-salt"
@@ -141,6 +142,10 @@ func TestBackendAndTraceDiagnosticsRemainLogOnly(t *testing.T) {
 		t.Fatal("backend_identifier was accepted as a metric label")
 	}
 
+	if err := ValidateMetricLabels(fieldBackendNode); err == nil {
+		t.Fatal("backend_node was accepted as a metric label")
+	}
+
 	if err := ValidateMetricLabels(fieldTraceID); err == nil {
 		t.Fatal("trace_id was accepted as a metric label")
 	}
@@ -151,11 +156,16 @@ func TestBackendAndTraceDiagnosticsRemainLogOnly(t *testing.T) {
 
 	fields := SanitizeLogFields(map[string]string{
 		fieldBackendIdentifier: testLogBackendID,
+		fieldBackendNode:       testLogBackendNode,
 		fieldTraceID:           "0123456789abcdef0123456789abcdef",
 		fieldSpanID:            "0123456789abcdef",
 	})
 	if fields[fieldBackendIdentifier] != testLogBackendID {
 		t.Fatalf("backend identifier log field = %q", fields[fieldBackendIdentifier])
+	}
+
+	if fields[fieldBackendNode] != testLogBackendNode {
+		t.Fatalf("backend node log field = %q", fields[fieldBackendNode])
 	}
 
 	if fields[fieldTraceID] == "" || fields[fieldSpanID] == "" {

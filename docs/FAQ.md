@@ -185,17 +185,22 @@ $CTL users affinity show "$USER"
 $CTL users sessions "$USER"
 ```
 
-Do not use `users backend-pin` as the cross-shard move primitive. A backend pin
-is same-shard only. Use `users move --to-shard` for the shard transition.
+Do not use `users backend-pin` as the cross-shard or cross-backend-node move
+primitive. A backend pin is only an additional concrete-backend constraint when
+the selected shard and any active or retained backend-node binding already
+match. Use `users move --to-shard` for the shard transition, and let active or
+retained affinity expire or be explicitly cleared before testing a different
+backend node.
 
 ## When do I add a backend pin during a migration?
 
 Add a backend pin only when the user must land on a concrete backend inside the
-already selected shard. This is useful for controlled commissioning, repair or
-validation of one backend.
+already selected shard and compatible backend node. This is useful for
+controlled commissioning, repair or validation of one backend.
 
 For a shard migration, first move the user to the new shard. Then, while the
-hold is still active, optionally pin the user to a backend in that same shard:
+hold is still active and no incompatible backend-node binding remains,
+optionally pin the user to a backend in that same shard and backend node:
 
 ```bash
 $CTL users backend-pin set "$USER" \
@@ -204,10 +209,11 @@ $CTL users backend-pin set "$USER" \
   --reason "pin alice to validated target backend during cutover"
 ```
 
-The target backend must belong to the selected shard for the relevant protocol
-and backend pool. If the user's selected shard is still `mailstore-a`, a pin to
-`mailstore-b-imap` is not a move. It remains diagnostic and does not select the
-cross-shard backend.
+The target backend must belong to the selected shard and compatible backend
+node for the relevant protocol and backend pool. If the user's selected shard is
+still `mailstore-a`, a pin to `mailstore-b-imap` is not a move. If active or
+retained affinity already binds the user to another backend node, the pin is not
+a backend-node move either. These mismatches remain diagnostic and fail closed.
 
 Clear temporary commissioning pins explicitly when they are no longer needed:
 
@@ -223,7 +229,8 @@ $CTL users backend-pin clear "$USER" \
   observed runtime control.
 - `users move`: changes the runtime shard target for future placement.
 - `users backend-pin`: optionally constrains placement to one concrete backend
-  after the selected shard already matches that backend.
+  after the selected shard and active or retained backend-node binding already
+  match that backend.
 - `users hold clear`: removes only the placement hold and wakes waiting
   placement attempts.
 - `users affinity clear`: clears inactive affinity and pending override state.
@@ -251,11 +258,11 @@ progress, set a fresh audited hold before the old one expires.
 
 ## How do I test a new backend before general traffic reaches it?
 
-Keep the backend out of normal weighted placement, then use a same-shard
-backend pin for one controlled test user. A backend pin bypasses only the
-weight-zero placement exclusion for the pinned backend; health, maintenance,
-runtime out, drain, connection limits and protocol or pool mismatches still
-fail closed.
+Keep the backend out of normal weighted placement, then use a same-shard and
+same-backend-node backend pin for one controlled test user. A backend pin
+bypasses only the weight-zero placement exclusion for the pinned backend;
+health, maintenance, runtime out, drain, connection limits, active or retained
+backend-node affinity and protocol or pool mismatches still fail closed.
 
 ```bash
 BACKEND='mailstore-c-imap'

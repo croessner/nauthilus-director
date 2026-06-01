@@ -28,6 +28,7 @@ import (
 
 const (
 	testBackendIdentifier = "mailstore-a-imap"
+	testBackendNode       = "mailstore-a-node-1"
 	testBackendPool       = "imap-default"
 	testBackendShardTag   = "mailstore-a"
 	testBackendHealthOp   = "backend_health"
@@ -85,6 +86,14 @@ func TestMetricPolicyRejectsForbiddenLabelsBeforeRegistrationOrObservation(t *te
 	if err == nil {
 		t.Fatal("metrics runtime accepted a forbidden observation label")
 	}
+
+	err = runtime.metrics.Record(context.Background(), Event{
+		Name:         EventRESTRequest,
+		MetricLabels: MetricLabels{fieldBackendNode: testBackendNode},
+	})
+	if err == nil {
+		t.Fatal("metrics runtime accepted backend_node as an observation label")
+	}
 }
 
 // TestRuntimeCollectorsFollowConfig verifies Go and process collectors are opt-in.
@@ -108,11 +117,12 @@ func TestRuntimeCollectorsFollowConfig(t *testing.T) {
 	}
 }
 
-// TestBackendHealthMetricsDoNotExposeBackendIdentifiers keeps health aggregates bounded.
-func TestBackendHealthMetricsDoNotExposeBackendIdentifiers(t *testing.T) {
+// TestBackendHealthMetricsDoNotExposeBackendDiagnostics keeps health aggregates bounded.
+func TestBackendHealthMetricsDoNotExposeBackendDiagnostics(t *testing.T) {
 	runtime := newMetricsTestRuntime(t, false)
 	event := newMetricEvent(t, EventBackendHealthTransition, map[string]string{
 		fieldBackendIdentifier: testBackendIdentifier,
+		fieldBackendNode:       testBackendNode,
 		testHealthStatusField:  metricStatusHealthy,
 		testPreviousStatus:     testHealthUnhealthy,
 		metricLabelOperation:   testBackendHealthOp,
@@ -135,6 +145,10 @@ func TestBackendHealthMetricsDoNotExposeBackendIdentifiers(t *testing.T) {
 
 	if strings.Contains(body, testBackendIdentifier) {
 		t.Fatalf("backend identifier leaked into metrics:\n%s", body)
+	}
+
+	if strings.Contains(body, testBackendNode) {
+		t.Fatalf("backend node leaked into metrics:\n%s", body)
 	}
 }
 

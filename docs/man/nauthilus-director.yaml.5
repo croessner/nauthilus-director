@@ -45,8 +45,8 @@ backend-pool bindings.
 Selector defaults, hash inputs, default shard and failover policy.
 .TP
 .B director.affinity
-Active user pinning, affinity key construction, release timing, failover and
-local cache behavior.
+Active user backend-node pinning, retained backend binding, affinity key
+construction, release timing, failover and local cache behavior.
 .TP
 .B director.runtime_overrides
 Runtime control permissions for backend and user operations.
@@ -61,8 +61,9 @@ Default maintenance mode, drain timing, hard-kill grace and audit behavior.
 Backend pool protocol, selector and backend membership.
 .TP
 .B director.backends
-Backend protocol, shard, address, weight, max connections, maintenance baseline,
-transport security, authentication and health checks.
+Backend protocol, shard, backend-node identity, address, weight, max
+connections, maintenance baseline, transport security, authentication and
+health checks.
 .SH RUNTIME STATE AND DEVELOPMENT RESET
 Redis runtime keys use
 .B storage.redis.schema_version
@@ -123,11 +124,21 @@ LMTP backend entries use
 .B director.backends.<name>.protocol: lmtp
 and should share
 .B shard_tag
-values with other protocol backends that represent the same mail shard.
+and
+.B backend_node
+values with other protocol backends that represent the same concrete mailstore
+authority.
 Backend TLS, SASL, OAuth bearer, credential replay, master-user and health-check
 settings use the shared backend config paths.
 BDAT forwarding is available only when the configured frontend capability and
 backend capability boundary allow CHUNKING.
+After a successful delivery or transaction close, LMTP retains the selected
+backend node under
+.B director.affinity.backend_retention
+for
+.B 15m
+by default so immediate mailbox access does not move to another backend node
+while the backend finishes index or storage synchronization.
 .PP
 LMTP route lookup through
 .BR nauthilus-directorctl (1)
@@ -142,7 +153,8 @@ LMTP logs, traces and Prometheus metrics expose operation, result, bounded
 reason class, backend pool, shard tag, mechanism, transport, TLS mode and status
 class where applicable.
 Metric labels remain low-cardinality and do not include usernames, recipients,
-client addresses, session IDs, backend identifiers, raw errors or secrets.
+client addresses, session IDs, backend identifiers, backend nodes, raw errors or
+secrets.
 .PP
 Observable LMTP output must not contain raw recipients, envelope senders,
 message IDs, subjects, DATA or BDAT content, peer passwords, bearer tokens,

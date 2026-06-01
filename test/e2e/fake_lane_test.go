@@ -51,6 +51,7 @@ import (
 	"github.com/croessner/nauthilus-director/internal/listener"
 	"github.com/croessner/nauthilus-director/internal/nauthilus"
 	"github.com/croessner/nauthilus-director/internal/observability"
+	"github.com/croessner/nauthilus-director/internal/placement"
 	"github.com/croessner/nauthilus-director/internal/protocol/imap"
 	"github.com/croessner/nauthilus-director/internal/proxy"
 	"github.com/croessner/nauthilus-director/internal/rest"
@@ -944,6 +945,12 @@ func TestRuntimeControlPublicBoundaries(t *testing.T) {
 	_ = weightedClient.Close()
 	waitForSessionIDs(t, store, 0)
 
+	retained := lookupRoute(t, control.URL(), e2eAccount, true)
+	if retained.SelectedBackend != otherID || retained.Source != "retained_backend_binding" {
+		t.Fatalf("retained route selected %q source=%q, want retained backend %q", retained.SelectedBackend, retained.Source, otherID)
+	}
+	deleteAccepted(t, clearPath, generated.RuntimeReasonRequest{Reason: "clear retained weighted binding"})
+
 	runDirectorctl(t, ctl, control.URL(), "backends", "weight", selectedID, "--weight", "100", "--reason", "restore weight")
 	runDirectorctl(t, ctl, control.URL(), "backends", "out", otherID, "--reason", "rest cli parity")
 	parity := lookupRoute(t, control.URL(), e2eAccount, false)
@@ -1621,9 +1628,22 @@ func startDirector(t *testing.T, options directorOptions) directorInstance {
 		store = newMemorySessionStore()
 	}
 	resolver := mustRoutingResolver(t)
+	registry := mustBackendRegistry(t, cfg)
 	selector := options.BackendSelector
 	if selector == nil {
-		selector = mustBackendSelector(t, cfg)
+		selector = mustBackendSelectorWithRegistry(t, registry)
+	}
+	placementService := placement.SessionPlacer(nil)
+	if !options.UsePlacementStubs {
+		placementStore, ok := store.(placement.StateStore)
+		if !ok {
+			t.Fatalf("session store %T does not implement placement state", store)
+		}
+		service, err := placement.NewService(registry, selector, placementStore)
+		if err != nil {
+			t.Fatalf("NewPlacementService: %v", err)
+		}
+		placementService = service
 	}
 	proxyRunner := proxy.Runner(proxy.NewPipe())
 	if options.UseProxyRunnerStub {
@@ -1669,7 +1689,7 @@ func startDirector(t *testing.T, options directorOptions) directorInstance {
 				Authenticator:          listenerOptions.Authenticator,
 				RoutingResolver:        resolver,
 				SessionStore:           store,
-				BackendSelector:        selector,
+				PlacementService:       placementService,
 				BackendConnector:       imap.NewTCPBackendConnector(nil),
 				ProxyRunner:            proxyRunner,
 				LocalSessions:          options.LocalSessions,
@@ -1678,7 +1698,7 @@ func startDirector(t *testing.T, options directorOptions) directorInstance {
 			if options.UsePlacementStubs {
 				sessionConfig.RoutingResolver = nil
 				sessionConfig.SessionStore = nil
-				sessionConfig.BackendSelector = nil
+				sessionConfig.PlacementService = nil
 			}
 
 			return imap.NewHandler(sessionConfig)
@@ -1836,6 +1856,26 @@ func mustBackendSelector(t *testing.T, cfg config.Config) backend.Selector {
 	if err != nil {
 		t.Fatalf("NewStaticRegistry: %v", err)
 	}
+
+	return mustBackendSelectorWithRegistry(t, registry)
+}
+
+// mustBackendRegistry creates the production static backend registry for E2E.
+func mustBackendRegistry(t *testing.T, cfg config.Config) backend.Registry {
+	t.Helper()
+
+	registry, err := backend.NewStaticRegistry(cfg.Director)
+	if err != nil {
+		t.Fatalf("NewStaticRegistry: %v", err)
+	}
+
+	return registry
+}
+
+// mustBackendSelectorWithRegistry creates the production static selector over a registry.
+func mustBackendSelectorWithRegistry(t *testing.T, registry backend.Registry) backend.Selector {
+	t.Helper()
+
 	selector, err := backend.NewStaticSelector(registry, backend.SelectionPolicy{SoftAllowsActivePins: true})
 	if err != nil {
 		t.Fatalf("NewStaticSelector: %v", err)
@@ -3472,16 +3512,53 @@ func (s *memorySessionStore) OpenSession(_ context.Context, record state.Session
 
 	current, ok := s.records[record.Key]
 	if !ok {
-		current = state.AffinityRecord{Key: record.Key, ShardTag: record.ShardTag, Status: "created", Present: true}
+		current = state.AffinityRecord{
+			Key:           record.Key,
+			ShardTag:      record.ShardTag,
+			BackendNode:   record.BackendNode,
+			Status:        "created",
+			Present:       true,
+			BindingStatus: state.BindingStatusActive,
+		}
 		s.records[record.Key] = current
 	} else {
 		current.Status = "reused"
+		current.Present = true
+		current.BindingStatus = state.BindingStatusActive
 	}
 	s.counts[record.Key]++
 	current.ActiveSessionCount = s.counts[record.Key]
+	current.ActiveHolderCount = s.counts[record.Key]
 	s.records[record.Key] = current
 
 	return current, nil
+}
+
+// LookupAffinity returns the current in-memory backend binding without mutation.
+func (s *memorySessionStore) LookupAffinity(_ context.Context, key state.AffinityKey) (state.AffinityRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	current, ok := s.records[key]
+	if !ok {
+		return state.AffinityRecord{Key: key, BindingStatus: state.BindingStatusNone}, nil
+	}
+	current.Present = true
+	if current.BindingStatus == "" {
+		current.BindingStatus = state.BindingStatusActive
+	}
+	current.ActiveSessionCount = s.counts[key]
+	current.ActiveHolderCount = s.counts[key]
+
+	return current, nil
+}
+
+// GetUserBackendPin returns an absent backend pin for the in-memory fake lane.
+func (s *memorySessionStore) GetUserBackendPin(
+	_ context.Context,
+	request state.UserBackendPinGetRequest,
+) (state.UserBackendPinRecord, error) {
+	return state.UserBackendPinRecord{Key: request.Key}, nil
 }
 
 // ReserveBackendCapacity records one in-memory backend reservation.

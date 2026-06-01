@@ -429,6 +429,7 @@ director:
     mailstore-a-imap:
       protocol: imap
       shard_tag: mailstore-a
+      backend_node: mailstore-a-node
       address: "mailstore-a:31143"
       weight: 100
       max_connections: 1000
@@ -467,6 +468,7 @@ director:
     mailstore-b-imap:
       protocol: imap
       shard_tag: mailstore-b
+      backend_node: mailstore-b-node
       address: "mailstore-b:31143"
       weight: 100
       max_connections: 1000
@@ -499,6 +501,7 @@ director:
     mailstore-c-imap:
       protocol: imap
       shard_tag: mailstore-c
+      backend_node: mailstore-c-node
       address: "mailstore-c:31143"
       weight: 100
       max_connections: 1000
@@ -553,6 +556,7 @@ director:
     stalwart-a-imap:
       protocol: imap
       shard_tag: stalwart
+      backend_node: stalwart-a-node
       address: "stalwart-a:3993"
       weight: 100
       max_connections: 1000
@@ -593,6 +597,7 @@ director:
     stalwart-b-imap:
       protocol: imap
       shard_tag: stalwart
+      backend_node: stalwart-b-node
       address: "stalwart-b:3993"
       weight: 100
       max_connections: 1000
@@ -628,6 +633,7 @@ director:
     mailstore-a-lmtp:
       protocol: lmtp
       shard_tag: mailstore-a
+      backend_node: mailstore-a-node
       address: "mailstore-a:31024"
       weight: 100
       max_connections: 1000
@@ -657,6 +663,7 @@ director:
     mailstore-b-lmtp:
       protocol: lmtp
       shard_tag: mailstore-b
+      backend_node: mailstore-b-node
       address: "mailstore-b:31024"
       weight: 100
       max_connections: 1000
@@ -683,6 +690,7 @@ director:
     mailstore-c-lmtp:
       protocol: lmtp
       shard_tag: mailstore-c
+      backend_node: mailstore-c-node
       address: "mailstore-c:31024"
       weight: 100
       max_connections: 1000
@@ -737,6 +745,7 @@ director:
     stalwart-a-lmtp:
       protocol: lmtp
       shard_tag: stalwart
+      backend_node: stalwart-a-node
       address: "stalwart-a:3024"
       weight: 100
       max_connections: 1000
@@ -772,6 +781,7 @@ director:
     stalwart-b-lmtp:
       protocol: lmtp
       shard_tag: stalwart
+      backend_node: stalwart-b-node
       address: "stalwart-b:3024"
       weight: 100
       max_connections: 1000

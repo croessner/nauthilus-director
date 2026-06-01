@@ -36,6 +36,18 @@ const (
 	routeLookupBackendPinExcluded     = "backend_pin_excluded"
 	routeLookupBackendPinMismatch     = "backend_pin_mismatch"
 	routeLookupBackendPinReadFailed   = "backend_pin_read_failed"
+	routeLookupBindingSourceNone      = "none"
+	routeLookupReasonBindingMissing   = "backend_node_missing_protocol"
+	routeLookupReasonBindingMismatch  = "backend_node_mismatch"
+	routeLookupReasonBindingUnusable  = "backend_node_unusable"
+	routeLookupReasonOK               = "ok"
+	routeLookupReasonOther            = "other"
+	routeLookupStatusRetained         = "retained"
+	routeLookupSourceActiveAffinity   = "active_affinity"
+	routeLookupSourceFailClosed       = "fail_closed"
+	routeLookupSourceInitialPlacement = "initial_placement"
+	routeLookupSourceMovementOverride = "movement_override"
+	routeLookupSourceRetainedBinding  = "retained_backend_binding"
 	routeLookupIdentityActiveAffinity = "active_affinity"
 	routeLookupIdentityCallerSupplied = "caller_supplied"
 	routeLookupIdentityNauthilus      = "nauthilus_lookup"
@@ -85,13 +97,22 @@ type RouteLookupRoutingState struct {
 
 // RouteLookupAffinityState describes read-only active-affinity context.
 type RouteLookupAffinityState struct {
-	Requested      bool
-	Present        bool
-	Active         bool
-	ShardTag       string
-	BackendID      string
-	Generation     string
-	ActiveSessions int
+	Requested          bool
+	Present            bool
+	Active             bool
+	Retained           bool
+	ShardTag           string
+	BackendNode        string
+	BackendID          string
+	Generation         string
+	BindingGeneration  string
+	BindingStatus      string
+	BindingSource      string
+	ActiveSessions     int
+	ActiveHolders      int
+	RetentionExpiresAt time.Time
+	MoveTargetShard    string
+	MoveStrategy       string
 }
 
 // RouteLookupBackendPinState describes read-only operator backend-pin context.
@@ -121,6 +142,7 @@ type RouteLookupBackendState struct {
 	Identifier        string
 	Protocol          string
 	BackendPool       string
+	BackendNode       string
 	EffectiveShard    string
 	Generation        string
 	Eligible          bool
@@ -158,6 +180,11 @@ type RouteLookupBackendPinReader interface {
 	GetUserBackendPin(ctx context.Context, request state.UserBackendPinGetRequest) (state.UserBackendPinRecord, error)
 }
 
+// RouteLookupBackendNodeSelector resolves bound backend nodes without mutating placement state.
+type RouteLookupBackendNodeSelector interface {
+	SelectInBackendNode(context.Context, backend.NodeSelectionRequest) (backend.SelectionResult, error)
+}
+
 // RouteLookupUserHoldReader reads placement-hold state without mutating or waiting.
 type RouteLookupUserHoldReader interface {
 	CheckUserHold(ctx context.Context, request state.UserHoldCheckRequest) (state.UserHoldRecord, error)
@@ -188,6 +215,7 @@ type RouteLookupResponse struct {
 	Effects         RouteLookupEffects
 	Identity        RouteLookupIdentityState
 	SelectedBackend string
+	Source          string
 	FailClosed      bool
 	ReasonClass     string
 }
@@ -196,6 +224,7 @@ type RouteLookupResponse struct {
 type RouteLookupServiceOptions struct {
 	Resolver         routing.RoutingResolver
 	Selector         backend.Selector
+	BackendNode      RouteLookupBackendNodeSelector
 	BackendRead      *BackendReadService
 	AffinityRead     state.AffinityStore
 	BackendPinRead   RouteLookupBackendPinReader
@@ -212,6 +241,7 @@ type RouteLookupServiceOptions struct {
 type RouteLookupService struct {
 	resolver         routing.RoutingResolver
 	selector         backend.Selector
+	backendNode      RouteLookupBackendNodeSelector
 	backendRead      *BackendReadService
 	affinityRead     state.AffinityStore
 	backendPinRead   RouteLookupBackendPinReader
@@ -238,9 +268,15 @@ func NewRouteLookupService(options RouteLookupServiceOptions) (*RouteLookupServi
 		options.DefaultTenant = defaultTenant
 	}
 
+	backendNode := options.BackendNode
+	if backendNode == nil {
+		backendNode, _ = options.Selector.(RouteLookupBackendNodeSelector)
+	}
+
 	return &RouteLookupService{
 		resolver:         options.Resolver,
 		selector:         options.Selector,
+		backendNode:      backendNode,
 		backendRead:      options.BackendRead,
 		affinityRead:     options.AffinityRead,
 		backendPinRead:   options.BackendPinRead,
@@ -303,7 +339,7 @@ func (s *RouteLookupService) Lookup(ctx context.Context, request RouteLookupRequ
 		ClientIP:          request.ClientIP,
 	})
 	if err != nil {
-		s.recordRouteLookup(ctx, request, runtimeObservationResultFailure, "other", RouteLookupResponse{}, time.Since(started))
+		s.recordRouteLookup(ctx, request, runtimeObservationResultFailure, routeLookupReasonOther, RouteLookupResponse{}, time.Since(started))
 
 		return RouteLookupResponse{}, err
 	}
@@ -345,29 +381,30 @@ func (s *RouteLookupService) Lookup(ctx context.Context, request RouteLookupRequ
 	}
 
 	affinity := s.lookupAffinity(ctx, request, routingResult)
-	selectionRequest := routeLookupSelectionRequest(request, routingResult, affinity, backendPin)
-	explanation, err := s.explainSelection(ctx, selectionRequest)
+	selectionRequest, explanation, source, err := s.explainRouteSelection(ctx, request, routingResult, affinity, backendPin)
 
-	response := routeLookupResponse(routingResult, affinity, backendPin, userHold, explanation, request, selectionRequest, usedDefaultShard)
+	response := routeLookupResponse(routingResult, affinity, backendPin, userHold, explanation, request, selectionRequest, usedDefaultShard, source)
 	response.Identity = identity
-	response.BackendPin = routeLookupBackendPinOutcome(response.BackendPin, explanation, selectionRequest, err)
+	response.BackendPin = routeLookupBackendPinOutcome(response.BackendPin, explanation, selectionRequest, affinity, err)
 
 	if err != nil {
 		if backend.IsErrorKind(err, backend.ErrorKindNoBackend) {
 			response.FailClosed = true
-			response.ReasonClass = string(backend.ErrorKindNoBackend)
+			response.Source = routeLookupSourceFailClosed
+			response.ReasonClass = routeLookupFailClosedReason(response, affinity)
 			s.recordRouteLookup(ctx, request, runtimeObservationResultOK, response.ReasonClass, response, time.Since(started))
 
 			return response, nil
 		}
 
-		s.recordRouteLookup(ctx, request, runtimeObservationResultFailure, "other", response, time.Since(started))
+		s.recordRouteLookup(ctx, request, runtimeObservationResultFailure, routeLookupReasonOther, response, time.Since(started))
 
 		return RouteLookupResponse{}, err
 	}
 
 	response.SelectedBackend = explanation.Result.Backend.Identifier
-	response.ReasonClass = explanation.Result.Reason
+	response.Source = routeLookupSuccessSource(source, explanation.Result)
+	response.ReasonClass = routeLookupSuccessReasonClass(response.Source, explanation.Result)
 	response.Routing.RoutingGeneration = firstNonEmpty(explanation.Result.Generation, routingResult.RoutingGeneration)
 	response.Routing.EffectiveShard = explanation.Result.EffectiveBackend.EffectiveShardTag
 	response.Effects = response.Effects.Merge(NewRouteLookupBackendState(explanation.Result.EffectiveBackend, selectionRequest.ActiveAffinity).Effects())
@@ -384,6 +421,7 @@ func NewRouteLookupBackendState(state backend.EffectiveBackendState, activeAffin
 		Identifier:        state.Identifier,
 		Protocol:          state.Protocol,
 		BackendPool:       state.BackendPool,
+		BackendNode:       state.Backend.BackendNode,
 		EffectiveShard:    state.EffectiveShardTag,
 		Generation:        state.Generation,
 		Eligible:          state.Eligible(activeAffinity),
@@ -663,8 +701,70 @@ func (s *RouteLookupService) explainSelection(ctx context.Context, request backe
 	return explanation, err
 }
 
+// explainRouteSelection mirrors placement selection without opening holders or reservations.
+func (s *RouteLookupService) explainRouteSelection(
+	ctx context.Context,
+	request RouteLookupRequest,
+	result routing.RoutingResult,
+	affinity RouteLookupAffinityState,
+	backendPin RouteLookupBackendPinState,
+) (backend.SelectionRequest, backend.SelectionExplanation, string, error) {
+	selectionRequest := routeLookupSelectionRequest(request, result, affinity, backendPin)
+
+	if routeLookupReusableBinding(affinity) && routeLookupMovementOverrideShard(affinity) == "" && s.backendNode != nil {
+		return s.explainBoundBackendSelection(ctx, request, affinity, backendPin, selectionRequest)
+	}
+
+	explanation, err := s.explainSelection(ctx, selectionRequest)
+	source := routeLookupInitialSelectionSource(affinity, explanation)
+
+	return selectionRequest, explanation, source, err
+}
+
+// explainBoundBackendSelection resolves a retained or active backend node read-only.
+func (s *RouteLookupService) explainBoundBackendSelection(
+	ctx context.Context,
+	request RouteLookupRequest,
+	affinity RouteLookupAffinityState,
+	backendPin RouteLookupBackendPinState,
+	selectionRequest backend.SelectionRequest,
+) (backend.SelectionRequest, backend.SelectionExplanation, string, error) {
+	operatorBackend := routeLookupBoundOperatorBackendIdentifier(request, affinity, backendPin)
+	selectionRequest.ActiveAffinity = true
+	selectionRequest.PinnedBackendIdentifier = strings.TrimSpace(affinity.BackendID)
+	selectionRequest.OperatorBackendIdentifier = operatorBackend
+
+	result, err := s.backendNode.SelectInBackendNode(ctx, backend.NodeSelectionRequest{
+		AccountKey:                selectionRequest.AccountKey,
+		Tenant:                    selectionRequest.Tenant,
+		ShardTag:                  affinity.ShardTag,
+		BackendNode:               affinity.BackendNode,
+		Protocol:                  selectionRequest.Protocol,
+		BackendPool:               selectionRequest.BackendPool,
+		OperatorBackendIdentifier: operatorBackend,
+	})
+
+	explanation := backend.SelectionExplanation{
+		Request: selectionRequest,
+		Result:  result,
+	}
+	if result.EffectiveBackend.Identifier != "" {
+		explanation.EffectiveBackends = []backend.EffectiveBackendState{result.EffectiveBackend}
+	} else {
+		explanation.EffectiveBackends = s.lookupBackends(ctx, selectionRequest)
+	}
+
+	source := routeLookupBindingSelectionSource(affinity, result)
+
+	return selectionRequest, explanation, source, err
+}
+
 // lookupBackends returns safe candidate summaries when only a simple selector is available.
 func (s *RouteLookupService) lookupBackends(ctx context.Context, request backend.SelectionRequest) []backend.EffectiveBackendState {
+	if s == nil || s.backendRead == nil {
+		return nil
+	}
+
 	states, err := s.backendRead.ListBackends(ctx)
 	if err != nil {
 		return nil
@@ -690,10 +790,13 @@ func (s *RouteLookupService) lookupBackends(ctx context.Context, request backend
 	return backends
 }
 
-// lookupAffinity optionally reads active affinity state without refreshing leases.
+// lookupAffinity reads backend binding state without refreshing leases.
 func (s *RouteLookupService) lookupAffinity(ctx context.Context, request RouteLookupRequest, result routing.RoutingResult) RouteLookupAffinityState {
-	affinity := RouteLookupAffinityState{Requested: request.IncludeAffinity}
-	if !request.IncludeAffinity || s.affinityRead == nil {
+	affinity := RouteLookupAffinityState{
+		Requested:     request.IncludeAffinity,
+		BindingSource: routeLookupBindingSourceNone,
+	}
+	if s.affinityRead == nil {
 		return affinity
 	}
 
@@ -706,11 +809,20 @@ func (s *RouteLookupService) lookupAffinity(ctx context.Context, request RouteLo
 	}
 
 	affinity.Present = record.Present
-	affinity.Active = routeLookupAffinityActive(result, record)
+	affinity.Active = routeLookupAffinityActive(record)
+	affinity.Retained = routeLookupAffinityRetained(record)
 	affinity.ShardTag = strings.TrimSpace(record.ShardTag)
+	affinity.BackendNode = strings.TrimSpace(record.BackendNode)
 	affinity.BackendID = strings.TrimSpace(record.BackendIdentifier)
 	affinity.Generation = strings.TrimSpace(record.Generation)
+	affinity.BindingGeneration = strings.TrimSpace(record.BindingGeneration)
+	affinity.BindingStatus = strings.TrimSpace(string(record.BindingStatus))
+	affinity.BindingSource = routeLookupAffinityBindingSource(record)
 	affinity.ActiveSessions = record.ActiveSessionCount
+	affinity.ActiveHolders = record.ActiveHolderCount
+	affinity.RetentionExpiresAt = record.RetentionExpiresAt
+	affinity.MoveTargetShard = strings.TrimSpace(record.MoveTargetShard)
+	affinity.MoveStrategy = strings.TrimSpace(record.MoveStrategy)
 
 	return affinity
 }
@@ -786,7 +898,7 @@ func routeLookupSelectionRequest(
 		BackendPool:             request.BackendPool,
 		ActiveAffinity:          affinity.Active,
 		PinnedBackendIdentifier: affinity.BackendID,
-		OperatorBackendIdentifier: routeLookupOperatorBackendIdentifier(
+		OperatorBackendIdentifier: routeLookupInitialOperatorBackendIdentifier(
 			request,
 			affinity,
 			backendPin,
@@ -867,16 +979,20 @@ func userHoldRemaining(record state.UserHoldRecord) time.Duration {
 
 // routeLookupSelectionShard mirrors placement shard choice without opening a session.
 func routeLookupSelectionShard(result routing.RoutingResult, affinity RouteLookupAffinityState) string {
+	if targetShard := routeLookupMovementOverrideShard(affinity); targetShard != "" {
+		return targetShard
+	}
+
 	shardTag := strings.TrimSpace(result.ShardTag)
-	if affinity.ShardTag != "" {
+	if routeLookupReusableBinding(affinity) || affinity.Active || affinity.Retained {
 		shardTag = affinity.ShardTag
 	}
 
 	return shardTag
 }
 
-// routeLookupOperatorBackendIdentifier returns the explicit selector target if applicable.
-func routeLookupOperatorBackendIdentifier(
+// routeLookupInitialOperatorBackendIdentifier returns an unbound explicit selector target.
+func routeLookupInitialOperatorBackendIdentifier(
 	request RouteLookupRequest,
 	affinity RouteLookupAffinityState,
 	backendPin RouteLookupBackendPinState,
@@ -901,6 +1017,27 @@ func routeLookupOperatorBackendIdentifier(
 	return strings.TrimSpace(backendPin.BackendID)
 }
 
+// routeLookupBoundOperatorBackendIdentifier returns a bound-node explicit target.
+func routeLookupBoundOperatorBackendIdentifier(
+	request RouteLookupRequest,
+	affinity RouteLookupAffinityState,
+	backendPin RouteLookupBackendPinState,
+) string {
+	if affinity.Active {
+		return ""
+	}
+
+	if !routeLookupBackendPinMatchesScope(backendPin, request.Protocol, request.BackendPool) {
+		return ""
+	}
+
+	if strings.TrimSpace(backendPin.EffectiveShard) != strings.TrimSpace(affinity.ShardTag) {
+		return ""
+	}
+
+	return strings.TrimSpace(backendPin.BackendID)
+}
+
 // routeLookupBackendPinMatchesScope checks protocol and backend-pool scoping.
 func routeLookupBackendPinMatchesScope(pin RouteLookupBackendPinState, protocol string, backendPool string) bool {
 	return pin.Present &&
@@ -915,6 +1052,7 @@ func routeLookupBackendPinOutcome(
 	pin RouteLookupBackendPinState,
 	explanation backend.SelectionExplanation,
 	selectionRequest backend.SelectionRequest,
+	affinity RouteLookupAffinityState,
 	selectionErr error,
 ) RouteLookupBackendPinState {
 	if !pin.Present {
@@ -931,7 +1069,7 @@ func routeLookupBackendPinOutcome(
 
 	if strings.TrimSpace(selectionRequest.OperatorBackendIdentifier) == "" {
 		pin.ReasonClass = routeLookupBackendPinMismatch
-		if selectionRequest.ActiveAffinity || strings.TrimSpace(selectionRequest.PinnedBackendIdentifier) != "" {
+		if routeLookupReusableBinding(affinity) || selectionRequest.ActiveAffinity || strings.TrimSpace(selectionRequest.PinnedBackendIdentifier) != "" {
 			pin.ReasonClass = routeLookupIdentityActiveAffinity
 		}
 
@@ -941,6 +1079,12 @@ func routeLookupBackendPinOutcome(
 	if selectionErr == nil && explanation.Result.Reason == routeLookupReasonOperatorPin {
 		pin.Applied = true
 		pin.ReasonClass = routeLookupBackendPinApplied
+
+		return pin
+	}
+
+	if routeLookupReusableBinding(affinity) && selectionErr != nil && backend.IsErrorKind(selectionErr, backend.ErrorKindNoBackend) {
+		pin.ReasonClass = routeLookupReasonBindingMismatch
 
 		return pin
 	}
@@ -985,6 +1129,7 @@ func routeLookupResponse(
 	request RouteLookupRequest,
 	selectionRequest backend.SelectionRequest,
 	usedDefaultShard bool,
+	source string,
 ) RouteLookupResponse {
 	backends, effects := routeLookupBackends(explanation.EffectiveBackends, selectionRequest.ActiveAffinity)
 
@@ -1003,6 +1148,7 @@ func routeLookupResponse(
 		UserHold:   userHold,
 		Backends:   backends,
 		Effects:    effects.Merge(userHold.Effects()),
+		Source:     source,
 	}
 }
 
@@ -1022,14 +1168,153 @@ func routeLookupBackends(states []backend.EffectiveBackendState, activeAffinity 
 	return backends, effects
 }
 
-// routeLookupAffinityActive mirrors active pin semantics without mutating state.
-func routeLookupAffinityActive(result routing.RoutingResult, record state.AffinityRecord) bool {
-	switch record.Status {
-	case "created", "":
-		return strings.TrimSpace(record.ShardTag) != "" && strings.TrimSpace(record.ShardTag) != strings.TrimSpace(result.ShardTag)
-	default:
-		return record.Present && record.ActiveSessionCount > 0
+// routeLookupAffinityActive reports whether a binding is protected by live holders.
+func routeLookupAffinityActive(record state.AffinityRecord) bool {
+	return record.Present &&
+		(record.BindingStatus == state.BindingStatusActive ||
+			record.ActiveHolderCount > 0 ||
+			record.ActiveSessionCount > 0)
+}
+
+// routeLookupAffinityRetained reports whether a zero-holder retained binding is authoritative.
+func routeLookupAffinityRetained(record state.AffinityRecord) bool {
+	if !record.Present {
+		return false
 	}
+
+	if record.BindingStatus != state.BindingStatusRetained && strings.TrimSpace(record.Status) != routeLookupStatusRetained {
+		return false
+	}
+
+	if record.RetentionExpiresAt.IsZero() || record.ServerTime.IsZero() {
+		return true
+	}
+
+	return record.RetentionExpiresAt.After(record.ServerTime)
+}
+
+// routeLookupAffinityBindingSource maps state binding status to bounded diagnostics.
+func routeLookupAffinityBindingSource(record state.AffinityRecord) string {
+	switch {
+	case routeLookupAffinityActive(record):
+		return routeLookupSourceActiveAffinity
+	case routeLookupAffinityRetained(record):
+		return routeLookupSourceRetainedBinding
+	default:
+		return routeLookupBindingSourceNone
+	}
+}
+
+// routeLookupReusableBinding reports whether backend-node affinity constrains lookup.
+func routeLookupReusableBinding(affinity RouteLookupAffinityState) bool {
+	return affinity.Present &&
+		strings.TrimSpace(affinity.BackendNode) != "" &&
+		(affinity.Active || affinity.Retained || affinity.BindingStatus == string(state.BindingStatusBackendNodeMismatch))
+}
+
+// routeLookupMovementOverrideShard mirrors user movement without mutating runtime state.
+func routeLookupMovementOverrideShard(affinity RouteLookupAffinityState) string {
+	targetShard := strings.TrimSpace(affinity.MoveTargetShard)
+	if targetShard == "" {
+		return ""
+	}
+
+	switch strings.TrimSpace(affinity.MoveStrategy) {
+	case string(MoveStrategyDrainExisting):
+		return targetShard
+	case string(MoveStrategyNewSessionsOnly), string(MoveStrategyKickExisting):
+		if affinity.ActiveHolders == 0 && affinity.ActiveSessions == 0 {
+			return targetShard
+		}
+	}
+
+	return ""
+}
+
+// routeLookupInitialSelectionSource classifies unbound selector outcomes.
+func routeLookupInitialSelectionSource(affinity RouteLookupAffinityState, explanation backend.SelectionExplanation) string {
+	if explanation.Result.Reason == routeLookupReasonOperatorPin {
+		return routeLookupReasonOperatorPin
+	}
+
+	if routeLookupMovementOverrideShard(affinity) != "" {
+		return routeLookupSourceMovementOverride
+	}
+
+	switch strings.TrimSpace(explanation.Result.Reason) {
+	case routeLookupSourceActiveAffinity, "active_affinity_pin", backend.SelectionReasonBackendBinding:
+		return routeLookupSourceActiveAffinity
+	case routeLookupSourceInitialPlacement:
+		return routeLookupSourceInitialPlacement
+	case "":
+		return routeLookupSourceInitialPlacement
+	default:
+		return explanation.Result.Reason
+	}
+}
+
+// routeLookupBindingSelectionSource classifies bound backend-node selection.
+func routeLookupBindingSelectionSource(affinity RouteLookupAffinityState, result backend.SelectionResult) string {
+	if result.Reason == backend.SelectionReasonBindingInvalidatedHardDown {
+		return backend.SelectionReasonBindingInvalidatedHardDown
+	}
+
+	if affinity.Retained {
+		return routeLookupSourceRetainedBinding
+	}
+
+	return routeLookupSourceActiveAffinity
+}
+
+// routeLookupSuccessSource normalizes selected backend sources for public diagnostics.
+func routeLookupSuccessSource(source string, result backend.SelectionResult) string {
+	if strings.TrimSpace(source) != "" {
+		return source
+	}
+
+	if result.Reason == "" {
+		return routeLookupSourceInitialPlacement
+	}
+
+	return result.Reason
+}
+
+// routeLookupSuccessReasonClass maps successful sources into bounded reasons.
+func routeLookupSuccessReasonClass(source string, result backend.SelectionResult) string {
+	reason := observability.BackendBindingReasonClass(source)
+	if reason != routeLookupReasonOK && reason != routeLookupReasonOther {
+		return reason
+	}
+
+	return observability.BackendBindingReasonClass(result.Reason)
+}
+
+// routeLookupFailClosedReason returns a bounded fail-closed reason class.
+func routeLookupFailClosedReason(response RouteLookupResponse, affinity RouteLookupAffinityState) string {
+	if !routeLookupReusableBinding(affinity) {
+		return string(backend.ErrorKindNoBackend)
+	}
+
+	if routeLookupBoundBackendMissing(response.Backends, affinity.BackendNode) {
+		return routeLookupReasonBindingMissing
+	}
+
+	if response.BackendPin.Present && strings.TrimSpace(response.BackendPin.ReasonClass) == routeLookupReasonBindingMismatch {
+		return routeLookupReasonBindingMismatch
+	}
+
+	return routeLookupReasonBindingUnusable
+}
+
+// routeLookupBoundBackendMissing reports whether no same-node protocol endpoint was visible.
+func routeLookupBoundBackendMissing(backends []RouteLookupBackendState, backendNode string) bool {
+	for _, candidate := range backends {
+		if strings.TrimSpace(candidate.BackendNode) == strings.TrimSpace(backendNode) {
+			return false
+		}
+	}
+
+	return true
 }
 
 // withDefaultRouteShard applies the immutable shard fallback used by placement.
@@ -1111,6 +1396,7 @@ func (s *RouteLookupService) recordRouteLookup(
 		"backend_pin_applied":                    boolAuditValue(response.BackendPin.Applied),
 		"backend_pin_present":                    boolAuditValue(response.BackendPin.Present),
 		runtimeObservationFieldBackendID:         response.BackendPin.BackendID,
+		runtimeObservationFieldBackendNode:       response.Affinity.BackendNode,
 		runtimeObservationFieldBackendPool:       request.BackendPool,
 		runtimeObservationFieldListener:          request.ListenerName,
 		runtimeObservationFieldProtocol:          request.Protocol,

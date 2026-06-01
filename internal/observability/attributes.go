@@ -32,6 +32,7 @@ const (
 
 var traceDiagnosticFields = map[string]struct{}{
 	fieldBackendIdentifier: {},
+	fieldBackendNode:       {},
 	fieldSpanID:            {},
 	fieldTraceID:           {},
 }

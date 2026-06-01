@@ -24,16 +24,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/croessner/nauthilus-director/internal/backend"
 	"github.com/croessner/nauthilus-director/internal/nauthilus"
 	"github.com/croessner/nauthilus-director/internal/observability"
+	"github.com/croessner/nauthilus-director/internal/placement"
 	"github.com/croessner/nauthilus-director/internal/proxy"
 	"github.com/croessner/nauthilus-director/internal/routing"
 	runtimectl "github.com/croessner/nauthilus-director/internal/runtime"
 	"github.com/croessner/nauthilus-director/internal/state"
 )
-
-const affinityStatusReused = "reused"
 
 // authenticateAndPlace maps frontend credentials through Nauthilus and director placement.
 func (s *Session) authenticateAndPlace(ctx context.Context, tag string, credentials *frontendCredentials) (commandOutcome, error) {
@@ -49,8 +47,6 @@ func (s *Session) authenticateAndPlace(ctx context.Context, tag string, credenti
 
 			return commandOutcome{}, s.writeTagged(tag, responseNo, authUnavailableText)
 		}
-
-		s.authenticated = true
 
 		return s.transitionAuthenticatedSession(ctx, tag, credentials)
 	case nauthilus.DecisionRejected:
@@ -148,81 +144,48 @@ func (s *Session) placeAuthenticatedSession(
 		return err
 	}
 
-	backendPin, err := s.lookupOperatorBackendPin(ctx, routingResult)
-	if err != nil {
-		return err
-	}
-
-	sessionRecord := s.sessionRecord(routingResult, backendPin)
-
-	affinity, err := s.sessionStore.OpenSession(ctx, sessionRecord)
-	if err != nil {
-		s.recordAffinityOpen(ctx, observationResultFailure, reasonClass(err), "", routingResult.ShardTag)
-
-		return err
-	}
-
-	if affinity.Key == (state.AffinityKey{}) {
-		affinity.Key = sessionRecord.Key
-	}
-
-	selectedShardTag := selectedAffinityShard(routingResult, affinity)
-
-	s.recordAffinityOpen(ctx, observationResultOK, "", affinity.Status, selectedShardTag)
-
-	operatorBackend := s.operatorBackendPinIdentifier(backendPin, selectedShardTag, affinity)
-	selectionRequest := s.selectionRequest(routingResult, selectedShardTag, affinity, operatorBackend)
 	selectCtx, selectSpan := s.startObservationSpan(ctx, observability.TraceBoundaryBackendSelect, observationOperationBackendSelect, observationResultStart, "", map[string]string{
-		obsFieldShardTag: selectedShardTag,
+		obsFieldShardTag: routingResult.ShardTag,
 	})
 
 	selectStarted := time.Now()
-	backendResult, err := s.backendSelector.Select(selectCtx, selectionRequest)
+	lease, err := s.placementService.PlaceSession(selectCtx, s.sessionPlacementRequest(routingResult))
 
 	selectDuration := time.Since(selectStarted)
 	if err != nil {
-		s.recordBackendSelect(selectCtx, observationResultFailure, reasonClass(err), selectedShardTag, selectDuration)
+		s.recordBackendSelect(selectCtx, observationResultFailure, reasonClass(err), routingResult.ShardTag, selectDuration)
 		selectSpan.End(observationResultFailure, reasonClass(err))
-		_, _ = s.sessionStore.CloseSession(context.Background(), sessionRecord.Key, s.context.ID)
 
 		return err
 	}
 
-	backendResult, err = s.attachSelectedBackend(selectCtx, sessionRecord.Key, selectionRequest, backendResult, sessionRecord.LeaseTTL)
-	if err != nil {
-		s.recordBackendSelect(selectCtx, observationResultFailure, reasonClass(err), selectedShardTag, time.Since(selectStarted))
-		s.recordSessionAttach(selectCtx, observationResultFailure, reasonClass(err), backendResult.Backend.Identifier, selectedShardTag)
-		selectSpan.SetAttributes(map[string]string{
-			obsFieldBackendIdentifier: backendResult.Backend.Identifier,
-			obsFieldShardTag:          selectedShardTag,
-		})
-		selectSpan.End(observationResultFailure, reasonClass(err))
-		_, _ = s.sessionStore.CloseSession(context.Background(), sessionRecord.Key, s.context.ID)
+	affinity := lease.Affinity()
+	binding := lease.Binding()
+	backendResult := lease.Backend()
+	selectedShardTag := binding.ShardTag
+	bindingReason := observability.BackendBindingReasonClass(string(binding.Source))
 
-		return err
-	}
+	s.recordAffinityOpen(ctx, observationResultOK, bindingReason, string(binding.Source), selectedShardTag, binding.BackendNode)
 
 	selectSpan.SetAttributes(map[string]string{
 		obsFieldBackendIdentifier: backendResult.Backend.Identifier,
+		obsFieldBackendNode:       backendResult.Backend.BackendNode,
 		obsFieldShardTag:          selectedShardTag,
 	})
-	s.recordSessionAttach(selectCtx, observationResultOK, "", backendResult.Backend.Identifier, selectedShardTag)
+	s.recordSessionAttach(selectCtx, observationResultOK, bindingReason, backendResult.Backend.Identifier, backendResult.Backend.BackendNode, selectedShardTag)
 
-	selectionReason := ""
-	if backendResult.Reason == reasonOperatorPin {
-		selectionReason = backendResult.Reason
-	}
-
-	s.recordBackendSelect(selectCtx, observationResultOK, selectionReason, selectedShardTag, time.Since(selectStarted))
-	selectSpan.End(observationResultOK, selectionReason)
+	s.recordBackendSelectWithNode(selectCtx, observationResultOK, bindingReason, selectedShardTag, backendResult.Backend.BackendNode, time.Since(selectStarted))
+	selectSpan.End(observationResultOK, bindingReason)
 
 	s.placement = Placement{
 		AuthResult:       cloneAuthResult(result),
 		Routing:          routingResult.Clone(),
 		Affinity:         affinity,
 		Backend:          backendResult,
+		Binding:          binding,
 		SelectedShardTag: selectedShardTag,
 	}
+	s.placementLease = lease
 	s.placed = true
 
 	return nil
@@ -245,81 +208,6 @@ func (s *Session) waitForPlacementGate(ctx context.Context, result routing.Routi
 	})
 
 	return err
-}
-
-// attachSelectedBackend registers backend counts and retries same-shard placement on attach races.
-func (s *Session) attachSelectedBackend(
-	ctx context.Context,
-	key state.AffinityKey,
-	request backend.SelectionRequest,
-	initial backend.SelectionResult,
-	reservationTTL time.Duration,
-) (backend.SelectionResult, error) {
-	if err := s.reserveAndAttachSelectedBackend(ctx, key, initial, reservationTTL); err != nil {
-		if request.OperatorBackendIdentifier != "" {
-			return backend.SelectionResult{}, err
-		}
-
-		retrySelector, ok := s.backendSelector.(interface {
-			RetryAfterAttachFailure(context.Context, backend.SelectionRequest, string) (backend.SelectionResult, error)
-		})
-		if !ok {
-			return backend.SelectionResult{}, err
-		}
-
-		retry, retryErr := retrySelector.RetryAfterAttachFailure(ctx, request, initial.Backend.Identifier)
-		if retryErr != nil {
-			return backend.SelectionResult{}, retryErr
-		}
-
-		if attachErr := s.reserveAndAttachSelectedBackend(ctx, key, retry, reservationTTL); attachErr != nil {
-			return backend.SelectionResult{}, attachErr
-		}
-
-		return retry, nil
-	}
-
-	return initial, nil
-}
-
-// reserveAndAttachSelectedBackend claims capacity before storing the backend pin.
-func (s *Session) reserveAndAttachSelectedBackend(
-	ctx context.Context,
-	key state.AffinityKey,
-	selected backend.SelectionResult,
-	reservationTTL time.Duration,
-) error {
-	reservations, ok := s.sessionStore.(state.BackendReservationStore)
-	if !ok {
-		return errors.New("imap: backend reservation store unavailable")
-	}
-
-	reservation, err := reservations.ReserveBackendCapacity(ctx, state.BackendReservationRequest{
-		BackendIdentifier: selected.Backend.Identifier,
-		ReservationID:     s.context.ID,
-		MaxConnections:    selected.Backend.MaxConnections,
-		LeaseTTL:          reservationTTL,
-	})
-	if err != nil {
-		return err
-	}
-
-	if _, err = s.sessionStore.AttachSelectedBackend(ctx, state.SessionBackendAttachment{
-		Key:               key,
-		SessionID:         s.context.ID,
-		BackendIdentifier: selected.Backend.Identifier,
-		ReservationID:     reservation.ReservationID,
-		MaxConnections:    selected.Backend.MaxConnections,
-	}); err != nil {
-		_, _ = reservations.ReleaseBackendReservation(context.Background(), state.BackendReservationReleaseRequest{
-			BackendIdentifier: selected.Backend.Identifier,
-			ReservationID:     reservation.ReservationID,
-		})
-
-		return err
-	}
-
-	return nil
 }
 
 // withEffectiveDefaultShard fills an omitted route shard from the immutable config snapshot.
@@ -367,127 +255,29 @@ func (s *Session) routingRequest(
 	}, nil
 }
 
-// sessionRecord builds the Redis session-open request after logical routing completes.
-func (s *Session) sessionRecord(result routing.RoutingResult, backendPin state.UserBackendPinRecord) state.SessionRecord {
+// sessionPlacementRequest builds the shared placement-domain input.
+func (s *Session) sessionPlacementRequest(result routing.RoutingResult) placement.SessionRequest {
 	ttl := result.TTL
 	if ttl <= 0 {
 		ttl = s.context.SessionLeaseTTL
 	}
 
-	return state.SessionRecord{
-		ID: s.context.ID,
+	return placement.SessionRequest{
 		Key: state.AffinityKey{
 			Tenant:     normalizedRoutingFact(result.Tenant),
 			AccountKey: normalizedAccount(result.AccountKey),
 		},
+		SessionID:          s.context.ID,
 		Protocol:           protocolIMAP,
+		BackendPool:        s.context.BackendPool,
+		ShardTag:           normalizedRoutingFact(result.ShardTag),
 		ListenerName:       s.context.ListenerName,
 		ServiceName:        s.context.ServiceName,
-		ShardTag:           s.sessionOpenShard(result),
 		DirectorInstanceID: s.context.DirectorInstanceID,
+		HolderKind:         state.HolderKindSession,
 		LeaseTTL:           ttl,
 		IdleGrace:          s.context.SessionIdleGrace,
-	}
-}
-
-// selectionRequest builds the backend selector input from the final active shard.
-func (s *Session) selectionRequest(
-	result routing.RoutingResult,
-	shardTag string,
-	affinity state.AffinityRecord,
-	operatorBackend string,
-) backend.SelectionRequest {
-	return backend.SelectionRequest{
-		AccountKey:                normalizedAccount(result.AccountKey),
-		Tenant:                    normalizedRoutingFact(result.Tenant),
-		ShardTag:                  normalizedRoutingFact(shardTag),
-		Protocol:                  protocolIMAP,
-		BackendPool:               s.context.BackendPool,
-		ActiveAffinity:            affinityActiveForSelection(result, affinity),
-		PinnedBackendIdentifier:   normalizedRoutingFact(affinity.BackendIdentifier),
-		OperatorBackendIdentifier: normalizedRoutingFact(operatorBackend),
-	}
-}
-
-type backendPinReader interface {
-	GetUserBackendPin(context.Context, state.UserBackendPinGetRequest) (state.UserBackendPinRecord, error)
-}
-
-// lookupOperatorBackendPin reads a concrete user backend pin when the store supports it.
-func (s *Session) lookupOperatorBackendPin(ctx context.Context, result routing.RoutingResult) (state.UserBackendPinRecord, error) {
-	reader, ok := s.sessionStore.(backendPinReader)
-	if !ok {
-		return state.UserBackendPinRecord{}, nil
-	}
-
-	return reader.GetUserBackendPin(ctx, state.UserBackendPinGetRequest{
-		Key: state.AffinityKey{
-			Tenant:     normalizedRoutingFact(result.Tenant),
-			AccountKey: normalizedAccount(result.AccountKey),
-		},
-	})
-}
-
-// sessionOpenShard returns the shard chosen by routing before concrete backend pins.
-func (s *Session) sessionOpenShard(result routing.RoutingResult) string {
-	return normalizedRoutingFact(result.ShardTag)
-}
-
-// operatorBackendPinIdentifier returns the exact backend target for this selection.
-func (s *Session) operatorBackendPinIdentifier(backendPin state.UserBackendPinRecord, shardTag string, affinity state.AffinityRecord) string {
-	if !backendPinMatchesScope(backendPin, protocolIMAP, s.context.BackendPool) {
-		return ""
-	}
-
-	if normalizedRoutingFact(backendPin.ShardTag) != normalizedRoutingFact(shardTag) {
-		return ""
-	}
-
-	if normalizedRoutingFact(affinity.BackendIdentifier) != "" {
-		return ""
-	}
-
-	if activeAffinityBlocksOperatorBackendPin(backendPin, affinity) {
-		return ""
-	}
-
-	return normalizedRoutingFact(backendPin.BackendIdentifier)
-}
-
-// activeAffinityBlocksOperatorBackendPin preserves active placement for deferred pin strategies.
-func activeAffinityBlocksOperatorBackendPin(backendPin state.UserBackendPinRecord, affinity state.AffinityRecord) bool {
-	if normalizedRoutingFact(backendPin.Strategy) == "kick_existing" {
-		return false
-	}
-
-	return affinity.Status == affinityStatusReused || affinity.ActiveSessionCount > 1
-}
-
-// backendPinMatchesScope checks protocol and pool before applying a concrete pin.
-func backendPinMatchesScope(backendPin state.UserBackendPinRecord, protocol string, backendPool string) bool {
-	return backendPin.Present &&
-		normalizedRoutingFact(backendPin.BackendIdentifier) != "" &&
-		strings.EqualFold(normalizedRoutingFact(backendPin.Protocol), normalizedRoutingFact(protocol)) &&
-		normalizedRoutingFact(backendPin.BackendPool) == normalizedRoutingFact(backendPool) &&
-		normalizedRoutingFact(backendPin.ShardTag) != ""
-}
-
-// selectedAffinityShard applies active affinity precedence over initial placement.
-func selectedAffinityShard(result routing.RoutingResult, affinity state.AffinityRecord) string {
-	if shardTag := normalizedRoutingFact(affinity.ShardTag); shardTag != "" {
-		return shardTag
-	}
-
-	return normalizedRoutingFact(result.ShardTag)
-}
-
-// affinityActiveForSelection reports whether Redis returned an existing pin.
-func affinityActiveForSelection(result routing.RoutingResult, affinity state.AffinityRecord) bool {
-	switch affinity.Status {
-	case "created", "":
-		return normalizedRoutingFact(affinity.ShardTag) != "" && normalizedRoutingFact(affinity.ShardTag) != normalizedRoutingFact(result.ShardTag)
-	default:
-		return affinity.Present
+		RetentionTTL:       s.context.BackendRetentionTTL,
 	}
 }
 
@@ -528,12 +318,8 @@ func (s *Session) ensurePlacementDependencies() error {
 		return errors.New("imap: routing resolver unavailable")
 	}
 
-	if s.sessionStore == nil {
-		return errors.New("imap: session store unavailable")
-	}
-
-	if s.backendSelector == nil {
-		return errors.New("imap: backend selector unavailable")
+	if s.placementService == nil {
+		return errors.New("imap: placement service unavailable")
 	}
 
 	return nil
@@ -591,6 +377,8 @@ func (s *Session) transitionAuthenticatedSession(
 
 		return commandOutcome{}, err
 	}
+
+	s.authenticated = true
 
 	handoff := s.BufferedProxyHandoff()
 
@@ -650,19 +438,42 @@ func (s *Session) registerLocalProxySession(frontend net.Conn, backendConn net.C
 
 // closePlacedSession closes a Redis lease when backend setup fails before proxy mode owns it.
 func (s *Session) closePlacedSession(ctx context.Context) error {
-	if s.sessionStore == nil || !s.placed {
+	if !s.placed {
 		return nil
 	}
 
-	_, err := s.sessionStore.CloseSession(ctx, s.placementAffinityKey(), s.context.ID)
-	s.recordSessionClose(ctx, resultLabel(err), reasonClass(err))
+	var err error
+	if s.placementLease != nil {
+		err = s.placementLease.Close(ctx)
+		affinity := s.placementLease.Affinity()
+		s.recordSessionClose(ctx, resultLabel(err), closeReasonClass(err, affinity))
+	} else if s.sessionStore != nil {
+		var affinity state.AffinityRecord
+
+		affinity, err = s.sessionStore.CloseSession(ctx, s.placementAffinityKey(), s.context.ID)
+		s.recordSessionClose(ctx, resultLabel(err), closeReasonClass(err, affinity))
+	} else {
+		s.recordSessionClose(ctx, resultLabel(err), reasonClass(err))
+	}
 
 	return err
 }
 
 // proxyLease builds the state lifecycle hook used by transparent proxy mode.
 func (s *Session) proxyLease() proxy.LeaseLifecycle {
-	if s.sessionStore == nil || !s.placed {
+	if !s.placed {
+		return nil
+	}
+
+	if s.placementLease != nil {
+		return &placementLeaseLifecycle{
+			lease:       s.placementLease,
+			ttl:         s.context.SessionLeaseTTL,
+			recordClose: s.recordSessionClose,
+		}
+	}
+
+	if s.sessionStore == nil {
 		return nil
 	}
 
@@ -717,6 +528,44 @@ type sessionLeaseLifecycle struct {
 	closeErr    error
 }
 
+// placementLeaseLifecycle adapts placement leases to the proxy lifecycle.
+type placementLeaseLifecycle struct {
+	lease       placement.LeaseHandle
+	ttl         time.Duration
+	recordClose func(context.Context, string, string)
+	closeOnce   sync.Once
+	closeErr    error
+}
+
+// Heartbeat refreshes the placement lease while proxy mode is running.
+func (l *placementLeaseLifecycle) Heartbeat(ctx context.Context) error {
+	record, err := l.lease.Heartbeat(ctx, l.ttl)
+	if err != nil {
+		return err
+	}
+
+	switch record.ControlAction {
+	case "", state.ControlActionNone:
+		return nil
+	case state.ControlActionKick, state.ControlActionDrain, state.ControlActionMoveGenerationChanged:
+		return proxy.NewControlActionError(string(record.ControlAction))
+	default:
+		return errors.New("imap: ambiguous heartbeat control action")
+	}
+}
+
+// Close releases the placement lease at proxy end.
+func (l *placementLeaseLifecycle) Close(ctx context.Context) error {
+	l.closeOnce.Do(func() {
+		l.closeErr = l.lease.Close(ctx)
+		if l.recordClose != nil {
+			l.recordClose(ctx, resultLabel(l.closeErr), closeReasonClass(l.closeErr, l.lease.Affinity()))
+		}
+	})
+
+	return l.closeErr
+}
+
 // Heartbeat refreshes the active session lease while proxy mode is running.
 func (l *sessionLeaseLifecycle) Heartbeat(ctx context.Context) error {
 	record, err := l.store.HeartbeatSession(ctx, l.key, l.sessionID, l.ttl)
@@ -738,9 +587,11 @@ func (l *sessionLeaseLifecycle) Heartbeat(ctx context.Context) error {
 // Close releases the active session lease at proxy end.
 func (l *sessionLeaseLifecycle) Close(ctx context.Context) error {
 	l.closeOnce.Do(func() {
-		_, l.closeErr = l.store.CloseSession(ctx, l.key, l.sessionID)
+		var affinity state.AffinityRecord
+
+		affinity, l.closeErr = l.store.CloseSession(ctx, l.key, l.sessionID)
 		if l.recordClose != nil {
-			l.recordClose(ctx, resultLabel(l.closeErr), reasonClass(l.closeErr))
+			l.recordClose(ctx, resultLabel(l.closeErr), closeReasonClass(l.closeErr, affinity))
 		}
 	})
 

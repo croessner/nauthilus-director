@@ -3125,11 +3125,12 @@ func writeListenerLine(writer io.Writer, listener generated.ListenerDetail) {
 func writeSessionLine(writer io.Writer, session generated.SessionDetail) {
 	_, _ = fmt.Fprintf(
 		writer,
-		"session_id=%s user_key=%s protocol=%s backend=%s shard_tag=%s expires_at=%s\n",
+		"session_id=%s user_key=%s protocol=%s backend=%s backend_node=%s shard_tag=%s expires_at=%s\n",
 		fieldValue(session.SessionID),
 		fieldValue(session.UserKey),
 		fieldValue(session.Protocol),
 		fieldValue(session.Backend),
+		fieldValue(session.BackendNode),
 		fieldValue(session.ShardTag),
 		fieldValue(session.ExpiresAt.UTC().Format(time.RFC3339)),
 	)
@@ -3138,15 +3139,27 @@ func writeSessionLine(writer io.Writer, session generated.SessionDetail) {
 // writeUserLine writes one scriptable user text row.
 func writeUserLine(writer io.Writer, user generated.UserDetail) {
 	affinityShard := ""
+	affinityNode := ""
+	bindingSource := ""
+	activeHolders := 0
+	retentionExpiresAt := ""
 	if user.Affinity != nil {
 		affinityShard = user.Affinity.ShardTag
+		affinityNode = stringPointerValue(user.Affinity.BackendNode)
+		bindingSource = user.Affinity.BindingSource
+		activeHolders = user.Affinity.ActiveHolders
+		retentionExpiresAt = timePointerValue(user.Affinity.RetentionExpiresAt)
 	}
 	_, _ = fmt.Fprintf(
 		writer,
-		"user_key=%s active_sessions=%d affinity_shard=%s\n",
+		"user_key=%s active_sessions=%d active_holders=%d affinity_shard=%s backend_node=%s binding_source=%s retention_expires_at=%s\n",
 		fieldValue(user.UserKey),
 		user.ActiveSessions,
+		activeHolders,
 		fieldValue(affinityShard),
+		fieldValue(affinityNode),
+		fieldValue(bindingSource),
+		fieldValue(retentionExpiresAt),
 	)
 }
 
@@ -3240,14 +3253,24 @@ func writeAffinityLine(writer io.Writer, affinity generated.UserAffinity) {
 	if affinity.ExpiresAt != nil {
 		expiresAt = affinity.ExpiresAt.UTC().Format(time.RFC3339)
 	}
+	bindingGeneration := stringPointerValue(affinity.BindingGeneration)
+	bindingStatus := stringPointerValue(affinity.BindingStatus)
+	backendNode := stringPointerValue(affinity.BackendNode)
+	retentionExpiresAt := timePointerValue(affinity.RetentionExpiresAt)
 	_, _ = fmt.Fprintf(
 		writer,
-		"user_key=%s shard_tag=%s active_sessions=%d generation=%s expires_at=%s\n",
+		"user_key=%s shard_tag=%s backend_node=%s active_sessions=%d active_holders=%d binding_source=%s binding_status=%s generation=%s binding_generation=%s expires_at=%s retention_expires_at=%s\n",
 		fieldValue(affinity.UserKey),
 		fieldValue(affinity.ShardTag),
+		fieldValue(backendNode),
 		affinity.ActiveSessions,
+		affinity.ActiveHolders,
+		fieldValue(affinity.BindingSource),
+		fieldValue(bindingStatus),
 		fieldValue(generation),
+		fieldValue(bindingGeneration),
 		fieldValue(expiresAt),
+		fieldValue(retentionExpiresAt),
 	)
 }
 
@@ -3259,9 +3282,10 @@ func writeRouteLine(writer io.Writer, route generated.RouteLookupResponse) {
 	}
 	_, _ = fmt.Fprintf(
 		writer,
-		"selected_backend=%s shard_tag=%s routing_source=%s healthy=%t maintenance=%t fail_closed=%t affected_health=%t affected_maintenance=%t affected_runtime=%t affected_max_connections=%t affected_user_hold=%t reason=%s routing_generation=%s",
+		"selected_backend=%s shard_tag=%s source=%s routing_source=%s healthy=%t maintenance=%t fail_closed=%t affected_health=%t affected_maintenance=%t affected_runtime=%t affected_max_connections=%t affected_user_hold=%t reason=%s routing_generation=%s",
 		fieldValue(route.SelectedBackend),
 		fieldValue(route.ShardTag),
+		fieldValue(route.Source),
 		fieldValue(route.Routing.Source),
 		route.Healthy,
 		route.Maintenance,
@@ -3289,13 +3313,25 @@ func writeRouteLine(writer io.Writer, route generated.RouteLookupResponse) {
 		if route.Affinity.ShardTag != nil {
 			shardTag = *route.Affinity.ShardTag
 		}
+		backendNode := stringPointerValue(route.Affinity.BackendNode)
+		backendID := stringPointerValue(route.Affinity.BackendID)
+		bindingGeneration := stringPointerValue(route.Affinity.BindingGeneration)
+		bindingStatus := stringPointerValue(route.Affinity.BindingStatus)
+		retentionExpiresAt := timePointerValue(route.Affinity.RetentionExpiresAt)
 		_, _ = fmt.Fprintf(
 			writer,
-			" affinity_present=%t affinity_active=%t affinity_shard=%s affinity_sessions=%d",
+			" affinity_present=%t affinity_active=%t affinity_shard=%s affinity_backend_node=%s affinity_backend=%s affinity_sessions=%d affinity_holders=%d affinity_binding_source=%s affinity_binding_status=%s affinity_binding_generation=%s affinity_retention_expires_at=%s",
 			route.Affinity.Present,
 			route.Affinity.Active,
 			fieldValue(shardTag),
+			fieldValue(backendNode),
+			fieldValue(backendID),
 			route.Affinity.ActiveSessions,
+			route.Affinity.ActiveHolders,
+			fieldValue(route.Affinity.BindingSource),
+			fieldValue(bindingStatus),
+			fieldValue(bindingGeneration),
+			fieldValue(retentionExpiresAt),
 		)
 	}
 	pinBackend := stringPointerValue(route.BackendPin.Backend)

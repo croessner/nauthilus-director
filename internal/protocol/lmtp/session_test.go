@@ -14,6 +14,7 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
+//nolint:goconst // Protocol fixtures repeat stable public wire and backend-node values.
 package lmtp
 
 import (
@@ -36,6 +37,7 @@ import (
 
 	"github.com/croessner/nauthilus-director/internal/backend"
 	"github.com/croessner/nauthilus-director/internal/nauthilus"
+	"github.com/croessner/nauthilus-director/internal/placement"
 	"github.com/croessner/nauthilus-director/internal/routing"
 	runtimectl "github.com/croessner/nauthilus-director/internal/runtime"
 	"github.com/croessner/nauthilus-director/internal/state"
@@ -53,6 +55,7 @@ const (
 	testPlacementPool       = "lmtp-default"
 	testPlacementService    = "delivery"
 	testPlacementBackendB   = "mailstore-b-lmtp"
+	testPlacementBackendA2  = "mailstore-a-other-lmtp"
 	testPlacementShardA     = "mailstore-a"
 	testPlacementShardB     = "mailstore-b"
 	testPlacementTenant     = "blue"
@@ -893,6 +896,99 @@ func TestRecipientPlacementIgnoresIMAPBackendPin(t *testing.T) {
 	}
 }
 
+// TestActiveIMAPBindingMakesLMTPSelectMatchingBackendNode verifies active login bindings constrain LMTP.
+func TestActiveIMAPBindingMakesLMTPSelectMatchingBackendNode(t *testing.T) {
+	identity := identityLookuperForRecipients(map[string]string{
+		testRecipientSingle: testPlacementShardA,
+	})
+	resolver := &recordingRoutingResolver{}
+	store := &recordingDeliveryStore{
+		affinity: state.AffinityRecord{
+			Key:                state.AffinityKey{Tenant: testPlacementTenant, AccountKey: testRecipientSingle},
+			ShardTag:           testPlacementShardB,
+			BackendNode:        "mailstore-b-node-1",
+			Status:             "found",
+			Present:            true,
+			BindingStatus:      state.BindingStatusActive,
+			ActiveSessionCount: 1,
+			ActiveHolderCount:  1,
+		},
+	}
+	selector := &recordingBackendSelector{}
+	config := placementSessionConfig(identity, resolver, store, selector)
+
+	harness := startLMTPHarness(t, config)
+	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+	harness.write(t, "LHLO submitter.example\r\n")
+	harness.drainLHLO(t)
+	harness.write(t, "MAIL FROM:<sender@example.test>\r\n")
+	harness.expectLine(t, "250 2.0.0 Sender accepted\r\n")
+	harness.write(t, "RCPT TO:<recipient@example.test>\r\n")
+	harness.expectLine(t, "250 2.0.0 Recipient accepted\r\n")
+	harness.write(t, "DATA\r\n")
+	harness.expectLine(t, "354 2.0.0 End data with <CR><LF>.<CR><LF>\r\n")
+	harness.write(t, "line-one\r\n.\r\n")
+	harness.expectLine(t, "250 2.0.0 Message accepted\r\n")
+
+	nodeRequest := selector.firstNodeRequest(t)
+	if nodeRequest.BackendNode != "mailstore-b-node-1" || nodeRequest.ShardTag != testPlacementShardB {
+		t.Fatalf("node request = %#v, want active IMAP backend node", nodeRequest)
+	}
+
+	open := store.singleOpen(t)
+	if open.BackendNode != "mailstore-b-node-1" || open.ShardTag != testPlacementShardB {
+		t.Fatalf("delivery hold = %#v, want active IMAP node binding", open)
+	}
+
+	store.assertClosed(t, 1)
+}
+
+// TestRetainedIMAPBindingMakesLMTPSelectMatchingBackendNode verifies idle login retention constrains LMTP.
+func TestRetainedIMAPBindingMakesLMTPSelectMatchingBackendNode(t *testing.T) {
+	identity := identityLookuperForRecipients(map[string]string{
+		testRecipientSingle: testPlacementShardA,
+	})
+	resolver := &recordingRoutingResolver{}
+	store := &recordingDeliveryStore{
+		affinity: state.AffinityRecord{
+			Key:                state.AffinityKey{Tenant: testPlacementTenant, AccountKey: testRecipientSingle},
+			ShardTag:           testPlacementShardB,
+			BackendNode:        "mailstore-b-node-1",
+			Status:             "retained",
+			Present:            true,
+			BindingStatus:      state.BindingStatusRetained,
+			RetentionExpiresAt: time.Now().Add(time.Minute),
+		},
+	}
+	selector := &recordingBackendSelector{}
+	config := placementSessionConfig(identity, resolver, store, selector)
+
+	harness := startLMTPHarness(t, config)
+	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+	harness.write(t, "LHLO submitter.example\r\n")
+	harness.drainLHLO(t)
+	harness.write(t, "MAIL FROM:<sender@example.test>\r\n")
+	harness.expectLine(t, "250 2.0.0 Sender accepted\r\n")
+	harness.write(t, "RCPT TO:<recipient@example.test>\r\n")
+	harness.expectLine(t, "250 2.0.0 Recipient accepted\r\n")
+	harness.write(t, "DATA\r\n")
+	harness.expectLine(t, "354 2.0.0 End data with <CR><LF>.<CR><LF>\r\n")
+	harness.write(t, "line-one\r\n.\r\n")
+	harness.expectLine(t, "250 2.0.0 Message accepted\r\n")
+
+	nodeRequest := selector.firstNodeRequest(t)
+	if nodeRequest.BackendNode != "mailstore-b-node-1" || nodeRequest.ShardTag != testPlacementShardB {
+		t.Fatalf("node request = %#v, want retained IMAP backend node", nodeRequest)
+	}
+
+	open := store.singleOpen(t)
+	if open.BackendNode != "mailstore-b-node-1" || open.ShardTag != testPlacementShardB {
+		t.Fatalf("delivery hold = %#v, want retained IMAP node binding", open)
+	}
+
+	store.assertClosed(t, 1)
+}
+
 // TestRecipientPlacementDifferentBackendTempfailsBeforeData verifies same-backend-only acceptance.
 func TestRecipientPlacementDifferentBackendTempfailsBeforeData(t *testing.T) {
 	identity := &recordingIdentityLookuper{results: map[string]nauthilus.AuthResult{
@@ -932,6 +1028,44 @@ func TestRecipientPlacementDifferentBackendTempfailsBeforeData(t *testing.T) {
 	store.assertClosed(t, 2)
 }
 
+// TestRecipientPlacementSameShardDifferentBackendNodeTempfailsBeforeData verifies node drift is rejected.
+func TestRecipientPlacementSameShardDifferentBackendNodeTempfailsBeforeData(t *testing.T) {
+	identity := identityLookuperForRecipients(map[string]string{
+		testRecipientFirst:  testPlacementShardA,
+		testRecipientSecond: testPlacementShardA,
+	})
+	resolver := &recordingRoutingResolver{}
+	store := &recordingDeliveryStore{}
+	selector := &recordingBackendSelector{
+		backendForAccount: map[string]string{testRecipientSecond: testPlacementBackendA2},
+	}
+	config := placementSessionConfig(identity, resolver, store, selector)
+
+	harness := startLMTPHarness(t, config)
+	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+	harness.write(t, "LHLO submitter.example\r\n")
+	harness.drainLHLO(t)
+	harness.write(t, "MAIL FROM:<sender@example.test>\r\n")
+	harness.expectLine(t, "250 2.0.0 Sender accepted\r\n")
+	harness.write(t, "RCPT TO:<first@example.test>\r\n")
+	harness.expectLine(t, "250 2.0.0 Recipient accepted\r\n")
+	harness.write(t, "RCPT TO:<second@example.test>\r\n")
+	harness.expectLine(t, "451 4.3.2 Recipient must be retried separately\r\n")
+	harness.write(t, "DATA\r\n")
+	harness.expectLine(t, "354 2.0.0 End data with <CR><LF>.<CR><LF>\r\n")
+	harness.write(t, "line-one\r\n.\r\n")
+	harness.expectLine(t, "250 2.0.0 Message accepted\r\n")
+
+	secondOpen := store.openAt(t, 1)
+	if secondOpen.ShardTag != testPlacementShardA || secondOpen.BackendNode != "mailstore-a-node-2" {
+		t.Fatalf("second hold = %#v, want same shard but different backend node", secondOpen)
+	}
+
+	store.assertOpened(t, 2)
+	store.assertAttached(t, 1)
+	store.assertClosed(t, 2)
+}
+
 // TestRecipientBackendAccountingCountsOneBackendTransaction verifies multi-recipient delivery uses one backend count.
 func TestRecipientBackendAccountingCountsOneBackendTransaction(t *testing.T) {
 	identity := identityLookuperForRecipients(map[string]string{
@@ -961,6 +1095,32 @@ func TestRecipientBackendAccountingCountsOneBackendTransaction(t *testing.T) {
 	store.assertOpened(t, 2)
 	store.assertAttached(t, 1)
 	store.assertClosed(t, 2)
+}
+
+// TestRecipientBackendReservationRollbackClosesHoldOnAttachFailure verifies failed accounting cleanup.
+func TestRecipientBackendReservationRollbackClosesHoldOnAttachFailure(t *testing.T) {
+	identity := identityLookuperForRecipients(map[string]string{
+		testRecipientSingle: testPlacementShardA,
+	})
+	resolver := &recordingRoutingResolver{}
+	store := &recordingDeliveryStore{attachErr: errors.New("attach failed")}
+	selector := &recordingBackendSelector{}
+	config := placementSessionConfig(identity, resolver, store, selector)
+
+	harness := startLMTPHarness(t, config)
+	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+	harness.write(t, "LHLO submitter.example\r\n")
+	harness.drainLHLO(t)
+	harness.write(t, "MAIL FROM:<sender@example.test>\r\n")
+	harness.expectLine(t, "250 2.0.0 Sender accepted\r\n")
+	harness.write(t, "RCPT TO:<recipient@example.test>\r\n")
+	harness.expectLine(t, "451 4.3.0 Recipient lookup temporarily unavailable\r\n")
+
+	store.assertOpened(t, 1)
+	store.assertReserved(t, 1)
+	store.assertAttached(t, 1)
+	store.assertReleased(t, 1)
+	store.assertClosed(t, 1)
 }
 
 // TestRecipientDeliveryHoldHeartbeatsAndClosesOnReset verifies hold lifecycle boundaries.
@@ -1430,8 +1590,23 @@ func placementSessionConfig(
 	config.RoutingResolver = resolver
 	config.SessionStore = store
 	config.BackendSelector = selector
+	if recordingStore, ok := store.(*recordingDeliveryStore); ok {
+		if recordingSelector, ok := selector.(*recordingBackendSelector); ok {
+			config.PlacementService = mustLMTPPlacementService(recordingStore, recordingSelector)
+		}
+	}
 
 	return config
+}
+
+// mustLMTPPlacementService creates the shared placement service used by LMTP tests.
+func mustLMTPPlacementService(store *recordingDeliveryStore, selector *recordingBackendSelector) placement.DeliveryPlacer {
+	service, err := placement.NewService(lmtpBackendRegistry{}, selector, store)
+	if err != nil {
+		panic(err)
+	}
+
+	return service
 }
 
 // backendForwardingSessionConfig returns placement config with a real backend connector seam.
@@ -1726,9 +1901,12 @@ type recordingDeliveryStore struct {
 	attachments  []state.SessionBackendAttachment
 	heartbeats   int
 	closes       []string
+	releaseCalls int
+	affinity     state.AffinityRecord
 	backendPin   state.UserBackendPinRecord
 	pinReads     int
 	pinErr       error
+	attachErr    error
 }
 
 // OpenSession records a delivery hold and returns an active affinity record.
@@ -1738,13 +1916,53 @@ func (s *recordingDeliveryStore) OpenSession(_ context.Context, record state.Ses
 
 	s.opens = append(s.opens, record)
 
+	if s.affinity.Present && strings.TrimSpace(s.affinity.BackendNode) != "" && strings.TrimSpace(s.affinity.BackendNode) != strings.TrimSpace(record.BackendNode) {
+		affinity := s.affinity
+		affinity.Key = record.Key
+		affinity.Status = "backend_node_mismatch"
+		affinity.BindingStatus = state.BindingStatusBackendNodeMismatch
+
+		return affinity, nil
+	}
+
+	status := deliveryStatusCreated
+	if s.affinity.Present {
+		status = "reused"
+		if s.affinity.Status == "retained" || s.affinity.BindingStatus == state.BindingStatusRetained {
+			status = "retained"
+		}
+	}
+
+	activeSessionCount := 0
+	if record.HolderKind == state.HolderKindSession {
+		activeSessionCount = 1
+	}
+
 	return state.AffinityRecord{
 		Key:                record.Key,
 		ShardTag:           record.ShardTag,
-		Status:             deliveryStatusCreated,
+		BackendNode:        record.BackendNode,
+		Status:             status,
 		Present:            true,
-		ActiveSessionCount: 1,
+		ActiveSessionCount: activeSessionCount,
+		ActiveHolderCount:  1,
+		BindingStatus:      state.BindingStatusActive,
 	}, nil
+}
+
+// LookupAffinity records a read-only affinity lookup for recipient placement.
+func (s *recordingDeliveryStore) LookupAffinity(_ context.Context, key state.AffinityKey) (state.AffinityRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.affinity.Present {
+		affinity := s.affinity
+		affinity.Key = key
+
+		return affinity, nil
+	}
+
+	return state.AffinityRecord{Key: key, BindingStatus: state.BindingStatusNone}, nil
 }
 
 // GetUserBackendPin records a read-only backend-pin lookup for placement tests.
@@ -1795,6 +2013,11 @@ func (s *recordingDeliveryStore) ReleaseBackendReservation(
 	context.Context,
 	state.BackendReservationReleaseRequest,
 ) (state.BackendReservationRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.releaseCalls++
+
 	return state.BackendReservationRecord{Status: "released", RepairedCount: 1}, nil
 }
 
@@ -1812,10 +2035,14 @@ func (s *recordingDeliveryStore) AttachSelectedBackend(_ context.Context, attach
 	defer s.mu.Unlock()
 
 	s.attachments = append(s.attachments, attachment)
+	if s.attachErr != nil {
+		return state.SessionBackendRecord{}, s.attachErr
+	}
 
 	return state.SessionBackendRecord{
 		Status:             "attached",
 		BackendIdentifier:  attachment.BackendIdentifier,
+		BackendNode:        attachment.BackendNode,
 		ReservationID:      attachment.ReservationID,
 		BackendActiveCount: 1,
 	}, nil
@@ -1855,6 +2082,20 @@ func (s *recordingDeliveryStore) singleOpen(t *testing.T) state.SessionRecord {
 	return s.opens[0]
 }
 
+// openAt returns a recorded open call by zero-based index.
+func (s *recordingDeliveryStore) openAt(t *testing.T, index int) state.SessionRecord {
+	t.Helper()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if index < 0 || index >= len(s.opens) {
+		t.Fatalf("open index %d outside %d recorded calls", index, len(s.opens))
+	}
+
+	return s.opens[index]
+}
+
 // assertOpened verifies the number of opened delivery holds.
 func (s *recordingDeliveryStore) assertOpened(t *testing.T, want int) {
 	t.Helper()
@@ -1888,6 +2129,18 @@ func (s *recordingDeliveryStore) assertAttached(t *testing.T, want int) {
 
 	if len(s.attachments) != want {
 		t.Fatalf("attachment calls = %d, want %d", len(s.attachments), want)
+	}
+}
+
+// assertReleased verifies the number of backend reservation rollback releases.
+func (s *recordingDeliveryStore) assertReleased(t *testing.T, want int) {
+	t.Helper()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.releaseCalls != want {
+		t.Fatalf("reservation release calls = %d, want %d", s.releaseCalls, want)
 	}
 }
 
@@ -1932,9 +2185,11 @@ func (s *recordingDeliveryStore) waitForHeartbeat(t *testing.T) {
 }
 
 type recordingBackendSelector struct {
-	mu              sync.Mutex
-	requests        []backend.SelectionRequest
-	backendForShard map[string]string
+	mu                sync.Mutex
+	requests          []backend.SelectionRequest
+	nodeRequests      []backend.NodeSelectionRequest
+	backendForShard   map[string]string
+	backendForAccount map[string]string
 }
 
 type recordingRecipientPlacementGate struct {
@@ -1955,6 +2210,8 @@ func (s *recordingBackendSelector) Select(_ context.Context, request backend.Sel
 	identifier := "mailstore-a-lmtp"
 	if request.PinnedBackendIdentifier != "" {
 		identifier = request.PinnedBackendIdentifier
+	} else if s.backendForAccount != nil && s.backendForAccount[request.AccountKey] != "" {
+		identifier = s.backendForAccount[request.AccountKey]
 	} else if s.backendForShard != nil && s.backendForShard[request.ShardTag] != "" {
 		identifier = s.backendForShard[request.ShardTag]
 	}
@@ -1964,6 +2221,7 @@ func (s *recordingBackendSelector) Select(_ context.Context, request backend.Sel
 		Protocol:       request.Protocol,
 		BackendPool:    request.BackendPool,
 		ShardTag:       request.ShardTag,
+		BackendNode:    lmtpBackendNode(identifier, request.ShardTag),
 		Address:        testBackendTLSHostTarget,
 		TLS:            backend.TLSConfig{Mode: backendTLSPlaintext, MinTLSVersion: backendTLSMinDefault},
 		Auth:           backend.AuthConfig{Mode: backendAuthModeNone},
@@ -1984,6 +2242,58 @@ func (s *recordingBackendSelector) Select(_ context.Context, request backend.Sel
 		},
 		Reason:         "test",
 		ActiveAffinity: request.ActiveAffinity,
+	}, nil
+}
+
+// SelectInBackendNode records backend-node constrained selection input.
+func (s *recordingBackendSelector) SelectInBackendNode(_ context.Context, request backend.NodeSelectionRequest) (backend.SelectionResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.nodeRequests = append(s.nodeRequests, request)
+
+	identifier := request.OperatorBackendIdentifier
+	if identifier == "" {
+		identifier = lmtpBackendForNode(request.BackendNode)
+	}
+
+	s.requests = append(s.requests, backend.SelectionRequest{
+		AccountKey:                request.AccountKey,
+		Tenant:                    request.Tenant,
+		ShardTag:                  request.ShardTag,
+		Protocol:                  request.Protocol,
+		BackendPool:               request.BackendPool,
+		ActiveAffinity:            true,
+		PinnedBackendIdentifier:   identifier,
+		OperatorBackendIdentifier: request.OperatorBackendIdentifier,
+	})
+
+	selected := backend.Backend{
+		Identifier:     identifier,
+		Protocol:       request.Protocol,
+		BackendPool:    request.BackendPool,
+		ShardTag:       request.ShardTag,
+		BackendNode:    request.BackendNode,
+		Address:        testBackendTLSHostTarget,
+		TLS:            backend.TLSConfig{Mode: backendTLSPlaintext, MinTLSVersion: backendTLSMinDefault},
+		Auth:           backend.AuthConfig{Mode: backendAuthModeNone},
+		MaxConnections: 100,
+	}
+
+	return backend.SelectionResult{
+		Backend: selected,
+		EffectiveBackend: backend.EffectiveBackendState{
+			Backend:           selected,
+			Identifier:        identifier,
+			Protocol:          request.Protocol,
+			BackendPool:       request.BackendPool,
+			EffectiveShardTag: request.ShardTag,
+			MaxConnections:    100,
+			AllowsNewSessions: true,
+			AllowsActivePins:  true,
+		},
+		Reason:         backend.SelectionReasonBackendBinding,
+		ActiveAffinity: true,
 	}, nil
 }
 
@@ -2015,12 +2325,125 @@ func (s *recordingBackendSelector) firstRequest(t *testing.T) backend.SelectionR
 	return s.requests[0]
 }
 
+// firstNodeRequest returns the first backend-node constrained selector request.
+func (s *recordingBackendSelector) firstNodeRequest(t *testing.T) backend.NodeSelectionRequest {
+	t.Helper()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if len(s.nodeRequests) == 0 {
+		t.Fatal("backend-node selector was not called")
+	}
+
+	return s.nodeRequests[0]
+}
+
 // requestCount returns how often the selector was called.
 func (s *recordingBackendSelector) requestCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	return len(s.requests)
+}
+
+// lmtpBackendNode returns the deterministic backend-node fixture for one backend.
+func lmtpBackendNode(identifier string, shardTag string) string {
+	if identifier == testPlacementBackendA2 {
+		return "mailstore-a-node-2"
+	}
+
+	if strings.Contains(identifier, "mailstore-b") || strings.TrimSpace(shardTag) == testPlacementShardB {
+		return "mailstore-b-node-1"
+	}
+
+	return "mailstore-a-node-1"
+}
+
+// lmtpBackendForNode returns the LMTP backend fixture inside one backend node.
+func lmtpBackendForNode(backendNode string) string {
+	if backendNode == "mailstore-a-node-2" {
+		return testPlacementBackendA2
+	}
+
+	if backendNode == "mailstore-b-node-1" {
+		return testPlacementBackendB
+	}
+
+	return "mailstore-a-lmtp"
+}
+
+// lmtpBackendRegistry supplies backend lookup facts for placement tests.
+type lmtpBackendRegistry struct{}
+
+// AllBackends returns the configured fake backend inventory.
+func (lmtpBackendRegistry) AllBackends(context.Context) ([]backend.Backend, error) {
+	return []backend.Backend{
+		lmtpRegistryBackend("mailstore-a-lmtp", testPlacementShardA),
+		lmtpRegistryBackend(testPlacementBackendA2, testPlacementShardA),
+		lmtpRegistryBackend(testPlacementBackendB, testPlacementShardB),
+	}, nil
+}
+
+// BackendsForShard returns fake backends matching one shard.
+func (lmtpBackendRegistry) BackendsForShard(_ context.Context, request backend.RegistryRequest) ([]backend.Backend, error) {
+	backends := []backend.Backend{}
+
+	for _, candidate := range []backend.Backend{
+		lmtpRegistryBackend("mailstore-a-lmtp", testPlacementShardA),
+		lmtpRegistryBackend(testPlacementBackendA2, testPlacementShardA),
+		lmtpRegistryBackend(testPlacementBackendB, testPlacementShardB),
+	} {
+		if candidate.Protocol == request.Protocol && candidate.BackendPool == request.BackendPool && candidate.ShardTag == request.ShardTag {
+			backends = append(backends, candidate)
+		}
+	}
+
+	if len(backends) == 0 {
+		return nil, &backend.Error{Kind: backend.ErrorKindNoBackend, Operation: "test_registry", Message: "no shard backend"}
+	}
+
+	return backends, nil
+}
+
+// Lookup returns one fake backend by identifier.
+func (lmtpBackendRegistry) Lookup(_ context.Context, identifier string) (backend.Backend, error) {
+	if identifier == testPlacementBackendB {
+		return lmtpRegistryBackend(identifier, testPlacementShardB), nil
+	}
+
+	if identifier == testPlacementBackendA2 {
+		return lmtpRegistryBackend(identifier, testPlacementShardA), nil
+	}
+
+	return lmtpRegistryBackend(identifier, testPlacementShardA), nil
+}
+
+// LookupInBackendNode resolves the fake LMTP endpoint inside a backend node.
+func (lmtpBackendRegistry) LookupInBackendNode(_ context.Context, request backend.NodeLookupRequest) (backend.Backend, error) {
+	if request.BackendNode == "mailstore-b-node-1" {
+		return lmtpRegistryBackend(testPlacementBackendB, testPlacementShardB), nil
+	}
+
+	return lmtpRegistryBackend("mailstore-a-lmtp", testPlacementShardA), nil
+}
+
+// Pool returns the fake LMTP backend pool.
+func (lmtpBackendRegistry) Pool(_ context.Context, name string) (backend.Pool, error) {
+	return backend.Pool{Name: name, Protocol: protocolLMTP, Selector: "recipient_hash", Backends: []string{"mailstore-a-lmtp", testPlacementBackendA2, testPlacementBackendB}}, nil
+}
+
+// lmtpRegistryBackend creates a fake registry backend with node metadata.
+func lmtpRegistryBackend(identifier string, shardTag string) backend.Backend {
+	return backend.Backend{
+		Identifier:     identifier,
+		Protocol:       protocolLMTP,
+		BackendPool:    testPlacementPool,
+		ShardTag:       shardTag,
+		BackendNode:    lmtpBackendNode(identifier, shardTag),
+		Address:        testBackendTLSHostTarget,
+		MaxConnections: 100,
+	}
 }
 
 type recordingAuthenticator struct {

@@ -504,6 +504,70 @@ func TestRuntimeSelectorHardMaintenanceFailoverRequiresPolicy(t *testing.T) {
 	}
 }
 
+// TestRuntimeSelectorBackendNodeFailoverRequiresHardDown verifies bound-node failover policy.
+func TestRuntimeSelectorBackendNodeFailoverRequiresHardDown(t *testing.T) {
+	cfg := sameShardBackendsConfig()
+	now := time.Now()
+	snapshots := fakeSnapshots{
+		testBackendID: {
+			Health: HealthState{
+				Enabled:   true,
+				Status:    HealthStatusUnhealthy,
+				CheckedAt: now,
+				ExpiresAt: now.Add(time.Minute),
+			},
+		},
+		testBackendIDB: {
+			Health: HealthState{
+				Enabled:   true,
+				Status:    HealthStatusHealthy,
+				CheckedAt: now,
+				ExpiresAt: now.Add(time.Minute),
+			},
+		},
+	}
+	request := defaultNodeSelectionRequest()
+
+	blocked := mustRuntimeSelector(t, cfg, snapshots, healthRuntimeSelectionPolicy(true))
+
+	_, err := blocked.SelectInBackendNode(context.Background(), request)
+	if !IsErrorKind(err, ErrorKindNoBackend) {
+		t.Fatalf("blocked SelectInBackendNode error = %v, want no_backend", err)
+	}
+
+	allowedPolicy := healthRuntimeSelectionPolicy(true)
+	allowedPolicy.AllowHardDownFailover = true
+	allowed := mustRuntimeSelector(t, cfg, snapshots, allowedPolicy)
+
+	result, err := allowed.SelectInBackendNode(context.Background(), request)
+	if err != nil {
+		t.Fatalf("allowed SelectInBackendNode returned error: %v", err)
+	}
+
+	if result.Backend.Identifier == testBackendID {
+		t.Fatalf("failover selected bound backend %q", result.Backend.Identifier)
+	}
+
+	if result.Reason != SelectionReasonBindingInvalidatedHardDown {
+		t.Fatalf("selection reason = %q, want %q", result.Reason, SelectionReasonBindingInvalidatedHardDown)
+	}
+}
+
+// TestRuntimeSelectorBackendNodeRuntimeOutFailsClosed verifies non-health exclusions do not move nodes.
+func TestRuntimeSelectorBackendNodeRuntimeOutFailsClosed(t *testing.T) {
+	cfg := sameShardBackendsConfig()
+	policy := runtimeSelectionPolicy(true)
+	policy.AllowHardDownFailover = true
+	selector := mustRuntimeSelector(t, cfg, fakeSnapshots{
+		testBackendID: {RuntimeOverride: RuntimeOverride{InService: new(false)}},
+	}, policy)
+
+	_, err := selector.SelectInBackendNode(context.Background(), defaultNodeSelectionRequest())
+	if !IsErrorKind(err, ErrorKindNoBackend) {
+		t.Fatalf("SelectInBackendNode error = %v, want no_backend", err)
+	}
+}
+
 // TestRuntimeSelectorStaleHealthFailsClosedAfterStartupGrace verifies health freshness input.
 func TestRuntimeSelectorStaleHealthFailsClosedAfterStartupGrace(t *testing.T) {
 	now := time.Date(2026, 5, 26, 12, 0, 0, 0, time.UTC)
@@ -747,12 +811,25 @@ func lmtpSelectionRequest(account string) SelectionRequest {
 	}
 }
 
+// defaultNodeSelectionRequest returns a bound backend-node selection fixture.
+func defaultNodeSelectionRequest() NodeSelectionRequest {
+	return NodeSelectionRequest{
+		AccountKey:  testAccountKey,
+		Tenant:      testTenant,
+		ShardTag:    testShardTag,
+		BackendNode: testBackendNode,
+		Protocol:    protocolIMAP,
+		BackendPool: testPoolIMAP,
+	}
+}
+
 // sameShardBackendsConfig returns two IMAP backends serving one effective shard.
 func sameShardBackendsConfig() config.Config {
 	cfg := config.DefaultConfig()
 	first := cfg.Director.Backends[testBackendID]
 	second := cfg.Director.Backends[testBackendIDB]
 	second.ShardTag = first.ShardTag
+	second.BackendNode = "mailstore-b-imap-same-shard-node"
 	cfg.Director.Backends[testBackendID] = first
 	cfg.Director.Backends[testBackendIDB] = second
 

@@ -54,6 +54,7 @@ type SessionRuntimeState struct {
 	ListenerName      string
 	ServiceName       string
 	EffectiveShardTag string
+	BackendNode       string
 	BackendIdentifier string
 	DirectorInstance  string
 	OpenedAt          time.Time
@@ -767,6 +768,7 @@ func (s SessionRuntimeState) Normalize() SessionRuntimeState {
 	s.ListenerName = strings.TrimSpace(s.ListenerName)
 	s.ServiceName = strings.TrimSpace(s.ServiceName)
 	s.EffectiveShardTag = strings.TrimSpace(s.EffectiveShardTag)
+	s.BackendNode = strings.TrimSpace(s.BackendNode)
 	s.BackendIdentifier = strings.TrimSpace(s.BackendIdentifier)
 	s.DirectorInstance = strings.TrimSpace(s.DirectorInstance)
 	s.ControlGeneration = strings.TrimSpace(s.ControlGeneration)

@@ -117,7 +117,7 @@ func proveRealDeliveryHoldPinsIMAP(t *testing.T, lmtpAddress string, imapAddress
 	client.WriteLine("RCPT TO:<" + interopLMTPRecipientA + ">")
 	client.ExpectLine("250 2.0.0 Recipient accepted\r\n")
 
-	imapClient, imapReader := loginIMAP(t, imapAddress, interopLMTPRecipientA)
+	imapClient, imapReader := loginProcessIMAP(t, imapAddress, interopLMTPRecipientA)
 	defer func() { _ = imapClient.Close() }()
 	writeLine(t, imapClient, "A002 NOOP")
 	response := readLine(t, imapReader)

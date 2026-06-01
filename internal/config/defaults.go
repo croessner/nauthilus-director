@@ -308,6 +308,11 @@ func defaultDirector() DirectorConfig {
 					Audit:                  true,
 				},
 			},
+			BackendRetention: BackendRetentionConfig{
+				Enabled:    true,
+				DefaultTTL: NewDuration(15 * time.Minute),
+				MaxTTL:     NewDuration(24 * time.Hour),
+			},
 			LocalCache: LocalCacheConfig{
 				Enabled:    true,
 				TTL:        NewDuration(15 * time.Minute),
@@ -364,10 +369,10 @@ func defaultDirector() DirectorConfig {
 			},
 		},
 		Backends: map[string]BackendConfig{
-			"mailstore-a-imap": defaultIMAPBackend("mailstore-a", "127.0.0.1:1143", "mailstore-a.example.org"),
-			"mailstore-b-imap": defaultIMAPBackend("mailstore-b", "127.0.0.1:2143", "mailstore-b.example.org"),
-			"mailstore-a-lmtp": defaultLMTPBackend("mailstore-a", "127.0.0.1:2424", "mailstore-a.example.org"),
-			"mailstore-b-lmtp": defaultLMTPBackend("mailstore-b", "127.0.0.1:3424", "mailstore-b.example.org"),
+			"mailstore-a-imap": defaultIMAPBackend("mailstore-a", "mailstore-a-node-1", "127.0.0.1:1143", "mailstore-a.example.org"),
+			"mailstore-b-imap": defaultIMAPBackend("mailstore-b", "mailstore-b-node-1", "127.0.0.1:2143", "mailstore-b.example.org"),
+			"mailstore-a-lmtp": defaultLMTPBackend("mailstore-a", "mailstore-a-node-1", "127.0.0.1:2424", "mailstore-a.example.org"),
+			"mailstore-b-lmtp": defaultLMTPBackend("mailstore-b", "mailstore-b-node-1", "127.0.0.1:3424", "mailstore-b.example.org"),
 		},
 	}
 }
@@ -447,10 +452,11 @@ func defaultLMTPListener(serviceName string, address string, tlsMode string, cer
 }
 
 // defaultIMAPBackend builds an IMAP backend using master-user authentication.
-func defaultIMAPBackend(shardTag string, address string, serverName string) BackendConfig {
+func defaultIMAPBackend(shardTag string, backendNode string, address string, serverName string) BackendConfig {
 	return BackendConfig{
 		Protocol:       "imap",
 		ShardTag:       shardTag,
+		BackendNode:    backendNode,
 		Address:        address,
 		Weight:         100,
 		MaxConnections: 1000,
@@ -482,10 +488,11 @@ func defaultIMAPBackend(shardTag string, address string, serverName string) Back
 }
 
 // defaultLMTPBackend builds an LMTP backend using SASL authentication.
-func defaultLMTPBackend(shardTag string, address string, serverName string) BackendConfig {
+func defaultLMTPBackend(shardTag string, backendNode string, address string, serverName string) BackendConfig {
 	return BackendConfig{
 		Protocol:       "lmtp",
 		ShardTag:       shardTag,
+		BackendNode:    backendNode,
 		Address:        address,
 		Weight:         100,
 		MaxConnections: 1000,

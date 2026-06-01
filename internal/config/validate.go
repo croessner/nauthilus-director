@@ -342,6 +342,7 @@ func validateDirector(director DirectorConfig, authorities map[string]AuthorityC
 	}
 
 	requirePositiveDuration("director.affinity.active_user_pinning.idle_grace", director.Affinity.ActiveUserPinning.IdleGrace, problems)
+	validateBackendRetention("director.affinity.backend_retention", director.Affinity.BackendRetention, problems)
 	requirePositiveDuration("director.affinity.local_cache.ttl", director.Affinity.LocalCache.TTL, problems)
 	requirePositiveInt("director.affinity.local_cache.max_entries", director.Affinity.LocalCache.MaxEntries, problems)
 	validateUserHolds("director.affinity.user_holds", director.Affinity.UserHolds, problems)
@@ -349,6 +350,23 @@ func validateDirector(director DirectorConfig, authorities map[string]AuthorityC
 	requirePositiveDuration("director.health.timeout", director.Health.Timeout, problems)
 	requirePositiveDuration("director.maintenance.drain_timeout", director.Maintenance.DrainTimeout, problems)
 	requirePositiveDuration("director.maintenance.hard_kill_grace", director.Maintenance.HardKillGrace, problems)
+}
+
+// validateBackendRetention enforces explicit opt-out for zero retained binding TTL.
+func validateBackendRetention(path string, retention BackendRetentionConfig, problems *[]string) {
+	requireNonNegativeDuration(path+".default_ttl", retention.DefaultTTL, problems)
+	requireNonNegativeDuration(path+".max_ttl", retention.MaxTTL, problems)
+
+	if !retention.Enabled {
+		return
+	}
+
+	requirePositiveDuration(path+".default_ttl", retention.DefaultTTL, problems)
+	requirePositiveDuration(path+".max_ttl", retention.MaxTTL, problems)
+
+	if retention.DefaultTTL > retention.MaxTTL {
+		addProblem(problems, path+".default_ttl must not exceed "+path+".max_ttl")
+	}
 }
 
 // validateUserHolds enforces bounded placement holds and local waiter limits.

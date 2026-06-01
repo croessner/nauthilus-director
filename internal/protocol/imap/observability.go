@@ -24,6 +24,8 @@ import (
 	"time"
 
 	"github.com/croessner/nauthilus-director/internal/observability"
+	placementpkg "github.com/croessner/nauthilus-director/internal/placement"
+	"github.com/croessner/nauthilus-director/internal/state"
 )
 
 const (
@@ -43,6 +45,8 @@ const (
 
 	reasonBackendAuth     = "backend_auth_failed"
 	reasonBackendConnect  = "backend_connect_failed"
+	reasonBindingExpired  = "binding_expired"
+	reasonBindingRetained = "binding_retained"
 	reasonCanceled        = "canceled"
 	reasonCredentialInput = "credential_input"
 	reasonLiteral         = "literal"
@@ -53,6 +57,7 @@ const (
 
 	obsFieldAffinitySource    = "affinity_source"
 	obsFieldBackendIdentifier = "backend_identifier"
+	obsFieldBackendNode       = "backend_node"
 	obsFieldBackendPool       = "backend_pool"
 	obsFieldCommand           = "command"
 	obsFieldListener          = "listener"
@@ -95,17 +100,19 @@ func (s *Session) recordRoutingResolve(ctx context.Context, result string, reaso
 }
 
 // recordAffinityOpen emits the Redis-backed session-open observation.
-func (s *Session) recordAffinityOpen(ctx context.Context, result string, reason string, source string, shardTag string) {
+func (s *Session) recordAffinityOpen(ctx context.Context, result string, reason string, source string, shardTag string, backendNode string) {
 	s.recordObservation(ctx, observability.EventAffinityOpen, observability.TraceBoundaryRoutingResolve, "affinity_open", result, reason, map[string]string{
 		obsFieldAffinitySource: source,
+		obsFieldBackendNode:    strings.TrimSpace(backendNode),
 		obsFieldShardTag:       shardTag,
 	})
 }
 
 // recordSessionAttach emits selected-backend attachment observations.
-func (s *Session) recordSessionAttach(ctx context.Context, result string, reason string, backendID string, shardTag string) {
+func (s *Session) recordSessionAttach(ctx context.Context, result string, reason string, backendID string, backendNode string, shardTag string) {
 	s.recordObservation(ctx, observability.EventSessionAttach, observability.TraceBoundaryBackendSelect, observationOperationSessionAttach, result, reason, map[string]string{
 		obsFieldBackendIdentifier: strings.TrimSpace(backendID),
+		obsFieldBackendNode:       strings.TrimSpace(backendNode),
 		obsFieldShardTag:          strings.TrimSpace(shardTag),
 	})
 }
@@ -119,6 +126,14 @@ func (s *Session) recordSessionClose(ctx context.Context, result string, reason 
 func (s *Session) recordBackendSelect(ctx context.Context, result string, reason string, shardTag string, duration time.Duration) {
 	s.recordObservation(ctx, observability.EventBackendSelect, observability.TraceBoundaryBackendSelect, observationOperationBackendSelect, result, reason, map[string]string{
 		obsFieldShardTag: shardTag,
+	}, duration)
+}
+
+// recordBackendSelectWithNode emits backend-node-aware selection diagnostics.
+func (s *Session) recordBackendSelectWithNode(ctx context.Context, result string, reason string, shardTag string, backendNode string, duration time.Duration) {
+	s.recordObservation(ctx, observability.EventBackendSelect, observability.TraceBoundaryBackendSelect, observationOperationBackendSelect, result, reason, map[string]string{
+		obsFieldBackendNode: strings.TrimSpace(backendNode),
+		obsFieldShardTag:    strings.TrimSpace(shardTag),
 	}, duration)
 }
 
@@ -218,6 +233,7 @@ func (s *Session) observationFields(operation string, result string, reason stri
 
 	if s.placed {
 		fields[obsFieldBackendIdentifier] = s.placement.Backend.Backend.Identifier
+		fields[obsFieldBackendNode] = s.placement.Backend.Backend.BackendNode
 		fields[obsFieldShardTag] = s.placement.SelectedShardTag
 	}
 
@@ -283,8 +299,34 @@ func reasonClass(err error) string {
 		return reasonLiteral
 	case errors.Is(err, ErrUnsupportedAuthMechanism), errors.Is(err, ErrUnsupportedCommand):
 		return reasonUnsupported
+	case placementpkg.IsErrorKind(err, placementpkg.ErrorKindBackendNodeMissingProtocol):
+		return string(placementpkg.ErrorKindBackendNodeMissingProtocol)
+	case placementpkg.IsErrorKind(err, placementpkg.ErrorKindBackendNodeMismatch):
+		return string(placementpkg.ErrorKindBackendNodeMismatch)
+	case placementpkg.IsErrorKind(err, placementpkg.ErrorKindBackendNodeUnusable):
+		return string(placementpkg.ErrorKindBackendNodeUnusable)
 	default:
 		return reasonProtocol
+	}
+}
+
+// closeReasonClass maps successful lease close state into binding retention classes.
+func closeReasonClass(err error, record state.AffinityRecord) string {
+	if err != nil {
+		return reasonClass(err)
+	}
+
+	switch record.BindingStatus {
+	case state.BindingStatusRetained:
+		return reasonBindingRetained
+	case state.BindingStatusExpired:
+		return reasonBindingExpired
+	default:
+		if record.ActiveHolderCount == 0 && !record.RetentionExpiresAt.IsZero() {
+			return reasonBindingRetained
+		}
+
+		return ""
 	}
 }
 
