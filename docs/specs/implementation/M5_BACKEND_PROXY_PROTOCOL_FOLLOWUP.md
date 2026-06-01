@@ -51,8 +51,9 @@ The implemented backend path does not provide the symmetric outbound behavior:
   health checks also start reading the backend greeting without sending a PROXY
   header.
 - `director.backends.*.haproxy.enabled` exists in typed config and generated
-  references, but the normalized backend domain object does not carry it into
-  connector behavior.
+  references. The normalized backend domain object already carries `shard_tag`
+  and `backend_node`, but it still does not carry backend HAProxy transport
+  policy into connector behavior.
 - Operators can point a backend address at a HAProxy or PROXY-aware mailstore,
   but a target that requires PROXY protocol cannot currently be used safely for
   either real sessions or health checks.
@@ -73,7 +74,8 @@ The target connection sequence for a PROXY-enabled backend is:
 
 ```text
 frontend session or health runner
-  -> select backend
+  -> select or reuse backend_node according to active/retained affinity
+  -> resolve protocol-specific backend entry for backend_node + protocol + backend_pool
   -> TCP connect to backend address
   -> write exactly one PROXY protocol header when backend config enables it
   -> continue with configured backend TLS mode
@@ -95,7 +97,8 @@ available to M6 ManageSieve through the same shared backend transport model.
 
 Implementation slices:
 
-1. Backend config and domain propagation for `director.backends.*.haproxy`.
+1. Backend config and domain propagation for `director.backends.*.haproxy`
+   without weakening backend-node registry validation.
 2. Shared outbound PROXY header construction and validation.
 3. IMAP backend connector support for session and health-check purposes.
 4. LMTP backend connector support for session and health-check purposes.
@@ -119,7 +122,8 @@ In scope:
 - Interpret `haproxy.enabled: true` as "send HAProxy PROXY protocol to this
   backend endpoint before any backend protocol bytes".
 - Propagate backend HAProxy configuration from typed config into the normalized
-  backend domain object.
+  backend domain object alongside the existing `backend_node` and `shard_tag`
+  identity fields.
 - Send outbound PROXY protocol for IMAP backend sessions when enabled.
 - Send outbound PROXY protocol for LMTP backend sessions when enabled.
 - Send outbound PROXY protocol for IMAP and LMTP backend health checks when
@@ -135,9 +139,14 @@ In scope:
   header write failures.
 - Keep logs, metrics and REST responses secret-safe and low-cardinality.
 - Add tests that prove no header is sent when the feature is disabled.
+- Preserve the existing backend-node placement invariant: active or retained
+  affinity binds to `backend_node`, then the requested protocol resolves the
+  matching backend entry before backend transport behavior runs.
 
 Out of scope:
 
+- Changing backend-node validation, affinity persistence, failover policy or
+  selector behavior.
 - Changing listener-side PROXY protocol semantics.
 - Accepting untrusted client-supplied PROXY source addresses.
 - Adding runtime commands that spoof arbitrary PROXY source addresses.
@@ -145,6 +154,8 @@ Out of scope:
 - Adding feature-specific Redis state or coordination.
 - Treating `haproxy.enabled` as a health endpoint, HTTP proxy, load-balancer
   discovery mechanism or backend selection policy.
+- Treating `backend_node` as a proxy hostname, backend address, HAProxy
+  endpoint or transport-policy container.
 - Adding general-purpose L4 load-balancer features to the Director.
 - Sending multiple PROXY headers on one backend connection.
 - Sending a PROXY header after backend TLS has already started.
@@ -159,6 +170,8 @@ director:
   backends:
     mailstore-a-imap:
       protocol: imap
+      shard_tag: shard-a
+      backend_node: mailstore-a-node-1
       address: mailstore-a-proxy:143
       haproxy:
         enabled: true
@@ -169,6 +182,20 @@ Semantics:
 - `enabled: false` means the Director sends no backend PROXY protocol preface.
 - `enabled: true` means every Director-created TCP connection to that backend
   starts with one PROXY protocol header.
+- `backend_node` remains the concrete mailbox-authority identity used by
+  placement and affinity. It is not a hostname, address, proxy name or fallback
+  transport selector.
+- In multi-protocol stateful deployments, every backend entry must declare a
+  safe `backend_node`. Existing single-protocol compatibility may derive
+  `backend_node` from the backend identifier only when the current registry
+  rules allow it.
+- All backend entries sharing a `backend_node` must share the same effective
+  `shard_tag`, and there may be at most one entry for each
+  `backend_node + protocol + backend_pool`.
+- `haproxy.enabled` is per protocol-specific backend entry. It is not inherited
+  across all entries with the same `backend_node`, because IMAP, LMTP,
+  ManageSieve and later protocol endpoints may legitimately use different
+  transport paths.
 - The header is written before implicit TLS, before reading a cleartext backend
   greeting and before any STARTTLS command.
 - The setting applies equally to session connections and health-check
@@ -206,6 +233,12 @@ must not create two independent sources of transport truth.
 Outbound PROXY protocol is backend transport metadata. It does not affect
 routing, affinity, health state ownership, maintenance, drain, runtime weight,
 backend authentication mode or protocol capability selection.
+
+Backend-node placement must complete before backend transport handling begins.
+The connector receives the already selected protocol-specific `backend.Backend`
+entry. It must not rerun shard selection, reinterpret `backend_node`, consult a
+different backend entry or move an active/retained binding because PROXY
+protocol is enabled or disabled.
 
 For real sessions:
 
@@ -270,14 +303,22 @@ type BackendConnectRequest struct {
 }
 ```
 
+`Target` is the backend entry produced by the selector or health runner after
+registry normalization. It must include the current `BackendNode`, `ShardTag`
+and HAProxy transport policy. The connect boundary may add a request struct as
+shown above or adapt the existing `Connect(ctx, target, timeout)` signatures,
+but callers must still provide purpose and frontend address facts without
+duplicating backend-node selection.
+
 Protocol packages may keep narrow interfaces for tests, but they must not
 duplicate outbound PROXY protocol construction. IMAP, LMTP, ManageSieve and
 later POP3 should all call a shared helper or shared backend transport type.
 
 The normalized `backend.Backend` domain object must contain secret-safe backend
 HAProxy configuration. It should remain a value object suitable for selector,
-health and route diagnostics. Do not let protocol packages read raw Viper maps
-or untyped YAML data to discover whether PROXY is enabled.
+health and route diagnostics, and it must preserve the existing `BackendNode`
+and `ShardTag` placement facts unchanged. Do not let protocol packages read raw
+Viper maps or untyped YAML data to discover whether PROXY is enabled.
 
 ## Header Construction
 
@@ -346,6 +387,8 @@ contract and generated client SDK.
 Allowed backend read-back fields are secret-safe:
 
 - backend identifier;
+- backend node, when the OpenAPI contract is intentionally extended for this
+  follow-up;
 - protocol;
 - backend pool;
 - shard tag;
@@ -354,10 +397,13 @@ Allowed backend read-back fields are secret-safe:
 - runtime health and maintenance state already exposed by the backend detail
   model.
 
-Do not expose backend addresses, TLS private key paths, passwords, bearer token
-paths, raw peer addresses or health-check credentials through the backend REST
-detail unless a separate redaction-aware config inspection endpoint is being
-used.
+Current `BackendDetail` responses expose backend identifier, protocol, backend
+pool, shard tag and runtime state. Adding backend-node or backend PROXY
+read-back requires an explicit OpenAPI change, generated server/client refresh
+and CLI update. Do not expose backend addresses, TLS private key paths,
+passwords, bearer token paths, raw peer addresses or health-check credentials
+through the backend REST detail unless a separate redaction-aware config
+inspection endpoint is being used.
 
 Route lookup remains side-effect-free. It may report that a selected backend
 would require outbound PROXY protocol, but it must not open a backend socket,
@@ -373,13 +419,15 @@ Acceptable event fields:
 - operation: `backend_proxy_protocol`;
 - protocol: `imap`, `lmtp`, `sieve` or later protocol names;
 - backend pool;
+- backend node as a secret-safe structured event field only, never as a
+  Prometheus label;
 - result: `ok` or `failure`;
 - reason class: `ok`, `disabled`, `write_failed`, `unsupported_family`,
   `missing_address`, `config` or similarly bounded values;
 - purpose: `session` or `health`;
 - version: `v1` or `v2` when configured.
 
-Forbidden metric labels and log fields:
+Forbidden Prometheus labels and unsafe log or event fields:
 
 - username;
 - user hash;
@@ -390,13 +438,15 @@ Forbidden metric labels and log fields:
 - client IP;
 - raw frontend address;
 - raw backend address;
-- raw backend identifier;
+- backend identifier as a Prometheus label;
+- backend node as a Prometheus label;
 - raw error text;
 - secret-bearing values.
 
 Metrics must aggregate by bounded dimensions. If backend identifiers are needed
-for operator troubleshooting, emit them only in secret-safe structured events
-where the existing observability policy permits them, not as Prometheus labels.
+or backend nodes are needed for operator troubleshooting, emit them only in
+secret-safe structured events where the existing observability policy permits
+them, not as Prometheus labels.
 
 ## Package Boundaries
 
@@ -405,7 +455,9 @@ Responsibilities:
 - `internal/config` owns typed config, defaults, environment expansion and
   validation for backend HAProxy settings.
 - `internal/backend` owns normalized backend inventory and exposes backend
-  transport policy as part of the backend domain object.
+  transport policy as part of the backend domain object. It also remains the
+  owner of `backend_node` validation, shard consistency and
+  `backend_node + protocol + backend_pool` lookup.
 - Shared backend transport code owns outbound PROXY header construction and
   write ordering.
 - `internal/protocol/imap` owns IMAP greeting, STARTTLS, backend auth and proxy
@@ -426,7 +478,14 @@ Unit tests:
 - Config validation accepts the existing disabled default.
 - Config validation accepts `haproxy.enabled: true`.
 - Config validation rejects an unknown version if `haproxy.version` is added.
-- The backend registry carries HAProxy config into normalized backend values.
+- The backend registry carries HAProxy config into normalized backend values
+  while preserving `BackendNode`, `ShardTag` and existing backend-node
+  ambiguity checks.
+- Multi-protocol configs still require explicit safe `backend_node` values, and
+  HAProxy-enabled entries cannot use `backend_node` as a proxy hostname or
+  address.
+- Backend entries sharing one `backend_node` may have distinct
+  `haproxy.enabled` values, because the setting is per protocol endpoint.
 - IMAP connector writes no PROXY header when disabled.
 - IMAP connector writes a PROXY header before greeting reads when enabled.
 - IMAP connector writes the PROXY header before implicit TLS handshake when
@@ -453,6 +512,8 @@ Health-check tests:
 REST and CLI tests, if read-back is added:
 
 - Generated OpenAPI DTOs expose only secret-safe backend transport fields.
+- Backend read-back includes `backend_node` only after the OpenAPI schema,
+  generated server/client code and CLI output are updated together.
 - `nauthilus-directorctl backends show` uses the generated client model and does
   not duplicate REST DTOs.
 - JSON and text output remain deterministic.
@@ -474,7 +535,8 @@ endpoints, but the implementation must not be demo-only.
 ## Acceptance Checklist
 
 - [ ] `director.backends.*.haproxy.enabled` is implemented, not inert metadata.
-- [ ] Backend HAProxy config is propagated into `backend.Backend`.
+- [ ] Backend HAProxy config is propagated into `backend.Backend` without
+      changing `BackendNode`, `ShardTag` or backend-node registry invariants.
 - [ ] Session backend connections send PROXY before TLS or protocol greeting when
       enabled.
 - [ ] Health-check backend connections send PROXY before TLS or protocol greeting
