@@ -45,6 +45,7 @@ const (
 	metricNameBackendHealthState      = "nauthilus_director_backend_health_state"
 	metricNameBackendHealthTotal      = "nauthilus_director_backend_health_transitions_total"
 	metricNameBackendMaintenance      = "nauthilus_director_backend_maintenance_operations_total"
+	metricNameBackendProxyProtocol    = "nauthilus_director_backend_proxy_protocol_total"
 	metricNameBackendSelection        = "nauthilus_director_backend_selection_total"
 	metricNameBackendSelectionSeconds = "nauthilus_director_backend_selection_duration_seconds"
 	metricNameBackendRuntime          = "nauthilus_director_backend_runtime_operations_total"
@@ -148,8 +149,15 @@ var (
 		metricLabelBackendPool,
 		metricLabelShardTag,
 	}
-	backendStateResultLabels    = append(cloneLabelNames(backendStateLabels), metricLabelResult)
-	backendAuthLabels           = append(cloneLabelNames(protocolBackendLabels), metricLabelMechanism)
+	backendStateResultLabels   = append(cloneLabelNames(backendStateLabels), metricLabelResult)
+	backendAuthLabels          = append(cloneLabelNames(protocolBackendLabels), metricLabelMechanism)
+	backendProxyProtocolLabels = []string{
+		metricLabelProtocol,
+		metricLabelBackendPool,
+		metricLabelOperation,
+		metricLabelResult,
+		metricLabelReasonClass,
+	}
 	operationResultReasonLabels = []string{
 		metricLabelOperation,
 		metricLabelResult,
@@ -218,6 +226,7 @@ type prometheusInstruments struct {
 	backendHealthState       *prometheus.GaugeVec
 	backendHealthTransitions *prometheus.CounterVec
 	backendMaintenance       *prometheus.CounterVec
+	backendProxyProtocol     *prometheus.CounterVec
 	backendSelection         *prometheus.CounterVec
 	backendSelectionSeconds  *prometheus.HistogramVec
 	backendRuntime           *prometheus.CounterVec
@@ -410,6 +419,8 @@ func (m *prometheusRuntime) recordPlacementMetric(event Event) bool {
 		m.recordBackendSelection(event)
 	case EventBackendConnect:
 		m.recordBackendConnect(event)
+	case EventBackendProxyProtocol:
+		m.recordBackendProxyProtocol(event)
 	case EventBackendAuth:
 		m.recordBackendAuth(event)
 	default:
@@ -536,6 +547,11 @@ func (m *prometheusRuntime) recordBackendConnect(event Event) {
 	observeDuration(m.instrument.backendConnectSeconds, event, protocolBackendLabels)
 }
 
+// recordBackendProxyProtocol counts outbound backend PROXY protocol preface outcomes.
+func (m *prometheusRuntime) recordBackendProxyProtocol(event Event) {
+	m.instrument.backendProxyProtocol.WithLabelValues(metricValues(event, backendProxyProtocolLabels)...).Inc()
+}
+
 // recordBackendAuth counts selected-backend authentication outcomes.
 func (m *prometheusRuntime) recordBackendAuth(event Event) {
 	m.instrument.backendAuth.WithLabelValues(metricValues(event, backendAuthLabels)...).Inc()
@@ -628,6 +644,7 @@ func newPrometheusInstruments() (prometheusInstruments, error) {
 		backendHealthState:       builders.gaugeVec(metricNameBackendHealthState, "Aggregate backend health state by bounded backend dimensions.", backendStateResultLabels...),
 		backendHealthTransitions: builders.counterVec(metricNameBackendHealthTotal, "Total backend health state transitions.", protocolBackendLabels...),
 		backendMaintenance:       builders.counterVec(metricNameBackendMaintenance, "Total backend maintenance runtime operations.", append(cloneLabelNames(operationResultReasonLabels), metricLabelMaintenanceMode)...),
+		backendProxyProtocol:     builders.counterVec(metricNameBackendProxyProtocol, "Total outbound backend PROXY protocol preface outcomes.", backendProxyProtocolLabels...),
 		backendSelection:         builders.counterVec(metricNameBackendSelection, "Total backend selection outcomes.", protocolBackendLabels...),
 		backendSelectionSeconds:  builders.histogramVec(metricNameBackendSelectionSeconds, "Backend selection duration in seconds.", backendConnectBuckets(), protocolBackendLabels...),
 		backendRuntime:           builders.counterVec(metricNameBackendRuntime, "Total backend runtime override operations.", operationResultReasonLabels...),
@@ -677,6 +694,7 @@ func (i prometheusInstruments) collectors() []prometheus.Collector {
 		i.backendHealthState,
 		i.backendHealthTransitions,
 		i.backendMaintenance,
+		i.backendProxyProtocol,
 		i.backendSelection,
 		i.backendSelectionSeconds,
 		i.backendRuntime,

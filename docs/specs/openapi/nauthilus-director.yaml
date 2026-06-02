@@ -915,19 +915,27 @@ components:
       additionalProperties: false
       required:
         - identifier
+        - backend_node
         - protocol
         - backend_pool
         - shard_tag
+        - outbound_proxy_protocol
         - runtime
       properties:
         identifier:
           type: string
+        backend_node:
+          type: string
+          description: Secret-safe backend-node identity used for cross-protocol affinity diagnostics.
         protocol:
           type: string
         backend_pool:
           type: string
         shard_tag:
           type: string
+        outbound_proxy_protocol:
+          type: boolean
+          description: Whether this backend endpoint sends an outbound HAProxy PROXY protocol preface.
         runtime:
           $ref: "#/components/schemas/BackendRuntimeState"
     BackendListResponse:
@@ -1440,6 +1448,7 @@ components:
         - protocol
         - backend_pool
         - shard_tag
+        - outbound_proxy_protocol
         - eligible
         - allows_new_sessions
         - allows_active_pins
@@ -1456,6 +1465,9 @@ components:
           type: string
         shard_tag:
           type: string
+        outbound_proxy_protocol:
+          type: boolean
+          description: Whether the selected backend endpoint would require an outbound PROXY preface.
         generation:
           type: string
         eligible:

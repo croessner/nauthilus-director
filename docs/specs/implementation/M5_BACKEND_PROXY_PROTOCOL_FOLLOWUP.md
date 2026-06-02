@@ -1,7 +1,8 @@
 # M5 Backend PROXY Protocol Follow-up
 
-Status: implementation-ready follow-up; required before declaring
-HAProxy-backed backend endpoints production-ready.
+Status: completed. Backend-side HAProxy PROXY protocol is implemented for IMAP
+and LMTP sessions, backend health checks, generated REST/CLI diagnostics and the
+demo stack.
 
 This document closes the backend-side PROXY protocol gap for the already
 implemented IMAP and LMTP backend connection paths. Listener-side PROXY protocol
@@ -203,25 +204,12 @@ Semantics:
 - The setting is per backend entry, not per backend pool or per listener.
 - Existing config dumps and generated references must keep showing the field.
 
-The implementation may add an optional version field under the existing block:
-
-```yaml
-director:
-  backends:
-    mailstore-a-imap:
-      haproxy:
-        enabled: true
-        version: v1
-```
-
-Rules for `version` if it is added:
-
-- Allowed values are `v1` and `v2`.
-- Empty or omitted version defaults to `v1` for compatibility with the common
-  HAProxy `send-proxy` mode and mail-server deployments that support only the
-  text format.
-- Unknown values fail typed validation before runtime startup.
-- Adding `version` must not rename, remove or invert `haproxy.enabled`.
+The current implementation exposes only `haproxy.enabled`. It sends the
+implemented outbound PROXY preface when enabled and does not expose a
+`haproxy.version` config path, REST field or CLI field. A future additive
+version field may be designed separately, but that slice must add typed config,
+validation, generated references, manpages and tests together. Adding such a
+field must not rename, remove or invert `haproxy.enabled`.
 
 Do not introduce a replacement `director.backends.*.proxy_protocol` tree in this
 follow-up. The current path is already present in stable generated references.
@@ -283,23 +271,23 @@ The exact Go type names are implementation details, but the boundary should be
 shaped around these facts:
 
 ```go
-type BackendConnectPurpose string
+type ConnectPurpose string
 
 const (
-    BackendConnectPurposeSession BackendConnectPurpose = "session"
-    BackendConnectPurposeHealth  BackendConnectPurpose = "health"
+    ConnectPurposeSession ConnectPurpose = "session"
+    ConnectPurposeHealth  ConnectPurpose = "health"
 )
 
-type BackendProxyAddresses struct {
+type ProxyAddresses struct {
     Source      net.Addr
     Destination net.Addr
 }
 
-type BackendConnectRequest struct {
+type ConnectRequest struct {
     Target         backend.Backend
     Timeout        time.Duration
-    Purpose        BackendConnectPurpose
-    ProxyAddresses *BackendProxyAddresses
+    Purpose        ConnectPurpose
+    ProxyAddresses *ProxyAddresses
 }
 ```
 
@@ -448,6 +436,22 @@ or backend nodes are needed for operator troubleshooting, emit them only in
 secret-safe structured events where the existing observability policy permits
 them, not as Prometheus labels.
 
+Implemented observability reconciliation:
+
+- The shared backend transport records a `backend.proxy_protocol` event for each
+  backend connection preface decision.
+- Structured events and traces carry `operation=backend_proxy_protocol`,
+  protocol, backend pool, result, bounded reason class and purpose. Backend node
+  may appear only as a structured diagnostic field.
+- Prometheus exposes an aggregate backend PROXY counter labeled only with
+  protocol, backend pool, operation, result and reason class.
+- Disabled backends report `result=ok` with `reason_class=disabled`; configured
+  writes report `result=ok` with `reason_class=ok`; failures report
+  `result=failure` with bounded reason classes such as `write_failed`,
+  `missing_address`, `unsupported_family` or `config`.
+- Metrics and generated output do not use backend identifier, backend node,
+  raw frontend address, raw backend address or raw error text as labels.
+
 ## Package Boundaries
 
 Responsibilities:
@@ -529,26 +533,46 @@ E2E tests:
   backend when the E2E environment supports LMTP delivery.
 - Prove LMTP delivery and LMTP backend health use the same PROXY-required path.
 
-Demo-stack proof may use HAProxy `accept-proxy` in front of selected mailstore
-endpoints, but the implementation must not be demo-only.
+Demo-stack proof uses HAProxy `accept-proxy` in front of the selected
+`mailstore-c` IMAP and LMTP endpoints. The production implementation remains
+shared backend transport behavior, not a demo-only path.
+
+## Completion Evidence
+
+- Shared outbound backend transport lives in `internal/backend` and is used by
+  IMAP and LMTP connectors before backend TLS, greeting reads or capability
+  discovery.
+- `backend.Backend` carries per-endpoint `haproxy.enabled` transport policy
+  without changing backend-node, shard or pool selection invariants.
+- Generated REST and `nauthilus-directorctl backends show` expose only the
+  secret-safe backend node and outbound PROXY boolean.
+- Route lookup reports whether the selected backend would use outbound PROXY
+  while remaining read-only and socket-free.
+- Public-boundary E2E covers IMAP login through a PROXY-required backend, IMAP
+  health through the same required preface, disabled-backend failure without a
+  PROXY header, LMTP delivery through a PROXY-required backend and LMTP health
+  through the same required preface.
+- Demo stack routes `mailstore-c-imap` and `mailstore-c-lmtp` through internal
+  HAProxy `accept-proxy` frontends and provides
+  `contrib/demo-stack/scripts/prove-backend-proxy.sh` for the public proof.
 
 ## Acceptance Checklist
 
-- [ ] `director.backends.*.haproxy.enabled` is implemented, not inert metadata.
-- [ ] Backend HAProxy config is propagated into `backend.Backend` without
+- [x] `director.backends.*.haproxy.enabled` is implemented, not inert metadata.
+- [x] Backend HAProxy config is propagated into `backend.Backend` without
       changing `BackendNode`, `ShardTag` or backend-node registry invariants.
-- [ ] Session backend connections send PROXY before TLS or protocol greeting when
+- [x] Session backend connections send PROXY before TLS or protocol greeting when
       enabled.
-- [ ] Health-check backend connections send PROXY before TLS or protocol greeting
+- [x] Health-check backend connections send PROXY before TLS or protocol greeting
       when enabled.
-- [ ] Light and deep health checks both exercise the PROXY-required path.
-- [ ] IMAP and LMTP use a shared outbound PROXY implementation.
-- [ ] No behavior changes occur for backends with `haproxy.enabled: false`.
-- [ ] Unsupported PROXY address data fails closed with bounded diagnostics.
-- [ ] Logs and metrics do not expose usernames, recipients, session IDs, client
+- [x] Light and deep health checks both exercise the PROXY-required path.
+- [x] IMAP and LMTP use a shared outbound PROXY implementation.
+- [x] No behavior changes occur for backends with `haproxy.enabled: false`.
+- [x] Unsupported PROXY address data fails closed with bounded diagnostics.
+- [x] Logs and metrics do not expose usernames, recipients, session IDs, client
       IPs, raw backend addresses or secret-bearing values.
-- [ ] Generated config references and operator examples describe the implemented
+- [x] Generated config references and operator examples describe the implemented
       behavior.
-- [ ] Public-boundary tests prove real session traffic and health traffic through
+- [x] Public-boundary tests prove real session traffic and health traffic through
       a PROXY-required backend endpoint.
-- [ ] `make guardrails` passes before the implementation is considered complete.
+- [x] `make guardrails` passes before the implementation is considered complete.

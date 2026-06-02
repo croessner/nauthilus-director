@@ -121,6 +121,41 @@ func TestDevelopmentRuntimeStateResetGuidanceDocumented(t *testing.T) {
 	}
 }
 
+// TestBackendProxyProtocolDocsDescribeImplementedConfig keeps operator guidance current.
+func TestBackendProxyProtocolDocsDescribeImplementedConfig(t *testing.T) {
+	manpages := map[string]string{
+		"server": readTextFile(t, filepath.Join("..", "..", "docs", "man", "nauthilus-director.1")),
+		"ctl":    readTextFile(t, filepath.Join("..", "..", "docs", "man", "nauthilus-directorctl.1")),
+		"yaml":   readTextFile(t, filepath.Join("..", "..", "docs", "man", "nauthilus-director.yaml.5")),
+	}
+	defaults := readTextFile(t, filepath.Join("..", "..", "docs", "reference", "config-defaults.yaml"))
+	paths := readTextFile(t, filepath.Join("..", "..", "docs", "reference", "config-paths.md"))
+	target := readTextFile(t, filepath.Join("..", "..", "docs", "config", "nauthilus-director.target.yml"))
+
+	for name, content := range manpages {
+		if strings.Contains(content, "haproxy.version") {
+			t.Fatalf("%s manpage advertises unimplemented haproxy.version", name)
+		}
+	}
+
+	for name, content := range map[string]string{"defaults": defaults, "paths": paths, "target": target} {
+		if !strings.Contains(content, "haproxy") || !strings.Contains(content, "enabled") {
+			t.Fatalf("%s config docs do not show haproxy.enabled", name)
+		}
+		if strings.Contains(content, "haproxy.version") {
+			t.Fatalf("%s config docs advertise unimplemented haproxy.version", name)
+		}
+	}
+
+	if !strings.Contains(manpages["yaml"], "backend_proxy_protocol") {
+		t.Fatal("yaml manpage missing backend PROXY observability operation")
+	}
+
+	if !strings.Contains(manpages["ctl"], "Outbound PROXY protocol read-back is a boolean endpoint property") {
+		t.Fatal("ctl manpage missing boolean outbound PROXY read-back guidance")
+	}
+}
+
 // TestRuntimeStateDefaultsValidate verifies scale-related defaults are typed and accepted.
 func TestRuntimeStateDefaultsValidate(t *testing.T) {
 	cfg := DefaultConfig()
@@ -207,6 +242,33 @@ func TestBackendRetentionDefaultsValidate(t *testing.T) {
 
 	if err := NewLoader().Validate(cfg); err != nil {
 		t.Fatalf("Validate rejected backend-retention defaults: %v", err)
+	}
+}
+
+// TestBackendHAProxyDefaultsValidate verifies outbound PROXY policy defaults to disabled per backend.
+func TestBackendHAProxyDefaultsValidate(t *testing.T) {
+	cfg := DefaultConfig()
+
+	for name, backend := range cfg.Director.Backends {
+		if backend.HAProxy.Enabled {
+			t.Fatalf("director.backends.%s.haproxy.enabled = true, want false", name)
+		}
+	}
+
+	if err := NewLoader().Validate(cfg); err != nil {
+		t.Fatalf("Validate rejected backend HAProxy defaults: %v", err)
+	}
+}
+
+// TestBackendHAProxyEnabledValidates verifies the stable backend transport switch is accepted.
+func TestBackendHAProxyEnabledValidates(t *testing.T) {
+	cfg := DefaultConfig()
+	backend := cfg.Director.Backends["mailstore-a-imap"]
+	backend.HAProxy.Enabled = true
+	cfg.Director.Backends["mailstore-a-imap"] = backend
+
+	if err := NewLoader().Validate(cfg); err != nil {
+		t.Fatalf("Validate rejected haproxy.enabled true: %v", err)
 	}
 }
 

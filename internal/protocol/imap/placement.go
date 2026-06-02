@@ -24,6 +24,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/croessner/nauthilus-director/internal/backend"
 	"github.com/croessner/nauthilus-director/internal/nauthilus"
 	"github.com/croessner/nauthilus-director/internal/observability"
 	"github.com/croessner/nauthilus-director/internal/placement"
@@ -337,12 +338,13 @@ func (s *Session) transitionAuthenticatedSession(
 	})
 
 	connectStarted := time.Now()
-	connection, err := s.backendConnector.Connect(connectCtx, s.placement.Backend.Backend, s.context.BackendConnectTimeout)
+	connection, err := s.backendConnector.Connect(connectCtx, s.sessionBackendConnectRequest())
 
 	connectDuration := time.Since(connectStarted)
 	if err != nil {
-		s.recordBackendConnect(connectCtx, observationResultFailure, reasonBackendConnect, connectDuration)
-		connectSpan.End(observationResultFailure, reasonBackendConnect)
+		connectReason := reasonClass(err)
+		s.recordBackendConnect(connectCtx, observationResultFailure, connectReason, connectDuration)
+		connectSpan.End(observationResultFailure, connectReason)
 		_ = s.closePlacedSession(context.Background())
 
 		return commandOutcome{}, s.writeTagged(tag, responseNo, authUnavailableText)
@@ -402,6 +404,20 @@ func (s *Session) transitionAuthenticatedSession(
 	proxySpan.End(resultLabel(err), reasonClass(err))
 
 	return commandOutcome{closeSession: true, flushed: true}, err
+}
+
+// sessionBackendConnectRequest carries selected backend and effective frontend tuple.
+func (s *Session) sessionBackendConnectRequest() backend.ConnectRequest {
+	return backend.ConnectRequest{
+		Target:        s.placement.Backend.Backend,
+		Timeout:       s.context.BackendConnectTimeout,
+		Purpose:       backend.ConnectPurposeSession,
+		Observability: s.observability,
+		ProxyAddresses: &backend.ProxyAddresses{
+			Source:      s.context.RemoteAddr,
+			Destination: s.context.LocalAddr,
+		},
+	}
 }
 
 // registerLocalProxySession exposes a local stream handle for runtime control actions.

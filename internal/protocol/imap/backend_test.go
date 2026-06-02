@@ -36,13 +36,18 @@ import (
 	"time"
 
 	"github.com/croessner/nauthilus-director/internal/backend"
+	"github.com/croessner/nauthilus-director/internal/config"
 )
 
 const (
 	testBackendAddress       = "127.0.0.1:1143"
+	testBackendHealthPass    = "health-secret"
+	testBackendHealthProxyV4 = "PROXY TCP4 10.10.0.1 10.10.0.2 50143 143"
+	testBackendHealthUser    = "healthcheck@example.test"
 	testBackendServerName    = "mailstore.example.test"
 	testBackendTLSHost       = "localhost"
 	testBackendTLSHostTarget = "localhost:1143"
+	testBackendProxyHeaderV4 = "PROXY TCP4 203.0.113.10 198.51.100.20 42500 143"
 )
 
 // TestBackendTargetValidationIsTCPOnly rejects Unix sockets and malformed backend addresses.
@@ -85,6 +90,224 @@ func TestBackendTLSRequiresSNIForIPAddress(t *testing.T) {
 	}
 }
 
+// TestBackendConnectorDisabledProxyWritesNoPreface verifies disabled backends keep old first bytes.
+func TestBackendConnectorDisabledProxyWritesNoPreface(t *testing.T) {
+	dialer := scriptedBackendDialer(t, func(t *testing.T, conn net.Conn) {
+		reader := bufio.NewReader(conn)
+		writeBackendLine(t, conn, "* OK ready")
+		expectBackendLine(t, reader, "D0001 CAPABILITY")
+		writeBackendLine(t, conn, "* CAPABILITY IMAP4rev1 AUTH=PLAIN")
+		writeBackendLine(t, conn, "D0001 OK capability completed")
+	})
+
+	connection, err := NewTCPBackendConnector(dialer).Connect(
+		context.Background(),
+		testSessionBackendConnectRequest(testBackendTarget(backendTLSPlaintext)),
+	)
+	if err != nil {
+		t.Fatalf("Connect returned error: %v", err)
+	}
+	defer func() { _ = connection.Conn().Close() }()
+
+	if connection.TLSActive() {
+		t.Fatal("plaintext backend unexpectedly enabled TLS")
+	}
+
+	dialer.Wait(t)
+}
+
+// TestBackendConnectorWritesProxyBeforePlaintextGreeting verifies PROXY precedes greeting reads.
+func TestBackendConnectorWritesProxyBeforePlaintextGreeting(t *testing.T) {
+	dialer := scriptedBackendDialer(t, func(t *testing.T, conn net.Conn) {
+		reader := bufio.NewReader(conn)
+		expectBackendLine(t, reader, testBackendProxyHeaderV4)
+		writeBackendLine(t, conn, "* OK ready")
+		expectBackendLine(t, reader, "D0001 CAPABILITY")
+		writeBackendLine(t, conn, "* CAPABILITY IMAP4rev1 AUTH=PLAIN")
+		writeBackendLine(t, conn, "D0001 OK capability completed")
+	})
+
+	connection, err := NewTCPBackendConnector(dialer).Connect(
+		context.Background(),
+		testProxySessionBackendConnectRequest(testBackendTarget(backendTLSPlaintext)),
+	)
+	if err != nil {
+		t.Fatalf("Connect returned error: %v", err)
+	}
+	defer func() { _ = connection.Conn().Close() }()
+
+	if connection.TLSActive() {
+		t.Fatal("plaintext backend unexpectedly enabled TLS")
+	}
+
+	dialer.Wait(t)
+}
+
+// TestBackendConnectorWritesProxyBeforeStartTLSGreeting verifies PROXY precedes STARTTLS setup.
+func TestBackendConnectorWritesProxyBeforeStartTLSGreeting(t *testing.T) {
+	certPath, certificate := writeBackendTestCertificate(t)
+	dialer := scriptedBackendDialer(t, func(t *testing.T, conn net.Conn) {
+		reader := bufio.NewReader(conn)
+		expectBackendLine(t, reader, testBackendProxyHeaderV4)
+		writeBackendLine(t, conn, "* OK ready")
+		expectBackendLine(t, reader, "D0001 STARTTLS")
+		writeBackendLine(t, conn, "D0001 OK begin TLS")
+
+		tlsConn := tls.Server(conn, backendTestTLSConfig(t, certificate))
+		if err := tlsConn.Handshake(); err != nil {
+			t.Errorf("server handshake: %v", err)
+			return
+		}
+
+		tlsReader := bufio.NewReader(tlsConn)
+		expectBackendLine(t, tlsReader, "D0002 CAPABILITY")
+		writeBackendLine(t, tlsConn, "* CAPABILITY IMAP4rev1 AUTH=PLAIN")
+		writeBackendLine(t, tlsConn, "D0002 OK capability completed")
+	})
+
+	connection, err := NewTCPBackendConnector(dialer).Connect(
+		context.Background(),
+		testProxySessionBackendConnectRequest(testBackendTargetWithCA(backendTLSStartTLS, certPath)),
+	)
+	if err != nil {
+		t.Fatalf("Connect returned error: %v", err)
+	}
+	defer func() { _ = connection.Conn().Close() }()
+
+	if !connection.TLSActive() || !connection.TLSVerified() {
+		t.Fatalf("TLS state active=%v verified=%v", connection.TLSActive(), connection.TLSVerified())
+	}
+
+	dialer.Wait(t)
+}
+
+// TestBackendConnectorWritesProxyBeforeImplicitTLS verifies PROXY precedes the TLS handshake.
+func TestBackendConnectorWritesProxyBeforeImplicitTLS(t *testing.T) {
+	certPath, certificate := writeBackendTestCertificate(t)
+	dialer := scriptedBackendDialer(t, func(t *testing.T, conn net.Conn) {
+		reader := bufio.NewReader(conn)
+		expectBackendLine(t, reader, testBackendProxyHeaderV4)
+
+		tlsConn := tls.Server(conn, backendTestTLSConfig(t, certificate))
+		if err := tlsConn.Handshake(); err != nil {
+			t.Errorf("server handshake: %v", err)
+			return
+		}
+
+		tlsReader := bufio.NewReader(tlsConn)
+		writeBackendLine(t, tlsConn, "* OK ready")
+		expectBackendLine(t, tlsReader, "D0001 CAPABILITY")
+		writeBackendLine(t, tlsConn, "* CAPABILITY IMAP4rev1 AUTH=PLAIN")
+		writeBackendLine(t, tlsConn, "D0001 OK capability completed")
+	})
+
+	connection, err := NewTCPBackendConnector(dialer).Connect(
+		context.Background(),
+		testProxySessionBackendConnectRequest(testBackendTargetWithCA(backendTLSImplicit, certPath)),
+	)
+	if err != nil {
+		t.Fatalf("Connect returned error: %v", err)
+	}
+	defer func() { _ = connection.Conn().Close() }()
+
+	if !connection.TLSActive() || !connection.TLSVerified() {
+		t.Fatalf("TLS state active=%v verified=%v", connection.TLSActive(), connection.TLSVerified())
+	}
+
+	dialer.Wait(t)
+}
+
+// TestLightHealthWritesProxyBeforeGreeting verifies authless checks use the health socket tuple.
+func TestLightHealthWritesProxyBeforeGreeting(t *testing.T) {
+	dialer := scriptedBackendDialerWithAddrs(
+		t,
+		tcpAddr("10.10.0.1", 50143),
+		tcpAddr("10.10.0.2", 143),
+		func(t *testing.T, conn net.Conn) {
+			reader := bufio.NewReader(conn)
+			expectBackendLine(t, reader, testBackendHealthProxyV4)
+			writeBackendLine(t, conn, "* OK ready")
+			expectBackendLine(t, reader, "D0001 CAPABILITY")
+			writeBackendLine(t, conn, "* CAPABILITY IMAP4rev1 AUTH=PLAIN")
+			writeBackendLine(t, conn, "D0001 OK capability completed")
+		},
+	)
+	target := testBackendTarget(backendTLSPlaintext)
+	target.HAProxy.Enabled = true
+
+	result := NewHealthChecker(NewTCPBackendConnector(dialer)).CheckBackend(context.Background(), target, backend.HealthCheckRequest{
+		Timeout: time.Second,
+	})
+	if !result.Healthy {
+		t.Fatalf("health result = %#v, want healthy", result)
+	}
+
+	dialer.Wait(t)
+}
+
+// TestDeepHealthWritesProxyBeforeHealthAuth verifies credentialed health auth follows PROXY.
+func TestDeepHealthWritesProxyBeforeHealthAuth(t *testing.T) {
+	dialer := scriptedBackendDialerWithAddrs(
+		t,
+		tcpAddr("10.10.0.1", 50143),
+		tcpAddr("10.10.0.2", 143),
+		func(t *testing.T, conn net.Conn) {
+			reader := bufio.NewReader(conn)
+			expectBackendLine(t, reader, testBackendHealthProxyV4)
+			writeBackendLine(t, conn, "* OK ready")
+			expectBackendLine(t, reader, "D0001 CAPABILITY")
+			writeBackendLine(t, conn, "* CAPABILITY IMAP4rev1 AUTH=PLAIN")
+			writeBackendLine(t, conn, "D0001 OK capability completed")
+			expectBackendLine(t, reader, "D0002 "+expectedIMAPHealthAuthCommand())
+			writeBackendLine(t, conn, "D0002 OK health auth completed")
+			expectBackendLine(t, reader, "D0003 LOGOUT")
+		},
+	)
+	target := testBackendTarget(backendTLSPlaintext)
+	target.HAProxy.Enabled = true
+	target.Health = backend.HealthConfig{
+		Username: testBackendHealthUser,
+		Password: config.Secret(testBackendHealthPass),
+	}
+
+	result := NewHealthChecker(NewTCPBackendConnector(dialer)).CheckBackend(context.Background(), target, backend.HealthCheckRequest{
+		Deep:    true,
+		Timeout: time.Second,
+	})
+	if !result.Healthy {
+		t.Fatalf("health result = %#v, want healthy", result)
+	}
+
+	dialer.Wait(t)
+}
+
+// TestBackendHealthReasonClassesAreBounded verifies secret-safe health classification.
+func TestBackendHealthReasonClassesAreBounded(t *testing.T) {
+	for _, reason := range []string{
+		backendHealthReason(ErrBackendConnect),
+		backendHealthReason(ErrBackendTLS),
+		backendHealthReason(ErrBackendProtocol),
+		backendHealthReason(ErrBackendAuth),
+		backendHealthReason(context.DeadlineExceeded),
+		backendHealthReason(&backend.TransportError{Reason: backend.TransportReasonWriteFailed, Purpose: backend.ConnectPurposeHealth}),
+		backendHealthReason(&backend.TransportError{Reason: backend.TransportReasonMissingAddress, Purpose: backend.ConnectPurposeHealth}),
+		backendHealthReason(&backend.TransportError{Reason: backend.TransportReasonUnsupportedFamily, Purpose: backend.ConnectPurposeHealth}),
+		backendHealthReason(errors.New(testBackendHealthPass)),
+	} {
+		switch reason {
+		case healthReasonConnect, healthReasonTLS, healthReasonProtocol, healthReasonAuth, healthReasonProxyConfig,
+			healthReasonProxyMissingAddress, healthReasonProxyUnsupportedFamily, healthReasonProxyWrite,
+			healthReasonTimeout, healthReasonUnknown:
+		default:
+			t.Fatalf("reason class %q is not bounded", reason)
+		}
+
+		if strings.Contains(reason, testBackendHealthPass) {
+			t.Fatalf("reason class leaked secret: %q", reason)
+		}
+	}
+}
+
 // TestBackendConnectorNegotiatesStartTLS verifies STARTTLS upgrades before capability discovery.
 func TestBackendConnectorNegotiatesStartTLS(t *testing.T) {
 	certPath, certificate := writeBackendTestCertificate(t)
@@ -106,7 +329,10 @@ func TestBackendConnectorNegotiatesStartTLS(t *testing.T) {
 		writeBackendLine(t, tlsConn, "D0002 OK capability completed")
 	})
 
-	connection, err := NewTCPBackendConnector(dialer).Connect(context.Background(), testBackendTargetWithCA(backendTLSStartTLS, certPath), time.Second)
+	connection, err := NewTCPBackendConnector(dialer).Connect(
+		context.Background(),
+		testSessionBackendConnectRequest(testBackendTargetWithCA(backendTLSStartTLS, certPath)),
+	)
 	if err != nil {
 		t.Fatalf("Connect returned error: %v", err)
 	}
@@ -140,7 +366,10 @@ func TestBackendConnectorNegotiatesImplicitTLS(t *testing.T) {
 		writeBackendLine(t, tlsConn, "D0001 OK capability completed")
 	})
 
-	connection, err := NewTCPBackendConnector(dialer).Connect(context.Background(), testBackendTargetWithCA(backendTLSImplicit, certPath), time.Second)
+	connection, err := NewTCPBackendConnector(dialer).Connect(
+		context.Background(),
+		testSessionBackendConnectRequest(testBackendTargetWithCA(backendTLSImplicit, certPath)),
+	)
 	if err != nil {
 		t.Fatalf("Connect returned error: %v", err)
 	}
@@ -160,9 +389,29 @@ func scriptedBackendDialer(t *testing.T, script func(*testing.T, net.Conn)) *bac
 	return &backendScriptedDialer{t: t, script: script, done: make(chan struct{})}
 }
 
+// scriptedBackendDialerWithAddrs creates a dialer with fixed backend socket addresses.
+func scriptedBackendDialerWithAddrs(
+	t *testing.T,
+	local net.Addr,
+	remote net.Addr,
+	script func(*testing.T, net.Conn),
+) *backendScriptedDialer {
+	t.Helper()
+
+	return &backendScriptedDialer{
+		t:      t,
+		local:  local,
+		remote: remote,
+		script: script,
+		done:   make(chan struct{}),
+	}
+}
+
 // backendScriptedDialer runs a fake backend script for each dial.
 type backendScriptedDialer struct {
 	t      *testing.T
+	local  net.Addr
+	remote net.Addr
 	script func(*testing.T, net.Conn)
 	done   chan struct{}
 }
@@ -170,6 +419,11 @@ type backendScriptedDialer struct {
 // DialContext returns one side of a net.Pipe and runs the fake backend on the other.
 func (d *backendScriptedDialer) DialContext(_ context.Context, _ string, _ string) (net.Conn, error) {
 	client, server := net.Pipe()
+	clientConn := client
+
+	if d.local != nil || d.remote != nil {
+		clientConn = backendAddressConn{Conn: client, local: d.local, remote: d.remote}
+	}
 
 	go func() {
 		defer close(d.done)
@@ -178,7 +432,7 @@ func (d *backendScriptedDialer) DialContext(_ context.Context, _ string, _ strin
 		d.script(d.t, server)
 	}()
 
-	return client, nil
+	return clientConn, nil
 }
 
 // Wait asserts that the fake backend script finished.
@@ -211,6 +465,54 @@ func testBackendTargetWithCA(mode string, caFile string) backend.Backend {
 	target.TLS.CAFile = caFile
 
 	return target
+}
+
+// testSessionBackendConnectRequest creates a disabled-PROXY request with stable metadata.
+func testSessionBackendConnectRequest(target backend.Backend) backend.ConnectRequest {
+	return backend.ConnectRequest{
+		Target:  target,
+		Timeout: time.Second,
+		Purpose: backend.ConnectPurposeSession,
+		ProxyAddresses: &backend.ProxyAddresses{
+			Source:      tcpAddr("203.0.113.10", 42500),
+			Destination: tcpAddr("198.51.100.20", 143),
+		},
+	}
+}
+
+// testProxySessionBackendConnectRequest enables outbound PROXY for connector tests.
+func testProxySessionBackendConnectRequest(target backend.Backend) backend.ConnectRequest {
+	request := testSessionBackendConnectRequest(target)
+	request.Target.HAProxy.Enabled = true
+
+	return request
+}
+
+// tcpAddr creates a TCP address fixture for outbound PROXY metadata.
+func tcpAddr(ip string, port int) *net.TCPAddr {
+	return &net.TCPAddr{IP: net.ParseIP(ip), Port: port}
+}
+
+// backendAddressConn overlays stable socket addresses onto an in-memory connection.
+type backendAddressConn struct {
+	net.Conn
+	local  net.Addr
+	remote net.Addr
+}
+
+// LocalAddr returns the configured Director-side backend socket address.
+func (c backendAddressConn) LocalAddr() net.Addr {
+	return c.local
+}
+
+// RemoteAddr returns the configured backend-side socket address.
+func (c backendAddressConn) RemoteAddr() net.Addr {
+	return c.remote
+}
+
+// expectedIMAPHealthAuthCommand returns the deep-health AUTH PLAIN command body.
+func expectedIMAPHealthAuthCommand() string {
+	return plainAuthCommand("", testBackendHealthUser, testBackendHealthPass)
 }
 
 // backendTestTLSConfig creates a server-side TLS config for backend tests.

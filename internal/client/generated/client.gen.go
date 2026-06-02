@@ -258,11 +258,16 @@ type AffinityUpdateRequest struct {
 
 // BackendDetail defines model for BackendDetail.
 type BackendDetail struct {
-	BackendPool string              `json:"backend_pool"`
-	Identifier  string              `json:"identifier"`
-	Protocol    string              `json:"protocol"`
-	Runtime     BackendRuntimeState `json:"runtime"`
-	ShardTag    string              `json:"shard_tag"`
+	// BackendNode Secret-safe backend-node identity used for cross-protocol affinity diagnostics.
+	BackendNode string `json:"backend_node"`
+	BackendPool string `json:"backend_pool"`
+	Identifier  string `json:"identifier"`
+
+	// OutboundProxyProtocol Whether this backend endpoint sends an outbound HAProxy PROXY protocol preface.
+	OutboundProxyProtocol bool                `json:"outbound_proxy_protocol"`
+	Protocol              string              `json:"protocol"`
+	Runtime               BackendRuntimeState `json:"runtime"`
+	ShardTag              string              `json:"shard_tag"`
 }
 
 // BackendListResponse defines model for BackendListResponse.
@@ -401,8 +406,11 @@ type RouteLookupBackendSummary struct {
 	FailClosedReason  *string                       `json:"fail_closed_reason,omitempty"`
 	Generation        *string                       `json:"generation,omitempty"`
 	Identifier        string                        `json:"identifier"`
-	Protocol          string                        `json:"protocol"`
-	ShardTag          string                        `json:"shard_tag"`
+
+	// OutboundProxyProtocol Whether the selected backend endpoint would require an outbound PROXY preface.
+	OutboundProxyProtocol bool   `json:"outbound_proxy_protocol"`
+	Protocol              string `json:"protocol"`
+	ShardTag              string `json:"shard_tag"`
 }
 
 // RouteLookupEffects defines model for RouteLookupEffects.

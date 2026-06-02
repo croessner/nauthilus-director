@@ -1417,10 +1417,12 @@ func backendDetail(state backend.EffectiveBackendState) generated.BackendDetail 
 	weight := state.EffectiveWeight
 
 	return generated.BackendDetail{
-		BackendPool: state.BackendPool,
-		Identifier:  state.Identifier,
-		Protocol:    state.Protocol,
-		ShardTag:    state.EffectiveShardTag,
+		BackendNode:           state.Backend.BackendNode,
+		BackendPool:           state.BackendPool,
+		Identifier:            state.Identifier,
+		OutboundProxyProtocol: state.Backend.HAProxy.Enabled,
+		Protocol:              state.Protocol,
+		ShardTag:              state.EffectiveShardTag,
 		Runtime: generated.BackendRuntimeState{
 			Draining:    state.Drain.Enabled,
 			InService:   state.RuntimeInService,
@@ -1603,18 +1605,19 @@ func routeLookupBackends(backends []runtime.RouteLookupBackendState) []generated
 	summaries := make([]generated.RouteLookupBackendSummary, 0, len(backends))
 	for _, entry := range backends {
 		summaries = append(summaries, generated.RouteLookupBackendSummary{
-			AllowsActivePins:  entry.AllowsActivePins,
-			AllowsNewSessions: entry.AllowsNewSessions,
-			BackendNode:       stringPtrIfNotEmpty(entry.BackendNode),
-			BackendPool:       entry.BackendPool,
-			Eligible:          entry.Eligible,
-			Exclusions:        routeLookupExclusions(entry.Exclusions),
-			FailClosed:        entry.FailClosed,
-			FailClosedReason:  stringPtrIfNotEmpty(string(entry.FailClosedReason)),
-			Generation:        stringPtrIfNotEmpty(entry.Generation),
-			Identifier:        entry.Identifier,
-			Protocol:          entry.Protocol,
-			ShardTag:          entry.EffectiveShard,
+			AllowsActivePins:      entry.AllowsActivePins,
+			AllowsNewSessions:     entry.AllowsNewSessions,
+			BackendNode:           stringPtrIfNotEmpty(entry.BackendNode),
+			BackendPool:           entry.BackendPool,
+			Eligible:              entry.Eligible,
+			Exclusions:            routeLookupExclusions(entry.Exclusions),
+			FailClosed:            entry.FailClosed,
+			FailClosedReason:      stringPtrIfNotEmpty(string(entry.FailClosedReason)),
+			Generation:            stringPtrIfNotEmpty(entry.Generation),
+			Identifier:            entry.Identifier,
+			OutboundProxyProtocol: entry.OutboundProxyProtocol,
+			Protocol:              entry.Protocol,
+			ShardTag:              entry.EffectiveShard,
 		})
 	}
 

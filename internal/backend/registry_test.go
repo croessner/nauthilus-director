@@ -28,6 +28,7 @@ import (
 const (
 	testAccountKey     = "alice@example.test"
 	testBackendID      = "mailstore-a-imap"
+	testBackendIDBIMAP = "mailstore-b-imap"
 	testBackendIDLMTP  = "mailstore-a-lmtp"
 	testBackendIDBLMTP = "mailstore-b-lmtp"
 	testBackendNode    = "mailstore-a-node-1"
@@ -78,6 +79,73 @@ func TestStaticRegistryIndexesByProtocolPoolAndShard(t *testing.T) {
 	})
 	if !IsErrorKind(err, ErrorKindNoBackend) {
 		t.Fatalf("missing shard error = %v, want no_backend", err)
+	}
+}
+
+// TestStaticRegistryCopiesHAProxyTransportPolicy verifies backend transport policy reaches the domain value.
+func TestStaticRegistryCopiesHAProxyTransportPolicy(t *testing.T) {
+	cfg := config.DefaultConfig()
+	backendConfig := cfg.Director.Backends[testBackendID]
+	backendConfig.HAProxy.Enabled = true
+	cfg.Director.Backends[testBackendID] = backendConfig
+
+	registry := mustStaticRegistry(t, cfg)
+
+	entry, err := registry.Lookup(context.Background(), testBackendID)
+	if err != nil {
+		t.Fatalf("Lookup returned error: %v", err)
+	}
+
+	if !entry.HAProxy.Enabled {
+		t.Fatal("HAProxy enabled flag was not copied into backend domain value")
+	}
+
+	if entry.Identifier != testBackendID ||
+		entry.Protocol != protocolIMAP ||
+		entry.BackendPool != testPoolIMAP ||
+		entry.ShardTag != testShardTag ||
+		entry.BackendNode != testBackendNode {
+		t.Fatalf("backend identity changed while copying HAProxy config: %#v", entry)
+	}
+}
+
+// TestStaticRegistryKeepsHAProxyPerBackendEntry verifies node siblings do not inherit transport policy.
+func TestStaticRegistryKeepsHAProxyPerBackendEntry(t *testing.T) {
+	cfg := config.DefaultConfig()
+	imapConfig := cfg.Director.Backends[testBackendID]
+	imapConfig.HAProxy.Enabled = true
+	cfg.Director.Backends[testBackendID] = imapConfig
+
+	lmtpConfig := cfg.Director.Backends[testBackendIDLMTP]
+	lmtpConfig.HAProxy.Enabled = false
+	cfg.Director.Backends[testBackendIDLMTP] = lmtpConfig
+
+	registry := mustStaticRegistry(t, cfg)
+
+	imapEntry, err := registry.Lookup(context.Background(), testBackendID)
+	if err != nil {
+		t.Fatalf("Lookup IMAP returned error: %v", err)
+	}
+
+	lmtpEntry, err := registry.LookupInBackendNode(context.Background(), NodeLookupRequest{
+		BackendNode: testBackendNode,
+		Protocol:    testProtocolLMTP,
+		BackendPool: testPoolLMTP,
+	})
+	if err != nil {
+		t.Fatalf("LookupInBackendNode LMTP returned error: %v", err)
+	}
+
+	if imapEntry.BackendNode != lmtpEntry.BackendNode {
+		t.Fatalf("backend nodes = %q/%q, want shared node", imapEntry.BackendNode, lmtpEntry.BackendNode)
+	}
+
+	if !imapEntry.HAProxy.Enabled {
+		t.Fatal("IMAP backend HAProxy flag = false, want true")
+	}
+
+	if lmtpEntry.HAProxy.Enabled {
+		t.Fatal("LMTP backend inherited HAProxy flag from IMAP sibling")
 	}
 }
 
@@ -132,6 +200,7 @@ func TestStaticRegistryRequiresBackendNodeForMultiProtocolConfig(t *testing.T) {
 	cfg := config.DefaultConfig()
 	backendConfig := cfg.Director.Backends[testBackendID]
 	backendConfig.BackendNode = ""
+	backendConfig.HAProxy.Enabled = true
 	cfg.Director.Backends[testBackendID] = backendConfig
 
 	_, err := NewStaticRegistry(cfg.Director)
@@ -161,10 +230,10 @@ func TestStaticRegistryRejectsBackendNodeShardMismatch(t *testing.T) {
 // TestStaticRegistryRejectsDuplicateBackendNodeProtocolPool prevents unsafe endpoint ambiguity.
 func TestStaticRegistryRejectsDuplicateBackendNodeProtocolPool(t *testing.T) {
 	cfg := config.DefaultConfig()
-	backendConfig := cfg.Director.Backends["mailstore-b-imap"]
+	backendConfig := cfg.Director.Backends[testBackendIDBIMAP]
 	backendConfig.BackendNode = testBackendNode
 	backendConfig.ShardTag = testShardTag
-	cfg.Director.Backends["mailstore-b-imap"] = backendConfig
+	cfg.Director.Backends[testBackendIDBIMAP] = backendConfig
 
 	_, err := NewStaticRegistry(cfg.Director)
 	if !IsErrorKind(err, ErrorKindAmbiguous) {
@@ -186,6 +255,7 @@ func TestStaticRegistryRejectsUnsafeBackendNodeIdentifiers(t *testing.T) {
 			cfg := config.DefaultConfig()
 			backendConfig := cfg.Director.Backends[testBackendID]
 			backendConfig.BackendNode = value
+			backendConfig.HAProxy.Enabled = true
 			cfg.Director.Backends[testBackendID] = backendConfig
 
 			_, err := NewStaticRegistry(cfg.Director)

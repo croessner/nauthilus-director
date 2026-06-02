@@ -48,6 +48,8 @@ const (
 	testBackendTLSHost       = "localhost"
 	testBackendTLSHostTarget = "localhost:2424"
 	testBackendToken         = "backend-token"
+	testLMTPProxyHeaderV4    = "PROXY TCP4 203.0.113.10 198.51.100.20 42500 24"
+	testLMTPHealthProxyV4    = "PROXY TCP4 10.10.0.1 10.10.0.2 5024 24"
 )
 
 // TestBackendConnectorHandlesPlaintext verifies cleartext LMTP capability discovery.
@@ -60,7 +62,10 @@ func TestBackendConnectorHandlesPlaintext(t *testing.T) {
 		writeLMTPBackendLine(t, conn, "250 "+capabilityCHUNKING)
 	})
 
-	connection, err := NewTCPBackendConnector(dialer).Connect(context.Background(), testLMTPBackendTarget(backendTLSPlaintext), time.Second)
+	connection, err := NewTCPBackendConnector(dialer).Connect(
+		context.Background(),
+		testLMTPBackendConnectRequest(testLMTPBackendTarget(backendTLSPlaintext)),
+	)
 	if err != nil {
 		t.Fatalf("Connect returned error: %v", err)
 	}
@@ -72,6 +77,146 @@ func TestBackendConnectorHandlesPlaintext(t *testing.T) {
 
 	if !connection.CapabilitySet().Has(capabilityCHUNKING) {
 		t.Fatalf("capabilities = %v, want CHUNKING", connection.Capabilities())
+	}
+
+	dialer.Wait(t)
+}
+
+// TestBackendConnectorWritesProxyBeforePlaintextGreeting verifies PROXY precedes greeting reads.
+func TestBackendConnectorWritesProxyBeforePlaintextGreeting(t *testing.T) {
+	dialer := scriptedLMTPBackendDialer(t, func(t *testing.T, conn net.Conn) {
+		reader := bufio.NewReader(conn)
+		expectLMTPBackendLine(t, reader, testLMTPProxyHeaderV4)
+		writeLMTPBackendLine(t, conn, "220 backend ready")
+		expectLMTPBackendLine(t, reader, "LHLO "+backendLHLOName)
+		writeLMTPBackendLine(t, conn, "250 mailstore")
+	})
+
+	connection, err := NewTCPBackendConnector(dialer).Connect(
+		context.Background(),
+		testProxyLMTPBackendConnectRequest(testLMTPBackendTarget(backendTLSPlaintext)),
+	)
+	if err != nil {
+		t.Fatalf("Connect returned error: %v", err)
+	}
+	defer func() { _ = connection.Conn().Close() }()
+
+	if connection.TLSActive() {
+		t.Fatal("plaintext backend unexpectedly enabled TLS")
+	}
+
+	dialer.Wait(t)
+}
+
+// TestBackendConnectorWritesProxyBeforeStartTLSGreeting verifies PROXY precedes STARTTLS setup.
+func TestBackendConnectorWritesProxyBeforeStartTLSGreeting(t *testing.T) {
+	certPath, certificate := writeLMTPBackendTestCertificate(t)
+	dialer := scriptedLMTPBackendDialer(t, func(t *testing.T, conn net.Conn) {
+		reader := bufio.NewReader(conn)
+		expectLMTPBackendLine(t, reader, testLMTPProxyHeaderV4)
+		writeLMTPBackendLine(t, conn, "220 backend ready")
+		expectLMTPBackendLine(t, reader, "LHLO "+backendLHLOName)
+		writeLMTPBackendLine(t, conn, "250-mailstore")
+		writeLMTPBackendLine(t, conn, "250 STARTTLS")
+		expectLMTPBackendLine(t, reader, "STARTTLS")
+		writeLMTPBackendLine(t, conn, "220 ready for tls")
+
+		tlsConn := tls.Server(conn, lmtpBackendTestTLSConfig(t, certificate))
+		if err := tlsConn.Handshake(); err != nil {
+			t.Errorf("server handshake: %v", err)
+			return
+		}
+
+		tlsReader := bufio.NewReader(tlsConn)
+		expectLMTPBackendLine(t, tlsReader, "LHLO "+backendLHLOName)
+		writeLMTPBackendLine(t, tlsConn, "250 mailstore")
+	})
+
+	connection, err := NewTCPBackendConnector(dialer).Connect(
+		context.Background(),
+		testProxyLMTPBackendConnectRequest(testLMTPBackendTargetWithCA(backendTLSStartTLS, certPath)),
+	)
+	if err != nil {
+		t.Fatalf("Connect returned error: %v", err)
+	}
+	defer func() { _ = connection.Conn().Close() }()
+
+	if !connection.TLSActive() || !connection.TLSVerified() {
+		t.Fatalf("TLS state active=%v verified=%v", connection.TLSActive(), connection.TLSVerified())
+	}
+
+	dialer.Wait(t)
+}
+
+// TestBackendConnectorWritesProxyBeforeImplicitTLS verifies PROXY precedes the TLS handshake.
+func TestBackendConnectorWritesProxyBeforeImplicitTLS(t *testing.T) {
+	certPath, certificate := writeLMTPBackendTestCertificate(t)
+	dialer := scriptedLMTPBackendDialer(t, func(t *testing.T, conn net.Conn) {
+		reader := bufio.NewReader(conn)
+		expectLMTPBackendLine(t, reader, testLMTPProxyHeaderV4)
+
+		tlsConn := tls.Server(conn, lmtpBackendTestTLSConfig(t, certificate))
+		if err := tlsConn.Handshake(); err != nil {
+			t.Errorf("server handshake: %v", err)
+			return
+		}
+
+		tlsReader := bufio.NewReader(tlsConn)
+		writeLMTPBackendLine(t, tlsConn, "220 backend ready")
+		expectLMTPBackendLine(t, tlsReader, "LHLO "+backendLHLOName)
+		writeLMTPBackendLine(t, tlsConn, "250 mailstore")
+	})
+
+	connection, err := NewTCPBackendConnector(dialer).Connect(
+		context.Background(),
+		testProxyLMTPBackendConnectRequest(testLMTPBackendTargetWithCA(backendTLSImplicit, certPath)),
+	)
+	if err != nil {
+		t.Fatalf("Connect returned error: %v", err)
+	}
+	defer func() { _ = connection.Conn().Close() }()
+
+	if !connection.TLSActive() || !connection.TLSVerified() {
+		t.Fatalf("TLS state active=%v verified=%v", connection.TLSActive(), connection.TLSVerified())
+	}
+
+	dialer.Wait(t)
+}
+
+// TestBackendConnectorWritesProxyBeforeBackendAuth verifies auth follows PROXY and LHLO.
+func TestBackendConnectorWritesProxyBeforeBackendAuth(t *testing.T) {
+	dialer := scriptedLMTPBackendDialer(t, func(t *testing.T, conn net.Conn) {
+		reader := bufio.NewReader(conn)
+		expectLMTPBackendLine(t, reader, testLMTPProxyHeaderV4)
+		writeLMTPBackendLine(t, conn, "220 backend ready")
+		expectLMTPBackendLine(t, reader, "LHLO "+backendLHLOName)
+		writeLMTPBackendLine(t, conn, "250-mailstore")
+		writeLMTPBackendLine(t, conn, "250 AUTH PLAIN")
+		expectLMTPBackendLine(t, reader, expectedPlainAuthCommand())
+		writeLMTPBackendLine(t, conn, "235 2.7.0 ok")
+	})
+
+	target := testLMTPBackendTarget(backendTLSPlaintext)
+	target.Auth = backend.AuthConfig{
+		Mode: backendAuthModeSASL,
+		SASL: backend.SASLConfig{
+			Mechanism: mechanismPlain,
+			Username:  testBackendServiceUser,
+			Password:  config.Secret(testBackendPassword),
+		},
+	}
+
+	connection, err := NewTCPBackendConnector(dialer).Connect(
+		context.Background(),
+		testProxyLMTPBackendConnectRequest(target),
+	)
+	if err != nil {
+		t.Fatalf("Connect returned error: %v", err)
+	}
+	defer func() { _ = connection.Conn().Close() }()
+
+	if err := AuthenticateBackend(connection, target); err != nil {
+		t.Fatalf("AuthenticateBackend returned error: %v", err)
 	}
 
 	dialer.Wait(t)
@@ -102,7 +247,10 @@ func TestBackendConnectorHandlesStartTLS(t *testing.T) {
 		writeLMTPBackendLine(t, tlsConn, "250 AUTH PLAIN")
 	})
 
-	connection, err := NewTCPBackendConnector(dialer).Connect(context.Background(), testLMTPBackendTargetWithCA(backendTLSStartTLS, certPath), time.Second)
+	connection, err := NewTCPBackendConnector(dialer).Connect(
+		context.Background(),
+		testLMTPBackendConnectRequest(testLMTPBackendTargetWithCA(backendTLSStartTLS, certPath)),
+	)
 	if err != nil {
 		t.Fatalf("Connect returned error: %v", err)
 	}
@@ -136,7 +284,10 @@ func TestBackendConnectorHandlesImplicitTLS(t *testing.T) {
 		writeLMTPBackendLine(t, tlsConn, "250 "+capabilityCHUNKING)
 	})
 
-	connection, err := NewTCPBackendConnector(dialer).Connect(context.Background(), testLMTPBackendTargetWithCA(backendTLSImplicit, certPath), time.Second)
+	connection, err := NewTCPBackendConnector(dialer).Connect(
+		context.Background(),
+		testLMTPBackendConnectRequest(testLMTPBackendTargetWithCA(backendTLSImplicit, certPath)),
+	)
 	if err != nil {
 		t.Fatalf("Connect returned error: %v", err)
 	}
@@ -277,27 +428,63 @@ func TestBackendMTLSAuthDoesNotSendSASL(t *testing.T) {
 	}
 }
 
+// TestLightHealthWritesProxyBeforeGreeting verifies health checks exercise the same transport preface.
+func TestLightHealthWritesProxyBeforeGreeting(t *testing.T) {
+	dialer := scriptedLMTPBackendDialerWithAddrs(
+		t,
+		tcpAddr("10.10.0.1", 5024),
+		tcpAddr("10.10.0.2", 24),
+		func(t *testing.T, conn net.Conn) {
+			reader := bufio.NewReader(conn)
+			expectLMTPBackendLine(t, reader, testLMTPHealthProxyV4)
+			writeLMTPBackendLine(t, conn, "220 backend ready")
+			expectLMTPBackendLine(t, reader, "LHLO "+backendLHLOName)
+			writeLMTPBackendLine(t, conn, "250 "+capabilityCHUNKING)
+			expectLMTPBackendLine(t, reader, "QUIT")
+			writeLMTPBackendLine(t, conn, "221 2.0.0 bye")
+		},
+	)
+	target := testLMTPBackendTarget(backendTLSPlaintext)
+	target.HAProxy.Enabled = true
+
+	result := NewHealthChecker(NewTCPBackendConnector(dialer)).CheckBackend(context.Background(), target, backend.HealthCheckRequest{
+		Timeout: time.Second,
+	})
+	if !result.Healthy || !result.Capabilities.Has(capabilityCHUNKING) {
+		t.Fatalf("health result = %#v, want healthy with CHUNKING", result)
+	}
+
+	dialer.Wait(t)
+}
+
 // TestDeepHealthUsesSafeCommandSequence verifies health stops before envelope state.
 func TestDeepHealthUsesSafeCommandSequence(t *testing.T) {
 	commands := make(chan string, 8)
-	dialer := scriptedLMTPBackendDialer(t, func(t *testing.T, conn net.Conn) {
-		reader := bufio.NewReader(conn)
-		writeLMTPBackendLine(t, conn, "220 backend ready")
-		recordAndExpectLMTPBackendLine(t, reader, commands, "LHLO "+backendLHLOName)
-		writeLMTPBackendLine(t, conn, "250-mailstore")
-		writeLMTPBackendLine(t, conn, "250-AUTH PLAIN")
-		writeLMTPBackendLine(t, conn, "250 CHUNKING")
-		recordAndExpectLMTPBackendLine(t, reader, commands, expectedPlainAuthCommand())
-		writeLMTPBackendLine(t, conn, "235 2.7.0 ok")
-		recordAndExpectLMTPBackendLine(t, reader, commands, "NOOP")
-		writeLMTPBackendLine(t, conn, "250 2.0.0 ok")
-		recordAndExpectLMTPBackendLine(t, reader, commands, "RSET")
-		writeLMTPBackendLine(t, conn, "250 2.0.0 ok")
-		recordAndExpectLMTPBackendLine(t, reader, commands, "QUIT")
-		writeLMTPBackendLine(t, conn, "221 2.0.0 bye")
-	})
+	dialer := scriptedLMTPBackendDialerWithAddrs(
+		t,
+		tcpAddr("10.10.0.1", 5024),
+		tcpAddr("10.10.0.2", 24),
+		func(t *testing.T, conn net.Conn) {
+			reader := bufio.NewReader(conn)
+			expectLMTPBackendLine(t, reader, testLMTPHealthProxyV4)
+			writeLMTPBackendLine(t, conn, "220 backend ready")
+			recordAndExpectLMTPBackendLine(t, reader, commands, "LHLO "+backendLHLOName)
+			writeLMTPBackendLine(t, conn, "250-mailstore")
+			writeLMTPBackendLine(t, conn, "250-AUTH PLAIN")
+			writeLMTPBackendLine(t, conn, "250 CHUNKING")
+			recordAndExpectLMTPBackendLine(t, reader, commands, expectedPlainAuthCommand())
+			writeLMTPBackendLine(t, conn, "235 2.7.0 ok")
+			recordAndExpectLMTPBackendLine(t, reader, commands, "NOOP")
+			writeLMTPBackendLine(t, conn, "250 2.0.0 ok")
+			recordAndExpectLMTPBackendLine(t, reader, commands, "RSET")
+			writeLMTPBackendLine(t, conn, "250 2.0.0 ok")
+			recordAndExpectLMTPBackendLine(t, reader, commands, "QUIT")
+			writeLMTPBackendLine(t, conn, "221 2.0.0 bye")
+		},
+	)
 
 	target := testLMTPBackendTarget(backendTLSPlaintext)
+	target.HAProxy.Enabled = true
 	target.Auth = backend.AuthConfig{
 		Mode: backendAuthModeSASL,
 		SASL: backend.SASLConfig{
@@ -336,10 +523,14 @@ func TestBackendHealthReasonClassesAreBounded(t *testing.T) {
 		backendHealthReason(ErrBackendProtocol),
 		backendHealthReason(ErrBackendAuth),
 		backendHealthReason(context.DeadlineExceeded),
+		backendHealthReason(&backend.TransportError{Reason: backend.TransportReasonWriteFailed, Purpose: backend.ConnectPurposeHealth}),
+		backendHealthReason(&backend.TransportError{Reason: backend.TransportReasonMissingAddress, Purpose: backend.ConnectPurposeHealth}),
+		backendHealthReason(&backend.TransportError{Reason: backend.TransportReasonUnsupportedFamily, Purpose: backend.ConnectPurposeHealth}),
 		backendHealthReason(errors.New(testBackendPassword)),
 	} {
 		switch reason {
-		case healthReasonConnect, healthReasonTLS, healthReasonProtocol, healthReasonAuth, healthReasonTimeout, healthReasonUnknown:
+		case healthReasonConnect, healthReasonTLS, healthReasonProtocol, healthReasonAuth, healthReasonProxyConfig,
+			healthReasonProxyMissing, healthReasonProxyFamily, healthReasonProxyWrite, healthReasonTimeout, healthReasonUnknown:
 		default:
 			t.Fatalf("reason class %q is not bounded", reason)
 		}
@@ -357,8 +548,28 @@ func scriptedLMTPBackendDialer(t *testing.T, script func(*testing.T, net.Conn)) 
 	return &lmtpBackendScriptedDialer{t: t, script: script, done: make(chan struct{})}
 }
 
+// scriptedLMTPBackendDialerWithAddrs creates a dialer with fixed backend socket addresses.
+func scriptedLMTPBackendDialerWithAddrs(
+	t *testing.T,
+	local net.Addr,
+	remote net.Addr,
+	script func(*testing.T, net.Conn),
+) *lmtpBackendScriptedDialer {
+	t.Helper()
+
+	return &lmtpBackendScriptedDialer{
+		t:      t,
+		local:  local,
+		remote: remote,
+		script: script,
+		done:   make(chan struct{}),
+	}
+}
+
 type lmtpBackendScriptedDialer struct {
 	t      *testing.T
+	local  net.Addr
+	remote net.Addr
 	script func(*testing.T, net.Conn)
 	done   chan struct{}
 }
@@ -366,6 +577,11 @@ type lmtpBackendScriptedDialer struct {
 // DialContext returns one side of a net.Pipe and runs the fake backend on the other.
 func (d *lmtpBackendScriptedDialer) DialContext(_ context.Context, _ string, _ string) (net.Conn, error) {
 	client, server := net.Pipe()
+	clientConn := client
+
+	if d.local != nil || d.remote != nil {
+		clientConn = backendAddressConn{Conn: client, local: d.local, remote: d.remote}
+	}
 
 	go func() {
 		defer close(d.done)
@@ -374,7 +590,7 @@ func (d *lmtpBackendScriptedDialer) DialContext(_ context.Context, _ string, _ s
 		d.script(d.t, server)
 	}()
 
-	return client, nil
+	return clientConn, nil
 }
 
 // Wait asserts that the fake backend script finished.
@@ -386,6 +602,27 @@ func (d *lmtpBackendScriptedDialer) Wait(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for scripted backend")
 	}
+}
+
+// testLMTPBackendConnectRequest creates a disabled-PROXY request with stable metadata.
+func testLMTPBackendConnectRequest(target backend.Backend) backend.ConnectRequest {
+	return backend.ConnectRequest{
+		Target:  target,
+		Timeout: time.Second,
+		Purpose: backend.ConnectPurposeSession,
+		ProxyAddresses: &backend.ProxyAddresses{
+			Source:      tcpAddr("203.0.113.10", 42500),
+			Destination: tcpAddr("198.51.100.20", 24),
+		},
+	}
+}
+
+// testProxyLMTPBackendConnectRequest enables outbound PROXY for connector tests.
+func testProxyLMTPBackendConnectRequest(target backend.Backend) backend.ConnectRequest {
+	request := testLMTPBackendConnectRequest(target)
+	request.Target.HAProxy.Enabled = true
+
+	return request
 }
 
 // testLMTPBackendTarget returns a minimal backend target for connector tests.
@@ -408,6 +645,28 @@ func testLMTPBackendTargetWithCA(mode string, caFile string) backend.Backend {
 	target.TLS.CAFile = caFile
 
 	return target
+}
+
+// tcpAddr creates a TCP address fixture for outbound PROXY metadata.
+func tcpAddr(ip string, port int) *net.TCPAddr {
+	return &net.TCPAddr{IP: net.ParseIP(ip), Port: port}
+}
+
+// backendAddressConn overlays stable socket addresses onto an in-memory connection.
+type backendAddressConn struct {
+	net.Conn
+	local  net.Addr
+	remote net.Addr
+}
+
+// LocalAddr returns the configured Director-side backend socket address.
+func (c backendAddressConn) LocalAddr() net.Addr {
+	return c.local
+}
+
+// RemoteAddr returns the configured backend-side socket address.
+func (c backendAddressConn) RemoteAddr() net.Addr {
+	return c.remote
 }
 
 // lmtpBackendTestTLSConfig creates a server-side TLS config for backend tests.

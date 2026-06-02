@@ -95,8 +95,9 @@ type HealthPublishRequest struct {
 
 // HealthCheckRequest describes a backend health check attempt.
 type HealthCheckRequest struct {
-	Deep    bool
-	Timeout time.Duration
+	Deep          bool
+	Timeout       time.Duration
+	Observability observability.Recorder
 }
 
 // HealthCheckResult is a secret-safe backend health check outcome.
@@ -441,7 +442,7 @@ func (r *HealthRunner) checkBackend(ctx context.Context, candidate Backend) erro
 	}
 
 	if !candidate.Health.DeepCheck {
-		result := r.checker.CheckBackend(ctx, candidate, HealthCheckRequest{Timeout: r.config.Timeout})
+		result := r.checker.CheckBackend(ctx, candidate, HealthCheckRequest{Timeout: r.config.Timeout, Observability: r.recorder})
 		r.storeLocal(candidate, result)
 
 		return nil
@@ -460,7 +461,7 @@ func (r *HealthRunner) checkBackend(ctx context.Context, candidate Backend) erro
 		return nil
 	}
 
-	result := r.checker.CheckBackend(ctx, candidate, HealthCheckRequest{Deep: true, Timeout: r.config.Timeout})
+	result := r.checker.CheckBackend(ctx, candidate, HealthCheckRequest{Deep: true, Timeout: r.config.Timeout, Observability: r.recorder})
 	state := r.storeLocal(candidate, result)
 
 	_, err = r.coordinator.PublishHealthState(ctx, HealthPublishRequest{

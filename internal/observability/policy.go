@@ -95,6 +95,10 @@ const (
 	reasonClassBackendNodeUnusable    = "backend_node_unusable"
 	reasonClassBackendPinApplied      = "backend_pin_applied"
 	reasonClassBackendPinMismatch     = "backend_pin_mismatch"
+	reasonClassBackendProxyConfig     = "backend_proxy_config"
+	reasonClassBackendProxyMissing    = "backend_proxy_missing_address"
+	reasonClassBackendProxyFamily     = "backend_proxy_unsupported_family"
+	reasonClassBackendProxyWrite      = "backend_proxy_write_failed"
 	reasonClassBackendStatus          = "backend_status"
 	reasonClassBDAT                   = "bdat"
 	reasonClassBindingExpired         = "binding_expired"
@@ -102,10 +106,12 @@ const (
 	reasonClassBindingRetained        = "binding_retained"
 	reasonClassData                   = "data"
 	reasonClassInitialPlacement       = "initial_placement"
+	reasonClassMissingAddress         = "missing_address"
 	reasonClassMovementOverride       = "movement_override"
 	reasonClassOperatorBackendPin     = "operator_backend_pin"
 	reasonClassOther                  = "other"
 	reasonClassParser                 = "parser"
+	reasonClassProxyUnsupportedFamily = "proxy_unsupported_family"
 	reasonClassRetainedBackendBinding = "retained_backend_binding"
 	reasonClassRouting                = "routing"
 	reasonClassRuntimeHardMaintenance = "runtime_hard_maintenance"
@@ -114,8 +120,10 @@ const (
 	reasonClassStaticHardMaintenance  = "static_hard_maintenance"
 	reasonClassStaticSoftMaintenance  = "static_soft_maintenance"
 	reasonClassTemporaryFailure       = "temporary_failure"
+	reasonClassUnsupportedFamily      = "unsupported_family"
 	reasonClassUserHoldActive         = "user_hold_active"
 	reasonClassUserHoldWaiterLimit    = "user_hold_waiter_limit_exceeded"
+	reasonClassWriteFailed            = "write_failed"
 )
 
 var allowedMetricLabels = map[string]struct{}{
@@ -249,6 +257,7 @@ var allowedReasonClasses = map[string]struct{}{
 	"credential_input":                {},
 	reasonClassData:                   {},
 	"denied":                          {},
+	logLevelDisabled:                  {},
 	"drain":                           {},
 	"health":                          {},
 	"healthy":                         {},
@@ -262,6 +271,7 @@ var allowedReasonClasses = map[string]struct{}{
 	"max_connections":                 {},
 	"malformed":                       {},
 	"malformed_response":              {},
+	reasonClassMissingAddress:         {},
 	"moved":                           {},
 	reasonClassMovementOverride:       {},
 	"no_backend":                      {},
@@ -273,6 +283,10 @@ var allowedReasonClasses = map[string]struct{}{
 	reasonClassRetainedBackendBinding: {},
 	"protocol":                        {},
 	"protected_config":                {},
+	"proxy_config":                    {},
+	"proxy_missing_address":           {},
+	reasonClassProxyUnsupportedFamily: {},
+	"proxy_write_failed":              {},
 	"reap":                            {},
 	"rejected":                        {},
 	"reload_safe":                     {},
@@ -298,6 +312,7 @@ var allowedReasonClasses = map[string]struct{}{
 	"untrusted":                       {},
 	"unavailable":                     {},
 	"unsupported":                     {},
+	reasonClassUnsupportedFamily:      {},
 	"unknown":                         {},
 	"unhealthy":                       {},
 	"user_hold_absent":                {},
@@ -311,6 +326,11 @@ var allowedReasonClasses = map[string]struct{}{
 	"user_hold_wait_timeout":          {},
 	reasonClassUserHoldWaiterLimit:    {},
 	"weight_zero":                     {},
+	reasonClassWriteFailed:            {},
+	reasonClassBackendProxyConfig:     {},
+	reasonClassBackendProxyMissing:    {},
+	reasonClassBackendProxyFamily:     {},
+	reasonClassBackendProxyWrite:      {},
 }
 
 // AllowedMetricLabels returns the stable low-cardinality metric label names.

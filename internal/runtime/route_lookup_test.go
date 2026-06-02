@@ -118,6 +118,38 @@ func TestRouteLookupUsesResolverSelectorAndReadOnlyAffinity(t *testing.T) {
 	assertNoRouteLookupMutations(t, store)
 }
 
+// TestRouteLookupReportsOutboundProxyRequirement verifies transport diagnostics stay read-only.
+func TestRouteLookupReportsOutboundProxyRequirement(t *testing.T) {
+	store := &countingRouteState{}
+	service := newRouteLookupTestService(t, store, false)
+
+	response, err := service.Lookup(context.Background(), RouteLookupRequest{
+		Protocol:     routeLookupProtocol,
+		ListenerName: routeLookupListener,
+		AccountKey:   routeLookupAccount,
+		Attributes: map[string][]string{
+			routeLookupAttributeShard: {routeLookupShardA},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Lookup returned error: %v", err)
+	}
+
+	if response.SelectedBackend != routeLookupBackendA {
+		t.Fatalf("selected backend = %q, want %q", response.SelectedBackend, routeLookupBackendA)
+	}
+
+	if !routeLookupBackendHasOutboundProxy(response.Backends, routeLookupBackendA) {
+		t.Fatalf("route lookup backends = %#v, want outbound PROXY diagnostic for %s", response.Backends, routeLookupBackendA)
+	}
+
+	if store.backendSnapshotCalls == 0 {
+		t.Fatal("BackendSnapshot was not read")
+	}
+
+	assertNoRouteLookupMutations(t, store)
+}
+
 // TestRouteLookupReportsRetainedBackendBinding verifies retained backend-node reuse is diagnostic only.
 func TestRouteLookupReportsRetainedBackendBinding(t *testing.T) {
 	retentionExpiresAt := time.Now().Add(15 * time.Minute).UTC()
@@ -873,7 +905,11 @@ func routeLookupExclusionCases(now time.Time) []routeLookupExclusionCase {
 func newRouteLookupTestService(t *testing.T, store *countingRouteState, enforceHealth bool, recorders ...observability.Recorder) *RouteLookupService {
 	t.Helper()
 
-	cfg := config.DefaultConfig().Normalize()
+	cfg := config.DefaultConfig()
+	proxyBackend := cfg.Director.Backends[routeLookupBackendA]
+	proxyBackend.HAProxy.Enabled = true
+	cfg.Director.Backends[routeLookupBackendA] = proxyBackend
+	cfg = cfg.Normalize()
 
 	registry, err := backend.NewStaticRegistry(cfg.Director)
 	if err != nil {
@@ -1033,6 +1069,17 @@ func routeLookupHasExclusion(backends []RouteLookupBackendState, reason backend.
 			if exclusion.Reason == reason {
 				return true
 			}
+		}
+	}
+
+	return false
+}
+
+// routeLookupBackendHasOutboundProxy reports whether one candidate would use outbound PROXY.
+func routeLookupBackendHasOutboundProxy(backends []RouteLookupBackendState, identifier string) bool {
+	for _, candidate := range backends {
+		if candidate.Identifier == identifier && candidate.OutboundProxyProtocol {
+			return true
 		}
 	}
 

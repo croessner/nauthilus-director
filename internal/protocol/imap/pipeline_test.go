@@ -623,6 +623,166 @@ func TestBackendSetupFailureClosesLeaseBeforeFrontendAuthSuccess(t *testing.T) {
 	}
 }
 
+// TestSessionBackendConnectRequestCarriesTrustedListenerEffectiveTuple verifies normalized addresses flow out.
+func TestSessionBackendConnectRequestCarriesTrustedListenerEffectiveTuple(t *testing.T) {
+	credentials := plainCredentialsForBackendTest(t)
+	defer credentials.Clear()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+
+	store := &recordingSessionStore{}
+	connector := &recordingBackendConnector{}
+	session := newPlacedTransitionSession(t, server, store)
+	session.backendConnector = connector
+	session.context.RemoteAddr = tcpAddr("203.0.113.10", 42500)
+	session.context.LocalAddr = tcpAddr("198.51.100.20", 143)
+
+	done := make(chan error, 1)
+	go func() {
+		_, transitionErr := session.transitionAuthenticatedSession(context.Background(), "A001", credentials)
+		done <- transitionErr
+	}()
+
+	if line := readPipeLine(t, client); line != "A001 OK Authentication completed\r\n" {
+		t.Fatalf("frontend auth response = %q, want OK", line)
+	}
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("transitionAuthenticatedSession returned error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for transition")
+	}
+
+	if connector.request.Purpose != backend.ConnectPurposeSession {
+		t.Fatalf("connect purpose = %q, want session", connector.request.Purpose)
+	}
+	if connector.request.Target.Identifier != "selected-imap" {
+		t.Fatalf("connect target = %q, want selected backend", connector.request.Target.Identifier)
+	}
+	if connector.request.Target.BackendNode != session.placement.Backend.Backend.BackendNode {
+		t.Fatalf("backend node changed across connector boundary: %#v", connector.request.Target)
+	}
+	if connector.request.ProxyAddresses == nil {
+		t.Fatal("connect request did not carry frontend proxy addresses")
+	}
+	if got := connector.request.ProxyAddresses.Source.String(); got != "203.0.113.10:42500" {
+		t.Fatalf("proxy source = %q, want effective remote address", got)
+	}
+	if got := connector.request.ProxyAddresses.Destination.String(); got != "198.51.100.20:143" {
+		t.Fatalf("proxy destination = %q, want effective local address", got)
+	}
+}
+
+// TestSessionProxyWriteFailurePreventsFrontendAuthSuccess verifies preface errors fail closed.
+func TestSessionProxyWriteFailurePreventsFrontendAuthSuccess(t *testing.T) {
+	authenticator := &recordingAuthenticator{result: nauthilus.AuthResult{Decision: nauthilus.DecisionAuthenticated, Account: "alice@example.test"}}
+	router := &recordingRoutingResolver{
+		result: routing.RoutingResult{
+			AccountKey: "alice@example.test",
+			Tenant:     defaultTenantName,
+			ShardTag:   "mailstore-a",
+		},
+	}
+	store := &recordingSessionStore{}
+	target := defaultPipelineBackend("mailstore-a-imap")
+	target.HAProxy.Enabled = true
+	selector := &recordingBackendSelector{result: backend.SelectionResult{Backend: target}}
+	runner := &recordingProxyRunner{}
+	dialer := &recordingFailureDialer{
+		conn: &recordingFailureConn{
+			local:    tcpAddr("10.0.0.1", 51000),
+			remote:   tcpAddr("10.0.0.2", 143),
+			writeErr: errors.New("proxy write failed for secret backend"),
+		},
+	}
+	config := pipelineSessionConfig(authenticator, router, store, selector)
+	config.BackendConnector = NewTCPBackendConnector(dialer)
+	config.ProxyRunner = runner
+	harness := startTestSessionWithClientAddrs(t, config, tcpAddr("203.0.113.10", 42500), tcpAddr("198.51.100.20", 143))
+
+	harness.expectLine(t, greetingLine)
+	harness.write(t, `A001 LOGIN "alice@example.test" "secret-password"`+"\r\n")
+	harness.expectLine(t, "A001 NO [UNAVAILABLE] Authentication service temporarily unavailable\r\n")
+
+	if !dialer.conn.closed {
+		t.Fatal("failed PROXY write did not close backend connection")
+	}
+	if dialer.conn.writes != 1 {
+		t.Fatalf("backend writes = %d, want exactly one failed PROXY write", dialer.conn.writes)
+	}
+	if runner.calls != 0 {
+		t.Fatalf("proxy calls = %d, want none before frontend auth success", runner.calls)
+	}
+	if store.closeCalls != 1 {
+		t.Fatalf("placement close calls = %d, want rollback", store.closeCalls)
+	}
+}
+
+// TestSessionProxyUnsafeFrontendAddressFailsBeforeBackendAuth verifies bad tuples stop early.
+func TestSessionProxyUnsafeFrontendAddressFailsBeforeBackendAuth(t *testing.T) {
+	testCases := []struct {
+		name       string
+		remoteAddr net.Addr
+	}{
+		{
+			name: "missing",
+		},
+		{
+			name:       "non_tcp",
+			remoteAddr: testAddr("203.0.113.10:42500"),
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			authenticator := &recordingAuthenticator{result: nauthilus.AuthResult{Decision: nauthilus.DecisionAuthenticated, Account: "alice@example.test"}}
+			router := &recordingRoutingResolver{
+				result: routing.RoutingResult{
+					AccountKey: "alice@example.test",
+					Tenant:     defaultTenantName,
+					ShardTag:   "mailstore-a",
+				},
+			}
+			store := &recordingSessionStore{}
+			target := defaultPipelineBackend("mailstore-a-imap")
+			target.HAProxy.Enabled = true
+			selector := &recordingBackendSelector{result: backend.SelectionResult{Backend: target}}
+			runner := &recordingProxyRunner{}
+			dialer := &recordingFailureDialer{
+				conn: &recordingFailureConn{
+					local:  tcpAddr("10.0.0.1", 51000),
+					remote: tcpAddr("10.0.0.2", 143),
+				},
+			}
+			config := pipelineSessionConfig(authenticator, router, store, selector)
+			config.BackendConnector = NewTCPBackendConnector(dialer)
+			config.ProxyRunner = runner
+			harness := startTestSessionWithClientAddrs(t, config, testCase.remoteAddr, tcpAddr("198.51.100.20", 143))
+
+			harness.expectLine(t, greetingLine)
+			harness.write(t, `A001 LOGIN "alice@example.test" "secret-password"`+"\r\n")
+			harness.expectLine(t, "A001 NO [UNAVAILABLE] Authentication service temporarily unavailable\r\n")
+
+			if !dialer.conn.closed {
+				t.Fatal("unsafe frontend address did not close backend connection")
+			}
+			if dialer.conn.writes != 0 {
+				t.Fatalf("backend writes = %d, want none before safe PROXY metadata exists", dialer.conn.writes)
+			}
+			if runner.calls != 0 {
+				t.Fatalf("proxy calls = %d, want none before frontend auth success", runner.calls)
+			}
+			if store.closeCalls != 1 {
+				t.Fatalf("placement close calls = %d, want rollback", store.closeCalls)
+			}
+		})
+	}
+}
+
 // TestReplaySecretsAreClearedBeforeProxyMode verifies credential replay does not enter long-lived state.
 func TestReplaySecretsAreClearedBeforeProxyMode(t *testing.T) {
 	credentials := plainCredentialsForBackendTest(t)
@@ -1555,15 +1715,15 @@ func readPipeLine(t *testing.T, conn net.Conn) string {
 // recordingBackendConnector returns an already prepared fake backend connection.
 type recordingBackendConnector struct {
 	calls        int
-	target       backend.Backend
+	request      backend.ConnectRequest
 	err          error
 	authResponse string
 }
 
 // Connect records the selected backend and prepares a fake auth-capable stream.
-func (c *recordingBackendConnector) Connect(_ context.Context, target backend.Backend, _ time.Duration) (*BackendConnection, error) {
+func (c *recordingBackendConnector) Connect(_ context.Context, request backend.ConnectRequest) (*BackendConnection, error) {
 	c.calls++
-	c.target = target
+	c.request = request
 	if c.err != nil {
 		return nil, c.err
 	}
@@ -1600,6 +1760,72 @@ func serveOneBackendAuthCommand(conn net.Conn, response string) {
 
 	_, _ = io.WriteString(conn, tag+" "+response+"\r\n")
 	_, _ = io.Copy(io.Discard, reader)
+}
+
+// recordingFailureDialer returns one controlled backend connection.
+type recordingFailureDialer struct {
+	conn *recordingFailureConn
+}
+
+// DialContext returns the configured connection for connector failure tests.
+func (d *recordingFailureDialer) DialContext(context.Context, string, string) (net.Conn, error) {
+	return d.conn, nil
+}
+
+// recordingFailureConn records writes and closes without exposing endpoint text in errors.
+type recordingFailureConn struct {
+	local    net.Addr
+	remote   net.Addr
+	writeErr error
+	closed   bool
+	writes   int
+}
+
+// Read returns EOF if protocol negotiation accidentally continues.
+func (c *recordingFailureConn) Read([]byte) (int, error) {
+	return 0, io.EOF
+}
+
+// Write records one backend write and optionally fails it.
+func (c *recordingFailureConn) Write(payload []byte) (int, error) {
+	c.writes++
+	if c.writeErr != nil {
+		return 0, c.writeErr
+	}
+
+	return len(payload), nil
+}
+
+// Close records backend stream closure.
+func (c *recordingFailureConn) Close() error {
+	c.closed = true
+
+	return nil
+}
+
+// LocalAddr returns the configured local backend socket address.
+func (c *recordingFailureConn) LocalAddr() net.Addr {
+	return c.local
+}
+
+// RemoteAddr returns the configured remote backend socket address.
+func (c *recordingFailureConn) RemoteAddr() net.Addr {
+	return c.remote
+}
+
+// SetDeadline accepts connector deadline calls.
+func (c *recordingFailureConn) SetDeadline(time.Time) error {
+	return nil
+}
+
+// SetReadDeadline accepts connector read deadline calls.
+func (c *recordingFailureConn) SetReadDeadline(time.Time) error {
+	return nil
+}
+
+// SetWriteDeadline accepts connector write deadline calls.
+func (c *recordingFailureConn) SetWriteDeadline(time.Time) error {
+	return nil
 }
 
 // recordingProxyRunner records transparent proxy start and releases the test lease.

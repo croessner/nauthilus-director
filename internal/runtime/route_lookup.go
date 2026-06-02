@@ -139,18 +139,19 @@ type RouteLookupUserHoldState struct {
 
 // RouteLookupBackendState describes one effective backend candidate safely.
 type RouteLookupBackendState struct {
-	Identifier        string
-	Protocol          string
-	BackendPool       string
-	BackendNode       string
-	EffectiveShard    string
-	Generation        string
-	Eligible          bool
-	AllowsNewSessions bool
-	AllowsActivePins  bool
-	FailClosed        bool
-	FailClosedReason  backend.EffectiveExclusionReason
-	Exclusions        []backend.EffectiveExclusion
+	Identifier            string
+	Protocol              string
+	BackendPool           string
+	BackendNode           string
+	EffectiveShard        string
+	OutboundProxyProtocol bool
+	Generation            string
+	Eligible              bool
+	AllowsNewSessions     bool
+	AllowsActivePins      bool
+	FailClosed            bool
+	FailClosedReason      backend.EffectiveExclusionReason
+	Exclusions            []backend.EffectiveExclusion
 }
 
 // RouteLookupEffects summarizes runtime factors that influenced lookup.
@@ -418,18 +419,19 @@ func (s *RouteLookupService) Lookup(ctx context.Context, request RouteLookupRequ
 // NewRouteLookupBackendState projects effective backend state into diagnostics.
 func NewRouteLookupBackendState(state backend.EffectiveBackendState, activeAffinity bool) RouteLookupBackendState {
 	return RouteLookupBackendState{
-		Identifier:        state.Identifier,
-		Protocol:          state.Protocol,
-		BackendPool:       state.BackendPool,
-		BackendNode:       state.Backend.BackendNode,
-		EffectiveShard:    state.EffectiveShardTag,
-		Generation:        state.Generation,
-		Eligible:          state.Eligible(activeAffinity),
-		AllowsNewSessions: state.AllowsNewSessions,
-		AllowsActivePins:  state.AllowsActivePins,
-		FailClosed:        state.FailClosed,
-		FailClosedReason:  state.FailClosedReason,
-		Exclusions:        append([]backend.EffectiveExclusion(nil), state.Exclusions...),
+		Identifier:            state.Identifier,
+		Protocol:              state.Protocol,
+		BackendPool:           state.BackendPool,
+		BackendNode:           state.Backend.BackendNode,
+		EffectiveShard:        state.EffectiveShardTag,
+		OutboundProxyProtocol: state.Backend.HAProxy.Enabled,
+		Generation:            state.Generation,
+		Eligible:              state.Eligible(activeAffinity),
+		AllowsNewSessions:     state.AllowsNewSessions,
+		AllowsActivePins:      state.AllowsActivePins,
+		FailClosed:            state.FailClosed,
+		FailClosedReason:      state.FailClosedReason,
+		Exclusions:            append([]backend.EffectiveExclusion(nil), state.Exclusions...),
 	}
 }
 

@@ -65,6 +65,8 @@ const (
 	EventBackendSelect = "backend.select"
 	// EventBackendConnect records selected backend connection setup.
 	EventBackendConnect = "backend.connect"
+	// EventBackendProxyProtocol records outbound backend PROXY protocol handling.
+	EventBackendProxyProtocol = "backend.proxy_protocol"
 	// EventBackendAuth records selected backend authentication.
 	EventBackendAuth = "backend.auth"
 	// EventBackendHealth records backend health transition and ownership results.

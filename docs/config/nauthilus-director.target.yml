@@ -509,6 +509,10 @@ director:
       max_connections: 1000
       maintenance: disabled
 
+      # Backend-side PROXY protocol is per protocol endpoint. When enabled,
+      # sessions and health checks write one PROXY preface before backend TLS
+      # or greeting reads. backend_node remains the mailbox-authority identity,
+      # not a proxy endpoint name.
       haproxy:
         enabled: false
 

@@ -78,12 +78,13 @@ func (s *Session) ensureBackendTransaction(ctx context.Context, target backend.B
 		lmtpObsFieldShardTag:          target.ShardTag,
 	})
 	connectStarted := time.Now()
-	connection, err := s.backendConnector.Connect(connectCtx, target, s.backendConnectTimeout)
+	connection, err := s.backendConnector.Connect(connectCtx, s.sessionBackendConnectRequest(target))
 
 	connectDuration := time.Since(connectStarted)
 	if err != nil {
-		s.recordBackendConnect(connectCtx, lmtpObservationResultFailure, lmtpReasonBackendConnect, target.Identifier, target.BackendNode, target.ShardTag, connectDuration)
-		connectSpan.End(lmtpObservationResultFailure, lmtpReasonBackendConnect)
+		connectReason := lmtpReasonClass(err)
+		s.recordBackendConnect(connectCtx, lmtpObservationResultFailure, connectReason, target.Identifier, target.BackendNode, target.ShardTag, connectDuration)
+		connectSpan.End(lmtpObservationResultFailure, connectReason)
 
 		return err
 	}
@@ -116,6 +117,20 @@ func (s *Session) ensureBackendTransaction(ctx context.Context, target backend.B
 	s.transaction.backend = transaction
 
 	return nil
+}
+
+// sessionBackendConnectRequest carries the selected backend and effective frontend tuple.
+func (s *Session) sessionBackendConnectRequest(target backend.Backend) backend.ConnectRequest {
+	return backend.ConnectRequest{
+		Target:        target,
+		Timeout:       s.backendConnectTimeout,
+		Purpose:       backend.ConnectPurposeSession,
+		Observability: s.observability,
+		ProxyAddresses: &backend.ProxyAddresses{
+			Source:      s.conn.RemoteAddr(),
+			Destination: s.conn.LocalAddr(),
+		},
+	}
 }
 
 // backendAuthObservationMechanism returns a bounded backend-auth mechanism label.

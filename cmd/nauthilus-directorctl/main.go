@@ -3083,11 +3083,13 @@ func writeBackendLine(writer io.Writer, backend generated.BackendDetail) {
 	}
 	_, _ = fmt.Fprintf(
 		writer,
-		"identifier=%s protocol=%s backend_pool=%s shard_tag=%s in_service=%t draining=%t maintenance=%s weight=%s\n",
+		"identifier=%s backend_node=%s protocol=%s backend_pool=%s shard_tag=%s outbound_proxy_protocol=%t in_service=%t draining=%t maintenance=%s weight=%s\n",
 		fieldValue(backend.Identifier),
+		fieldValue(backend.BackendNode),
 		fieldValue(backend.Protocol),
 		fieldValue(backend.BackendPool),
 		fieldValue(backend.ShardTag),
+		backend.OutboundProxyProtocol,
 		backend.Runtime.InService,
 		backend.Runtime.Draining,
 		fieldValue(string(backend.Runtime.Maintenance)),

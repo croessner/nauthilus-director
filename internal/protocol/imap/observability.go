@@ -23,6 +23,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/croessner/nauthilus-director/internal/backend"
 	"github.com/croessner/nauthilus-director/internal/observability"
 	placementpkg "github.com/croessner/nauthilus-director/internal/placement"
 	"github.com/croessner/nauthilus-director/internal/state"
@@ -43,17 +44,21 @@ const (
 	observationResultOK      = "ok"
 	observationResultStart   = "start"
 
-	reasonBackendAuth     = "backend_auth_failed"
-	reasonBackendConnect  = "backend_connect_failed"
-	reasonBindingExpired  = "binding_expired"
-	reasonBindingRetained = "binding_retained"
-	reasonCanceled        = "canceled"
-	reasonCredentialInput = "credential_input"
-	reasonLiteral         = "literal"
-	reasonOperatorPin     = "operator_backend_pin"
-	reasonProtocol        = "protocol"
-	reasonState           = "state_failed"
-	reasonUnsupported     = "unsupported"
+	reasonBackendAuth                   = "backend_auth_failed"
+	reasonBackendConnect                = "backend_connect_failed"
+	reasonBackendProxyConfig            = "backend_proxy_config"
+	reasonBackendProxyMissingAddress    = "backend_proxy_missing_address"
+	reasonBackendProxyUnsupportedFamily = "backend_proxy_unsupported_family"
+	reasonBackendProxyWrite             = "backend_proxy_write_failed"
+	reasonBindingExpired                = "binding_expired"
+	reasonBindingRetained               = "binding_retained"
+	reasonCanceled                      = "canceled"
+	reasonCredentialInput               = "credential_input"
+	reasonLiteral                       = "literal"
+	reasonOperatorPin                   = "operator_backend_pin"
+	reasonProtocol                      = "protocol"
+	reasonState                         = "state_failed"
+	reasonUnsupported                   = "unsupported"
 
 	obsFieldAffinitySource    = "affinity_source"
 	obsFieldBackendIdentifier = "backend_identifier"
@@ -291,6 +296,14 @@ func reasonClass(err error) string {
 		return reasonCanceled
 	case errors.Is(err, ErrBackendAuth), errors.Is(err, ErrBackendAuthPolicy):
 		return reasonBackendAuth
+	case backend.IsTransportReason(err, backend.TransportReasonWriteFailed):
+		return reasonBackendProxyWrite
+	case backend.IsTransportReason(err, backend.TransportReasonMissingAddress):
+		return reasonBackendProxyMissingAddress
+	case backend.IsTransportReason(err, backend.TransportReasonUnsupportedFamily):
+		return reasonBackendProxyUnsupportedFamily
+	case backend.IsTransportReason(err, backend.TransportReasonConfig):
+		return reasonBackendProxyConfig
 	case errors.Is(err, ErrBackendConnect), errors.Is(err, ErrBackendTLS), errors.Is(err, ErrBackendProtocol):
 		return reasonBackendConnect
 	case errors.Is(err, ErrCredentialRejected), errors.Is(err, ErrCredentialTooLarge):

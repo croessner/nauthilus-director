@@ -26,7 +26,10 @@ import (
 	"github.com/croessner/nauthilus-director/internal/observability"
 )
 
-const testBackendIDB = "mailstore-b-imap"
+const (
+	testBackendIDB               = "mailstore-b-imap"
+	testProxyHealthFailureReason = "proxy_write_failed"
+)
 
 // TestRuntimeSelectorExcludesRuntimeOutAndDrain verifies runtime state blocks new placement.
 func TestRuntimeSelectorExcludesRuntimeOutAndDrain(t *testing.T) {
@@ -693,6 +696,51 @@ func TestHealthRunnerOnlyCurrentOwnerPerformsDeepCheck(t *testing.T) {
 	}
 }
 
+// TestHealthRunnerPublishesUnhealthyProxyFailure verifies PROXY-required failures stay unhealthy.
+func TestHealthRunnerPublishesUnhealthyProxyFailure(t *testing.T) {
+	cfg := singleBackendConfig(string(MaintenanceModeDisabled), 100)
+	registry := mustStaticRegistry(t, cfg)
+	checker := &recordingHealthChecker{
+		result: &HealthCheckResult{ReasonClass: testProxyHealthFailureReason},
+	}
+	coordinator := &fakeHealthCoordinator{owned: true}
+
+	runner, err := NewHealthRunner(registry, coordinator, checker, HealthRunnerConfig{
+		InstanceID: "director-a",
+		Interval:   time.Second,
+		Timeout:    time.Second,
+		StateTTL:   time.Second,
+	})
+	if err != nil {
+		t.Fatalf("NewHealthRunner returned error: %v", err)
+	}
+
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce returned error: %v", err)
+	}
+
+	if coordinator.published != 1 {
+		t.Fatalf("published states = %d, want 1", coordinator.published)
+	}
+
+	if coordinator.lastState.Status != HealthStatusUnhealthy {
+		t.Fatalf("published status = %q, want unhealthy", coordinator.lastState.Status)
+	}
+
+	if coordinator.lastState.ReasonClass != testProxyHealthFailureReason {
+		t.Fatalf("published reason = %q, want proxy_write_failed", coordinator.lastState.ReasonClass)
+	}
+
+	if len(coordinator.lastState.Capabilities.List()) != 0 {
+		t.Fatalf("unhealthy state published capabilities = %v, want none", coordinator.lastState.Capabilities.List())
+	}
+
+	local, ok := runner.LocalState(testBackendID)
+	if !ok || local.Status != HealthStatusUnhealthy {
+		t.Fatalf("local state = %#v ok=%v, want unhealthy", local, ok)
+	}
+}
+
 type fakeSnapshots map[string]RuntimeSnapshot
 
 // capabilitySnapshot creates a healthy test snapshot with bounded capability state.
@@ -733,6 +781,7 @@ func (r *recordingObservability) Has(name string) bool {
 
 type recordingHealthChecker struct {
 	deepChecks int
+	result     *HealthCheckResult
 }
 
 // CheckBackend records deep-check attempts without touching credentials.
@@ -741,12 +790,17 @@ func (c *recordingHealthChecker) CheckBackend(_ context.Context, _ Backend, requ
 		c.deepChecks++
 	}
 
+	if c.result != nil {
+		return *c.result
+	}
+
 	return HealthCheckResult{Healthy: true}
 }
 
 type fakeHealthCoordinator struct {
 	owned     bool
 	published int
+	lastState HealthState
 }
 
 // PublishInstanceHeartbeat records instance liveness for the fake coordinator.
@@ -773,6 +827,7 @@ func (c *fakeHealthCoordinator) RenewHealthOwner(context.Context, HealthOwnershi
 // PublishHealthState records that a fenced state publication was attempted.
 func (c *fakeHealthCoordinator) PublishHealthState(_ context.Context, request HealthPublishRequest) (HealthState, error) {
 	c.published++
+	c.lastState = request.State
 
 	return request.State, nil
 }

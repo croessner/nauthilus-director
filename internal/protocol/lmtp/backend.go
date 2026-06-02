@@ -44,6 +44,10 @@ const (
 	healthReasonAuth         = "auth"
 	healthReasonConnect      = "connect"
 	healthReasonProtocol     = "protocol"
+	healthReasonProxyConfig  = "proxy_config"
+	healthReasonProxyMissing = "proxy_missing_address"
+	healthReasonProxyFamily  = "proxy_unsupported_family"
+	healthReasonProxyWrite   = "proxy_write_failed"
 	healthReasonTimeout      = "timeout"
 	healthReasonTLS          = "tls"
 	healthReasonUnknown      = "unknown"
@@ -60,7 +64,7 @@ var (
 
 // BackendConnector establishes an LMTP backend stream through LHLO discovery.
 type BackendConnector interface {
-	Connect(ctx context.Context, target backend.Backend, timeout time.Duration) (*BackendConnection, error)
+	Connect(ctx context.Context, request backend.ConnectRequest) (*BackendConnection, error)
 }
 
 // BackendDialer is the narrow TCP dial boundary used by the connector and tests.
@@ -114,7 +118,12 @@ func (c *HealthChecker) CheckBackend(ctx context.Context, target backend.Backend
 		connector = NewTCPBackendConnector(nil)
 	}
 
-	connection, err := connector.Connect(ctx, target, request.Timeout)
+	connection, err := connector.Connect(ctx, backend.ConnectRequest{
+		Target:        target,
+		Timeout:       request.Timeout,
+		Purpose:       backend.ConnectPurposeHealth,
+		Observability: request.Observability,
+	})
 	if err != nil {
 		return backend.HealthCheckResult{ReasonClass: backendHealthReason(err)}
 	}
@@ -191,19 +200,23 @@ func (c *BackendConnection) Capabilities() []string {
 // Connect dials, negotiates configured TLS, and collects backend LHLO capabilities.
 func (c *TCPBackendConnector) Connect(
 	ctx context.Context,
-	target backend.Backend,
-	timeout time.Duration,
+	request backend.ConnectRequest,
 ) (*BackendConnection, error) {
+	target := request.Target
 	if err := validateBackendTarget(target); err != nil {
 		return nil, err
 	}
 
-	dialCtx, cancel := backendConnectContext(ctx, timeout)
+	dialCtx, cancel := backendConnectContext(ctx, request.Timeout)
 	defer cancel()
 
 	raw, err := c.dialer.DialContext(dialCtx, "tcp", target.Address)
 	if err != nil {
 		return nil, fmt.Errorf("%w: tcp dial", ErrBackendConnect)
+	}
+
+	if _, err := backend.NewTransport().WriteProxyProtocolPreface(ctx, raw, request); err != nil {
+		return nil, fmt.Errorf("%w: proxy preface: %w", ErrBackendConnect, err)
 	}
 
 	connection := newBackendConnection(raw)
@@ -416,6 +429,14 @@ func looksLikeUnixBackendAddress(address string) bool {
 // backendHealthReason maps backend check errors to low-cardinality reason classes.
 func backendHealthReason(err error) string {
 	switch {
+	case backend.IsTransportReason(err, backend.TransportReasonWriteFailed):
+		return healthReasonProxyWrite
+	case backend.IsTransportReason(err, backend.TransportReasonMissingAddress):
+		return healthReasonProxyMissing
+	case backend.IsTransportReason(err, backend.TransportReasonUnsupportedFamily):
+		return healthReasonProxyFamily
+	case backend.IsTransportReason(err, backend.TransportReasonConfig):
+		return healthReasonProxyConfig
 	case isTimeoutError(err):
 		return healthReasonTimeout
 	case errors.Is(err, ErrBackendTLS):

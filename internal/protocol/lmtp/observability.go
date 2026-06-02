@@ -24,6 +24,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/croessner/nauthilus-director/internal/backend"
 	"github.com/croessner/nauthilus-director/internal/observability"
 	placementpkg "github.com/croessner/nauthilus-director/internal/placement"
 	"github.com/croessner/nauthilus-director/internal/state"
@@ -56,27 +57,31 @@ const (
 	lmtpObservationResultStart    = "start"
 	lmtpObservationResultTempfail = "tempfail"
 
-	lmtpReasonAuth             = "auth"
-	lmtpReasonBackendAuth      = "backend_auth_failed"
-	lmtpReasonBackendConnect   = "backend_connect"
-	lmtpReasonBackendStatus    = "backend_status"
-	lmtpReasonBDAT             = "bdat"
-	lmtpReasonBindingExpired   = "binding_expired"
-	lmtpReasonBindingRetained  = "binding_retained"
-	lmtpReasonCanceled         = "canceled"
-	lmtpReasonCredentialInput  = "credential_input"
-	lmtpReasonDATA             = "data"
-	lmtpReasonMalformed        = "malformed"
-	lmtpReasonOK               = "ok"
-	lmtpReasonOperatorPin      = "operator_backend_pin"
-	lmtpReasonParser           = "parser"
-	lmtpReasonProtocol         = "protocol"
-	lmtpReasonRejected         = "rejected"
-	lmtpReasonRouting          = "routing"
-	lmtpReasonSameBackend      = "same_backend"
-	lmtpReasonState            = "state_failed"
-	lmtpReasonTemporaryFailure = "temporary_failure"
-	lmtpReasonUnsupported      = "unsupported"
+	lmtpReasonAuth                = "auth"
+	lmtpReasonBackendAuth         = "backend_auth_failed"
+	lmtpReasonBackendConnect      = "backend_connect"
+	lmtpReasonBackendProxyConfig  = "backend_proxy_config"
+	lmtpReasonBackendProxyMissing = "backend_proxy_missing_address"
+	lmtpReasonBackendProxyFamily  = "backend_proxy_unsupported_family"
+	lmtpReasonBackendProxyWrite   = "backend_proxy_write_failed"
+	lmtpReasonBackendStatus       = "backend_status"
+	lmtpReasonBDAT                = "bdat"
+	lmtpReasonBindingExpired      = "binding_expired"
+	lmtpReasonBindingRetained     = "binding_retained"
+	lmtpReasonCanceled            = "canceled"
+	lmtpReasonCredentialInput     = "credential_input"
+	lmtpReasonDATA                = "data"
+	lmtpReasonMalformed           = "malformed"
+	lmtpReasonOK                  = "ok"
+	lmtpReasonOperatorPin         = "operator_backend_pin"
+	lmtpReasonParser              = "parser"
+	lmtpReasonProtocol            = "protocol"
+	lmtpReasonRejected            = "rejected"
+	lmtpReasonRouting             = "routing"
+	lmtpReasonSameBackend         = "same_backend"
+	lmtpReasonState               = "state_failed"
+	lmtpReasonTemporaryFailure    = "temporary_failure"
+	lmtpReasonUnsupported         = "unsupported"
 
 	lmtpStatusClass2xx     = "2xx"
 	lmtpStatusClass4xx     = "4xx"
@@ -447,6 +452,14 @@ func lmtpReasonClass(err error) string {
 		return lmtpReasonCanceled
 	case errors.Is(err, ErrBackendAuth), errors.Is(err, ErrBackendAuthPolicy):
 		return lmtpReasonBackendAuth
+	case backend.IsTransportReason(err, backend.TransportReasonWriteFailed):
+		return lmtpReasonBackendProxyWrite
+	case backend.IsTransportReason(err, backend.TransportReasonMissingAddress):
+		return lmtpReasonBackendProxyMissing
+	case backend.IsTransportReason(err, backend.TransportReasonUnsupportedFamily):
+		return lmtpReasonBackendProxyFamily
+	case backend.IsTransportReason(err, backend.TransportReasonConfig):
+		return lmtpReasonBackendProxyConfig
 	case errors.Is(err, ErrBackendConnect), errors.Is(err, ErrBackendTLS), errors.Is(err, ErrBackendProtocol):
 		return lmtpReasonBackendConnect
 	case errors.Is(err, ErrCredentialRejected), errors.Is(err, ErrCredentialTooLarge):

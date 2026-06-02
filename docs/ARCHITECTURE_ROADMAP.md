@@ -993,12 +993,16 @@ sasl_blob
 raw_error
 ```
 
-Prometheus metrics should include sessions, auth totals/durations, routing resolver totals/durations, backend selection totals, backend health, backend maintenance, proxy bytes/durations, LMTP transaction totals/durations, LMTP recipient route/status totals, LMTP same-backend policy failures, LMTP DATA/BDAT stream totals/durations, LMTP backend status classes, REST requests and Redis operation health.
+Prometheus metrics should include sessions, auth totals/durations, routing resolver totals/durations, backend selection totals, backend connection totals/durations, outbound backend PROXY protocol preface totals, backend health, backend maintenance, proxy bytes/durations, LMTP transaction totals/durations, LMTP recipient route/status totals, LMTP same-backend policy failures, LMTP DATA/BDAT stream totals/durations, LMTP backend status classes, REST requests and Redis operation health.
 
 `backend_pool` and `shard_tag` are acceptable labels; raw backend identifiers
 and backend nodes are not metrics labels. Per-backend and backend-node details
 belong only in REST diagnostics, logs and traces where the operator-diagnostic
 policy permits them.
+Backend-side PROXY protocol observability must aggregate by bounded dimensions
+such as operation, protocol, backend pool, result and reason class. Backend
+nodes may be structured diagnostics for permitted logs and traces, but they are
+not Prometheus labels.
 LMTP observability must also keep raw recipients, envelope senders, message identifiers, subjects and DATA/BDAT content out of logs, traces and metric labels.
 
 ## 18. Health checks and maintenance
@@ -1302,12 +1306,13 @@ completion evidence lives in
 Status: completed. The production LMTP/LMTPS listener path, LMTP transaction
 state machine, DATA/BDAT backend forwarding, peer authentication, recipient
 identity lookup, runtime-aware same-backend placement, delivery-scoped
-affinity, route lookup integration, observability coverage, deterministic
-fake-service E2E proof and real Postfix-to-Director-to-Dovecot interop lane are
-in place. A follow-up is required to lift the completed shard-level LMTP/IMAP
-affinity behavior to concrete cross-protocol backend-node affinity and retained
-post-activity backend binding. The detailed M5 completion evidence lives in
-`docs/specs/implementation/M5_LMTP_PRODUCTION_SPEC.md`.
+affinity, route lookup integration, backend-side outbound PROXY protocol for
+IMAP and LMTP sessions plus health checks, observability coverage,
+deterministic fake-service E2E proof and real Postfix-to-Director-to-Dovecot
+interop lane are in place. The detailed M5 completion evidence lives in
+`docs/specs/implementation/M5_LMTP_PRODUCTION_SPEC.md`,
+`docs/specs/implementation/M5_CROSS_PROTOCOL_BACKEND_AFFINITY_FOLLOWUP.md` and
+`docs/specs/implementation/M5_BACKEND_PROXY_PROTOCOL_FOLLOWUP.md`.
 
 - production-ready LMTP and LMTPS entrypoints within the M5 scope
 - LMTP state machine with DATA and BDAT handling

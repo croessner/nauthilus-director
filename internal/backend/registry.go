@@ -37,6 +37,7 @@ type Backend struct {
 	ShardTag        string
 	BackendNode     string
 	Address         string
+	HAProxy         HAProxyConfig
 	TLS             TLSConfig
 	Auth            AuthConfig
 	MaintenanceMode MaintenanceMode
@@ -44,6 +45,11 @@ type Backend struct {
 	MaxConnections  int
 	HealthEnabled   bool
 	Health          HealthConfig
+}
+
+// HAProxyConfig describes backend outbound PROXY protocol transport policy.
+type HAProxyConfig struct {
+	Enabled bool
 }
 
 // PlacementFacts contains the bounded backend identity used by runtime overrides.
@@ -571,6 +577,7 @@ func newBackend(
 		ShardTag:        shardTag,
 		BackendNode:     backendNode,
 		Address:         address,
+		HAProxy:         newHAProxyConfig(backend.HAProxy),
 		TLS:             newBackendTLSConfig(backend.TLS),
 		Auth:            newBackendAuthConfig(backend.Auth),
 		MaintenanceMode: mode,
@@ -785,6 +792,13 @@ func normalizeTCPAddress(address string) (string, error) {
 	}
 
 	return net.JoinHostPort(strings.TrimSpace(host), strings.TrimSpace(port)), nil
+}
+
+// newHAProxyConfig copies secret-safe backend transport policy into the domain value.
+func newHAProxyConfig(haproxy config.HAProxyConfig) HAProxyConfig {
+	return HAProxyConfig{
+		Enabled: haproxy.Enabled,
+	}
 }
 
 // looksLikeUnixSocketAddress detects explicit Unix networks and absolute socket paths.

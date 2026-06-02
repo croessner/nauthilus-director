@@ -329,10 +329,30 @@ type sessionHarness struct {
 func startTestSession(t *testing.T, cfg SessionConfig) *sessionHarness {
 	t.Helper()
 
+	return startTestSessionWithSetup(t, cfg, nil)
+}
+
+// startTestSessionWithClientAddrs starts a session with deterministic frontend address metadata.
+func startTestSessionWithClientAddrs(t *testing.T, cfg SessionConfig, remoteAddr net.Addr, localAddr net.Addr) *sessionHarness {
+	t.Helper()
+
+	return startTestSessionWithSetup(t, cfg, func(session *Session) {
+		session.context.RemoteAddr = remoteAddr
+		session.context.LocalAddr = localAddr
+	})
+}
+
+// startTestSessionWithSetup starts one in-memory frontend session after optional setup.
+func startTestSessionWithSetup(t *testing.T, cfg SessionConfig, setup func(*Session)) *sessionHarness {
+	t.Helper()
+
 	client, server := net.Pipe()
 	session, err := NewSession(cfg, server)
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
+	}
+	if setup != nil {
+		setup(session)
 	}
 
 	harness := &sessionHarness{

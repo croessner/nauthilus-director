@@ -1,7 +1,7 @@
 .\" Copyright (C) 2026 Christian Rößner
 .\"
 .\" SPDX-License-Identifier: AGPL-3.0-only
-.TH NAUTHILUS-DIRECTOR.YAML 5 "2026-05-29" "nauthilus-director" "File Formats"
+.TH NAUTHILUS-DIRECTOR.YAML 5 "2026-06-02" "nauthilus-director" "File Formats"
 .SH NAME
 nauthilus-director.yaml \- Nauthilus Director YAML configuration format
 .SH DESCRIPTION
@@ -64,6 +64,29 @@ Backend pool protocol, selector and backend membership.
 Backend protocol, shard, backend-node identity, address, weight, max
 connections, maintenance baseline, transport security, authentication and
 health checks.
+.SH BACKEND OUTBOUND PROXY PROTOCOL
+Backend entries may enable backend-side HAProxy PROXY protocol with
+.B director.backends.<name>.haproxy.enabled: true.
+When enabled, every Director-created TCP connection to that backend writes one
+PROXY preface before backend TLS, STARTTLS negotiation, greeting reads,
+capability discovery, authentication or protocol forwarding.
+The setting applies to real IMAP and LMTP sessions and to light and deep backend
+health checks.
+.PP
+When
+.B haproxy.enabled
+is false, no outbound PROXY preface is written.
+There is no implemented
+.B backend PROXY protocol version
+configuration path; generated references and examples intentionally show only
+.BR enabled .
+.PP
+.B backend_node
+is the concrete mailbox-authority identity used for placement, active affinity
+and retained backend binding. It is not a proxy hostname, socket address,
+HAProxy endpoint name or transport selector.
+Backend-side PROXY handling does not change routing, health ownership,
+maintenance, drain, runtime weight or YAML configuration.
 .SH RUNTIME STATE AND DEVELOPMENT RESET
 Redis runtime keys use
 .B storage.redis.schema_version
@@ -152,9 +175,19 @@ sessions, open backend connections or mutate Redis state.
 LMTP logs, traces and Prometheus metrics expose operation, result, bounded
 reason class, backend pool, shard tag, mechanism, transport, TLS mode and status
 class where applicable.
+Backend-side PROXY observations use the operation
+.B backend_proxy_protocol
+and bounded reason classes such as
+.BR ok ,
+.BR disabled ,
+.BR write_failed ,
+.BR missing_address ,
+.B unsupported_family
+and
+.BR config .
 Metric labels remain low-cardinality and do not include usernames, recipients,
-client addresses, session IDs, backend identifiers, backend nodes, raw errors or
-secrets.
+client addresses, session IDs, backend identifiers, backend nodes, raw errors,
+raw frontend or backend socket addresses, or secrets.
 .PP
 Observable LMTP output must not contain raw recipients, envelope senders,
 message IDs, subjects, DATA or BDAT content, peer passwords, bearer tokens,

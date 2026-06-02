@@ -31,6 +31,7 @@ expected_paths=(
 	"test/e2e/fakes/managesieve_backend/README.md"
 	"test/e2e/fakes/pop3_backend/README.md"
 	"test/e2e/interop/README.md"
+	"contrib/demo-stack/scripts/prove-backend-proxy.sh"
 )
 
 for path in "${expected_paths[@]}"; do
@@ -46,7 +47,7 @@ printf 'ok e2e: required fake-service and interoperability scaffold files exist\
 NAUTHILUS_DIRECTOR_E2E_SERVER_BINARY="$tmpdir/nauthilus-director" \
 	"$go_cmd" test -mod=vendor -count=1 ./test/e2e
 
-printf 'ok e2e: fake Nauthilus HTTP/gRPC authority, real server binary, fake IMAP and LMTP backends, backend pinning, user placement holds, listener drain/resume, DATA/BDAT, TLS, route lookup and observability checks passed\n'
+printf 'ok e2e: fake Nauthilus HTTP/gRPC authority, real server binary, fake IMAP and LMTP backends, outbound backend PROXY, backend pinning, user placement holds, listener drain/resume, DATA/BDAT, TLS, route lookup and observability checks passed\n'
 
 "$go_cmd" run -mod=vendor ./cmd/nauthilus-director --version >"$tmpdir/nauthilus-director.version"
 "$go_cmd" run -mod=vendor ./cmd/nauthilus-directorctl --version >"$tmpdir/nauthilus-directorctl.version"

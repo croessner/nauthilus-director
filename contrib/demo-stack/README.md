@@ -13,6 +13,7 @@ This stack is a runnable integration playground for the production Director path
 - The Directors authenticate through that internal HAProxy to the TLS-protected Nauthilus gRPC AuthService.
 - Three Dovecot 2.4 containers provide IMAPS and LMTPS backend shards. All three use OpenLDAP for passdb/userdb lookups.
 - `mailstore-c-imap` is intentionally wired with Director `master_user` backend auth; the other Dovecot IMAP shards use credential replay.
+- `mailstore-c` IMAP and LMTP are reached through internal HAProxy `accept-proxy` frontends, so that shard proves Director-to-backend outbound PROXY protocol while the other Dovecot shards keep the disabled path.
 - A FoundationDB-backed Stalwart pair provides an additional `stalwart` backend shard through demo IMAPS and LMTPS listeners.
 - The Stalwart instances share FoundationDB for data, blobs and search, and use the demo Valkey service for short-lived in-memory state and cluster coordination.
 - Stalwart is configured from the command line: `stalwart-configure` waits for both instances, applies `stalwart/bootstrap.ndjson` through `stalwart-cli`, and then enables the built-in user role for LDAP-backed accounts. No GUI is required or exposed on the host.
@@ -23,7 +24,7 @@ flowchart LR
     client["Mail client / smoke scripts"]
 
     subgraph ingress["Public ingress"]
-        haproxy["haproxy<br/>SMTP, IMAP, IMAPS, LMTPS"]
+        haproxy["haproxy<br/>SMTP, IMAP, IMAPS, LMTPS<br/>mailstore-c accept-proxy"]
         postfix["postfix<br/>SMTP relay"]
     end
 
@@ -77,10 +78,11 @@ flowchart LR
 
     directorA -->|"IMAP / LMTP backend pools"| mailstoreA
     directorA -->|"IMAP / LMTP backend pools"| mailstoreB
-    directorA -->|"IMAP / LMTP backend pools"| mailstoreC
+    directorA -->|"IMAP / LMTP via outbound PROXY"| haproxy
     directorB -->|"IMAP / LMTP backend pools"| mailstoreA
     directorB -->|"IMAP / LMTP backend pools"| mailstoreB
-    directorB -->|"IMAP / LMTP backend pools"| mailstoreC
+    directorB -->|"IMAP / LMTP via outbound PROXY"| haproxy
+    haproxy -->|"accept-proxy backend path"| mailstoreC
     mailstoreA -->|"LDAP passdb / userdb"| openldap
     mailstoreB -->|"LDAP passdb / userdb"| openldap
     mailstoreC -->|"LDAP passdb / userdb"| openldap
@@ -176,6 +178,7 @@ The demo also includes public-boundary affinity proofs:
 
 ```bash
 ./scripts/prove-affinity.sh
+./scripts/prove-backend-proxy.sh
 ./scripts/prove-user-backend-pin.sh
 ./scripts/prove-user-hold.sh
 ```
@@ -184,6 +187,10 @@ The demo also includes public-boundary affinity proofs:
 message through the public SMTP to LMTP delivery path, opens follow-up IMAPS
 sessions while the first session is still active, and verifies through the
 Director control API that all IMAP sessions stay on the same backend.
+`prove-backend-proxy.sh` pins `carol@example.test` to `mailstore-c-imap` and
+repeats the same public IMAPS plus SMTP/LMTP proof through the demo HAProxy
+`accept-proxy` path. Without Director outbound PROXY protocol, that shard's
+IMAP and LMTP backend connections cannot complete.
 `prove-user-backend-pin.sh` sets a runtime backend pin for `dave@example.test`
 to `mailstore-a-imap`, repeats the same IMAPS plus SMTP/LMTP proof, and clears
 the pin afterwards. Set `DEMO_KEEP_BACKEND_PIN=1` to leave the runtime pin in

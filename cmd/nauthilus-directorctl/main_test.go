@@ -978,11 +978,12 @@ func TestTextAndJSONOutputDeterministic(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("text command returned exit code %d, want 0; stderr=%q", code, stderr)
 	}
-	wantText := "identifier=backend-a protocol=imap backend_pool=imap-default shard_tag=shard-a in_service=true draining=false maintenance=disabled weight=100\n" +
-		"identifier=backend-b protocol=imap backend_pool=imap-default shard_tag=shard-b in_service=false draining=true maintenance=soft weight=\"\"\n"
+	wantText := "identifier=backend-a backend_node=mailstore-a-node-1 protocol=imap backend_pool=imap-default shard_tag=shard-a outbound_proxy_protocol=true in_service=true draining=false maintenance=disabled weight=100\n" +
+		"identifier=backend-b backend_node=mailstore-b-node-1 protocol=imap backend_pool=imap-default shard_tag=shard-b outbound_proxy_protocol=false in_service=false draining=true maintenance=soft weight=\"\"\n"
 	if stdout != wantText {
 		t.Fatalf("text output = %q, want %q", stdout, wantText)
 	}
+	assertBackendOutputSecretSafe(t, stdout)
 
 	jsonFake := newFakeControlClient()
 	stdout, stderr, code = runWithFakeClient([]string{"--output", "json", "backends", "show", "backend-a"}, jsonFake)
@@ -990,8 +991,10 @@ func TestTextAndJSONOutputDeterministic(t *testing.T) {
 		t.Fatalf("json command returned exit code %d, want 0; stderr=%q", code, stderr)
 	}
 	wantJSON := "{\n" +
+		"  \"backend_node\": \"mailstore-a-node-1\",\n" +
 		"  \"backend_pool\": \"imap-default\",\n" +
 		"  \"identifier\": \"backend-a\",\n" +
+		"  \"outbound_proxy_protocol\": true,\n" +
 		"  \"protocol\": \"imap\",\n" +
 		"  \"runtime\": {\n" +
 		"    \"draining\": false,\n" +
@@ -1004,6 +1007,7 @@ func TestTextAndJSONOutputDeterministic(t *testing.T) {
 	if stdout != wantJSON {
 		t.Fatalf("JSON output = %q, want %q", stdout, wantJSON)
 	}
+	assertBackendOutputSecretSafe(t, stdout)
 
 	listenerTextFake := newFakeControlClient()
 	stdout, stderr, code = runWithFakeClient([]string{"listeners", "list"}, listenerTextFake)
@@ -1307,9 +1311,11 @@ func httpResponse(status int) *http.Response {
 func backendA() generated.BackendDetail {
 	weight := 100
 	return generated.BackendDetail{
-		BackendPool: "imap-default",
-		Identifier:  "backend-a",
-		Protocol:    "imap",
+		BackendNode:           "mailstore-a-node-1",
+		BackendPool:           "imap-default",
+		Identifier:            "backend-a",
+		OutboundProxyProtocol: true,
+		Protocol:              "imap",
 		Runtime: generated.BackendRuntimeState{
 			InService:   true,
 			Maintenance: generated.MaintenanceModeDisabled,
@@ -1322,6 +1328,7 @@ func backendA() generated.BackendDetail {
 // backendB returns a second stable backend fixture.
 func backendB() generated.BackendDetail {
 	return generated.BackendDetail{
+		BackendNode: "mailstore-b-node-1",
 		BackendPool: "imap-default",
 		Identifier:  "backend-b",
 		Protocol:    "imap",
@@ -1330,6 +1337,17 @@ func backendB() generated.BackendDetail {
 			Maintenance: generated.MaintenanceModeSoft,
 		},
 		ShardTag: "shard-b",
+	}
+}
+
+// assertBackendOutputSecretSafe verifies backend read-back does not expose addresses or secrets.
+func assertBackendOutputSecretSafe(t *testing.T, output string) {
+	t.Helper()
+
+	for _, forbidden := range []string{"127.0.0.1", "address", "private_key", "password", "credential", "token"} {
+		if strings.Contains(output, forbidden) {
+			t.Fatalf("backend output exposed forbidden value %q in %s", forbidden, output)
+		}
 	}
 }
 

@@ -34,19 +34,24 @@ import (
 )
 
 const (
-	backendCapabilityCommand = "CAPABILITY"
-	backendLineLimitBytes    = 16 * 1024
-	backendProtocol          = "imap"
-	backendTLSDisabled       = "disabled"
-	backendTLSImplicit       = "implicit"
-	backendTLSPlaintext      = "plaintext"
-	backendTLSStartTLS       = "starttls"
-	backendTLSMinDefault     = "TLS1.2"
-	healthReasonAuth         = "auth"
-	healthReasonConnect      = "connect"
-	healthReasonProtocol     = "protocol"
-	healthReasonTLS          = "tls"
-	healthReasonUnknown      = "unknown"
+	backendCapabilityCommand           = "CAPABILITY"
+	backendLineLimitBytes              = 16 * 1024
+	backendProtocol                    = "imap"
+	backendTLSDisabled                 = "disabled"
+	backendTLSImplicit                 = "implicit"
+	backendTLSPlaintext                = "plaintext"
+	backendTLSStartTLS                 = "starttls"
+	backendTLSMinDefault               = "TLS1.2"
+	healthReasonAuth                   = "auth"
+	healthReasonConnect                = "connect"
+	healthReasonProtocol               = "protocol"
+	healthReasonProxyConfig            = "proxy_config"
+	healthReasonProxyMissingAddress    = "proxy_missing_address"
+	healthReasonProxyUnsupportedFamily = "proxy_unsupported_family"
+	healthReasonProxyWrite             = "proxy_write_failed"
+	healthReasonTimeout                = "timeout"
+	healthReasonTLS                    = "tls"
+	healthReasonUnknown                = "unknown"
 )
 
 var (
@@ -60,7 +65,7 @@ var (
 
 // BackendConnector establishes the selected backend stream up to the auth boundary.
 type BackendConnector interface {
-	Connect(ctx context.Context, target backend.Backend, timeout time.Duration) (*BackendConnection, error)
+	Connect(ctx context.Context, request backend.ConnectRequest) (*BackendConnection, error)
 }
 
 // BackendDialer is the narrow TCP dial boundary used by the production connector and tests.
@@ -103,7 +108,12 @@ func (c *HealthChecker) CheckBackend(ctx context.Context, target backend.Backend
 		connector = NewTCPBackendConnector(nil)
 	}
 
-	connection, err := connector.Connect(ctx, target, request.Timeout)
+	connection, err := connector.Connect(ctx, backend.ConnectRequest{
+		Target:        target,
+		Timeout:       request.Timeout,
+		Purpose:       backend.ConnectPurposeHealth,
+		Observability: request.Observability,
+	})
 	if err != nil {
 		return backend.HealthCheckResult{ReasonClass: backendHealthReason(err)}
 	}
@@ -185,19 +195,23 @@ func (c *BackendConnection) nextCommandTag() string {
 // Connect dials, negotiates configured backend TLS, and collects backend capabilities.
 func (c *TCPBackendConnector) Connect(
 	ctx context.Context,
-	target backend.Backend,
-	timeout time.Duration,
+	request backend.ConnectRequest,
 ) (*BackendConnection, error) {
+	target := request.Target
 	if err := validateBackendTarget(target); err != nil {
 		return nil, err
 	}
 
-	dialCtx, cancel := backendConnectContext(ctx, timeout)
+	dialCtx, cancel := backendConnectContext(ctx, request.Timeout)
 	defer cancel()
 
 	raw, err := c.dialer.DialContext(dialCtx, "tcp", target.Address)
 	if err != nil {
 		return nil, fmt.Errorf("%w: tcp dial", ErrBackendConnect)
+	}
+
+	if _, err := backend.NewTransport().WriteProxyProtocolPreface(ctx, raw, request); err != nil {
+		return nil, fmt.Errorf("%w: proxy preface: %w", ErrBackendConnect, err)
 	}
 
 	connection := newBackendConnection(raw)
@@ -429,6 +443,16 @@ func looksLikeUnixBackendAddress(address string) bool {
 // backendHealthReason maps backend check errors to low-cardinality reason classes.
 func backendHealthReason(err error) string {
 	switch {
+	case backend.IsTransportReason(err, backend.TransportReasonWriteFailed):
+		return healthReasonProxyWrite
+	case backend.IsTransportReason(err, backend.TransportReasonMissingAddress):
+		return healthReasonProxyMissingAddress
+	case backend.IsTransportReason(err, backend.TransportReasonUnsupportedFamily):
+		return healthReasonProxyUnsupportedFamily
+	case backend.IsTransportReason(err, backend.TransportReasonConfig):
+		return healthReasonProxyConfig
+	case isTimeoutError(err):
+		return healthReasonTimeout
 	case errors.Is(err, ErrBackendTLS):
 		return healthReasonTLS
 	case errors.Is(err, ErrBackendConnect):
@@ -440,6 +464,17 @@ func backendHealthReason(err error) string {
 	default:
 		return healthReasonUnknown
 	}
+}
+
+// isTimeoutError detects context and network timeouts without exposing raw error text.
+func isTimeoutError(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+
+	var netErr net.Error
+
+	return errors.As(err, &netErr) && netErr.Timeout()
 }
 
 // backendTLSConfig builds a tls.Config from the selected backend policy.

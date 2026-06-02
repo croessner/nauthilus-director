@@ -1,7 +1,7 @@
 .\" Copyright (C) 2026 Christian Rößner
 .\"
 .\" SPDX-License-Identifier: AGPL-3.0-only
-.TH NAUTHILUS-DIRECTOR 1 "2026-05-29" "nauthilus-director" "User Commands"
+.TH NAUTHILUS-DIRECTOR 1 "2026-06-02" "nauthilus-director" "User Commands"
 .SH NAME
 nauthilus-director \- run and inspect the Nauthilus Director server process
 .SH SYNOPSIS
@@ -87,6 +87,12 @@ The default dump includes backend-node affinity retention under
 with the safe
 .B 15m
 retention window.
+Backend transport examples expose
+.B director.backends.<name>.haproxy.enabled
+for outbound backend PROXY protocol; they do not expose a replacement
+.B proxy_protocol
+backend tree or a
+backend PROXY protocol version field.
 .TP
 .B config dump -n|--non-default
 Print non-default effective configuration after loading the selected config

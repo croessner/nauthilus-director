@@ -32,10 +32,15 @@ const (
 	testBackendPool       = "imap-default"
 	testBackendShardTag   = "mailstore-a"
 	testBackendHealthOp   = "backend_health"
+	testBackendProxyOp    = "backend_proxy_protocol"
+	testBackendProxyWrite = "write_failed"
 	testHealthStatusField = "health_status"
 	testHealthUnhealthy   = "unhealthy"
 	testLMTPOperationData = "data"
 	testMechanismPlain    = "plain"
+	testPurposeField      = "purpose"
+	testPurposeHealth     = "health"
+	testPurposeSession    = "session"
 	testPreviousStatus    = "previous_status"
 	testProtocolIMAP      = "imap"
 	testProtocolLMTP      = "lmtp"
@@ -149,6 +154,54 @@ func TestBackendHealthMetricsDoNotExposeBackendDiagnostics(t *testing.T) {
 
 	if strings.Contains(body, testBackendNode) {
 		t.Fatalf("backend node leaked into metrics:\n%s", body)
+	}
+}
+
+// TestBackendProxyProtocolMetricsDoNotExposeBackendDiagnostics keeps outbound PROXY metrics bounded.
+func TestBackendProxyProtocolMetricsDoNotExposeBackendDiagnostics(t *testing.T) {
+	runtime := newMetricsTestRuntime(t, false)
+	rawFrontend := "203.0.113.10:42500"
+	rawBackend := "10.0.0.2:143"
+	rawError := "write failed for 10.0.0.2:143 secret backend"
+
+	failure := newMetricEvent(t, EventBackendProxyProtocol, map[string]string{
+		fieldBackendIdentifier: testBackendIdentifier,
+		fieldBackendNode:       testBackendNode,
+		fieldRawError:          rawError,
+		fieldRemoteAddr:        rawFrontend,
+		"backend_address":      rawBackend,
+		testPurposeField:       testPurposeSession,
+		metricLabelOperation:   testBackendProxyOp,
+		metricLabelResult:      telemetryResultFailed,
+		metricLabelReasonClass: testBackendProxyWrite,
+	}, backendProxyProtocolLabelsForTest(telemetryResultFailed, testBackendProxyWrite))
+	runtime.Recorder().Record(context.Background(), failure)
+
+	disabled := newMetricEvent(t, EventBackendProxyProtocol, map[string]string{
+		fieldBackendNode:       testBackendNode,
+		testPurposeField:       testPurposeHealth,
+		metricLabelOperation:   testBackendProxyOp,
+		metricLabelResult:      reasonClassOK,
+		metricLabelReasonClass: logLevelDisabled,
+	}, backendProxyProtocolLabelsForTest(reasonClassOK, logLevelDisabled))
+	runtime.Recorder().Record(context.Background(), disabled)
+
+	body := gatherMetricsText(t, runtime)
+	for _, want := range []string{
+		metricNameBackendProxyProtocol,
+		`operation="backend_proxy_protocol"`,
+		`reason_class="` + testBackendProxyWrite + `"`,
+		`reason_class="disabled"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("backend PROXY metric missing %q:\n%s", want, body)
+		}
+	}
+
+	for _, forbidden := range []string{testBackendIdentifier, testBackendNode, rawFrontend, rawBackend, rawError, "backend_node=", "backend_identifier="} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("backend PROXY metric leaked %q:\n%s", forbidden, body)
+		}
 	}
 }
 
@@ -276,6 +329,7 @@ func representativeMetricEvents(t *testing.T) []Event {
 		newMetricEvent(t, EventAffinityOpen, nil, backendLabels(reasonClassOK, reasonClassOK)),
 		measuredEvent(t, EventBackendSelect, nil, backendLabels(reasonClassOK, reasonClassOK), 0.001),
 		measuredEvent(t, EventBackendConnect, nil, backendLabels(reasonClassOK, reasonClassOK), 0.001),
+		newMetricEvent(t, EventBackendProxyProtocol, nil, backendProxyProtocolLabelsForTest(reasonClassOK, reasonClassOK)),
 		newMetricEvent(t, EventBackendAuth, nil, backendAuthLabelsForTest(reasonClassOK, reasonClassOK)),
 		backendHealthEvent(t),
 		backendEffectiveEvent(t),
@@ -381,6 +435,17 @@ func backendLabels(result string, reason string) map[string]string {
 		metricLabelReasonClass: reason,
 		metricLabelResult:      result,
 		metricLabelShardTag:    testBackendShardTag,
+	}
+}
+
+// backendProxyProtocolLabelsForTest returns bounded outbound PROXY metric labels.
+func backendProxyProtocolLabelsForTest(result string, reason string) map[string]string {
+	return map[string]string{
+		metricLabelBackendPool: testBackendPool,
+		metricLabelOperation:   testBackendProxyOp,
+		metricLabelProtocol:    testProtocolIMAP,
+		metricLabelReasonClass: reason,
+		metricLabelResult:      result,
 	}
 }
 

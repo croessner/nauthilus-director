@@ -160,6 +160,71 @@ func TestServerBinaryPublicLMTPChunkingSuppression(t *testing.T) {
 	assertLMTPProcessOutputSafe(t, process.output.String())
 }
 
+// TestServerBinaryPublicLMTPBackendProxyProtocolFlow proves LMTP delivery and health through outbound PROXY.
+func TestServerBinaryPublicLMTPBackendProxyProtocolFlow(t *testing.T) {
+	binary := e2eServerBinary(t)
+	redisFixture := startValkeySessionStore(t)
+	authority := startLMTPAuthority(t, lmtpAuthorityIdentities())
+	tlsBundle := writeLMTPPeerTLSBundle(t)
+	fakeLMTPA := lmtpbackend.Start(t, lmtpbackend.Options{
+		Capabilities:         []string{"CHUNKING"},
+		RequireProxyProtocol: true,
+	})
+	fakeLMTPB := lmtpbackend.Start(t, lmtpbackend.Options{Capabilities: []string{"CHUNKING"}})
+	fakeIMAPA := startFakeIMAPBackend(t, fakeBackendOptions{})
+	fakeIMAPB := startFakeIMAPBackend(t, fakeBackendOptions{})
+	lmtpAddress := loopbackAddress(t)
+	lmtpsAddress := loopbackAddress(t)
+	imapAddress := loopbackAddress(t)
+	controlAddress := loopbackAddress(t)
+	configPath := writeLMTPProcessConfig(t, lmtpProcessConfigOptions{
+		RedisAddress:   redisFixture.addr,
+		AuthorityURL:   authority.URL(),
+		LMTPAddress:    lmtpAddress,
+		LMTPSAddress:   lmtpsAddress,
+		IMAPAddress:    imapAddress,
+		ControlAddress: controlAddress,
+		LMTPBackends: map[string]string{
+			e2eLMTPBackendAID: fakeLMTPA.Address(),
+			e2eLMTPBackendBID: fakeLMTPB.Address(),
+		},
+		IMAPBackends: map[string]string{
+			e2eBackendAID: fakeIMAPA.Address(),
+			e2eBackendBID: fakeIMAPB.Address(),
+		},
+		LMTPBackendHAProxy: map[string]bool{
+			e2eLMTPBackendAID: true,
+		},
+		LMTPBackendHealth: map[string]bool{
+			e2eLMTPBackendAID: true,
+		},
+		LMTPBackendDeepHealth: map[string]bool{
+			e2eLMTPBackendAID: true,
+		},
+		TLS: tlsBundle,
+	})
+	process := startDirectorProcess(t, binary, configPath)
+
+	waitForLMTPGreeting(t, lmtpAddress, process)
+	waitForControlReady(t, "http://"+controlAddress, process)
+	waitForProcessHealthStatus(t, redisFixture.store, e2eLMTPBackendAID, backend.HealthStatusHealthy)
+	assertProxyProtocolHeader(t, fakeLMTPA.ExpectProxyProtocolHeader(t))
+
+	client := authenticatedLMTPClient(t, lmtpAddress)
+	defer client.Close()
+	client.WriteLine("MAIL FROM:<sender@example.test>")
+	client.ExpectLine("250 2.0.0 Sender accepted\r\n")
+	client.WriteLine("RCPT TO:<" + e2eLMTPRecipientA + ">")
+	client.ExpectLine("250 2.0.0 Recipient accepted\r\n")
+	client.WriteLine("DATA")
+	client.ExpectLine("354 2.0.0 End data with <CR><LF>.<CR><LF>\r\n")
+	client.WriteRaw(e2eLMTPMessageSecret + "\r\n.\r\n")
+	client.ExpectLine("250 2.1.5 Message accepted\r\n")
+	assertLMTPBackendObservation(t, fakeLMTPA.ExpectObservation(t), []string{lmtpPath(e2eLMTPRecipientA)}, false)
+	assertProxyProtocolHeader(t, fakeLMTPA.ExpectProxyProtocolHeader(t))
+	assertLMTPProcessOutputSafe(t, process.output.String())
+}
+
 // TestFakeGRPCLMTPRecipientLookup proves the scaffolded gRPC authority uses LookupIdentity for LMTP recipients.
 func TestFakeGRPCLMTPRecipientLookup(t *testing.T) {
 	service := &fakeGRPCService{
@@ -381,6 +446,9 @@ type lmtpProcessConfigOptions struct {
 	BackendRetentionTTL         string
 	LMTPBackends                map[string]string
 	IMAPBackends                map[string]string
+	LMTPBackendHAProxy          map[string]bool
+	LMTPBackendHealth           map[string]bool
+	LMTPBackendDeepHealth       map[string]bool
 	TLS                         lmtpPeerTLSBundle
 	DisableLMTPPeerAuth         bool
 	IMAPBackendTLSMode          string
@@ -450,6 +518,12 @@ auth:
         basic_auth:
           password_file: "unused"
 director:
+  health:
+    interval: 200ms
+    timeout: 1s
+    jitter: 0s
+    unhealthy_after: 1
+    healthy_after: 1
   affinity:
     backend_retention:
       enabled: true
@@ -608,6 +682,8 @@ director:
       weight: 100
       max_connections: 100
       maintenance: disabled
+      haproxy:
+        enabled: %t
       tls:
         mode: %q
         ca_file: ""
@@ -619,7 +695,10 @@ director:
       auth:
         mode: none
       health_check:
-        enabled: false
+        enabled: %t
+        deep_check: %t
+        username: healthcheck@example.test
+        password_file: %q
     mailstore-b-lmtp:
       protocol: lmtp
       shard_tag: %q
@@ -628,6 +707,8 @@ director:
       weight: 100
       max_connections: 100
       maintenance: disabled
+      haproxy:
+        enabled: %t
       tls:
         mode: %q
         ca_file: ""
@@ -639,7 +720,10 @@ director:
       auth:
         mode: none
       health_check:
-        enabled: false
+        enabled: %t
+        deep_check: %t
+        username: healthcheck@example.test
+        password_file: %q
 `, options.ControlAddress,
 		options.RedisAddress,
 		options.AuthorityURL,
@@ -668,12 +752,20 @@ director:
 		imapBackendAuthMode,
 		e2eShardTag,
 		options.LMTPBackends[e2eLMTPBackendAID],
+		options.LMTPBackendHAProxy[e2eLMTPBackendAID],
 		lmtpBackendTLSMode,
 		options.LMTPBackendTLSInsecure,
+		options.LMTPBackendHealth[e2eLMTPBackendAID],
+		options.LMTPBackendDeepHealth[e2eLMTPBackendAID],
+		e2ePassword,
 		e2eShardTagB,
 		options.LMTPBackends[e2eLMTPBackendBID],
+		options.LMTPBackendHAProxy[e2eLMTPBackendBID],
 		lmtpBackendTLSMode,
 		options.LMTPBackendTLSInsecure,
+		options.LMTPBackendHealth[e2eLMTPBackendBID],
+		options.LMTPBackendDeepHealth[e2eLMTPBackendBID],
+		e2ePassword,
 	)
 
 	path := filepath.Join(t.TempDir(), "nauthilus-director-lmtp.yml")

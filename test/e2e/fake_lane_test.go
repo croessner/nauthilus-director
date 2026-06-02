@@ -82,11 +82,16 @@ const (
 	e2eHoldTimeoutLogin = "hold-timeout-login@example.test"
 	e2ePinnedAccountKey = "pin-account-key-e2e"
 	e2ePinnedLogin      = "pin-login@example.test"
+	e2eProxyAccountKey  = "proxy-account-key-e2e"
+	e2eProxyLogin       = "proxy-login@example.test"
 	e2eShardTagB        = "mailstore-b"
 	e2eShardTag         = "mailstore-a"
 	e2eTenant           = "default"
 	e2eToken            = "e2e-bearer-token"
 	fakeBackendReady    = "* OK fake IMAP backend ready\r\n"
+	fakeProxyPrefix     = "PROXY "
+	fakeProxyReadLimit  = 256
+	fakeProxyTimeout    = 500 * time.Millisecond
 	serverBinaryEnv     = "NAUTHILUS_DIRECTOR_E2E_SERVER_BINARY"
 )
 
@@ -226,6 +231,127 @@ func TestServerBinaryControlRESTCLIParity(t *testing.T) {
 	if !strings.Contains(output, "in_service=true") {
 		t.Fatalf("CLI backend state after REST in = %q", output)
 	}
+}
+
+// TestServerBinaryBackendProxyProtocolPublicIMAPFlow proves outbound PROXY through real process boundaries.
+func TestServerBinaryBackendProxyProtocolPublicIMAPFlow(t *testing.T) {
+	binary := e2eServerBinary(t)
+	ctl := buildDirectorctl(t)
+	redisFixture := startValkeySessionStore(t)
+	authority := startFakeHTTPAuthority(t, map[string][]string{
+		"account":   {e2eProxyAccountKey},
+		"tenant":    {e2eTenant},
+		"mailShard": {e2eShardTag},
+	})
+	proxyRequiredBackend := startFakeIMAPBackend(t, fakeBackendOptions{RequireProxyProtocol: true})
+	directorAddress := loopbackAddress(t)
+	controlAddress := loopbackAddress(t)
+	controlURL := "http://" + controlAddress
+	configPath := writeProcessConfig(t, processConfigOptions{
+		RedisAddress:    redisFixture.addr,
+		AuthorityURL:    authority.URL(),
+		DirectorAddress: directorAddress,
+		ControlAddress:  controlAddress,
+		ControlEnabled:  true,
+		BackendAddress:  proxyRequiredBackend.Address(),
+		BackendHAProxy:  true,
+		BackendTLS: config.BackendTLSConfig{
+			Mode:          "plaintext",
+			MinTLSVersion: "TLS1.2",
+		},
+		BackendAuth: masterUserBackendAuth(),
+	})
+	process := startDirectorProcess(t, binary, configPath)
+
+	waitForDirectorGreeting(t, directorAddress, process)
+	waitForControlReady(t, controlURL, process)
+
+	route := lookupRoute(t, controlURL, e2eProxyAccountKey, true)
+	assertRouteLookupBackendProxy(t, route, e2eBackendAID, true)
+	if proxyRequiredBackend.ConnectionCount() != 0 || proxyRequiredBackend.ProxyProtocolHeaderCount() != 0 {
+		t.Fatal("route lookup opened a backend socket or wrote outbound PROXY")
+	}
+	assertNoRuntimePlacement(t, controlURL)
+
+	detail := getBackendDetail(t, controlURL, e2eBackendAID)
+	if !detail.OutboundProxyProtocol || detail.BackendNode == "" {
+		t.Fatalf("backend detail = %#v, want outbound PROXY read-back", detail)
+	}
+	cliOutput := runDirectorctl(t, ctl, controlURL, "backends", "show", e2eBackendAID)
+	assertCLIOutputFields(t, cliOutput, "backend_node=", "outbound_proxy_protocol=true")
+	assertOutputOmits(t, cliOutput, e2ePassword, e2eProxyLogin, proxyRequiredBackend.Address())
+
+	client, reader := loginProcessIMAP(t, directorAddress, e2eProxyLogin)
+	expectBackendProxy(t, client, reader, proxyRequiredBackend, "A002")
+	_ = client.Close()
+	assertProxyProtocolHeader(t, proxyRequiredBackend.ExpectProxyProtocolHeader(t))
+	assertNoSecretText(t, process.output.String())
+	authority.ExpectRequest(t, e2eProtocol, "login", "")
+}
+
+// TestServerBinaryBackendProxyProtocolHealthRequiresPreface proves health honors backend PROXY policy.
+func TestServerBinaryBackendProxyProtocolHealthRequiresPreface(t *testing.T) {
+	binary := e2eServerBinary(t)
+
+	healthyRedis := startValkeySessionStore(t)
+	healthyAuthority := startFakeHTTPAuthority(t, map[string][]string{
+		"account":   {e2eProxyAccountKey},
+		"tenant":    {e2eTenant},
+		"mailShard": {e2eShardTag},
+	})
+	healthyBackend := startFakeIMAPBackend(t, fakeBackendOptions{RequireProxyProtocol: true})
+	healthyDirectorAddress := loopbackAddress(t)
+	healthyControlAddress := loopbackAddress(t)
+	healthyConfig := writeProcessConfig(t, processConfigOptions{
+		RedisAddress:           healthyRedis.addr,
+		AuthorityURL:           healthyAuthority.URL(),
+		DirectorAddress:        healthyDirectorAddress,
+		ControlAddress:         healthyControlAddress,
+		ControlEnabled:         true,
+		BackendAddress:         healthyBackend.Address(),
+		BackendHAProxy:         true,
+		BackendHealthEnabled:   true,
+		BackendHealthDeepCheck: true,
+		BackendAuth:            masterUserBackendAuth(),
+	})
+	healthyProcess := startDirectorProcess(t, binary, healthyConfig)
+	waitForControlReady(t, "http://"+healthyControlAddress, healthyProcess)
+	waitForProcessHealthStatus(t, processRuntimeStore(t, healthyRedis.addr), e2eBackendAID, backend.HealthStatusHealthy)
+	assertProxyProtocolHeader(t, healthyBackend.ExpectProxyProtocolHeader(t))
+
+	unhealthyRedis := startValkeySessionStore(t)
+	unhealthyAuthority := startFakeHTTPAuthority(t, map[string][]string{
+		"account":   {e2eProxyAccountKey},
+		"tenant":    {e2eTenant},
+		"mailShard": {e2eShardTag},
+	})
+	unhealthyBackend := startFakeIMAPBackend(t, fakeBackendOptions{RequireProxyProtocol: true})
+	unhealthyDirectorAddress := loopbackAddress(t)
+	unhealthyControlAddress := loopbackAddress(t)
+	unhealthyConfig := writeProcessConfig(t, processConfigOptions{
+		RedisAddress:           unhealthyRedis.addr,
+		AuthorityURL:           unhealthyAuthority.URL(),
+		DirectorAddress:        unhealthyDirectorAddress,
+		ControlAddress:         unhealthyControlAddress,
+		ControlEnabled:         true,
+		BackendAddress:         unhealthyBackend.Address(),
+		BackendHAProxy:         false,
+		BackendHealthEnabled:   true,
+		BackendHealthDeepCheck: true,
+		BackendAuth:            masterUserBackendAuth(),
+	})
+	unhealthyProcess := startDirectorProcess(t, binary, unhealthyConfig)
+	waitForDirectorGreeting(t, unhealthyDirectorAddress, unhealthyProcess)
+	waitForControlReady(t, "http://"+unhealthyControlAddress, unhealthyProcess)
+	waitForProcessHealthStatus(t, processRuntimeStore(t, unhealthyRedis.addr), e2eBackendAID, backend.HealthStatusUnhealthy)
+	if unhealthyBackend.ProxyProtocolHeaderCount() != 0 || unhealthyBackend.MissingProxyProtocolCount() == 0 {
+		t.Fatalf("disabled backend headers=%d missing=%d, want no PROXY and a required-preface miss",
+			unhealthyBackend.ProxyProtocolHeaderCount(),
+			unhealthyBackend.MissingProxyProtocolCount(),
+		)
+	}
+	expectProcessIMAPLoginUnavailable(t, unhealthyDirectorAddress, e2eProxyLogin)
+	assertNoSecretText(t, unhealthyProcess.output.String())
 }
 
 // TestServerBinaryBackendPinPublicIMAPFlow proves backend pinning through real process boundaries.
@@ -1080,23 +1206,29 @@ type directorProcess struct {
 }
 
 type processConfigOptions struct {
-	RedisAddress         string
-	AuthorityURL         string
-	DirectorAddress      string
-	ControlAddress       string
-	ControlEnabled       bool
-	BackendAddress       string
-	BackendTLS           config.BackendTLSConfig
-	BackendAuth          backend.AuthConfig
-	UserHoldMaxWait      time.Duration
-	UserHoldPollInterval time.Duration
+	RedisAddress           string
+	AuthorityURL           string
+	DirectorAddress        string
+	ControlAddress         string
+	ControlEnabled         bool
+	BackendAddress         string
+	BackendHAProxy         bool
+	BackendHealthEnabled   bool
+	BackendHealthDeepCheck bool
+	BackendTLS             config.BackendTLSConfig
+	BackendAuth            backend.AuthConfig
+	UserHoldMaxWait        time.Duration
+	UserHoldPollInterval   time.Duration
 }
 
 type processBackendDefinition struct {
-	Identifier string
-	Address    string
-	Shard      string
-	Weight     int
+	Identifier      string
+	Address         string
+	Shard           string
+	Weight          int
+	HAProxy         bool
+	HealthEnabled   bool
+	HealthDeepCheck bool
 }
 
 // e2eServerBinary returns the real server binary built by the E2E runner.
@@ -1244,6 +1376,12 @@ auth:
         basic_auth:
           password_file: "unused"
 director:
+  health:
+    interval: 200ms
+    timeout: 1s
+    jitter: 0s
+    unhealthy_after: 1
+    healthy_after: 1
 %s
   listeners:
     imap:
@@ -1262,6 +1400,8 @@ director:
     mailstore-a-imap:
       address: %q
       shard_tag: %q
+      haproxy:
+        enabled: %t
       tls:
         mode: %q
         ca_file: %q
@@ -1282,7 +1422,10 @@ director:
           preserve_mechanism: %t
           allowed_mechanisms: [%s]
       health_check:
-        enabled: false
+        enabled: %t
+        deep_check: %t
+        username: healthcheck@example.test
+        password_file: %q
 	`, options.ControlEnabled,
 		controlAddress,
 		e2eProcessKeyPrefix,
@@ -1294,6 +1437,7 @@ director:
 		listenerKeyPath,
 		options.BackendAddress,
 		e2eShardTag,
+		options.BackendHAProxy,
 		backendTLS.Mode,
 		backendTLS.CAFile,
 		backendTLS.Cert,
@@ -1309,6 +1453,9 @@ director:
 		backendAuth.CredentialReplay.RequireBackendTLS,
 		backendAuth.CredentialReplay.PreserveMechanism,
 		quotedYAMLStrings(backendAuth.CredentialReplay.AllowedMechanisms),
+		options.BackendHealthEnabled,
+		options.BackendHealthDeepCheck,
+		e2ePassword,
 	)
 	content = strings.ReplaceAll(content, "\t", "")
 
@@ -1388,6 +1535,12 @@ auth:
         basic_auth:
           password_file: "unused"
 director:
+  health:
+    interval: 200ms
+    timeout: 1s
+    jitter: 0s
+    unhealthy_after: 1
+    healthy_after: 1
 %s
   listeners:
     imap:
@@ -1493,6 +1646,8 @@ func processBackendConfigYAML(
       weight: %d
       max_connections: 100
       maintenance: disabled
+      haproxy:
+        enabled: %t
       tls:
         mode: %q
         ca_file: %q
@@ -1513,11 +1668,15 @@ func processBackendConfigYAML(
           preserve_mechanism: %t
           allowed_mechanisms: [%s]
       health_check:
-        enabled: false
+        enabled: %t
+        deep_check: %t
+        username: healthcheck@example.test
+        password_file: %q
 `, configured.Identifier,
 			configured.Address,
 			shard,
 			configured.Weight,
+			configured.HAProxy,
 			backendTLS.Mode,
 			backendTLS.CAFile,
 			backendTLS.Cert,
@@ -1533,6 +1692,9 @@ func processBackendConfigYAML(
 			backendAuth.CredentialReplay.RequireBackendTLS,
 			backendAuth.CredentialReplay.PreserveMechanism,
 			quotedYAMLStrings(backendAuth.CredentialReplay.AllowedMechanisms),
+			configured.HealthEnabled,
+			configured.HealthDeepCheck,
+			e2ePassword,
 		)
 	}
 
@@ -2547,6 +2709,27 @@ func assertBackendPinRoute(t *testing.T, response generated.RouteLookupResponse,
 	}
 }
 
+// assertRouteLookupBackendProxy verifies read-only backend transport diagnostics.
+func assertRouteLookupBackendProxy(t *testing.T, response generated.RouteLookupResponse, backendID string, want bool) {
+	t.Helper()
+
+	if response.FailClosed || response.SelectedBackend != backendID {
+		t.Fatalf("route lookup response = %#v, want selected backend %q", response, backendID)
+	}
+
+	for _, summary := range response.Backends {
+		if summary.Identifier == backendID {
+			if summary.OutboundProxyProtocol != want {
+				t.Fatalf("route lookup backend summary = %#v, want outbound proxy %t", summary, want)
+			}
+
+			return
+		}
+	}
+
+	t.Fatalf("route lookup response = %#v, missing backend summary %q", response, backendID)
+}
+
 // getBackendDetail reads one backend through the public REST boundary.
 func getBackendDetail(t *testing.T, baseURL string, backendID string) generated.BackendDetail {
 	t.Helper()
@@ -2555,6 +2738,26 @@ func getBackendDetail(t *testing.T, baseURL string, backendID string) generated.
 	requestJSON(t, http.MethodGet, baseURL+"/api/v1/backends/"+backendID, nil, http.StatusOK, &response)
 
 	return response
+}
+
+// waitForProcessHealthStatus waits until Redis carries the expected process health state.
+func waitForProcessHealthStatus(t *testing.T, store *state.RedisSessionStore, backendID string, status backend.HealthStatus) backend.HealthState {
+	t.Helper()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		state, err := store.ReadHealthState(context.Background(), backendID)
+		if err == nil && state.Enabled && state.Status == status {
+			return state
+		}
+
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	state, err := store.ReadHealthState(context.Background(), backendID)
+	t.Fatalf("backend %s health state = %#v err=%v, want %s", backendID, state, err, status)
+
+	return backend.HealthState{}
 }
 
 // getRuntimeSummary reads the public runtime summary.
@@ -3093,6 +3296,39 @@ func assertNoSecretText(t *testing.T, output string) {
 	}
 }
 
+// assertProxyProtocolHeader checks only bounded syntax, not raw address values.
+func assertProxyProtocolHeader(t *testing.T, header string) {
+	t.Helper()
+
+	if !strings.HasPrefix(header, "PROXY TCP4 ") && !strings.HasPrefix(header, "PROXY TCP6 ") {
+		t.Fatalf("PROXY header = %q, want TCP4 or TCP6 preface", header)
+	}
+	if !strings.HasSuffix(header, "\r\n") {
+		t.Fatalf("PROXY header = %q, want CRLF terminator", header)
+	}
+}
+
+// readProxyProtocolPreface reads exactly one PROXY line without buffering later protocol bytes.
+func readProxyProtocolPreface(conn net.Conn) (string, bool) {
+	_ = conn.SetReadDeadline(time.Now().Add(fakeProxyTimeout))
+	defer func() { _ = conn.SetReadDeadline(time.Time{}) }()
+
+	var builder strings.Builder
+	var current [1]byte
+	for builder.Len() < fakeProxyReadLimit {
+		if _, err := conn.Read(current[:]); err != nil {
+			return "", false
+		}
+
+		builder.WriteByte(current[0])
+		if current[0] == '\n' {
+			return builder.String(), true
+		}
+	}
+
+	return builder.String(), false
+}
+
 type fakeHTTPAuthority struct {
 	server       *http.Server
 	listener     net.Listener
@@ -3309,15 +3545,19 @@ func (s *fakeGRPCService) SingleLookup(t *testing.T) nauthilus.GRPCLookupIdentit
 }
 
 type fakeBackendOptions struct {
-	TLSConfig *tls.Config
-	TLSMode   string
+	RequireProxyProtocol bool
+	TLSConfig            *tls.Config
+	TLSMode              string
 }
 
 type fakeIMAPBackend struct {
-	listener     net.Listener
-	observations chan fakeBackendObservation
-	options      fakeBackendOptions
-	connections  atomic.Int64
+	listener             net.Listener
+	observations         chan fakeBackendObservation
+	proxyProtocolHeaders chan string
+	options              fakeBackendOptions
+	connections          atomic.Int64
+	proxyProtocolCount   atomic.Int64
+	missingProxyProtocol atomic.Int64
 }
 
 type fakeBackendObservation struct {
@@ -3334,9 +3574,10 @@ func startFakeIMAPBackend(t *testing.T, options fakeBackendOptions) *fakeIMAPBac
 		t.Fatalf("listen fake backend: %v", err)
 	}
 	backend := &fakeIMAPBackend{
-		listener:     ln,
-		observations: make(chan fakeBackendObservation, 8),
-		options:      options,
+		listener:             ln,
+		observations:         make(chan fakeBackendObservation, 8),
+		proxyProtocolHeaders: make(chan string, 8),
+		options:              options,
 	}
 
 	go backend.accept()
@@ -3366,6 +3607,20 @@ func (b *fakeIMAPBackend) ExpectProxyLine(t *testing.T, want string) {
 	}
 }
 
+// ExpectProxyProtocolHeader verifies a required outbound PROXY preface arrived.
+func (b *fakeIMAPBackend) ExpectProxyProtocolHeader(t *testing.T) string {
+	t.Helper()
+
+	select {
+	case header := <-b.proxyProtocolHeaders:
+		return header
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for fake backend PROXY protocol header")
+	}
+
+	return ""
+}
+
 // ConnectionCount returns how many backend sockets were accepted.
 func (b *fakeIMAPBackend) ConnectionCount() int64 {
 	if b == nil {
@@ -3373,6 +3628,24 @@ func (b *fakeIMAPBackend) ConnectionCount() int64 {
 	}
 
 	return b.connections.Load()
+}
+
+// ProxyProtocolHeaderCount returns how many required PROXY prefaces arrived.
+func (b *fakeIMAPBackend) ProxyProtocolHeaderCount() int64 {
+	if b == nil {
+		return 0
+	}
+
+	return b.proxyProtocolCount.Load()
+}
+
+// MissingProxyProtocolCount returns how often a required PROXY preface was absent.
+func (b *fakeIMAPBackend) MissingProxyProtocolCount() int64 {
+	if b == nil {
+		return 0
+	}
+
+	return b.missingProxyProtocol.Load()
 }
 
 // assertNoFakeBackendConnections verifies placement has not reached fake backends.
@@ -3428,6 +3701,10 @@ func (b *fakeIMAPBackend) serve(conn net.Conn) {
 
 // prepareBackendConn applies implicit TLS when the fake backend is configured for it.
 func (b *fakeIMAPBackend) prepareBackendConn(conn net.Conn) (net.Conn, bool) {
+	if b.options.RequireProxyProtocol && !b.consumeProxyProtocolPreface(conn) {
+		return conn, false
+	}
+
 	if b.options.TLSMode == imap.TLSModeImplicit && b.options.TLSConfig != nil {
 		tlsConn := tls.Server(conn, b.options.TLSConfig.Clone())
 		if err := tlsConn.Handshake(); err != nil {
@@ -3438,6 +3715,21 @@ func (b *fakeIMAPBackend) prepareBackendConn(conn net.Conn) (net.Conn, bool) {
 	}
 
 	return conn, true
+}
+
+// consumeProxyProtocolPreface requires one HAProxy PROXY line before backend bytes.
+func (b *fakeIMAPBackend) consumeProxyProtocolPreface(conn net.Conn) bool {
+	header, ok := readProxyProtocolPreface(conn)
+	if !ok || !strings.HasPrefix(header, fakeProxyPrefix) {
+		b.missingProxyProtocol.Add(1)
+
+		return false
+	}
+
+	b.proxyProtocolCount.Add(1)
+	b.proxyProtocolHeaders <- header
+
+	return true
 }
 
 // handleBackendLine dispatches one minimal fake backend command.

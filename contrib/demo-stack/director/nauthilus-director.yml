@@ -502,13 +502,13 @@ director:
       protocol: imap
       shard_tag: mailstore-c
       backend_node: mailstore-c-node
-      address: "mailstore-c:31143"
+      address: "haproxy:1143"
       weight: 100
       max_connections: 1000
       maintenance: disabled
 
       haproxy:
-        enabled: false
+        enabled: true
 
       tls:
         mode: starttls
@@ -691,13 +691,13 @@ director:
       protocol: lmtp
       shard_tag: mailstore-c
       backend_node: mailstore-c-node
-      address: "mailstore-c:31024"
+      address: "haproxy:1024"
       weight: 100
       max_connections: 1000
       maintenance: disabled
 
       haproxy:
-        enabled: false
+        enabled: true
 
       tls:
         mode: implicit

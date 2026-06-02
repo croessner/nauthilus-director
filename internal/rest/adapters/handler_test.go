@@ -35,6 +35,7 @@ import (
 
 const (
 	testBackendIdentifier   = "mailstore-a-imap"
+	testBackendNode         = "mailstore-a-node-1"
 	testBackendPinOperation = "user_backend_pin_set"
 	testBackendPinPool      = "imap-default"
 	testBackendPinApplied   = "backend_pin_applied"
@@ -55,6 +56,11 @@ const (
 	testListenerName        = "imap"
 	testListenerReason      = "node maintenance"
 	testPinnedBackend       = "mailstore-c-imap"
+	testPrivateKeyField     = "private_key"
+	testRecipientField      = "recipient"
+	testSecretField         = "credential"
+	testSessionIDField      = "session_id"
+	testUsernameField       = "username"
 )
 
 // TestLookupRouteUsesInjectedSideEffectFreeDomainService verifies route lookup is no longer a stub.
@@ -842,6 +848,51 @@ func TestSummaryHandlerUsesAggregateReader(t *testing.T) {
 	}
 }
 
+// TestListBackendsMapsSafeTransportReadback verifies generated backend DTOs expose only safe transport state.
+func TestListBackendsMapsSafeTransportReadback(t *testing.T) {
+	reader := &recordingBackendReader{states: []backend.EffectiveBackendState{
+		{
+			Backend: backend.Backend{
+				BackendNode: testBackendNode,
+				HAProxy:     backend.HAProxyConfig{Enabled: true},
+			},
+			Identifier:           testBackendIdentifier,
+			Protocol:             "imap",
+			BackendPool:          testBackendPinPool,
+			EffectiveShardTag:    testBackendPinShard,
+			EffectiveWeight:      100,
+			RuntimeInService:     true,
+			EffectiveMaintenance: backend.MaintenanceModeDisabled,
+		},
+	}}
+	handler := NewHandler(HandlerOptions{Version: testHandlerVersion, BackendReader: reader})
+
+	response, err := handler.ListBackends(context.Background(), generated.ListBackendsRequestObject{})
+	if err != nil {
+		t.Fatalf("ListBackends returned error: %v", err)
+	}
+
+	list, ok := response.(generated.ListBackends200JSONResponse)
+	if !ok {
+		t.Fatalf("ListBackends response = %T, want list", response)
+	}
+
+	if len(list.Backends) != 1 {
+		t.Fatalf("backends = %d, want 1", len(list.Backends))
+	}
+
+	detail := list.Backends[0]
+	if detail.BackendNode != testBackendNode || !detail.OutboundProxyProtocol {
+		t.Fatalf("backend transport read-back = %#v, want backend node and enabled PROXY", detail)
+	}
+
+	if detail.Identifier != testBackendIdentifier || detail.BackendPool != testBackendPinPool || detail.ShardTag != testBackendPinShard {
+		t.Fatalf("backend identity = %#v, want stable safe fields", detail)
+	}
+
+	assertBackendDTOSecretSafe(t, detail)
+}
+
 // TestListListenersMapsRuntimeDetails verifies listener inventory uses generated DTOs.
 func TestListListenersMapsRuntimeDetails(t *testing.T) {
 	listenerRuntime := &recordingListenerRuntime{
@@ -1309,6 +1360,25 @@ func stringPtrValue(value *string) string {
 	return *value
 }
 
+// recordingBackendReader returns stable backend details for REST adapter tests.
+type recordingBackendReader struct {
+	states []backend.EffectiveBackendState
+}
+
+// ListBackends returns the configured effective backend states.
+func (r *recordingBackendReader) ListBackends(context.Context) ([]backend.EffectiveBackendState, error) {
+	return append([]backend.EffectiveBackendState(nil), r.states...), nil
+}
+
+// GetBackend returns the first configured effective backend state.
+func (r *recordingBackendReader) GetBackend(context.Context, string) (backend.EffectiveBackendState, error) {
+	if len(r.states) == 0 {
+		return backend.EffectiveBackendState{}, errors.New("backend not found")
+	}
+
+	return r.states[0], nil
+}
+
 // recordingRuntimeReadService captures paginated read requests.
 type recordingRuntimeReadService struct {
 	sessionRequest   runtime.SessionListRequest
@@ -1481,6 +1551,23 @@ func listenerRuntimeDetail(name string, state runtime.ListenerState, active int)
 	return detail
 }
 
+// assertBackendDTOSecretSafe rejects fields outside the public backend contract.
+func assertBackendDTOSecretSafe(t *testing.T, detail generated.BackendDetail) {
+	t.Helper()
+
+	payload, err := json.Marshal(detail)
+	if err != nil {
+		t.Fatalf("marshal backend DTO: %v", err)
+	}
+
+	rendered := string(payload)
+	for _, forbidden := range []string{"address", testUsernameField, testRecipientField, testSessionIDField, testSecretField, testPrivateKeyField, "password", "token"} {
+		if strings.Contains(rendered, forbidden) {
+			t.Fatalf("backend DTO exposed forbidden field %q in %s", forbidden, rendered)
+		}
+	}
+}
+
 // assertListenerDTOSecretSafe rejects fields outside the public listener contract.
 func assertListenerDTOSecretSafe(t *testing.T, detail generated.ListenerDetail) {
 	t.Helper()
@@ -1491,7 +1578,7 @@ func assertListenerDTOSecretSafe(t *testing.T, detail generated.ListenerDetail) 
 	}
 
 	rendered := string(payload)
-	for _, forbidden := range []string{"peer", "username", "recipient", "session_id", "credential", "private_key"} {
+	for _, forbidden := range []string{"peer", testUsernameField, testRecipientField, testSessionIDField, testSecretField, testPrivateKeyField} {
 		if strings.Contains(rendered, forbidden) {
 			t.Fatalf("listener DTO exposed forbidden field %q in %s", forbidden, rendered)
 		}

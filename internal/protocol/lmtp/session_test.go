@@ -1154,6 +1154,161 @@ func TestRecipientDeliveryHoldHeartbeatsAndClosesOnReset(t *testing.T) {
 	store.assertClosed(t, 1)
 }
 
+// TestBackendSessionConnectRequestCarriesEffectiveFrontendTuple verifies trusted listener addresses flow out.
+func TestBackendSessionConnectRequestCarriesEffectiveFrontendTuple(t *testing.T) {
+	identity := identityLookuperForRecipients(map[string]string{testRecipientSingle: testPlacementShardA})
+	resolver := &recordingRoutingResolver{}
+	store := &recordingDeliveryStore{}
+	selector := &recordingBackendSelector{}
+	connector := &recordingLMTPBackendConnector{}
+	config := placementSessionConfig(identity, resolver, store, selector)
+	config.BackendConnector = connector
+	config.BackendConnectTimeout = time.Second
+
+	harness := startLMTPHarnessWithServerConn(t, config, func(conn net.Conn) net.Conn {
+		return backendAddressConn{
+			Conn:   conn,
+			local:  tcpAddr("198.51.100.20", 24),
+			remote: tcpAddr("203.0.113.10", 42500),
+		}
+	})
+	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+	harness.write(t, "LHLO submitter.example\r\n")
+	harness.drainLHLO(t)
+	harness.write(t, "MAIL FROM:<sender@example.test>\r\n")
+	harness.expectLine(t, "250 2.0.0 Sender accepted\r\n")
+	harness.write(t, "RCPT TO:<recipient@example.test>\r\n")
+	harness.expectLine(t, "250 2.0.0 Recipient accepted\r\n")
+
+	request := connector.singleRequest(t)
+	if request.Purpose != backend.ConnectPurposeSession {
+		t.Fatalf("connect purpose = %q, want session", request.Purpose)
+	}
+
+	if request.Target.Identifier != "mailstore-a-lmtp" {
+		t.Fatalf("connect target = %q, want selected LMTP backend", request.Target.Identifier)
+	}
+
+	if request.Target.BackendNode != "mailstore-a-node-1" || request.Target.ShardTag != testPlacementShardA {
+		t.Fatalf("placement facts changed across connector boundary: %#v", request.Target)
+	}
+
+	if request.ProxyAddresses == nil {
+		t.Fatal("connect request did not carry frontend proxy addresses")
+	}
+
+	if got := request.ProxyAddresses.Source.String(); got != "203.0.113.10:42500" {
+		t.Fatalf("proxy source = %q, want effective frontend remote", got)
+	}
+
+	if got := request.ProxyAddresses.Destination.String(); got != "198.51.100.20:24" {
+		t.Fatalf("proxy destination = %q, want effective frontend local", got)
+	}
+
+	store.assertOpened(t, 1)
+	store.assertAttached(t, 1)
+}
+
+// TestBackendProxyUnsafeFrontendAddressFailsBeforeBackendCommands verifies fail-closed metadata validation.
+func TestBackendProxyUnsafeFrontendAddressFailsBeforeBackendCommands(t *testing.T) {
+	testCases := []struct {
+		name   string
+		remote net.Addr
+	}{
+		{
+			name: "missing",
+		},
+		{
+			name:   "non_tcp",
+			remote: &net.UnixAddr{Name: "/run/client.sock", Net: "unix"},
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			identity := identityLookuperForRecipients(map[string]string{testRecipientSingle: testPlacementShardA})
+			resolver := &recordingRoutingResolver{}
+			store := &recordingDeliveryStore{}
+			selector := &recordingBackendSelector{configureBackend: enableBackendProxy}
+			dialer := &recordingLMTPFailureDialer{
+				conn: &recordingLMTPFailureConn{
+					local:  tcpAddr("10.0.0.1", 5024),
+					remote: tcpAddr("10.0.0.2", 24),
+				},
+			}
+			config := backendForwardingSessionConfig(identity, resolver, store, selector, dialer)
+
+			harness := startLMTPHarnessWithServerConn(t, config, func(conn net.Conn) net.Conn {
+				return backendAddressConn{
+					Conn:   conn,
+					local:  tcpAddr("198.51.100.20", 24),
+					remote: testCase.remote,
+				}
+			})
+			harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+			harness.write(t, "LHLO submitter.example\r\n")
+			harness.drainLHLO(t)
+			harness.write(t, "MAIL FROM:<sender@example.test>\r\n")
+			harness.expectLine(t, "250 2.0.0 Sender accepted\r\n")
+			harness.write(t, "RCPT TO:<recipient@example.test>\r\n")
+			harness.expectLine(t, testTemporaryDelivery)
+
+			if !dialer.conn.closed {
+				t.Fatal("unsafe frontend metadata did not close backend connection")
+			}
+
+			if dialer.conn.writes != 0 {
+				t.Fatalf("backend writes = %d, want none before valid PROXY metadata", dialer.conn.writes)
+			}
+
+			store.assertClosed(t, 1)
+		})
+	}
+}
+
+// TestBackendProxyWriteFailurePreventsMessageBodyForwarding verifies body bytes cannot stream afterward.
+func TestBackendProxyWriteFailurePreventsMessageBodyForwarding(t *testing.T) {
+	identity := identityLookuperForRecipients(map[string]string{testRecipientSingle: testPlacementShardA})
+	resolver := &recordingRoutingResolver{}
+	store := &recordingDeliveryStore{}
+	selector := &recordingBackendSelector{configureBackend: enableBackendProxy}
+	dialer := &recordingLMTPFailureDialer{
+		conn: &recordingLMTPFailureConn{
+			local:    tcpAddr("10.0.0.1", 5024),
+			remote:   tcpAddr("10.0.0.2", 24),
+			writeErr: errors.New("proxy write failed for secret backend"),
+		},
+	}
+	config := backendForwardingSessionConfig(identity, resolver, store, selector, dialer)
+
+	harness := startLMTPHarnessWithServerConn(t, config, func(conn net.Conn) net.Conn {
+		return backendAddressConn{
+			Conn:   conn,
+			local:  tcpAddr("198.51.100.20", 24),
+			remote: tcpAddr("203.0.113.10", 42500),
+		}
+	})
+	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+	harness.write(t, "LHLO submitter.example\r\n")
+	harness.drainLHLO(t)
+	harness.write(t, "MAIL FROM:<sender@example.test>\r\n")
+	harness.expectLine(t, "250 2.0.0 Sender accepted\r\n")
+	harness.write(t, "RCPT TO:<recipient@example.test>\r\n")
+	harness.expectLine(t, testTemporaryDelivery)
+	harness.write(t, "DATA\r\n")
+	harness.expectLine(t, "503 5.5.1 Need recipient before message body\r\n")
+
+	if !dialer.conn.closed {
+		t.Fatal("failed PROXY write did not close backend connection")
+	}
+
+	if dialer.conn.writes != 1 {
+		t.Fatalf("backend writes = %d, want exactly one failed PROXY write", dialer.conn.writes)
+	}
+
+	store.assertClosed(t, 1)
+}
+
 // TestBackendTransactionForwardsEnvelopeAndDATAStatuses verifies DATA forwarding and ordered final replies.
 func TestBackendTransactionForwardsEnvelopeAndDATAStatuses(t *testing.T) {
 	identity := identityLookuperForRecipients(map[string]string{
@@ -1788,6 +1943,138 @@ func (h *lmtpHarness) drainLHLO(t *testing.T) {
 	}
 }
 
+// enableBackendProxy marks a selected test backend as PROXY-enabled.
+func enableBackendProxy(target *backend.Backend) {
+	target.HAProxy.Enabled = true
+}
+
+type recordingLMTPBackendConnector struct {
+	mu       sync.Mutex
+	requests []backend.ConnectRequest
+	err      error
+}
+
+// Connect records backend request metadata and returns a minimal envelope-capable stream.
+func (c *recordingLMTPBackendConnector) Connect(_ context.Context, request backend.ConnectRequest) (*BackendConnection, error) {
+	c.mu.Lock()
+	c.requests = append(c.requests, request)
+	c.mu.Unlock()
+
+	if c.err != nil {
+		return nil, c.err
+	}
+
+	client, server := net.Pipe()
+	connection := newBackendConnection(client)
+	connection.capabilities = backend.NewCapabilitySet(capabilityCHUNKING)
+
+	go serveMinimalLMTPEnvelopeBackend(server)
+
+	return connection, nil
+}
+
+// singleRequest returns the only recorded backend connect request.
+func (c *recordingLMTPBackendConnector) singleRequest(t *testing.T) backend.ConnectRequest {
+	t.Helper()
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if len(c.requests) != 1 {
+		t.Fatalf("backend connect requests = %d, want 1", len(c.requests))
+	}
+
+	return c.requests[0]
+}
+
+// serveMinimalLMTPEnvelopeBackend accepts MAIL and RCPT before waiting for close.
+func serveMinimalLMTPEnvelopeBackend(conn net.Conn) {
+	defer func() { _ = conn.Close() }()
+
+	reader := bufio.NewReader(conn)
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			return
+		}
+
+		upper := strings.ToUpper(strings.TrimSpace(line))
+		switch {
+		case strings.HasPrefix(upper, "MAIL FROM:"):
+			_, _ = io.WriteString(conn, "250 2.1.0 sender ok\r\n")
+		case strings.HasPrefix(upper, "RCPT TO:"):
+			_, _ = io.WriteString(conn, "250 2.1.5 recipient ok\r\n")
+			_, _ = io.Copy(io.Discard, reader)
+
+			return
+		}
+	}
+}
+
+type recordingLMTPFailureDialer struct {
+	conn *recordingLMTPFailureConn
+}
+
+// DialContext returns the configured backend connection for fail-closed tests.
+func (d *recordingLMTPFailureDialer) DialContext(context.Context, string, string) (net.Conn, error) {
+	return d.conn, nil
+}
+
+type recordingLMTPFailureConn struct {
+	local    net.Addr
+	remote   net.Addr
+	writeErr error
+	closed   bool
+	writes   int
+}
+
+// Read returns EOF if protocol negotiation accidentally continues.
+func (c *recordingLMTPFailureConn) Read([]byte) (int, error) {
+	return 0, io.EOF
+}
+
+// Write records backend writes and can fail the PROXY preface.
+func (c *recordingLMTPFailureConn) Write([]byte) (int, error) {
+	c.writes++
+	if c.writeErr != nil {
+		return 0, c.writeErr
+	}
+
+	return 0, io.ErrClosedPipe
+}
+
+// Close records backend stream closure.
+func (c *recordingLMTPFailureConn) Close() error {
+	c.closed = true
+
+	return nil
+}
+
+// LocalAddr returns the configured Director-side backend socket address.
+func (c *recordingLMTPFailureConn) LocalAddr() net.Addr {
+	return c.local
+}
+
+// RemoteAddr returns the configured backend-side socket address.
+func (c *recordingLMTPFailureConn) RemoteAddr() net.Addr {
+	return c.remote
+}
+
+// SetDeadline accepts connector deadline calls.
+func (c *recordingLMTPFailureConn) SetDeadline(time.Time) error {
+	return nil
+}
+
+// SetReadDeadline accepts connector read deadline calls.
+func (c *recordingLMTPFailureConn) SetReadDeadline(time.Time) error {
+	return nil
+}
+
+// SetWriteDeadline accepts connector write deadline calls.
+func (c *recordingLMTPFailureConn) SetWriteDeadline(time.Time) error {
+	return nil
+}
+
 type stateConn struct {
 	net.Conn
 	state tls.ConnectionState
@@ -2190,6 +2477,7 @@ type recordingBackendSelector struct {
 	nodeRequests      []backend.NodeSelectionRequest
 	backendForShard   map[string]string
 	backendForAccount map[string]string
+	configureBackend  func(*backend.Backend)
 }
 
 type recordingRecipientPlacementGate struct {
@@ -2226,6 +2514,9 @@ func (s *recordingBackendSelector) Select(_ context.Context, request backend.Sel
 		TLS:            backend.TLSConfig{Mode: backendTLSPlaintext, MinTLSVersion: backendTLSMinDefault},
 		Auth:           backend.AuthConfig{Mode: backendAuthModeNone},
 		MaxConnections: 100,
+	}
+	if s.configureBackend != nil {
+		s.configureBackend(&selected)
 	}
 
 	return backend.SelectionResult{
@@ -2278,6 +2569,9 @@ func (s *recordingBackendSelector) SelectInBackendNode(_ context.Context, reques
 		TLS:            backend.TLSConfig{Mode: backendTLSPlaintext, MinTLSVersion: backendTLSMinDefault},
 		Auth:           backend.AuthConfig{Mode: backendAuthModeNone},
 		MaxConnections: 100,
+	}
+	if s.configureBackend != nil {
+		s.configureBackend(&selected)
 	}
 
 	return backend.SelectionResult{

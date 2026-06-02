@@ -27,6 +27,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -43,8 +44,10 @@ const (
 	commandRSET     = "RSET"
 	commandSTARTTLS = "STARTTLS"
 
-	tlsModeImplicit = "implicit"
-	tlsModeStartTLS = "starttls"
+	tlsModeImplicit  = "implicit"
+	tlsModeStartTLS  = "starttls"
+	proxyReadLimit   = 256
+	proxyReadTimeout = 500 * time.Millisecond
 )
 
 // Status is one LMTP response line without exposing message content.
@@ -56,11 +59,12 @@ type Status struct {
 
 // Options configures a deterministic fake backend instance.
 type Options struct {
-	Capabilities []string
-	FinalStatus  map[string]Status
-	TLSConfig    *tls.Config
-	TLSMode      string
-	HoldFinal    <-chan struct{}
+	Capabilities         []string
+	FinalStatus          map[string]Status
+	RequireProxyProtocol bool
+	TLSConfig            *tls.Config
+	TLSMode              string
+	HoldFinal            <-chan struct{}
 }
 
 // Observation records one backend transaction at protocol boundaries only.
@@ -73,9 +77,12 @@ type Observation struct {
 
 // Server owns one fake LMTP backend listener.
 type Server struct {
-	listener     net.Listener
-	options      Options
-	observations chan Observation
+	listener             net.Listener
+	options              Options
+	observations         chan Observation
+	proxyProtocolHeaders chan string
+	missingProxyProtocol int64
+	proxyProtocolCount   int64
 }
 
 type connectionState struct {
@@ -95,9 +102,10 @@ func Start(t testing.TB, options Options) *Server {
 	}
 
 	server := &Server{
-		listener:     ln,
-		options:      options,
-		observations: make(chan Observation, 16),
+		listener:             ln,
+		options:              options,
+		observations:         make(chan Observation, 16),
+		proxyProtocolHeaders: make(chan string, 16),
 	}
 
 	go server.accept()
@@ -125,6 +133,30 @@ func (s *Server) ExpectObservation(t testing.TB) Observation {
 	}
 
 	return Observation{}
+}
+
+// ExpectProxyProtocolHeader verifies a required outbound PROXY preface arrived.
+func (s *Server) ExpectProxyProtocolHeader(t testing.TB) string {
+	t.Helper()
+
+	select {
+	case header := <-s.proxyProtocolHeaders:
+		return header
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for fake LMTP backend PROXY protocol header")
+	}
+
+	return ""
+}
+
+// ProxyProtocolHeaderCount returns how many required PROXY prefaces arrived.
+func (s *Server) ProxyProtocolHeaderCount() int64 {
+	return atomic.LoadInt64(&s.proxyProtocolCount)
+}
+
+// MissingProxyProtocolCount returns how often a required PROXY preface was absent.
+func (s *Server) MissingProxyProtocolCount() int64 {
+	return atomic.LoadInt64(&s.missingProxyProtocol)
 }
 
 // accept serves backend connections until the listener closes.
@@ -171,6 +203,10 @@ func (s *Server) serve(conn net.Conn) {
 
 // prepare applies implicit TLS when requested by the test.
 func (s *Server) prepare(conn net.Conn) (net.Conn, bool) {
+	if s.options.RequireProxyProtocol && !s.consumeProxyProtocolPreface(conn) {
+		return conn, false
+	}
+
 	if s.options.TLSMode != tlsModeImplicit || s.options.TLSConfig == nil {
 		return conn, true
 	}
@@ -181,6 +217,42 @@ func (s *Server) prepare(conn net.Conn) (net.Conn, bool) {
 	}
 
 	return tlsConn, true
+}
+
+// consumeProxyProtocolPreface requires one HAProxy PROXY line before LMTP bytes.
+func (s *Server) consumeProxyProtocolPreface(conn net.Conn) bool {
+	header, ok := readProxyProtocolPreface(conn)
+	if !ok || !strings.HasPrefix(header, "PROXY ") {
+		atomic.AddInt64(&s.missingProxyProtocol, 1)
+
+		return false
+	}
+
+	atomic.AddInt64(&s.proxyProtocolCount, 1)
+	s.proxyProtocolHeaders <- header
+
+	return true
+}
+
+// readProxyProtocolPreface reads one PROXY line without buffering later TLS or LMTP bytes.
+func readProxyProtocolPreface(conn net.Conn) (string, bool) {
+	_ = conn.SetReadDeadline(time.Now().Add(proxyReadTimeout))
+	defer func() { _ = conn.SetReadDeadline(time.Time{}) }()
+
+	var builder strings.Builder
+	var current [1]byte
+	for builder.Len() < proxyReadLimit {
+		if _, err := conn.Read(current[:]); err != nil {
+			return "", false
+		}
+
+		builder.WriteByte(current[0])
+		if current[0] == '\n' {
+			return builder.String(), true
+		}
+	}
+
+	return builder.String(), false
 }
 
 // handleLine dispatches one backend command.
