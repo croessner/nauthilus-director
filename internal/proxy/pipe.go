@@ -82,7 +82,7 @@ func (p *Pipe) Run(ctx context.Context, config PipeConfig) (result Result, err e
 
 	deadlines := newDeadlineController(config.Frontend, config.Backend, config.IdleTimeout)
 
-	if err := deadlines.touch(); err != nil {
+	if err := deadlines.touch(); err != nil && !isClosedError(err) {
 		result.Class = ResultStateFailed
 		result.Err = err
 
@@ -173,12 +173,16 @@ func writeInitial(
 
 	if err != nil {
 		result.Class = classifyWriteError(direction, err)
-		result.Err = err
+		result.Err = resultError(err)
 
 		return false
 	}
 
 	if err := deadlines.touch(); err != nil {
+		if isClosedError(err) {
+			return true
+		}
+
 		result.Class = ResultStateFailed
 		result.Err = err
 
@@ -215,7 +219,7 @@ func proxyCopy(
 					direction: direction,
 					bytes:     total,
 					class:     classifyWriteError(direction, writeErr),
-					err:       writeErr,
+					err:       resultError(writeErr),
 				}
 
 				return
@@ -388,7 +392,13 @@ func isTimeout(err error) bool {
 
 // isClosedError reports local close races that occur while the other copy direction is ending.
 func isClosedError(err error) bool {
-	return errors.Is(err, net.ErrClosed) || errors.Is(err, io.ErrClosedPipe)
+	if err == nil {
+		return false
+	}
+
+	return errors.Is(err, net.ErrClosed) ||
+		errors.Is(err, io.ErrClosedPipe) ||
+		err.Error() == "io: read/write on closed pipe"
 }
 
 // resultError suppresses ordinary EOF while preserving actionable failures.

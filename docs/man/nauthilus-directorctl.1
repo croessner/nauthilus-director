@@ -160,9 +160,10 @@ YAML is the default.
 List active sessions, optionally filtered by protocol or backend.
 The protocol filter accepts the canonical runtime protocol values such as
 .BR imap ,
-.BR lmtp
+.BR lmtp ,
+.BR sieve ,
 and
-.BR sieve .
+.BR pop3 .
 The command reads one bounded page by default.
 If more records are available, text output prints
 .B more=true
@@ -314,6 +315,8 @@ The output is operator summary state and is not routing authority.
 .br
 .BI "route lookup --protocol sieve --user " user-key
 .br
+.BI "route lookup --protocol pop3 --user " user-key
+.br
 .BI "route lookup --protocol lmtp --recipient " address
 Run a side-effect-free route lookup diagnostic.
 Optional flags are
@@ -342,6 +345,13 @@ and
 .B --user
 with caller-supplied user facts and never accepts script names or script
 contents as routing input.
+POP3 route lookup uses the canonical protocol value
+.B pop3
+and
+.B --user
+with caller-supplied user facts.
+It does not accept credentials, SASL blobs, message numbers, UIDLs, message
+sizes, message content or mailbox data.
 LMTP recipient diagnostics may resolve the supplied recipient through the
 configured Nauthilus no-auth identity lookup path before explaining the dry-run
 route.
@@ -367,7 +377,8 @@ When a user placement hold is active, route lookup reports bounded hold context
 such as presence, expiry and
 .B user_hold_active
 without waiting behind the hold or exposing the operator reason text.
-Credential-bearing attributes are rejected before the request is sent.
+Credential- or mailbox-bearing attributes are rejected before the request is
+sent.
 .TP
 .B reload
 Request a safe runtime reload from the running Director.

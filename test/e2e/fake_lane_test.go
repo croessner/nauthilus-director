@@ -1464,13 +1464,13 @@ func writeProcessConfig(t *testing.T, options processConfigOptions) string {
 	content := fmt.Sprintf(`patch:
   - op: remove
     path: director.listeners
-    value: [imaps, lmtp, lmtps, sieve, sieves]
+    value: [imaps, lmtp, lmtps, sieve, sieves, pop3, pop3s]
   - op: remove
     path: director.backend_pools
-    value: [lmtp-default, sieve-default]
+    value: [lmtp-default, sieve-default, pop3-default]
   - op: remove
     path: director.backends
-    value: [mailstore-b-imap, mailstore-a-lmtp, mailstore-b-lmtp, mailstore-a-sieve, mailstore-b-sieve]
+    value: [mailstore-b-imap, mailstore-a-lmtp, mailstore-b-lmtp, mailstore-a-sieve, mailstore-b-sieve, mailstore-a-pop3, mailstore-b-pop3]
 runtime:
   instance_name: "e2e-director"
   process:
@@ -1609,13 +1609,13 @@ func writeSieveProcessConfig(t *testing.T, options processConfigOptions, sieveAd
 	content := fmt.Sprintf(`patch:
   - op: remove
     path: director.listeners
-    value: [imap, imaps, lmtp, lmtps]
+    value: [imap, imaps, lmtp, lmtps, pop3, pop3s]
   - op: remove
     path: director.backend_pools
-    value: [imap-default, lmtp-default]
+    value: [imap-default, lmtp-default, pop3-default]
   - op: remove
     path: director.backends
-    value: [mailstore-a-imap, mailstore-b-imap, mailstore-a-lmtp, mailstore-b-lmtp]
+    value: [mailstore-a-imap, mailstore-b-imap, mailstore-a-lmtp, mailstore-b-lmtp, mailstore-a-pop3, mailstore-b-pop3]
 runtime:
   instance_name: "e2e-director"
   process:
@@ -1798,13 +1798,13 @@ func writeBackendPinProcessConfig(t *testing.T, options processConfigOptions, ba
 	content := fmt.Sprintf(`patch:
   - op: remove
     path: director.listeners
-    value: [imaps, lmtp, lmtps, sieve, sieves]
+    value: [imaps, lmtp, lmtps, sieve, sieves, pop3, pop3s]
   - op: remove
     path: director.backend_pools
-    value: [lmtp-default, sieve-default]
+    value: [lmtp-default, sieve-default, pop3-default]
   - op: remove
     path: director.backends
-    value: [mailstore-a-lmtp, mailstore-b-lmtp, mailstore-a-sieve, mailstore-b-sieve]
+    value: [mailstore-a-lmtp, mailstore-b-lmtp, mailstore-a-sieve, mailstore-b-sieve, mailstore-a-pop3, mailstore-b-pop3]
 runtime:
   instance_name: "e2e-director"
   process:

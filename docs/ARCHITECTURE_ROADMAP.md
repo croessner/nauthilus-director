@@ -1009,6 +1009,11 @@ contents, post-auth command bodies, client IPs, session IDs, SASL blobs, bearer
 tokens and passwords out of logs, traces, metric labels and test failure output.
 The observable protocol value is `sieve`; `managesieve` is human-facing prose,
 not a second config, runtime or metric protocol value.
+POP3 observability must also keep raw usernames, message numbers, UIDLs,
+message sizes, message contents, post-auth command bodies, client IPs, session
+IDs, SASL blobs, bearer tokens and passwords out of logs, traces, metric labels
+and test failure output. The observable protocol value is `pop3`; `pop` and
+`pop3s` are not second config, runtime or metric protocol values.
 
 ## 18. Health checks and maintenance
 
@@ -1358,6 +1363,12 @@ detailed M6 completion evidence lives in
   identifiers or raw error text as metric labels
 
 ### M7: POP3
+
+Status: completed. The production POP3 and POP3S listener paths, Nauthilus
+auth integration, shared placement/affinity/runtime controls, transparent
+backend proxying, Dovecot interoperability lane and demo-stack operator proof
+are complete. Detailed closeout commands and evidence are recorded in
+`docs/specs/implementation/M7_POP3_PROXY_SPEC.md`.
 
 - POP3 pre-auth state machine
 - Nauthilus auth

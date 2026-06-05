@@ -14,7 +14,7 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-//nolint:goconst // Runtime read fixtures repeat stable diagnostic values.
+//nolint:dupl,goconst // Runtime read fixtures repeat stable diagnostic values.
 package runtime
 
 import (
@@ -32,6 +32,7 @@ const (
 	runtimeReaderCursorInvalid = "not-a-valid-cursor"
 	runtimeReaderSessionA      = "session-a"
 	runtimeReaderSessionB      = "session-b"
+	runtimeReaderProtocolPOP3  = "pop3"
 	runtimeReaderProtocolSieve = "sieve"
 	runtimeReaderStateCursorB  = "state-cursor-b"
 	runtimeReaderUserA         = "user-a"
@@ -83,6 +84,21 @@ func TestRedisRuntimeReaderListSessionsAcceptsSieveProtocol(t *testing.T) {
 
 	if store.sessionPageRequest.Protocol != runtimeReaderProtocolSieve {
 		t.Fatalf("protocol = %q, want sieve", store.sessionPageRequest.Protocol)
+	}
+}
+
+// TestRedisRuntimeReaderListSessionsAcceptsPOP3Protocol verifies POP3 filters share session reads.
+func TestRedisRuntimeReaderListSessionsAcceptsPOP3Protocol(t *testing.T) {
+	store := &pagedRuntimeReadStore{limits: state.RuntimeReadPageLimits{Default: 2, Max: 3}}
+	reader := NewRedisRuntimeReader(store)
+
+	_, err := reader.ListSessions(context.Background(), SessionListRequest{Protocol: "POP3"})
+	if err != nil {
+		t.Fatalf("ListSessions returned error: %v", err)
+	}
+
+	if store.sessionPageRequest.Protocol != runtimeReaderProtocolPOP3 {
+		t.Fatalf("protocol = %q, want pop3", store.sessionPageRequest.Protocol)
 	}
 }
 

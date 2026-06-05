@@ -1,6 +1,6 @@
 # M7 POP3 Proxy Specification
 
-Status: planned.
+Status: completed.
 
 This document defines the POP3 milestone for `nauthilus-director`. M7 adds a
 production-ready POP3 proxy entrypoint within the explicit scope below:
@@ -1256,6 +1256,25 @@ binding_expired
 - No unsafe credential, identity or mailbox material appears in observable
   output.
 
+### M7.7 Implementation Evidence
+
+As of 2026-06-05, the POP3 observability slice is implemented at unit/package
+level without marking the full M7 milestone complete. POP3 now uses the prepared
+`nauthilus_director.pop3.pre_auth` span, the shared session, Nauthilus auth,
+routing, backend select/connect and proxy span boundaries, and the shared
+Prometheus families with approved low-cardinality labels only.
+
+Focused coverage in `internal/protocol/pop3/observability_test.go` and
+`internal/observability/prometheus_test.go` verifies POP3 metric labels, trace
+attribute redaction, mailbox sentinel rejection for message numbers, UIDLs,
+message sizes and message content, and bounded reason classes for parser, auth,
+routing, hold, backend and proxy failures. The 2026-06-05 validation pass for
+this slice ran `make check-docs`, `make test` and `make build-check`.
+
+This is not final M7 completion evidence. M7.8 still owns fake-service E2E,
+real POP3 interoperability, demo-stack proof, `make guardrails` closeout and
+the eventual `### Completion Evidence` section.
+
 ### Review Checklist
 
 - Verify no POP3 metric label violates the allowlist.
@@ -1430,77 +1449,154 @@ Closeout documentation should:
 
 M7 is complete only when all items below are true:
 
-- [ ] `pop3` and `pop3s` listeners start from typed config through the
+- [x] `pop3` and `pop3s` listeners start from typed config through the
       production server binary.
-- [ ] Listener dispatch supports IMAP, LMTP, ManageSieve and POP3 without
+- [x] Listener dispatch supports IMAP, LMTP, ManageSieve and POP3 without
       duplicating transport lifecycle behavior.
-- [ ] The application handler factory, listener manager, health-runner protocol
+- [x] The application handler factory, listener manager, health-runner protocol
       dispatch and route-lookup listener contexts are extended for
       `protocol=pop3` instead of adding parallel POP3 lifecycle code.
-- [ ] POP3 CAPA advertisement matches implemented behavior and RFC 2449
+- [x] POP3 CAPA advertisement matches implemented behavior and RFC 2449
       framing.
-- [ ] STLS and implicit TLS behavior are implemented and tested.
-- [ ] Credential-bearing POP3 methods require frontend TLS before Nauthilus is
+- [x] STLS and implicit TLS behavior are implemented and tested.
+- [x] Credential-bearing POP3 methods require frontend TLS before Nauthilus is
       called.
-- [ ] `USER`/`PASS`, `AUTH XOAUTH2` and `AUTH OAUTHBEARER` are authenticated
+- [x] `USER`/`PASS`, `AUTH XOAUTH2` and `AUTH OAUTHBEARER` are authenticated
       through Nauthilus when configured.
-- [ ] The Nauthilus auth request uses `protocol: pop3` and does not send a
+- [x] The Nauthilus auth request uses `protocol: pop3` and does not send a
       forbidden `service` body field.
-- [ ] A client-supplied `USER` value remains provisional until Nauthilus returns
+- [x] A client-supplied `USER` value remains provisional until Nauthilus returns
       canonical account facts and is never used as an authoritative placement
       key.
-- [ ] Frontend login success is returned only after Nauthilus auth, routing,
+- [x] Frontend login success is returned only after Nauthilus auth, routing,
       hold gate, backend selection, backend connect and backend auth/trust all
       succeed.
-- [ ] POP3 checks user placement holds after authoritative auth and routing
+- [x] POP3 checks user placement holds after authoritative auth and routing
       facts, before backend selection or login success.
-- [ ] Hold timeout returns a generic temporary failure and never falls back to
+- [x] Hold timeout returns a generic temporary failure and never falls back to
       the old backend.
-- [ ] POP3 placement consumes health, maintenance, runtime out, drain, weight,
+- [x] POP3 placement consumes health, maintenance, runtime out, drain, weight,
       max-connection and backend-pin state.
-- [ ] POP3 placement uses the shared `placement.SessionPlacer` /
+- [x] POP3 placement uses the shared `placement.SessionPlacer` /
       `PlaceSession` boundary and does not directly compose Redis affinity,
       backend-pin reads, backend selectors or backend reservations.
-- [ ] Backend pins apply only when protocol, backend pool, selected shard and
+- [x] Backend pins apply only when protocol, backend pool, selected shard and
       backend node match the POP3 placement request.
-- [ ] An IMAP, LMTP or ManageSieve backend pin never names the concrete POP3
+- [x] An IMAP, LMTP or ManageSieve backend pin never names the concrete POP3
       backend.
-- [ ] Existing IMAP active or retained affinity influences POP3 placement for
+- [x] Existing IMAP active or retained affinity influences POP3 placement for
       the same account and backend node.
-- [ ] Existing ManageSieve active or retained affinity influences POP3
+- [x] Existing ManageSieve active or retained affinity influences POP3
       placement for the same account and backend node.
-- [ ] Existing LMTP delivery-scoped active or retained affinity influences POP3
+- [x] Existing LMTP delivery-scoped active or retained affinity influences POP3
       placement for the same account and backend node.
-- [ ] Active or retained POP3 sessions influence later user-stateful placement
+- [x] Active or retained POP3 sessions influence later user-stateful placement
       for the same account and backend node.
-- [ ] Backend POP3 connect, TLS, CAPA discovery and configured backend auth are
+- [x] Backend POP3 connect, TLS, CAPA discovery and configured backend auth are
       implemented.
-- [ ] POP3 backend session and health connects use `backend.ConnectRequest` and
+- [x] POP3 backend session and health connects use `backend.ConnectRequest` and
       the shared outbound backend PROXY transport/reason classes.
-- [ ] Backend deep health proves connect, TLS, greeting, `CAPA`, configured
+- [x] Backend deep health proves connect, TLS, greeting, `CAPA`, configured
       backend auth, optional `NOOP` and `QUIT` without mailbox inspection or
       mutation commands.
-- [ ] Post-auth POP3 traffic is transparent and opaque to the director.
-- [ ] Message numbers, UIDLs, message sizes, message contents and post-auth
+- [x] Post-auth POP3 traffic is transparent and opaque to the director.
+- [x] Message numbers, UIDLs, message sizes, message contents and post-auth
       command bodies are not logged, traced, metric-labeled, stored or used for
       routing.
-- [ ] Route lookup supports `protocol: pop3` without credential auth, Redis
+- [x] Route lookup supports `protocol: pop3` without credential auth, Redis
       mutation, backend connect or mailbox inspection.
-- [ ] POP3 metrics use only approved low-cardinality labels.
-- [ ] `make e2e` proves POP3 through public sockets, the production binary and
+- [x] POP3 metrics use only approved low-cardinality labels.
+- [x] `make e2e` proves POP3 through public sockets, the production binary and
       cross-protocol active-affinity invariants.
-- [ ] `make e2e-interop` proves real Dovecot POP3 access through the director
+- [x] `make e2e-interop` proves real Dovecot POP3 access through the director
       on a Docker-capable environment while preserving existing IMAP, LMTP and
       ManageSieve lanes.
-- [ ] `contrib/demo-stack` carries M7 topology/config/proof updates and proves
+- [x] `contrib/demo-stack` carries M7 topology/config/proof updates and proves
       the final operator-facing POP3 path on a Docker/Compose-capable
       environment.
-- [ ] Config docs, generated references, OpenAPI artifacts and manpages are
+- [x] Config docs, generated references, OpenAPI artifacts and manpages are
       updated when behavior changes.
-- [ ] Final closeout adds `### Completion Evidence` to this specification and a
+- [x] Final closeout adds `### Completion Evidence` to this specification and a
       matching `Status: completed` paragraph to `docs/ARCHITECTURE_ROADMAP.md`.
-- [ ] `make guardrails` is the final local gate before any commit or pull
+- [x] `make guardrails` is the final local gate before any commit or pull
       request that contains M7 implementation work.
+
+### Completion Evidence
+
+Closeout date: 2026-06-05.
+
+Implemented POP3 surface: typed `pop3` STARTTLS and `pop3s` implicit TLS
+listeners, TLS-gated `USER`/`PASS`, `AUTH XOAUTH2` and `AUTH OAUTHBEARER`
+frontend auth through Nauthilus, provisional `USER` handling, shared placement
+hold and backend-pin enforcement, backend-node affinity with IMAP, LMTP and
+ManageSieve, runtime health/maintenance/out/max-connection selection, backend
+POP3 connect/TLS/CAPA/auth and deep health checks, backend-side PROXY transport
+reuse, transparent post-auth proxying, `protocol: pop3` route lookup and
+secret-safe POP3 logs, metrics, traces, runtime reads and test observations.
+
+Fake-service E2E proof:
+
+- `make e2e` passed. Result:
+  `ok e2e: fake Nauthilus HTTP/gRPC authority, real server binary, fake IMAP,
+  LMTP, ManageSieve and POP3 backends, outbound backend PROXY, backend pinning,
+  user placement holds, listener drain/resume, DATA/BDAT, TLS, route lookup and
+  observability checks passed`.
+- The POP3 fake lane covers public `pop3` STLS and `pop3s`, pre-TLS
+  credential fail-closed behavior, `USER`/`PASS`, XOAUTH2 and OAUTHBEARER,
+  hold wait/release/timeout, backend-pin match/mismatch/fail-closed behavior,
+  runtime out and maintenance behavior, route lookup, IMAP/LMTP/ManageSieve to
+  POP3 affinity, POP3 to IMAP/ManageSieve affinity and proxy handoff for
+  `STAT`, `LIST`, `UIDL`, `RETR`, `DELE`, `RSET` and `QUIT`.
+
+Real-server interoperability proof:
+
+- `make e2e-interop` passed on a Docker-capable environment with
+  `dovecot/dovecot:2.4.4`. Result:
+  `ok e2e-interop: real server binary, six Dovecot IMAP backends, Dovecot LMTP
+  backend, Dovecot ManageSieve and POP3 backends when available,
+  swaks-to-Postfix submitter, curl IMAP delivery proof, health ownership,
+  cluster affinity and runtime control passed`.
+- The interop lane mapped a real Dovecot POP3 backend and proved successful
+  POP3 auth plus `CAPA`, `USER`/`PASS`, `STAT`, `LIST`, `UIDL`, `RETR` and
+  `QUIT` through the production director binary.
+- Existing Dovecot IMAP, Postfix-to-Director-to-Dovecot LMTP and Dovecot
+  ManageSieve interop lanes remained present and passed in the same
+  `make e2e-interop` run.
+
+Demo-stack proof:
+
+- The demo stack now exposes public POP3 on host port `8110` and POP3S on
+  `8995`, enables Dovecot POP3 with `protocols = imap pop3 submission lmtp
+  sieve`, includes POP3 backend entries aligned by `backend_node`, includes
+  `pop3` in the Nauthilus LDAP search protocol list and provides
+  `contrib/demo-stack/scripts/prove-pop3.sh`.
+- Rebuilt and recreated only `director-a` and `director-b`; Stalwart containers
+  were not rebuilt. Restarted `nauthilus-a`, `nauthilus-b` and
+  `nauthilus-haproxy` so the already-mounted `pop3` search-protocol config was
+  loaded.
+- `contrib/demo-stack/scripts/prove-pop3.sh` passed:
+  `proof ok: POP3 STLS, POP3S auth, mailbox read and route lookup crossed
+  public demo-stack sockets`.
+- Compatibility proofs passed:
+  `contrib/demo-stack/scripts/prove-affinity.sh`,
+  `contrib/demo-stack/scripts/prove-managesieve.sh`,
+  `contrib/demo-stack/scripts/prove-user-hold.sh`,
+  `contrib/demo-stack/scripts/prove-user-backend-pin.sh`,
+  `contrib/demo-stack/scripts/prove-backend-proxy.sh`,
+  `contrib/demo-stack/scripts/send-mail.sh alice@example.test` and
+  `contrib/demo-stack/scripts/fetch-mail.sh alice@example.test`.
+
+Validation commands:
+
+- `go test -mod=vendor ./internal/backend` passed.
+- `make check-openapi` passed.
+- `make check-docs` passed.
+- `make test` passed.
+- `make race` passed.
+- `make e2e` passed.
+- `make build-check` passed.
+- `make e2e-interop` passed.
+- `make guardrails` passed as the final local gate for this closeout.
 
 ## Required M7 Review Pass
 

@@ -100,6 +100,24 @@ func TestRuntimeSelectorSupportsSieveRendezvousHash(t *testing.T) {
 	}
 }
 
+// TestRuntimeSelectorSupportsPOP3RendezvousHash verifies POP3 uses the shared runtime selector.
+func TestRuntimeSelectorSupportsPOP3RendezvousHash(t *testing.T) {
+	selector := mustRuntimeSelector(t, config.DefaultConfig(), nil, runtimeSelectionPolicy(true))
+
+	result, err := selector.Select(context.Background(), pop3SelectionRequest(testAccountKey))
+	if err != nil {
+		t.Fatalf("Select returned error: %v", err)
+	}
+
+	if result.Backend.Identifier != "mailstore-a-pop3" {
+		t.Fatalf("selected backend = %q, want mailstore-a-pop3", result.Backend.Identifier)
+	}
+
+	if result.Backend.Protocol != protocolPOP3 {
+		t.Fatalf("selected protocol = %q, want pop3", result.Backend.Protocol)
+	}
+}
+
 // TestRuntimeSelectorAppliesRuntimeConstraintsToSieve verifies shared runtime gates affect ManageSieve.
 func TestRuntimeSelectorAppliesRuntimeConstraintsToSieve(t *testing.T) {
 	for _, testCase := range []struct {
@@ -147,6 +165,60 @@ func TestRuntimeSelectorAppliesRuntimeConstraintsToSieve(t *testing.T) {
 			}, runtimeSelectionPolicy(true))
 
 			_, err := selector.Select(context.Background(), sieveSelectionRequest(testAccountKey))
+			if !IsErrorKind(err, ErrorKindNoBackend) {
+				t.Fatalf("Select error = %v, want no_backend", err)
+			}
+		})
+	}
+}
+
+// TestRuntimeSelectorAppliesRuntimeConstraintsToPOP3 verifies shared runtime gates affect POP3.
+func TestRuntimeSelectorAppliesRuntimeConstraintsToPOP3(t *testing.T) {
+	for _, testCase := range []struct {
+		name     string
+		snapshot RuntimeSnapshot
+	}{
+		{
+			name: "runtime out",
+			snapshot: RuntimeSnapshot{RuntimeOverride: RuntimeOverride{
+				InService: new(false),
+			}},
+		},
+		{
+			name: "runtime drain",
+			snapshot: RuntimeSnapshot{RuntimeOverride: RuntimeOverride{
+				Drain: &DrainState{Enabled: true, Mode: DrainModeSoft},
+			}},
+		},
+		{
+			name: "runtime soft maintenance",
+			snapshot: RuntimeSnapshot{RuntimeOverride: RuntimeOverride{
+				Maintenance: &MaintenanceState{Mode: MaintenanceModeSoft},
+			}},
+		},
+		{
+			name: "runtime hard maintenance",
+			snapshot: RuntimeSnapshot{RuntimeOverride: RuntimeOverride{
+				Maintenance: &MaintenanceState{Mode: MaintenanceModeHard},
+			}},
+		},
+		{
+			name: "runtime weight zero",
+			snapshot: RuntimeSnapshot{RuntimeOverride: RuntimeOverride{
+				Weight: new(0),
+			}},
+		},
+		{
+			name:     "max connections",
+			snapshot: RuntimeSnapshot{ActiveSessions: 1000},
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			selector := mustRuntimeSelector(t, config.DefaultConfig(), fakeSnapshots{
+				"mailstore-a-pop3": testCase.snapshot,
+			}, runtimeSelectionPolicy(true))
+
+			_, err := selector.Select(context.Background(), pop3SelectionRequest(testAccountKey))
 			if !IsErrorKind(err, ErrorKindNoBackend) {
 				t.Fatalf("Select error = %v, want no_backend", err)
 			}
@@ -727,16 +799,12 @@ func TestHealthTransitionThresholdsRequireConsecutiveResults(t *testing.T) {
 	}
 }
 
-// TestHealthRunnerSupportsSieveProtocol verifies ManageSieve deep health is not filtered out.
-func TestHealthRunnerSupportsSieveProtocol(t *testing.T) {
-	for _, protocol := range []string{protocolIMAP, protocolLMTP, protocolSIEVE} {
+// TestHealthRunnerSupportsStatefulProtocolHealth verifies stateful protocols are not filtered out.
+func TestHealthRunnerSupportsStatefulProtocolHealth(t *testing.T) {
+	for _, protocol := range []string{protocolIMAP, protocolLMTP, protocolSIEVE, protocolPOP3} {
 		if !healthSupportedProtocol(protocol) {
 			t.Fatalf("protocol %q should support health checks", protocol)
 		}
-	}
-
-	if healthSupportedProtocol("pop3") {
-		t.Fatal("unsupported protocol pop3 should not support health checks")
 	}
 }
 
@@ -960,6 +1028,17 @@ func sieveSelectionRequest(account string) SelectionRequest {
 		ShardTag:    testShardTag,
 		Protocol:    testProtocolSIEVE,
 		BackendPool: testPoolSIEVE,
+	}
+}
+
+// pop3SelectionRequest returns a complete POP3 selection request fixture.
+func pop3SelectionRequest(account string) SelectionRequest {
+	return SelectionRequest{
+		AccountKey:  account,
+		Tenant:      testTenant,
+		ShardTag:    testShardTag,
+		Protocol:    protocolPOP3,
+		BackendPool: "pop3-default",
 	}
 }
 

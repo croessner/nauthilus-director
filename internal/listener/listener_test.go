@@ -51,11 +51,13 @@ const (
 	testLMTPSListener    = "lmtps"
 	testSieveListener    = "sieve"
 	testSievesListener   = "sieves"
+	testPOP3Listener     = "pop3"
+	testPOP3SListener    = "pop3s"
 	testLoopbackAny      = "127.0.0.1:0"
 	trustedLocalhostCIDR = "127.0.0.1/32"
 )
 
-// TestManagerSelectsSupportedProtocolListeners verifies that startup plans include IMAP and LMTP listeners.
+// TestManagerSelectsSupportedProtocolListeners verifies startup plans include every supported protocol.
 func TestManagerSelectsSupportedProtocolListeners(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg = withTestListenerCertificates(t, cfg)
@@ -66,7 +68,16 @@ func TestManagerSelectsSupportedProtocolListeners(t *testing.T) {
 	}
 
 	got := manager.ListenerNames()
-	want := []string{testIMAPListener, testIMAPSListener, testLMTPListener, testLMTPSListener, testSieveListener, testSievesListener}
+	want := []string{
+		testIMAPListener,
+		testIMAPSListener,
+		testLMTPListener,
+		testLMTPSListener,
+		testPOP3Listener,
+		testPOP3SListener,
+		testSieveListener,
+		testSievesListener,
+	}
 
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("listener names = %v, want %v", got, want)
@@ -77,7 +88,7 @@ func TestManagerSelectsSupportedProtocolListeners(t *testing.T) {
 func TestManagerRejectsUnsupportedProtocolBeforeBind(t *testing.T) {
 	cfg := singleListenerConfig(t, testIMAPListener, tlsModeStartTLS)
 	entry := cfg.Director.Listeners[testIMAPListener]
-	entry.Protocol = "pop3"
+	entry.Protocol = "nntp"
 	cfg.Director.Listeners[testIMAPListener] = entry
 
 	_, err := NewManagerWithConfig(cfg)
@@ -85,7 +96,7 @@ func TestManagerRejectsUnsupportedProtocolBeforeBind(t *testing.T) {
 		t.Fatal("NewManagerWithConfig accepted an unsupported protocol")
 	}
 
-	if !strings.Contains(err.Error(), "unsupported protocol pop3") {
+	if !strings.Contains(err.Error(), "unsupported protocol nntp") {
 		t.Fatalf("error = %q, want unsupported protocol rejection", err.Error())
 	}
 }
@@ -200,8 +211,8 @@ func TestStartTLSListenerStartsWithoutImplicitTLS(t *testing.T) {
 	}
 }
 
-// TestIMAPLMTPAndSieveListenersStartThroughProtocolFactory verifies shared transport startup is protocol-generic.
-func TestIMAPLMTPAndSieveListenersStartThroughProtocolFactory(t *testing.T) {
+// TestSupportedListenersStartThroughProtocolFactory verifies shared transport startup is protocol-generic.
+func TestSupportedListenersStartThroughProtocolFactory(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg = withTestListenerCertificates(t, cfg)
 
@@ -219,13 +230,19 @@ func TestIMAPLMTPAndSieveListenersStartThroughProtocolFactory(t *testing.T) {
 	sieveEntry.TLS.Mode = tlsModeStartTLS
 	cfg.Director.Listeners[testSieveListener] = sieveEntry
 
+	pop3Entry := cfg.Director.Listeners[testPOP3Listener]
+	pop3Entry.Address = testLoopbackAny
+	pop3Entry.TLS.Mode = tlsModeStartTLS
+	cfg.Director.Listeners[testPOP3Listener] = pop3Entry
+
 	cfg.Director.Listeners = map[string]config.ListenerConfig{
 		testIMAPListener:  imapEntry,
 		testLMTPListener:  lmtpEntry,
+		testPOP3Listener:  pop3Entry,
 		testSieveListener: sieveEntry,
 	}
 
-	protocols := make(chan string, 3)
+	protocols := make(chan string, 4)
 
 	manager, err := NewManagerWithConfig(
 		cfg,
@@ -265,12 +282,16 @@ func TestIMAPLMTPAndSieveListenersStartThroughProtocolFactory(t *testing.T) {
 		t.Fatal("Sieve listener did not bind")
 	}
 
-	if got := manager.ListenerNames(); !reflect.DeepEqual(got, []string{testIMAPListener, testLMTPListener, testSieveListener}) {
-		t.Fatalf("listener names = %v, want IMAP, LMTP and Sieve", got)
+	if _, ok := manager.BoundAddress(testPOP3Listener); !ok {
+		t.Fatal("POP3 listener did not bind")
 	}
 
-	if len(protocols) != 3 {
-		t.Fatalf("handler factory calls = %d, want 3", len(protocols))
+	if got := manager.ListenerNames(); !reflect.DeepEqual(got, []string{testIMAPListener, testLMTPListener, testPOP3Listener, testSieveListener}) {
+		t.Fatalf("listener names = %v, want IMAP, LMTP, POP3 and Sieve", got)
+	}
+
+	if len(protocols) != 4 {
+		t.Fatalf("handler factory calls = %d, want 4", len(protocols))
 	}
 }
 

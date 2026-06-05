@@ -1,8 +1,9 @@
 # Real Interoperability Lane
 
 `make e2e-interop` is the real-server interoperability lane for IMAP regression
-coverage, LMTP delivery proof and ManageSieve script-management proof. It is separate from the deterministic
-fake-service guardrail lane run by `make e2e`, and it must not replace
+coverage, LMTP delivery proof, ManageSieve script-management proof and POP3
+mailbox-read proof. It is separate from the deterministic fake-service
+guardrail lane run by `make e2e`, and it must not replace
 fake-service coverage for edge cases, forced failures, routing, active affinity,
 runtime control, or secret-safe observability.
 
@@ -16,13 +17,13 @@ container. `swaks` submits into the real Postfix SMTP listener, and
 `curl --url imap...` verifies the delivered test message through the real
 Dovecot IMAP backend.
 
-The lane uses the Dovecot project-provided `dovecot/dovecot:2.4.3-dev` image by
+The lane uses the Dovecot project-provided `dovecot/dovecot:2.4.4` image by
 default and the pinned `chrroessner/postfix:3.11.1` image for the LMTP
 submitting peer. Dovecot's own Docker documentation describes versioned image
 names and the `-dev` test flavor; the script pins that tag instead of using
 `latest`.
 
-The current lane has four scenarios:
+The current lane has five scenarios:
 
 - a single production `nauthilus-director` process with fake Nauthilus
   authentication and one real Dovecot IMAP backend, proving frontend `LOGIN`,
@@ -52,6 +53,14 @@ The current lane has four scenarios:
   `LISTSCRIPTS`, `PUTSCRIPT`, `SETACTIVE` and `GETSCRIPT` through the Director,
   safe route lookup for `protocol=sieve`, and same-account backend-node
   consistency between an active ManageSieve session and a later IMAP session
+- one production `nauthilus-director` process proxying public POP3 STARTTLS
+  traffic to a real Dovecot POP3 backend. The scenario seeds the real mailbox
+  through Director LMTP, verifies the delivery through real Dovecot IMAP, then
+  proves POP3 `CAPA`, `USER`/`PASS`, `STAT`, `LIST`, `UIDL`, `RETR` and `QUIT`
+  through the Director plus same-account backend-node consistency between an
+  active POP3 session and a later IMAP session. When the pinned Dovecot image
+  does not expose a ready POP3 port, the POP3 scenario skips with a stable
+  message while the existing IMAP, LMTP and ManageSieve lanes continue
 
 The cluster scenario optionally confirms backend identity through `doveadm who`
 inside the Dovecot containers when that command is available. The Director

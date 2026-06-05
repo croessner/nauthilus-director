@@ -40,6 +40,7 @@ const (
 	protocolIMAP      = "imap"
 	protocolLMTP      = "lmtp"
 	protocolSIEVE     = "sieve"
+	protocolPOP3      = "pop3"
 	tlsModeImplicit   = "implicit"
 	tlsModeStartTLS   = "starttls"
 	networkTCP        = "tcp"
@@ -580,7 +581,7 @@ func sortedSupportedListenerNames(listeners map[string]config.ListenerConfig) ([
 	names := make([]string, 0, len(listeners))
 	for name, entry := range listeners {
 		switch entry.Protocol {
-		case protocolIMAP, protocolLMTP, protocolSIEVE:
+		case protocolIMAP, protocolLMTP, protocolSIEVE, protocolPOP3:
 			names = append(names, name)
 		default:
 			return nil, errors.New("listener " + name + ": unsupported protocol " + entry.Protocol)

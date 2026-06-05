@@ -42,6 +42,7 @@ const (
 	protocolIMAP  = "imap"
 	protocolLMTP  = "lmtp"
 	protocolSIEVE = "sieve"
+	protocolPOP3  = "pop3"
 
 	backendAuthModeMasterUser       = "master_user"
 	backendAuthModeCredentialReplay = "credential_replay"
@@ -348,6 +349,7 @@ type ListenerConfig struct {
 	IMAP          *IMAPListenerConfig  `mapstructure:"imap" yaml:"imap,omitempty"`
 	LMTP          *LMTPListenerConfig  `mapstructure:"lmtp" yaml:"lmtp,omitempty"`
 	Sieve         *SieveListenerConfig `mapstructure:"sieve" yaml:"sieve,omitempty"`
+	POP3          *POP3ListenerConfig  `mapstructure:"pop3" yaml:"pop3,omitempty"`
 }
 
 type ProxyProtocolConfig struct {
@@ -395,6 +397,11 @@ type SieveListenerConfig struct {
 type SieveCapabilitiesConfig struct {
 	ScriptExtensions []string `mapstructure:"script_extensions" yaml:"script_extensions"`
 	Language         string   `mapstructure:"language" yaml:"language"`
+}
+
+type POP3ListenerConfig struct {
+	AuthMechanisms []string `mapstructure:"auth_mechanisms" yaml:"auth_mechanisms"`
+	Capabilities   []string `mapstructure:"capabilities" yaml:"capabilities"`
 }
 
 type RoutingConfig struct {

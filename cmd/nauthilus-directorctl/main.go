@@ -2391,6 +2391,9 @@ func (app application) runRouteLookup(args []string) int {
 	if userKey == "" && recipient == "" {
 		return app.usageError("route lookup requires --user or --recipient")
 	}
+	if recipient != "" && !strings.EqualFold(protocol, "lmtp") {
+		return app.usageError("route lookup --recipient is only supported for lmtp")
+	}
 
 	attributes, err := parseRouteAttributes(line.all("attribute"))
 	if err != nil {
@@ -3044,7 +3047,7 @@ func parseRouteAttributes(values []string) (*map[string][]string, error) {
 			return nil, fmt.Errorf("route lookup attributes must use k=v syntax")
 		}
 		if forbiddenRouteLookupAttributeName(key) {
-			return nil, fmt.Errorf("route lookup does not accept credential- or script-bearing attributes")
+			return nil, fmt.Errorf("route lookup does not accept credential- or mailbox-bearing attributes")
 		}
 		attributes[key] = append(attributes[key], value)
 	}
@@ -3054,14 +3057,48 @@ func parseRouteAttributes(values []string) (*map[string][]string, error) {
 
 // forbiddenRouteLookupAttributeName reports whether a route attribute name could carry forbidden material.
 func forbiddenRouteLookupAttributeName(name string) bool {
-	lower := strings.ToLower(name)
-	for _, marker := range []string{"password", "passwd", "secret", "token", "bearer", "credential", "sasl", "oauth", "script"} {
-		if strings.Contains(lower, marker) {
+	canonical := canonicalRouteLookupAttributeName(name)
+	for _, marker := range []string{
+		"password",
+		"passwd",
+		"secret",
+		"token",
+		"bearer",
+		"credential",
+		"sasl",
+		"oauth",
+		"script",
+		"uidl",
+		"messagenumber",
+		"messagenum",
+		"messagesize",
+		"messagecontent",
+		"messagedata",
+		"msgnum",
+		"msgsize",
+		"msgcontent",
+		"mailboxdata",
+		"mailboxcontent",
+		"mailboxmessage",
+	} {
+		if strings.Contains(canonical, marker) {
 			return true
 		}
 	}
 
-	return false
+	return canonical == "mailbox"
+}
+
+// canonicalRouteLookupAttributeName removes separators before marker matching.
+func canonicalRouteLookupAttributeName(name string) string {
+	var builder strings.Builder
+	for _, r := range strings.ToLower(strings.TrimSpace(name)) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			builder.WriteRune(r)
+		}
+	}
+
+	return builder.String()
 }
 
 // firstProblem returns the first non-nil generated error response.

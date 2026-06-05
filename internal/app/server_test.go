@@ -14,6 +14,7 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
+//nolint:goconst // App wiring tests repeat protocol literals to show dispatch coverage.
 package app
 
 import (
@@ -26,6 +27,7 @@ import (
 	"github.com/croessner/nauthilus-director/internal/backend"
 	"github.com/croessner/nauthilus-director/internal/config"
 	"github.com/croessner/nauthilus-director/internal/listener"
+	"github.com/croessner/nauthilus-director/internal/protocol/pop3"
 	"github.com/croessner/nauthilus-director/internal/protocol/sieve"
 	"github.com/croessner/nauthilus-director/internal/routing"
 )
@@ -137,5 +139,28 @@ func TestSessionHandlerFactoryDispatchesSieve(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("Sieve handler did not stop after client close")
+	}
+}
+
+// TestSessionHandlerFactoryDispatchesPOP3 verifies the app path recognizes POP3 listeners.
+func TestSessionHandlerFactoryDispatchesPOP3(t *testing.T) {
+	factory := sessionHandlerFactory(nil, nil, nil, nil, nil, 0, nil, nil, "test-version")
+	handler := factory(listener.SessionOptions{
+		ListenerName: "pop3",
+		Config:       config.DefaultConfig().Director.Listeners["pop3"],
+	})
+
+	pop3Handler, ok := handler.(*pop3.Handler)
+	if !ok {
+		t.Fatalf("handler type = %T, want POP3 handler", handler)
+	}
+
+	handlerConfig := pop3Handler.Config()
+	if handlerConfig.ServiceName != "pop3" || handlerConfig.BackendPool != "pop3-default" || handlerConfig.TLSMode != "starttls" {
+		t.Fatalf("POP3 handler config = %#v, want listener-derived service, pool and TLS mode", handlerConfig)
+	}
+
+	if len(handlerConfig.AuthMechanisms) != 3 {
+		t.Fatalf("POP3 auth methods = %v, want default userpass and bearer methods", handlerConfig.AuthMechanisms)
 	}
 }

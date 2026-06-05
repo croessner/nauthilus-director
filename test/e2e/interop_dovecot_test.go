@@ -328,13 +328,13 @@ func writeDovecotClusterProcessConfig(t *testing.T, options interopClusterProces
 	fmt.Fprintf(&content, `patch:
   - op: remove
     path: director.listeners
-    value: [imaps, lmtp, lmtps, sieve, sieves]
+    value: [imaps, lmtp, lmtps, sieve, sieves, pop3, pop3s]
   - op: remove
     path: director.backend_pools
-    value: [lmtp-default, sieve-default]
+    value: [lmtp-default, sieve-default, pop3-default]
   - op: remove
     path: director.backends
-    value: [mailstore-a-lmtp, mailstore-b-lmtp, mailstore-a-sieve, mailstore-b-sieve]
+    value: [mailstore-a-lmtp, mailstore-b-lmtp, mailstore-a-sieve, mailstore-b-sieve, mailstore-a-pop3, mailstore-b-pop3]
 runtime:
   instance_name: %q
   process:

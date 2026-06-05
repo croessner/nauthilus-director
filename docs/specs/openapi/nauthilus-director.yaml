@@ -785,7 +785,9 @@ paths:
       description: >
         This diagnostic endpoint is side-effect-free. It must not authenticate
         credentials, call Nauthilus, create sessions, refresh leases or mutate
-        Redis state.
+        Redis state. User-stateful protocol lookups such as IMAP, ManageSieve
+        and POP3 use caller-supplied user facts; LMTP alone may use the
+        recipient lookup field.
       requestBody:
         required: true
         content:
@@ -1146,6 +1148,7 @@ components:
         recipient:
           type: string
           minLength: 1
+          description: LMTP-only recipient identity used for no-auth route diagnostics.
         tenant:
           type: string
         listener:
@@ -1160,6 +1163,11 @@ components:
           type: boolean
         attributes:
           type: object
+          description: >
+            Secret-free routing attributes supplied by the caller. Attribute
+            names that imply credentials, SASL/bearer material, scripts, UIDLs,
+            message numbers, message sizes, message content or mailbox data
+            are rejected.
           additionalProperties:
             type: array
             items:

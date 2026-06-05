@@ -98,6 +98,12 @@ director:
                 - mailstore-b-lmtp
             protocol: lmtp
             selector: recipient_hash
+        pop3-default:
+            backends:
+                - mailstore-a-pop3
+                - mailstore-b-pop3
+            protocol: pop3
+            selector: rendezvous_hash
         sieve-default:
             backends:
                 - mailstore-a-sieve
@@ -191,6 +197,51 @@ director:
                 key: <redacted>
                 min_tls_version: TLS1.2
                 mode: implicit
+                server_name: mailstore-a.example.org
+            weight: 100
+        mailstore-a-pop3:
+            address: 127.0.0.1:1110
+            auth:
+                credential_replay:
+                    allowed_mechanisms:
+                        - userpass
+                        - xoauth2
+                        - oauthbearer
+                    preserve_mechanism: true
+                    require_backend_tls: true
+                master_user:
+                    mechanism: plain
+                    password_file: <redacted>
+                    user_format: '{user}*{master_user}'
+                    username: nauthilus-director
+                mode: master_user
+                oauthbearer:
+                    require_tls: false
+                    token_file: ""
+                sasl:
+                    mechanism: ""
+                    password_file: ""
+                    require_tls: false
+                    username: ""
+            backend_node: mailstore-a-node-1
+            haproxy:
+                enabled: false
+            health_check:
+                deep_check: true
+                enabled: true
+                password_file: <redacted>
+                username: healthcheck@example.org
+            maintenance: disabled
+            max_connections: 1000
+            protocol: pop3
+            shard_tag: mailstore-a
+            tls:
+                ca_file: /etc/nauthilus-director/mailstore-ca.pem
+                cert: ""
+                insecure_skip_verify: false
+                key: ""
+                min_tls_version: TLS1.2
+                mode: starttls
                 server_name: mailstore-a.example.org
             weight: 100
         mailstore-a-sieve:
@@ -324,6 +375,51 @@ director:
                 key: <redacted>
                 min_tls_version: TLS1.2
                 mode: implicit
+                server_name: mailstore-b.example.org
+            weight: 100
+        mailstore-b-pop3:
+            address: 127.0.0.1:2110
+            auth:
+                credential_replay:
+                    allowed_mechanisms:
+                        - userpass
+                        - xoauth2
+                        - oauthbearer
+                    preserve_mechanism: true
+                    require_backend_tls: true
+                master_user:
+                    mechanism: plain
+                    password_file: <redacted>
+                    user_format: '{user}*{master_user}'
+                    username: nauthilus-director
+                mode: master_user
+                oauthbearer:
+                    require_tls: false
+                    token_file: ""
+                sasl:
+                    mechanism: ""
+                    password_file: ""
+                    require_tls: false
+                    username: ""
+            backend_node: mailstore-b-node-1
+            haproxy:
+                enabled: false
+            health_check:
+                deep_check: true
+                enabled: true
+                password_file: <redacted>
+                username: healthcheck@example.org
+            maintenance: disabled
+            max_connections: 1000
+            protocol: pop3
+            shard_tag: mailstore-b
+            tls:
+                ca_file: /etc/nauthilus-director/mailstore-ca.pem
+                cert: ""
+                insecure_skip_verify: false
+                key: ""
+                min_tls_version: TLS1.2
+                mode: starttls
                 server_name: mailstore-b.example.org
             weight: 100
         mailstore-b-sieve:
@@ -500,6 +596,57 @@ director:
             tls:
                 cert: /etc/nauthilus-director/lmtps.crt
                 client_ca: /etc/nauthilus-director/lmtp-client-ca.pem
+                key: <redacted>
+                min_tls_version: TLS1.2
+                mode: implicit
+                require_client_cert: false
+        pop3:
+            address: 127.0.0.1:10110
+            authority: default
+            backend_pool: pop3-default
+            network: tcp
+            pop3:
+                auth_mechanisms:
+                    - userpass
+                    - xoauth2
+                    - oauthbearer
+                capabilities:
+                    - STLS
+                    - USER
+                    - SASL
+            protocol: pop3
+            proxy_protocol:
+                enabled: false
+                trusted_cidrs: []
+            service_name: pop3
+            tls:
+                cert: /etc/nauthilus-director/pop3.crt
+                client_ca: ""
+                key: <redacted>
+                min_tls_version: TLS1.2
+                mode: starttls
+                require_client_cert: false
+        pop3s:
+            address: 127.0.0.1:10995
+            authority: default
+            backend_pool: pop3-default
+            network: tcp
+            pop3:
+                auth_mechanisms:
+                    - userpass
+                    - xoauth2
+                    - oauthbearer
+                capabilities:
+                    - USER
+                    - SASL
+            protocol: pop3
+            proxy_protocol:
+                enabled: false
+                trusted_cidrs: []
+            service_name: pop3s
+            tls:
+                cert: /etc/nauthilus-director/pop3s.crt
+                client_ca: ""
                 key: <redacted>
                 min_tls_version: TLS1.2
                 mode: implicit

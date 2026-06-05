@@ -14,7 +14,7 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-//nolint:funlen,goconst // Defaults intentionally spell out the canonical YAML surface.
+//nolint:dupl,funlen,goconst // Defaults intentionally spell out the canonical YAML surface.
 package config
 
 import "time"
@@ -276,6 +276,8 @@ func defaultDirector() DirectorConfig {
 			"lmtps":  defaultLMTPListener("lmtps", "127.0.0.1:11024", "implicit", "/etc/nauthilus-director/lmtps.crt", "/etc/nauthilus-director/lmtps.key"),
 			"sieve":  defaultSieveListener("sieve", "127.0.0.1:14190", "starttls", "/etc/nauthilus-director/sieve.crt", "/etc/nauthilus-director/sieve.key"),
 			"sieves": defaultSieveListener("sieves", "127.0.0.1:14490", "implicit", "/etc/nauthilus-director/sieves.crt", "/etc/nauthilus-director/sieves.key"),
+			"pop3":   defaultPOP3Listener("pop3", "127.0.0.1:10110", "starttls", "/etc/nauthilus-director/pop3.crt", "/etc/nauthilus-director/pop3.key"),
+			"pop3s":  defaultPOP3Listener("pop3s", "127.0.0.1:10995", "implicit", "/etc/nauthilus-director/pop3s.crt", "/etc/nauthilus-director/pop3s.key"),
 		},
 		Routing: RoutingConfig{
 			DefaultSelector: "rendezvous_hash",
@@ -374,6 +376,11 @@ func defaultDirector() DirectorConfig {
 				Selector: "rendezvous_hash",
 				Backends: []string{"mailstore-a-sieve", "mailstore-b-sieve"},
 			},
+			"pop3-default": {
+				Protocol: "pop3",
+				Selector: "rendezvous_hash",
+				Backends: []string{"mailstore-a-pop3", "mailstore-b-pop3"},
+			},
 		},
 		Backends: map[string]BackendConfig{
 			"mailstore-a-imap":  defaultIMAPBackend("mailstore-a", "mailstore-a-node-1", "127.0.0.1:1143", "mailstore-a.example.org"),
@@ -382,6 +389,8 @@ func defaultDirector() DirectorConfig {
 			"mailstore-b-lmtp":  defaultLMTPBackend("mailstore-b", "mailstore-b-node-1", "127.0.0.1:3424", "mailstore-b.example.org"),
 			"mailstore-a-sieve": defaultSieveBackend("mailstore-a", "mailstore-a-node-1", "127.0.0.1:4190", "mailstore-a.example.org"),
 			"mailstore-b-sieve": defaultSieveBackend("mailstore-b", "mailstore-b-node-1", "127.0.0.1:5190", "mailstore-b.example.org"),
+			"mailstore-a-pop3":  defaultPOP3Backend("mailstore-a", "mailstore-a-node-1", "127.0.0.1:1110", "mailstore-a.example.org"),
+			"mailstore-b-pop3":  defaultPOP3Backend("mailstore-b", "mailstore-b-node-1", "127.0.0.1:2110", "mailstore-b.example.org"),
 		},
 	}
 }
@@ -488,6 +497,41 @@ func defaultSieveListener(serviceName string, address string, tlsMode string, ce
 	}
 }
 
+// defaultPOP3Listener builds conservative POP3 listener defaults.
+func defaultPOP3Listener(serviceName string, address string, tlsMode string, cert string, key string) ListenerConfig {
+	return ListenerConfig{
+		Protocol:    "pop3",
+		ServiceName: serviceName,
+		Network:     "tcp",
+		Address:     address,
+		Authority:   "default",
+		BackendPool: "pop3-default",
+		ProxyProtocol: ProxyProtocolConfig{
+			TrustedCIDRs: []string{},
+		},
+		TLS: ListenerTLSConfig{
+			Mode:          tlsMode,
+			Cert:          cert,
+			Key:           Secret(key),
+			MinTLSVersion: "TLS1.2",
+		},
+		POP3: &POP3ListenerConfig{
+			AuthMechanisms: []string{"userpass", "xoauth2", "oauthbearer"},
+			Capabilities:   defaultPOP3Capabilities(tlsMode),
+		},
+	}
+}
+
+// defaultPOP3Capabilities returns the bounded authorization-state CAPA policy.
+func defaultPOP3Capabilities(tlsMode string) []string {
+	capabilities := []string{"USER", "SASL"}
+	if tlsMode == "starttls" {
+		capabilities = append([]string{"STLS"}, capabilities...)
+	}
+
+	return capabilities
+}
+
 // defaultIMAPBackend builds an IMAP backend using master-user authentication.
 func defaultIMAPBackend(shardTag string, backendNode string, address string, serverName string) BackendConfig {
 	return BackendConfig{
@@ -590,6 +634,42 @@ func defaultSieveBackend(shardTag string, backendNode string, address string, se
 				RequireBackendTLS: true,
 				PreserveMechanism: true,
 				AllowedMechanisms: []string{"plain", "xoauth2", "oauthbearer"},
+			},
+		},
+		HealthCheck: defaultBackendHealthCheck(),
+	}
+}
+
+// defaultPOP3Backend builds a POP3 backend using master-user authentication.
+func defaultPOP3Backend(shardTag string, backendNode string, address string, serverName string) BackendConfig {
+	return BackendConfig{
+		Protocol:       "pop3",
+		ShardTag:       shardTag,
+		BackendNode:    backendNode,
+		Address:        address,
+		Weight:         100,
+		MaxConnections: 1000,
+		Maintenance:    "disabled",
+		HAProxy:        HAProxyConfig{},
+		TLS: BackendTLSConfig{
+			Mode:               "starttls",
+			CAFile:             "/etc/nauthilus-director/mailstore-ca.pem",
+			ServerName:         serverName,
+			MinTLSVersion:      "TLS1.2",
+			InsecureSkipVerify: false,
+		},
+		Auth: BackendAuthConfig{
+			Mode: "master_user",
+			MasterUser: BackendMasterUserConfig{
+				Username:     "nauthilus-director",
+				PasswordFile: Secret("/etc/nauthilus-director/pop3-backend-master-password"),
+				UserFormat:   "{user}*{master_user}",
+				Mechanism:    "plain",
+			},
+			CredentialReplay: BackendCredentialReplayConfig{
+				RequireBackendTLS: true,
+				PreserveMechanism: true,
+				AllowedMechanisms: []string{"userpass", "xoauth2", "oauthbearer"},
 			},
 		},
 		HealthCheck: defaultBackendHealthCheck(),

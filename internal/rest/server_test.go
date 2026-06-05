@@ -82,8 +82,8 @@ func TestServerBackendListIsImplemented(t *testing.T) {
 	}
 }
 
-// TestRouteLookupRejectsCredentialBearingInput enforces diagnostic-only input.
-func TestRouteLookupRejectsCredentialBearingInput(t *testing.T) {
+// TestRouteLookupRejectsCredentialAndMailboxBearingInput enforces diagnostic-only input.
+func TestRouteLookupRejectsCredentialAndMailboxBearingInput(t *testing.T) {
 	server := rest.NewServer(rest.Options{Version: testVersion})
 	tests := []struct {
 		name string
@@ -91,6 +91,9 @@ func TestRouteLookupRejectsCredentialBearingInput(t *testing.T) {
 	}{
 		{name: "password", body: `{"protocol":"imap","user_key":"user@example.org","password":"` + secretLeakSentinel + `"}`},
 		{name: "script", body: `{"protocol":"sieve","user_key":"user@example.org","script_name":"` + secretLeakSentinel + `"}`},
+		{name: "uidl", body: `{"protocol":"pop3","user_key":"user@example.org","attributes":{"uidl":["` + secretLeakSentinel + `"]}}`},
+		{name: "message size", body: `{"protocol":"pop3","user_key":"user@example.org","message_size":"` + secretLeakSentinel + `"}`},
+		{name: "mailbox", body: `{"protocol":"pop3","user_key":"user@example.org","mailbox":"` + secretLeakSentinel + `"}`},
 	}
 
 	for _, test := range tests {

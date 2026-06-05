@@ -39,6 +39,8 @@ const (
 	EventIMAPPreAuth = "imap.pre_auth"
 	// EventSievePreAuth records pre-auth ManageSieve command handling.
 	EventSievePreAuth = "sieve.pre_auth"
+	// EventPOP3PreAuth records pre-auth POP3 command handling.
+	EventPOP3PreAuth = "pop3.pre_auth"
 	// EventLMTPBDATStream records LMTP BDAT chunk and completion outcomes.
 	EventLMTPBDATStream = "lmtp.bdat_stream"
 	// EventLMTPBackendStatus records bounded backend status classes for LMTP delivery.

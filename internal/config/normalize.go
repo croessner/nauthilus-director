@@ -60,6 +60,13 @@ func (d DirectorConfig) Normalize() DirectorConfig {
 				listener.Sieve = &sieve
 			}
 
+			if listener.POP3 != nil {
+				pop3 := *listener.POP3
+				pop3.AuthMechanisms = normalizeLowerList(pop3.AuthMechanisms)
+				pop3.Capabilities = normalizeUpperList(pop3.Capabilities)
+				listener.POP3 = &pop3
+			}
+
 			listeners[name] = listener
 		}
 

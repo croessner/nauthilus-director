@@ -1,14 +1,15 @@
 # Fake POP3 Backend
 
-This scaffold is reserved for the deterministic POP3 backend used by the E2E
-guardrail lane once the production POP3 listener exists.
+This package contains the deterministic POP3 backend used by the E2E guardrail
+lane for public-socket POP3 and POP3S proof.
 
-The fake should listen on a public test socket and expose protocol-level
-observations for greeting, STLS, USER/PASS or SASL authentication, selected
-account, proxy transition, and connection close behavior. It should be able to
-force authentication rejection, slow responses, and backend connection failures
-without relying on a real POP3 server.
+The fake listens on a public loopback socket, emits a bounded POP3 greeting and
+CAPA response, accepts backend `USER`/`PASS` or `AUTH` handoff, and proxies
+deterministic mailbox commands such as `STAT`, `LIST`, `UIDL`, `RETR`, `DELE`,
+`RSET` and `QUIT`. Command status overrides allow tests to force backend
+failures without relying on a real POP3 server.
 
-Logs and observations must not include plaintext passwords, bearer tokens, SASL
-blobs, raw authorization headers, private keys, or session secrets.
-
+Observations are intentionally redacted. They expose mechanism and command
+classes plus boolean sentinel matches, but not plaintext passwords, bearer
+tokens, SASL blobs, raw authorization headers, private keys, session secrets,
+message numbers, UIDLs or message content.

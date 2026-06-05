@@ -14,6 +14,7 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
+//nolint:goconst,wsl_v5 // Route lookup redaction keeps diagnostic marker names explicit.
 package runtime
 
 import (
@@ -318,6 +319,12 @@ func (s *RouteLookupService) Lookup(ctx context.Context, request RouteLookupRequ
 
 	started := time.Now()
 	request = request.Normalize()
+	if err := validateRouteLookupRequest(request); err != nil {
+		s.recordRouteLookup(ctx, request, runtimeObservationResultFailure, "invalid_request", RouteLookupResponse{}, time.Since(started))
+
+		return RouteLookupResponse{}, err
+	}
+
 	if err := s.applyDefaults(&request); err != nil {
 		s.recordRouteLookup(ctx, request, runtimeObservationResultFailure, "invalid_request", RouteLookupResponse{}, time.Since(started))
 
@@ -511,6 +518,77 @@ func (s *RouteLookupService) applyDefaults(request *RouteLookupRequest) error {
 	}
 
 	return nil
+}
+
+// validateRouteLookupRequest rejects secret-bearing and protocol-mismatched diagnostic input.
+func validateRouteLookupRequest(request RouteLookupRequest) error {
+	request = request.Normalize()
+	if request.Protocol != "" && request.Recipient != "" && request.Protocol != routeLookupProtocolLMTP {
+		return newRuntimeError(ErrorKindInvalidRequest, operationRouteLookup, "recipient is only supported for lmtp route lookup")
+	}
+
+	if routeLookupHasForbiddenAttribute(request.Attributes) {
+		return newRuntimeError(ErrorKindInvalidRequest, operationRouteLookup, "credential or mailbox attributes are not accepted")
+	}
+
+	return nil
+}
+
+// routeLookupHasForbiddenAttribute reports whether attributes could carry forbidden material.
+func routeLookupHasForbiddenAttribute(attributes map[string][]string) bool {
+	for name := range attributes {
+		if routeLookupForbiddenAttributeName(name) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// routeLookupForbiddenAttributeName matches bounded credential and mailbox-data markers.
+func routeLookupForbiddenAttributeName(name string) bool {
+	canonical := routeLookupCanonicalAttributeName(name)
+	for _, marker := range []string{
+		"password",
+		"passwd",
+		"secret",
+		"token",
+		"bearer",
+		"credential",
+		"sasl",
+		"oauth",
+		"script",
+		"uidl",
+		"messagenumber",
+		"messagenum",
+		"messagesize",
+		"messagecontent",
+		"messagedata",
+		"msgnum",
+		"msgsize",
+		"msgcontent",
+		"mailboxdata",
+		"mailboxcontent",
+		"mailboxmessage",
+	} {
+		if strings.Contains(canonical, marker) {
+			return true
+		}
+	}
+
+	return canonical == "mailbox"
+}
+
+// routeLookupCanonicalAttributeName normalizes separators before marker matching.
+func routeLookupCanonicalAttributeName(name string) string {
+	var builder strings.Builder
+	for _, r := range strings.ToLower(strings.TrimSpace(name)) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			builder.WriteRune(r)
+		}
+	}
+
+	return builder.String()
 }
 
 // defaultPoolForProtocol returns the listener-derived fallback for one protocol.

@@ -58,6 +58,8 @@ const (
 	fieldMessageBody         = "message_body"
 	fieldMessageContent      = "message_content"
 	fieldMessageID           = "message_id"
+	fieldMessageNumber       = "message_number"
+	fieldMessageSize         = "message_size"
 	fieldOAuth               = "oauth"
 	fieldOperatorHoldReason  = "operator_hold_reason"
 	fieldPasswd              = "passwd"
@@ -81,6 +83,7 @@ const (
 	fieldSubject             = "subject"
 	fieldToken               = "token"
 	fieldTraceID             = "trace_id"
+	fieldUIDL                = "uidl"
 	fieldUserHash            = "user_hash"
 	fieldUserKey             = "user_key"
 	fieldUsername            = "username"
@@ -150,6 +153,8 @@ var forbiddenMetricLabels = map[string]struct{}{
 	fieldBackendIdentifier:   {},
 	fieldBackendNode:         {},
 	fieldClientIP:            {},
+	fieldMessageNumber:       {},
+	fieldMessageSize:         {},
 	fieldOperatorHoldReason:  {},
 	fieldPassword:            {},
 	fieldPostAuthCommandBody: {},
@@ -165,6 +170,7 @@ var forbiddenMetricLabels = map[string]struct{}{
 	fieldSpanID:              {},
 	fieldToken:               {},
 	fieldTraceID:             {},
+	fieldUIDL:                {},
 	fieldUserHash:            {},
 	fieldUsername:            {},
 }
@@ -182,6 +188,8 @@ var collapsedLogFields = map[string]struct{}{
 	fieldMessageBody:         {},
 	fieldMessageContent:      {},
 	fieldMessageID:           {},
+	fieldMessageNumber:       {},
+	fieldMessageSize:         {},
 	fieldOperatorHoldReason:  {},
 	fieldPostAuthCommandBody: {},
 	fieldRawError:            {},
@@ -194,6 +202,7 @@ var collapsedLogFields = map[string]struct{}{
 	fieldScriptName:          {},
 	fieldSessionID:           {},
 	fieldSubject:             {},
+	fieldUIDL:                {},
 	fieldUserHash:            {},
 	fieldUserKey:             {},
 	fieldUsername:            {},

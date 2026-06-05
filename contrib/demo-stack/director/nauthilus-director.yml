@@ -33,9 +33,8 @@
 # - remove: remove a matching list item or named map key.
 #
 # In this demo the built-in defaults include a plain LMTP listener. The stack
-# intentionally publishes IMAP, IMAPS, Sieve, Sieve-over-TLS and TLS-wrapped
-# LMTPS through HAProxy/Postfix, so inherited listeners outside that topology
-# are removed here.
+# intentionally publishes TLS-wrapped LMTPS through HAProxy/Postfix, so that
+# inherited listener outside the topology is removed here.
 patch:
   - op: remove
     path: director.listeners
@@ -247,7 +246,7 @@ auth:
 # Director protocol surface
 # -------------------------
 #
-# The Director exposes IMAP, IMAPS, Sieve, Sieve-over-TLS and LMTPS listeners
+# The Director exposes IMAP, IMAPS, POP3, POP3S, Sieve, Sieve-over-TLS and LMTPS listeners
 # to HAProxy. HAProxy adds PROXY protocol headers so the Director sees the
 # original frontend source address instead of only the HAProxy container
 # address.
@@ -368,6 +367,70 @@ director:
           - SMTPUTF8
           - CHUNKING
 
+    pop3:
+      # Cleartext POP3 with STLS support, published by HAProxy on host port
+      # 8110. Credential-bearing commands remain disabled until STLS succeeds.
+      protocol: pop3
+      service_name: pop3
+      network: tcp
+      address: "0.0.0.0:10110"
+      authority: default
+      backend_pool: pop3-default
+
+      proxy_protocol:
+        enabled: true
+        trusted_cidrs:
+          - 172.30.0.0/24
+
+      tls:
+        mode: starttls
+        cert: /run/nauthilus-director/tls/server.crt
+        key: /run/nauthilus-director/tls/server.key
+        client_ca: ""
+        require_client_cert: false
+        min_tls_version: TLS1.2
+
+      pop3:
+        auth_mechanisms:
+          - userpass
+        capabilities:
+          - STLS
+          - USER
+          - UIDL
+          - TOP
+          - RESP-CODES
+
+    pop3s:
+      # Implicit TLS POP3, published by HAProxy on host port 8995.
+      protocol: pop3
+      service_name: pop3s
+      network: tcp
+      address: "0.0.0.0:10995"
+      authority: default
+      backend_pool: pop3-default
+
+      proxy_protocol:
+        enabled: true
+        trusted_cidrs:
+          - 172.30.0.0/24
+
+      tls:
+        mode: implicit
+        cert: /run/nauthilus-director/tls/server.crt
+        key: /run/nauthilus-director/tls/server.key
+        client_ca: ""
+        require_client_cert: false
+        min_tls_version: TLS1.2
+
+      pop3:
+        auth_mechanisms:
+          - userpass
+        capabilities:
+          - USER
+          - UIDL
+          - TOP
+          - RESP-CODES
+
     sieve:
       # Cleartext ManageSieve with STARTTLS support, published by HAProxy on
       # host port 4190. Script management remains backend-owned; the Director
@@ -481,6 +544,14 @@ director:
         - mailstore-c-lmtp
         - stalwart-a-lmtp
         - stalwart-b-lmtp
+
+    pop3-default:
+      protocol: pop3
+      selector: rendezvous_hash
+      backends:
+        - mailstore-a-pop3
+        - mailstore-b-pop3
+        - mailstore-c-pop3
 
     sieve-default:
       protocol: sieve
@@ -808,6 +879,107 @@ director:
         oauthbearer:
           token_file: ""
           require_tls: false
+
+      health_check:
+        enabled: true
+        deep_check: true
+        username: healthcheck@example.test
+        password_file: demo-secret
+
+    mailstore-a-pop3:
+      protocol: pop3
+      shard_tag: mailstore-a
+      backend_node: mailstore-a-node
+      address: "mailstore-a:31110"
+      weight: 100
+      max_connections: 1000
+      maintenance: disabled
+
+      tls:
+        mode: starttls
+        ca_file: ""
+        cert: ""
+        key: ""
+        server_name: ""
+        min_tls_version: TLS1.2
+        insecure_skip_verify: true
+
+      auth:
+        mode: master_user
+        master_user:
+          username: nauthilus-director
+          password_file: "${DOVECOT_MASTER_PASSWORD}"
+          user_format: "{user}*{master_user}"
+          mechanism: plain
+
+      health_check:
+        enabled: true
+        deep_check: true
+        username: healthcheck@example.test
+        password_file: demo-secret
+
+    mailstore-b-pop3:
+      protocol: pop3
+      shard_tag: mailstore-b
+      backend_node: mailstore-b-node
+      address: "mailstore-b:31110"
+      weight: 100
+      max_connections: 1000
+      maintenance: disabled
+
+      tls:
+        mode: starttls
+        ca_file: ""
+        cert: ""
+        key: ""
+        server_name: ""
+        min_tls_version: TLS1.2
+        insecure_skip_verify: true
+
+      auth:
+        mode: master_user
+        master_user:
+          username: nauthilus-director
+          password_file: "${DOVECOT_MASTER_PASSWORD}"
+          user_format: "{user}*{master_user}"
+          mechanism: plain
+
+      health_check:
+        enabled: true
+        deep_check: true
+        username: healthcheck@example.test
+        password_file: demo-secret
+
+    mailstore-c-pop3:
+      protocol: pop3
+      shard_tag: mailstore-c
+      backend_node: mailstore-c-node
+      address: "haproxy:1110"
+      weight: 100
+      max_connections: 1000
+      maintenance: disabled
+
+      haproxy:
+        enabled: true
+
+      tls:
+        mode: starttls
+        ca_file: ""
+        cert: ""
+        key: ""
+        server_name: ""
+        min_tls_version: TLS1.2
+        insecure_skip_verify: true
+
+      auth:
+        # This shard intentionally exercises Dovecot master-user auth and the
+        # Director-to-backend outbound PROXY path for POP3.
+        mode: master_user
+        master_user:
+          username: nauthilus-director
+          password_file: "${DOVECOT_MASTER_PASSWORD}"
+          user_format: "{user}*{master_user}"
+          mechanism: plain
 
       health_check:
         enabled: true

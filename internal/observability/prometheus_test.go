@@ -44,6 +44,7 @@ const (
 	testPreviousStatus    = "previous_status"
 	testProtocolIMAP      = "imap"
 	testProtocolLMTP      = "lmtp"
+	testProtocolPOP3      = "pop3"
 	testRedisKey          = "{alice}:session"
 	testRedisModeCluster  = "cluster"
 	testRedisOpen         = "open"
@@ -325,6 +326,7 @@ func representativeMetricEvents(t *testing.T) []Event {
 		newMetricEvent(t, EventSessionEnd, nil, protocolLabels(reasonClassOK, reasonClassOK)),
 		newMetricEvent(t, EventIMAPPreAuth, nil, protocolLabels("accepted", reasonClassOK)),
 		newMetricEvent(t, EventSievePreAuth, nil, protocolLabels("accepted", reasonClassOK)),
+		newMetricEvent(t, EventPOP3PreAuth, nil, pop3ProtocolLabels("accepted", reasonClassOK)),
 		measuredEvent(t, EventNauthilusAuth, nil, authLabels(reasonClassOK, reasonClassOK), 0.002),
 		measuredEvent(t, EventRoutingResolve, nil, backendLabels(reasonClassOK, reasonClassOK), 0.001),
 		newMetricEvent(t, EventAffinityOpen, nil, backendLabels(reasonClassOK, reasonClassOK)),
@@ -425,6 +427,17 @@ func protocolLabels(result string, reason string) map[string]string {
 		metricLabelService:     "mail",
 		metricLabelTLSMode:     "starttls",
 	}
+}
+
+// pop3ProtocolLabels returns common POP3 frontend protocol metric labels.
+func pop3ProtocolLabels(result string, reason string) map[string]string {
+	labels := protocolLabels(result, reason)
+	labels[metricLabelBackendPool] = "pop3-default"
+	labels[metricLabelListener] = testProtocolPOP3
+	labels[metricLabelProtocol] = testProtocolPOP3
+	labels[metricLabelService] = testProtocolPOP3
+
+	return labels
 }
 
 // backendLabels returns bounded backend metric labels.

@@ -287,8 +287,9 @@ func validateDirector(director DirectorConfig, authorities map[string]AuthorityC
 		case protocolIMAP:
 		case protocolLMTP:
 		case protocolSIEVE:
+		case protocolPOP3:
 		default:
-			addProblem(problems, path+".protocol must be imap, lmtp, or sieve")
+			addProblem(problems, path+".protocol must be imap, lmtp, pop3, or sieve")
 		}
 
 		if listener.Protocol == protocolIMAP && listener.IMAP == nil {
@@ -315,6 +316,23 @@ func validateDirector(director DirectorConfig, authorities map[string]AuthorityC
 			}
 			if listener.Sieve != nil {
 				validateSieveListener(path+".sieve", listener, authority, authorityOK, problems)
+			}
+		}
+		if listener.Protocol == protocolPOP3 && listener.POP3 == nil {
+			addProblem(problems, path+".pop3 is required for pop3 listeners")
+		}
+		if listener.Protocol == protocolPOP3 {
+			if listener.IMAP != nil {
+				addProblem(problems, path+".imap must not be set for pop3 listeners")
+			}
+			if listener.LMTP != nil {
+				addProblem(problems, path+".lmtp must not be set for pop3 listeners")
+			}
+			if listener.Sieve != nil {
+				addProblem(problems, path+".sieve must not be set for pop3 listeners")
+			}
+			if listener.POP3 != nil {
+				validatePOP3Listener(path+".pop3", listener, authority, authorityOK, problems)
 			}
 		}
 		if strings.TrimSpace(listener.TLS.Mode) == "" {
@@ -440,17 +458,21 @@ func validateBackendPool(path string, pool BackendPoolConfig, problems *[]string
 		if strings.ToLower(strings.TrimSpace(pool.Selector)) != "rendezvous_hash" {
 			addProblem(problems, path+".selector for Sieve pools must be rendezvous_hash")
 		}
+	case protocolPOP3:
+		if strings.ToLower(strings.TrimSpace(pool.Selector)) != "rendezvous_hash" {
+			addProblem(problems, path+".selector for POP3 pools must be rendezvous_hash")
+		}
 	default:
-		addProblem(problems, path+".protocol must be imap, lmtp, or sieve")
+		addProblem(problems, path+".protocol must be imap, lmtp, pop3, or sieve")
 	}
 }
 
 // validateBackendProtocol rejects backend protocols without production support.
 func validateBackendProtocol(path string, protocol string, problems *[]string) {
 	switch strings.ToLower(strings.TrimSpace(protocol)) {
-	case protocolIMAP, protocolLMTP, protocolSIEVE:
+	case protocolIMAP, protocolLMTP, protocolSIEVE, protocolPOP3:
 	default:
-		addProblem(problems, path+".protocol must be imap, lmtp, or sieve")
+		addProblem(problems, path+".protocol must be imap, lmtp, pop3, or sieve")
 	}
 }
 
@@ -732,6 +754,77 @@ func validSieveCapabilityToken(value string) bool {
 	return true
 }
 
+// validatePOP3Listener rejects unsafe POP3 frontend auth and CAPA policy.
+func validatePOP3Listener(path string, listener ListenerConfig, authority AuthorityConfig, authorityKnown bool, problems *[]string) {
+	pop3 := listener.POP3
+	if pop3 == nil {
+		addProblem(problems, path+" is required for pop3 listeners")
+
+		return
+	}
+
+	if len(pop3.AuthMechanisms) == 0 {
+		addProblem(problems, path+".auth_mechanisms is required")
+	}
+
+	if len(pop3.AuthMechanisms) > 0 && !listenerTLSProtectsCredentialAuth(listener.TLS.Mode) {
+		addProblem(problems, path+".auth_mechanisms requires frontend TLS mode starttls or implicit")
+	}
+
+	for _, mechanism := range pop3.AuthMechanisms {
+		if !validPOP3AuthMethod(mechanism) {
+			addProblem(problems, path+".auth_mechanisms contains unsupported method "+mechanism)
+
+			continue
+		}
+
+		if authorityKnown && !pop3MethodSupportedByAuthority(mechanism, authority) {
+			addProblem(problems, path+".auth_mechanisms contains method not supported by authority "+mechanism)
+		}
+	}
+
+	validatePOP3Capabilities(path+".capabilities", listener, pop3.Capabilities, problems)
+}
+
+// validatePOP3Capabilities keeps POP3 CAPA policy bounded and renderer-owned.
+func validatePOP3Capabilities(path string, listener ListenerConfig, capabilities []string, problems *[]string) {
+	for _, capability := range capabilities {
+		normalized := strings.ToUpper(strings.TrimSpace(capability))
+		switch normalized {
+		case "USER", "SASL", "TOP", "UIDL", "RESP-CODES", "PIPELINING":
+		case "STLS":
+			if listener.TLS.Mode != "starttls" {
+				addProblem(problems, path+" advertises STLS for non-starttls listener TLS mode")
+			}
+		default:
+			addProblem(problems, path+" contains unsupported capability "+capability)
+		}
+	}
+}
+
+// validPOP3AuthMethod reports whether POP3 frontend auth can accept this method.
+func validPOP3AuthMethod(mechanism string) bool {
+	switch strings.ToLower(strings.TrimSpace(mechanism)) {
+	case "userpass", "xoauth2", "oauthbearer":
+		return true
+	default:
+		return false
+	}
+}
+
+// pop3MethodSupportedByAuthority checks the selected authority mechanism class.
+func pop3MethodSupportedByAuthority(mechanism string, authority AuthorityConfig) bool {
+	mechanism = strings.ToLower(strings.TrimSpace(mechanism))
+	switch mechanism {
+	case "userpass":
+		return authority.Mechanisms.Password.Enabled
+	case "xoauth2", "oauthbearer":
+		return authority.Mechanisms.Bearer.Enabled && containsFold(authority.Mechanisms.Bearer.Names, mechanism)
+	default:
+		return false
+	}
+}
+
 // containsFold reports whether a string list contains a case-insensitive match.
 func containsFold(values []string, needle string) bool {
 	for _, value := range values {
@@ -829,6 +922,15 @@ func validateBackendAuth(path string, backend BackendConfig, problems *[]string)
 			return
 		}
 	}
+	if protocol == protocolPOP3 {
+		switch mode {
+		case backendAuthModeMasterUser, backendAuthModeCredentialReplay:
+		default:
+			addProblem(problems, path+".mode for POP3 backends must be master_user or credential_replay")
+
+			return
+		}
+	}
 
 	switch mode {
 	case backendAuthModeMasterUser:
@@ -917,9 +1019,10 @@ func validateCredentialReplayAuth(path string, backend BackendConfig, problems *
 		}
 	}
 
-	if strings.EqualFold(strings.TrimSpace(backend.Protocol), protocolSIEVE) {
+	protocol := strings.ToLower(strings.TrimSpace(backend.Protocol))
+	if protocol == protocolSIEVE || protocol == protocolPOP3 {
 		if !replay.RequireBackendTLS {
-			addProblem(problems, path+".require_backend_tls must be true for sieve credential_replay")
+			addProblem(problems, path+".require_backend_tls must be true for "+protocol+" credential_replay")
 		}
 
 		if !backendTLSCanVerify(backend.TLS) {
@@ -941,7 +1044,7 @@ func validBackendPasswordMechanism(mechanism string) bool {
 // validBackendReplayMechanism reports whether credential replay can preserve this mechanism.
 func validBackendReplayMechanism(mechanism string) bool {
 	switch strings.ToLower(strings.TrimSpace(mechanism)) {
-	case "plain", "login", "xoauth2", "oauthbearer":
+	case "plain", "login", "userpass", "xoauth2", "oauthbearer":
 		return true
 	default:
 		return false

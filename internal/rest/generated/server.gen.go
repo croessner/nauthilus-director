@@ -434,16 +434,19 @@ type RouteLookupIdentityResolution struct {
 
 // RouteLookupRequest defines model for RouteLookupRequest.
 type RouteLookupRequest struct {
+	// Attributes Secret-free routing attributes supplied by the caller. Attribute names that imply credentials, SASL/bearer material, scripts, UIDLs, message numbers, message sizes, message content or mailbox data are rejected.
 	Attributes      *map[string][]string `json:"attributes,omitempty"`
 	BackendPool     *string              `json:"backend_pool,omitempty"`
 	ClientIP        *string              `json:"client_ip,omitempty"`
 	IncludeAffinity *bool                `json:"include_affinity,omitempty"`
 	Listener        *string              `json:"listener,omitempty"`
 	Protocol        string               `json:"protocol"`
-	Recipient       *string              `json:"recipient,omitempty"`
-	ServiceName     *string              `json:"service_name,omitempty"`
-	Tenant          *string              `json:"tenant,omitempty"`
-	UserKey         *string              `json:"user_key,omitempty"`
+
+	// Recipient LMTP-only recipient identity used for no-auth route diagnostics.
+	Recipient   *string `json:"recipient,omitempty"`
+	ServiceName *string `json:"service_name,omitempty"`
+	Tenant      *string `json:"tenant,omitempty"`
+	UserKey     *string `json:"user_key,omitempty"`
 }
 
 // RouteLookupResponse defines model for RouteLookupResponse.

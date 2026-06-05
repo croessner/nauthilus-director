@@ -520,6 +520,19 @@ func TestRuntimeSessionListFlagsPassSieveProtocol(t *testing.T) {
 	}
 }
 
+// TestRuntimeSessionListFlagsPassPOP3Protocol verifies POP3 filters use generated request params.
+func TestRuntimeSessionListFlagsPassPOP3Protocol(t *testing.T) {
+	fake := newFakeControlClient()
+	_, stderr, code := runWithFakeClient([]string{"sessions", "list", "--protocol", "pop3"}, fake)
+	if code != 0 {
+		t.Fatalf("sessions list returned exit code %d, want 0; stderr=%q", code, stderr)
+	}
+
+	if fake.listSessionsParams == nil || fake.listSessionsParams.Protocol == nil || *fake.listSessionsParams.Protocol != "pop3" {
+		t.Fatalf("protocol param = %#v, want pop3", fake.listSessionsParams)
+	}
+}
+
 // TestRuntimeUserListFlagsPassPaginationParams verifies user list pagination fields.
 func TestRuntimeUserListFlagsPassPaginationParams(t *testing.T) {
 	fake := newFakeControlClient()
@@ -603,6 +616,29 @@ func TestRuntimeListDefaultOutputReportsNextCursor(t *testing.T) {
 	}
 	if !strings.Contains(stdout, "more=true next_cursor=user-cursor-b") {
 		t.Fatalf("stdout = %q, want user continuation cursor", stdout)
+	}
+}
+
+// TestRuntimeSessionListPrintsPOP3WithoutMailboxData verifies POP3 session rows stay opaque.
+func TestRuntimeSessionListPrintsPOP3WithoutMailboxData(t *testing.T) {
+	session := sessionA()
+	session.Backend = "mailstore-a-pop3"
+	session.Protocol = "pop3"
+
+	fake := newFakeControlClient()
+	fake.listSessionPages = []generated.SessionListResponse{{Sessions: []generated.SessionDetail{session}}}
+
+	stdout, stderr, code := runWithFakeClient([]string{"sessions", "list", "--protocol", "pop3"}, fake)
+	if code != 0 {
+		t.Fatalf("sessions list returned exit code %d, want 0; stderr=%q", code, stderr)
+	}
+	if !strings.Contains(stdout, "protocol=pop3") {
+		t.Fatalf("stdout = %q, want POP3 session row", stdout)
+	}
+	for _, forbidden := range []string{"uidl", "message_number", "message_size", "message_content", "mailbox"} {
+		if strings.Contains(strings.ToLower(stdout), forbidden) {
+			t.Fatalf("stdout exposed mailbox data marker %q: %s", forbidden, stdout)
+		}
 	}
 }
 
@@ -861,6 +897,28 @@ func TestRouteLookupRecipient(t *testing.T) {
 	}
 }
 
+// TestRouteLookupRecipientIsLMTPOnly rejects POP3 mailbox-style diagnostics before transport.
+func TestRouteLookupRecipientIsLMTPOnly(t *testing.T) {
+	fake := newFakeControlClient()
+	stdout, stderr, code := runWithFakeClient([]string{
+		"route", "lookup",
+		"--protocol", "pop3",
+		"--recipient", "user@example.test",
+	}, fake)
+	if code != 2 {
+		t.Fatalf("run returned exit code %d, want 2", code)
+	}
+	if stdout != "" {
+		t.Fatalf("stdout = %q, want empty output", stdout)
+	}
+	if !strings.Contains(stderr, "--recipient is only supported for lmtp") {
+		t.Fatalf("stderr = %q, want recipient diagnostic", stderr)
+	}
+	if len(fake.calls) != 0 {
+		t.Fatalf("calls = %#v, want none", fake.calls)
+	}
+}
+
 // TestRouteLookupSieveUsesGeneratedDTO verifies Sieve route lookup stays on the generated client model.
 func TestRouteLookupSieveUsesGeneratedDTO(t *testing.T) {
 	fake := newFakeControlClient()
@@ -886,6 +944,34 @@ func TestRouteLookupSieveUsesGeneratedDTO(t *testing.T) {
 
 	if request.Recipient != nil {
 		t.Fatalf("route request = %#v, want no recipient for Sieve", request)
+	}
+}
+
+// TestRouteLookupPOP3UsesGeneratedDTO verifies POP3 route lookup stays on the generated client model.
+func TestRouteLookupPOP3UsesGeneratedDTO(t *testing.T) {
+	fake := newFakeControlClient()
+	_, stderr, code := runWithFakeClient([]string{
+		"route", "lookup",
+		"--protocol", "pop3",
+		"--user", "user-a",
+		"--listener", "pop3",
+		"--backend-pool", "pop3-default",
+	}, fake)
+	if code != 0 {
+		t.Fatalf("run returned exit code %d, want 0; stderr=%q", code, stderr)
+	}
+
+	request := fake.routeRequest
+	if request.Protocol != "pop3" || request.UserKey == nil || *request.UserKey != "user-a" {
+		t.Fatalf("route request = %#v, want POP3 user diagnostic", request)
+	}
+
+	if request.Listener == nil || *request.Listener != "pop3" || request.BackendPool == nil || *request.BackendPool != "pop3-default" {
+		t.Fatalf("route request = %#v, want POP3 listener and pool", request)
+	}
+
+	if request.Recipient != nil {
+		t.Fatalf("route request = %#v, want no recipient for POP3", request)
 	}
 }
 
@@ -1176,6 +1262,9 @@ func TestUsageErrorsDoNotPrintSecrets(t *testing.T) {
 	}{
 		{name: "token", attribute: "token=super-secret-value"},
 		{name: "script", attribute: "script_name=super-secret-value"},
+		{name: "uidl", attribute: "uidl=super-secret-value"},
+		{name: "message size", attribute: "message_size=super-secret-value"},
+		{name: "mailbox", attribute: "mailbox=super-secret-value"},
 	}
 
 	for _, test := range tests {

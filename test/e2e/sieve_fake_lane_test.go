@@ -426,7 +426,13 @@ func writeSieveProductionProcessConfig(t *testing.T, options sieveProductionProc
 	content := fmt.Sprintf(`patch:
   - op: remove
     path: director.listeners
-    value: [imaps, lmtps]
+    value: [imaps, lmtps, pop3, pop3s]
+  - op: remove
+    path: director.backend_pools
+    value: [pop3-default]
+  - op: remove
+    path: director.backends
+    value: [mailstore-a-pop3, mailstore-b-pop3]
 runtime:
   instance_name: "e2e-director"
   process:

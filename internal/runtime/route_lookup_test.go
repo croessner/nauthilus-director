@@ -14,7 +14,7 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-//nolint:funlen,goconst,wsl_v5 // Route lookup fixtures repeat public diagnostic strings intentionally.
+//nolint:dupl,funlen,goconst,wsl_v5 // Route lookup fixtures repeat public diagnostic strings intentionally.
 package runtime
 
 import (
@@ -35,19 +35,24 @@ import (
 const (
 	routeLookupAccount        = "alice@example.test"
 	routeLookupAttributeShard = "mailShard"
+	routeLookupAttributeTier  = "tier"
 	routeLookupAttributeToken = "token"
 	routeLookupBackendA       = "mailstore-a-imap"
 	routeLookupBackendALMTP   = "mailstore-a-lmtp"
+	routeLookupBackendAPOP3   = "mailstore-a-pop3"
 	routeLookupBackendASieve  = "mailstore-a-sieve"
 	routeLookupBackendB       = "mailstore-b-imap"
+	routeLookupBackendBPOP3   = "mailstore-b-pop3"
 	routeLookupBackendBSieve  = "mailstore-b-sieve"
 	routeLookupCanonicalLMTP  = "canonical@example.test"
 	routeLookupDefaultPool    = "imap-default"
 	routeLookupHoldGeneration = "hold-7"
 	routeLookupListener       = "imap"
 	routeLookupPoolLMTP       = "lmtp-default"
+	routeLookupPoolPOP3       = "pop3-default"
 	routeLookupPoolSieve      = "sieve-default"
 	routeLookupProtocol       = "imap"
+	routeLookupProtocolPOP3   = "pop3"
 	routeLookupProtocolSieve  = "sieve"
 	routeLookupSecretValue    = "super-secret-value"
 	routeLookupShardA         = "mailstore-a"
@@ -96,13 +101,14 @@ func TestRouteLookupAcceptsSieveProtocol(t *testing.T) {
 	}
 }
 
-// TestRouteLookupDefaultsBackendPoolByProtocol verifies listener defaults support bare Sieve lookups.
-func TestRouteLookupDefaultsBackendPoolByProtocol(t *testing.T) {
+// TestRouteLookupAcceptsPOP3Protocol verifies POP3 diagnostics use shared selector input.
+func TestRouteLookupAcceptsPOP3Protocol(t *testing.T) {
 	service := newRouteLookupTestService(t, &countingRouteState{}, false)
 
 	response, err := service.Lookup(context.Background(), RouteLookupRequest{
-		Protocol:   routeLookupProtocolSieve,
-		AccountKey: routeLookupAccount,
+		Protocol:     routeLookupProtocolPOP3,
+		ListenerName: routeLookupProtocolPOP3,
+		AccountKey:   routeLookupAccount,
 		Attributes: map[string][]string{
 			routeLookupAttributeShard: {routeLookupShardA},
 		},
@@ -111,8 +117,49 @@ func TestRouteLookupDefaultsBackendPoolByProtocol(t *testing.T) {
 		t.Fatalf("Lookup returned error: %v", err)
 	}
 
-	if response.SelectedBackend != routeLookupBackendASieve {
-		t.Fatalf("selected backend = %q, want Sieve backend from protocol default pool", response.SelectedBackend)
+	if response.SelectedBackend != routeLookupBackendAPOP3 {
+		t.Fatalf("selected backend = %q, want %s", response.SelectedBackend, routeLookupBackendAPOP3)
+	}
+
+	foundPool := false
+	for _, candidate := range response.Backends {
+		if candidate.Identifier == routeLookupBackendAPOP3 && candidate.BackendPool == routeLookupPoolPOP3 && candidate.Protocol == routeLookupProtocolPOP3 {
+			foundPool = true
+		}
+	}
+	if !foundPool {
+		t.Fatalf("backends = %#v, want selected POP3 backend in pop3-default pool", response.Backends)
+	}
+}
+
+// TestRouteLookupDefaultsBackendPoolByProtocol verifies listener defaults support bare user lookups.
+func TestRouteLookupDefaultsBackendPoolByProtocol(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		protocol     string
+		wantSelected string
+	}{
+		{name: "sieve", protocol: routeLookupProtocolSieve, wantSelected: routeLookupBackendASieve},
+		{name: "pop3", protocol: routeLookupProtocolPOP3, wantSelected: routeLookupBackendAPOP3},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service := newRouteLookupTestService(t, &countingRouteState{}, false)
+
+			response, err := service.Lookup(context.Background(), RouteLookupRequest{
+				Protocol:   test.protocol,
+				AccountKey: routeLookupAccount,
+				Attributes: map[string][]string{
+					routeLookupAttributeShard: {routeLookupShardA},
+				},
+			})
+			if err != nil {
+				t.Fatalf("Lookup returned error: %v", err)
+			}
+
+			if response.SelectedBackend != test.wantSelected {
+				t.Fatalf("selected backend = %q, want %s from protocol default pool", response.SelectedBackend, test.wantSelected)
+			}
+		})
 	}
 }
 
@@ -188,6 +235,100 @@ func TestRouteLookupReportsSieveBackendPinContexts(t *testing.T) {
 			response, err := service.Lookup(context.Background(), RouteLookupRequest{
 				Protocol:     routeLookupProtocolSieve,
 				ListenerName: routeLookupProtocolSieve,
+				AccountKey:   routeLookupAccount,
+				Attributes: map[string][]string{
+					routeLookupAttributeShard: {test.shard},
+				},
+			})
+			if err != nil {
+				t.Fatalf("Lookup returned error: %v", err)
+			}
+
+			if response.SelectedBackend != test.wantSelected || response.FailClosed != test.wantFail {
+				t.Fatalf("response selected/fail = %q/%t, want %q/%t", response.SelectedBackend, response.FailClosed, test.wantSelected, test.wantFail)
+			}
+
+			if response.BackendPin.Applied != test.wantApplied || response.BackendPin.ReasonClass != test.wantReason {
+				t.Fatalf("backend pin = %#v, want applied=%t reason=%s", response.BackendPin, test.wantApplied, test.wantReason)
+			}
+
+			assertNoRouteLookupMutations(t, store)
+		})
+	}
+}
+
+// TestRouteLookupReportsPOP3BackendPinContexts verifies POP3 pin diagnostics stay shared.
+func TestRouteLookupReportsPOP3BackendPinContexts(t *testing.T) {
+	tests := []struct {
+		name         string
+		pin          state.UserBackendPinRecord
+		snapshots    map[string]backend.RuntimeSnapshot
+		shard        string
+		wantSelected string
+		wantApplied  bool
+		wantReason   string
+		wantFail     bool
+	}{
+		{
+			name: "matching",
+			pin: state.UserBackendPinRecord{
+				Present:           true,
+				BackendIdentifier: routeLookupBackendBPOP3,
+				Protocol:          routeLookupProtocolPOP3,
+				BackendPool:       routeLookupPoolPOP3,
+				ShardTag:          routeLookupShardB,
+				Generation:        "pop3-pin-1",
+			},
+			shard:        routeLookupShardB,
+			wantSelected: routeLookupBackendBPOP3,
+			wantApplied:  true,
+			wantReason:   routeLookupBackendPinApplied,
+		},
+		{
+			name: "mismatched",
+			pin: state.UserBackendPinRecord{
+				Present:           true,
+				BackendIdentifier: routeLookupBackendA,
+				Protocol:          routeLookupProtocol,
+				BackendPool:       routeLookupDefaultPool,
+				ShardTag:          routeLookupShardA,
+				Generation:        "imap-pin-1",
+			},
+			shard:        routeLookupShardA,
+			wantSelected: routeLookupBackendAPOP3,
+			wantReason:   routeLookupBackendPinMismatch,
+		},
+		{
+			name: "unusable",
+			pin: state.UserBackendPinRecord{
+				Present:           true,
+				BackendIdentifier: routeLookupBackendAPOP3,
+				Protocol:          routeLookupProtocolPOP3,
+				BackendPool:       routeLookupPoolPOP3,
+				ShardTag:          routeLookupShardA,
+				Generation:        "pop3-pin-2",
+			},
+			snapshots: map[string]backend.RuntimeSnapshot{
+				routeLookupBackendAPOP3: {
+					RuntimeOverride: backend.RuntimeOverride{
+						InService: new(false),
+					},
+				},
+			},
+			shard:      routeLookupShardA,
+			wantReason: string(backend.EffectiveExclusionRuntimeOut),
+			wantFail:   true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store := &countingRouteState{backendPin: test.pin, snapshots: test.snapshots}
+			service := newRouteLookupTestService(t, store, false)
+
+			response, err := service.Lookup(context.Background(), RouteLookupRequest{
+				Protocol:     routeLookupProtocolPOP3,
+				ListenerName: routeLookupProtocolPOP3,
 				AccountKey:   routeLookupAccount,
 				Attributes: map[string][]string{
 					routeLookupAttributeShard: {test.shard},
@@ -410,8 +551,65 @@ func TestRouteLookupExplanationsReflectRuntimeExclusions(t *testing.T) {
 	}
 }
 
-// TestRouteLookupResponseOmitsSecretBearingAttributeValues verifies safe output.
-func TestRouteLookupResponseOmitsSecretBearingAttributeValues(t *testing.T) {
+// TestRouteLookupRejectsCredentialAndMailboxBearingAttributes verifies unsafe fields fail closed.
+func TestRouteLookupRejectsCredentialAndMailboxBearingAttributes(t *testing.T) {
+	for _, attributeName := range []string{
+		routeLookupAttributeToken,
+		"password",
+		"sasl_blob",
+		"uidl",
+		"message_number",
+		"message_size",
+		"message_content",
+		"mailbox",
+	} {
+		t.Run(attributeName, func(t *testing.T) {
+			store := &countingRouteState{}
+			service := newRouteLookupTestService(t, store, false)
+
+			_, err := service.Lookup(context.Background(), RouteLookupRequest{
+				Protocol:   routeLookupProtocolPOP3,
+				AccountKey: routeLookupAccount,
+				Attributes: map[string][]string{
+					attributeName: {routeLookupSecretValue},
+				},
+			})
+			if !IsErrorKind(err, ErrorKindInvalidRequest) {
+				t.Fatalf("Lookup error = %v, want invalid request", err)
+			}
+
+			if store.backendSnapshotCalls != 0 || store.lookupAffinityCalls != 0 || store.backendPinGetCalls != 0 || store.userHoldCheckCalls != 0 {
+				t.Fatalf("route lookup performed reads after rejected input: %#v", store)
+			}
+
+			assertNoRouteLookupMutations(t, store)
+		})
+	}
+}
+
+// TestRouteLookupRejectsRecipientOutsideLMTP keeps POP3 user-key diagnostics mailbox-free.
+func TestRouteLookupRejectsRecipientOutsideLMTP(t *testing.T) {
+	store := &countingRouteState{}
+	service := newRouteLookupTestService(t, store, false)
+
+	_, err := service.Lookup(context.Background(), RouteLookupRequest{
+		Protocol:   routeLookupProtocolPOP3,
+		AccountKey: routeLookupAccount,
+		Recipient:  "<user@example.test>",
+	})
+	if !IsErrorKind(err, ErrorKindInvalidRequest) {
+		t.Fatalf("Lookup error = %v, want invalid request", err)
+	}
+
+	if store.backendSnapshotCalls != 0 || store.lookupAffinityCalls != 0 || store.backendPinGetCalls != 0 || store.userHoldCheckCalls != 0 {
+		t.Fatalf("route lookup performed reads after rejected recipient input: %#v", store)
+	}
+
+	assertNoRouteLookupMutations(t, store)
+}
+
+// TestRouteLookupResponseOmitsBenignAttributeValues verifies safe output.
+func TestRouteLookupResponseOmitsBenignAttributeValues(t *testing.T) {
 	store := &countingRouteState{}
 	service := newRouteLookupTestService(t, store, false)
 
@@ -420,7 +618,7 @@ func TestRouteLookupResponseOmitsSecretBearingAttributeValues(t *testing.T) {
 		AccountKey: routeLookupAccount,
 		Attributes: map[string][]string{
 			routeLookupAttributeShard: {routeLookupShardA},
-			routeLookupAttributeToken: {routeLookupSecretValue},
+			routeLookupAttributeTier:  {routeLookupSecretValue},
 		},
 	})
 	if err != nil {
@@ -428,8 +626,8 @@ func TestRouteLookupResponseOmitsSecretBearingAttributeValues(t *testing.T) {
 	}
 
 	rendered := fmt.Sprintf("%#v", response)
-	if strings.Contains(rendered, routeLookupSecretValue) || strings.Contains(rendered, routeLookupAttributeToken) {
-		t.Fatalf("route lookup response leaked secret-bearing attributes: %s", rendered)
+	if strings.Contains(rendered, routeLookupSecretValue) || strings.Contains(rendered, routeLookupAttributeTier) {
+		t.Fatalf("route lookup response leaked attribute input: %s", rendered)
 	}
 
 	assertNoRouteLookupMutations(t, store)
@@ -839,6 +1037,41 @@ func TestRouteLookupReportsActiveUserHoldContext(t *testing.T) {
 	assertNoRouteLookupMutations(t, store)
 }
 
+// TestRouteLookupReportsPOP3ActiveUserHoldWithoutWaiting verifies POP3 hold context is read-only.
+func TestRouteLookupReportsPOP3ActiveUserHoldWithoutWaiting(t *testing.T) {
+	now := time.Unix(1_780_000_000, 0).UTC()
+	store := &countingRouteState{
+		userHold: state.UserHoldRecord{
+			Present:           true,
+			Generation:        routeLookupHoldGeneration,
+			CreatedAt:         now.Add(-time.Minute),
+			ExpiresAt:         now.Add(5 * time.Minute),
+			RequestedDuration: 10 * time.Minute,
+			ServerTime:        now,
+		},
+	}
+	service := newRouteLookupTestService(t, store, false)
+
+	response, err := service.Lookup(context.Background(), RouteLookupRequest{
+		Protocol:     routeLookupProtocolPOP3,
+		ListenerName: routeLookupProtocolPOP3,
+		AccountKey:   routeLookupAccount,
+		Attributes: map[string][]string{
+			routeLookupAttributeShard: {routeLookupShardA},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Lookup returned error: %v", err)
+	}
+
+	if response.SelectedBackend != routeLookupBackendAPOP3 {
+		t.Fatalf("selected backend = %q, want %s", response.SelectedBackend, routeLookupBackendAPOP3)
+	}
+
+	assertActiveUserHoldContext(t, response)
+	assertNoRouteLookupMutations(t, store)
+}
+
 // TestRouteLookupTreatsExpiredUserHoldAsNonBlocking verifies stale records do not defer.
 func TestRouteLookupTreatsExpiredUserHoldAsNonBlocking(t *testing.T) {
 	now := time.Unix(1_780_000_000, 0).UTC()
@@ -1108,6 +1341,12 @@ func newRouteLookupTestService(t *testing.T, store *countingRouteState, enforceH
 				Protocol:    routeLookupProtocolSieve,
 				ServiceName: routeLookupProtocolSieve,
 				BackendPool: routeLookupPoolSieve,
+			},
+			{
+				Name:        routeLookupProtocolPOP3,
+				Protocol:    routeLookupProtocolPOP3,
+				ServiceName: routeLookupProtocolPOP3,
+				BackendPool: routeLookupPoolPOP3,
 			},
 		},
 		DefaultPool:   routeLookupDefaultPool,

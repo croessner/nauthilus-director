@@ -14,6 +14,7 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
+//nolint:wsl_v5 // REST auth parsing keeps small validation steps adjacent.
 package rest
 
 import (
@@ -54,7 +55,7 @@ func (a ControlAuthenticator) shouldInspectRouteLookup(r *http.Request) bool {
 	return r.Method == http.MethodPost && r.URL.Path == "/api/v1/route/lookup"
 }
 
-// inspectRouteLookupBody rejects credential- or script-bearing route diagnostics early.
+// inspectRouteLookupBody rejects credential- or mailbox-bearing route diagnostics early.
 func (a ControlAuthenticator) inspectRouteLookupBody(w http.ResponseWriter, r *http.Request) bool {
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxRouteLookupInspectionBytes+1))
 	if err != nil {
@@ -70,7 +71,7 @@ func (a ControlAuthenticator) inspectRouteLookupBody(w http.ResponseWriter, r *h
 	}
 
 	if containsForbiddenRouteLookupKey(body) {
-		writeProblem(w, http.StatusBadRequest, "credential_input_rejected", "route lookup does not accept authentication or script material", "LookupRoute")
+		writeProblem(w, http.StatusBadRequest, "credential_input_rejected", "route lookup does not accept authentication or mailbox material", "LookupRoute")
 		return false
 	}
 
@@ -108,28 +109,52 @@ func containsForbiddenRouteLookupKeyValue(value any) bool {
 	return false
 }
 
-// isForbiddenRouteLookupKey reports whether a JSON key appears to carry credentials or scripts.
+// isForbiddenRouteLookupKey reports whether a JSON key appears to carry forbidden material.
 func isForbiddenRouteLookupKey(key string) bool {
 	fragments := [...]string{
 		"auth",
 		"bearer",
 		"credential",
+		"mailboxcontent",
+		"mailboxdata",
+		"mailboxmessage",
+		"messagecontent",
+		"messagedata",
+		"messagenum",
+		"messagenumber",
+		"messagesize",
+		"msgcontent",
+		"msgnum",
+		"msgsize",
 		"password",
 		"passwd",
 		"sasl",
 		"script",
 		"secret",
 		"token",
+		"uidl",
 	}
 
-	normalized := strings.ToLower(strings.TrimSpace(key))
+	normalized := canonicalRouteLookupKey(key)
 	for _, fragment := range fragments {
 		if strings.Contains(normalized, fragment) {
 			return true
 		}
 	}
 
-	return false
+	return normalized == "mailbox"
+}
+
+// canonicalRouteLookupKey removes separators before marker matching.
+func canonicalRouteLookupKey(key string) string {
+	var builder strings.Builder
+	for _, r := range strings.ToLower(strings.TrimSpace(key)) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			builder.WriteRune(r)
+		}
+	}
+
+	return builder.String()
 }
 
 // writeProblem writes structured error JSON without echoing request values.

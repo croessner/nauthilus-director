@@ -195,13 +195,13 @@ func writeDovecotManageSieveProcessConfig(t *testing.T, options interopManageSie
 	content := fmt.Sprintf(`patch:
   - op: remove
     path: director.listeners
-    value: [imaps, lmtp, lmtps, sieves]
+    value: [imaps, lmtp, lmtps, sieves, pop3, pop3s]
   - op: remove
     path: director.backend_pools
-    value: [lmtp-default]
+    value: [lmtp-default, pop3-default]
   - op: remove
     path: director.backends
-    value: [mailstore-a-lmtp, mailstore-b-lmtp]
+    value: [mailstore-a-lmtp, mailstore-b-lmtp, mailstore-a-pop3, mailstore-b-pop3]
 runtime:
   instance_name: "e2e-director"
   process:

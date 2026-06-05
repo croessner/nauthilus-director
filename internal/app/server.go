@@ -32,6 +32,7 @@ import (
 	"github.com/croessner/nauthilus-director/internal/placement"
 	"github.com/croessner/nauthilus-director/internal/protocol/imap"
 	"github.com/croessner/nauthilus-director/internal/protocol/lmtp"
+	"github.com/croessner/nauthilus-director/internal/protocol/pop3"
 	"github.com/croessner/nauthilus-director/internal/protocol/sieve"
 	"github.com/croessner/nauthilus-director/internal/proxy"
 	"github.com/croessner/nauthilus-director/internal/rest"
@@ -47,6 +48,7 @@ const (
 	protocolIMAP  = "imap"
 	protocolLMTP  = "lmtp"
 	protocolSIEVE = "sieve"
+	protocolPOP3  = "pop3"
 )
 
 // Options configures one production server process instance.
@@ -87,6 +89,7 @@ type reaperHandle struct {
 type protocolHealthChecker struct {
 	imap  backend.HealthChecker
 	lmtp  backend.HealthChecker
+	pop3  backend.HealthChecker
 	sieve backend.HealthChecker
 }
 
@@ -101,6 +104,8 @@ func (c protocolHealthChecker) CheckBackend(ctx context.Context, target backend.
 		return c.imap.CheckBackend(ctx, target, request)
 	case protocolLMTP:
 		return c.lmtp.CheckBackend(ctx, target, request)
+	case protocolPOP3:
+		return c.pop3.CheckBackend(ctx, target, request)
 	case protocolSIEVE:
 		return c.sieve.CheckBackend(ctx, target, request)
 	default:
@@ -560,6 +565,8 @@ func sessionHandlerFactory(
 			return lmtpSessionHandler(options, resolver, store, selector, capabilities, placementService, retentionTTL, placementGate)
 		case protocolSIEVE:
 			return sieveSessionHandler(options, resolver, placementService, retentionTTL, placementGate, processVersion)
+		case protocolPOP3:
+			return pop3SessionHandler(options, resolver, placementService, retentionTTL, placementGate)
 		default:
 			return unsupportedProtocolHandler{protocol: options.Config.Protocol}
 		}
@@ -749,6 +756,59 @@ func sieveSessionHandler(
 		PlacementService:       placementService,
 		PlacementGate:          placementGate,
 		BackendConnector:       sieve.NewTCPBackendConnector(nil),
+		ProxyRunner:            proxy.NewPipe(),
+		LocalSessions:          options.LocalSessions,
+		Observability:          options.Observability,
+	})
+}
+
+// pop3SessionHandler builds the POP3 dispatch shell and shared placement boundary.
+func pop3SessionHandler(
+	options listener.SessionOptions,
+	resolver routing.RoutingResolver,
+	placementService placement.SessionPlacer,
+	retentionTTL time.Duration,
+	placementGate runtimectl.PlacementGate,
+) listener.SessionHandler {
+	var (
+		authMechanisms []string
+		capabilities   []string
+	)
+
+	if options.Config.POP3 != nil {
+		authMechanisms = options.Config.POP3.AuthMechanisms
+		capabilities = options.Config.POP3.Capabilities
+	}
+
+	return pop3.NewHandler(pop3.SessionConfig{
+		ListenerName:           options.ListenerName,
+		AuthorityName:          options.Config.Authority,
+		AuthorityTransport:     options.AuthorityTransport,
+		ServiceName:            options.Config.ServiceName,
+		Network:                options.Config.Network,
+		BackendPool:            options.Config.BackendPool,
+		DirectorInstanceID:     options.DirectorInstanceID,
+		DefaultTenant:          options.DefaultTenant,
+		DefaultShard:           options.DefaultShard,
+		TLSMode:                options.Config.TLS.Mode,
+		AuthMechanisms:         authMechanisms,
+		Capabilities:           capabilities,
+		PreauthTimeout:         options.Timeouts.Preauth.Std(),
+		AuthTimeout:            options.Timeouts.Auth.Std(),
+		SessionLeaseTTL:        options.SessionLeaseTTL,
+		SessionIdleGrace:       options.SessionIdleGrace,
+		BackendRetentionTTL:    retentionTTL,
+		ProxyIdleTimeout:       options.Timeouts.ProxyIdle.Std(),
+		MaxPreauthLineBytes:    options.Security.MaxPreauthLineBytes,
+		MaxPreauthLiteralBytes: options.Security.MaxPreauthLiteralBytes,
+		MaxBearerTokenBytes:    options.BearerTokenMaxBytes,
+		BackendConnectTimeout:  options.Timeouts.BackendConnect.Std(),
+		FrontendTLSConfig:      options.FrontendTLSConfig,
+		Authenticator:          options.Authenticator,
+		RoutingResolver:        resolver,
+		PlacementService:       placementService,
+		PlacementGate:          placementGate,
+		BackendConnector:       pop3.NewTCPBackendConnector(nil),
 		ProxyRunner:            proxy.NewPipe(),
 		LocalSessions:          options.LocalSessions,
 		Observability:          options.Observability,
@@ -973,6 +1033,7 @@ func healthRunner(
 		protocolHealthChecker{
 			imap:  imap.NewHealthChecker(imap.NewTCPBackendConnector(nil)),
 			lmtp:  lmtp.NewHealthChecker(lmtp.NewTCPBackendConnector(nil)),
+			pop3:  pop3.NewHealthChecker(pop3.NewTCPBackendConnector(nil)),
 			sieve: sieve.NewHealthChecker(sieve.NewTCPBackendConnector(nil)),
 		},
 		backend.HealthRunnerConfig{

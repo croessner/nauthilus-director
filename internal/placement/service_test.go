@@ -14,7 +14,7 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-//nolint:dupl,goconst // Placement matrix cases intentionally mirror protocol directions.
+//nolint:dupl,funlen,goconst // Placement matrix cases intentionally mirror protocol directions.
 package placement
 
 import (
@@ -31,14 +31,18 @@ const (
 	placementAccountKey       = "alice@example.test"
 	placementBackendA         = "mailstore-a-imap"
 	placementBackendALMTP     = "mailstore-a-lmtp"
+	placementBackendAPOP3     = "mailstore-a-pop3"
 	placementBackendASieve    = "mailstore-a-sieve"
 	placementBackendB         = "mailstore-b-imap"
+	placementBackendBPOP3     = "mailstore-b-pop3"
 	placementBackendBSieve    = "mailstore-b-sieve"
 	placementBackendSameShard = "mailstore-a-other-imap"
 	placementNodeA            = "mailstore-a-node"
 	placementNodeB            = "mailstore-b-node"
 	placementNodeSameShard    = "mailstore-a-other-node"
 	placementPool             = "imap-default"
+	placementPOP3Pool         = "pop3-default"
+	placementPOP3Protocol     = "pop3"
 	placementProtocol         = "imap"
 	placementShardA           = "mailstore-a"
 	placementShardB           = "mailstore-b"
@@ -359,6 +363,175 @@ func TestServiceIgnoresCrossProtocolBackendPinForSieve(t *testing.T) {
 	}
 }
 
+// TestServiceReusesCrossProtocolBindingForPOP3Session verifies POP3 resolves existing protocol-neutral bindings by backend node.
+func TestServiceReusesCrossProtocolBindingForPOP3Session(t *testing.T) {
+	tests := []struct {
+		name                string
+		status              string
+		bindingStatus       state.BindingStatus
+		activeSessionCount  int
+		activeHolderCount   int
+		retentionExpiresAt  time.Time
+		wantBindingSource   BindingSource
+		wantOpenedSessionID string
+	}{
+		{
+			name:                "active IMAP",
+			status:              affinityStatusFound,
+			bindingStatus:       state.BindingStatusActive,
+			activeSessionCount:  1,
+			activeHolderCount:   1,
+			wantBindingSource:   BindingSourceActiveAffinity,
+			wantOpenedSessionID: "pop3-from-active-imap",
+		},
+		{
+			name:                "active ManageSieve",
+			status:              affinityStatusFound,
+			bindingStatus:       state.BindingStatusActive,
+			activeSessionCount:  1,
+			activeHolderCount:   1,
+			wantBindingSource:   BindingSourceActiveAffinity,
+			wantOpenedSessionID: "pop3-from-active-sieve",
+		},
+		{
+			name:                "active LMTP delivery hold",
+			status:              affinityStatusFound,
+			bindingStatus:       state.BindingStatusActive,
+			activeSessionCount:  0,
+			activeHolderCount:   1,
+			wantBindingSource:   BindingSourceActiveAffinity,
+			wantOpenedSessionID: "pop3-from-active-lmtp",
+		},
+		{
+			name:                "retained IMAP",
+			status:              affinityStatusRetained,
+			bindingStatus:       state.BindingStatusRetained,
+			retentionExpiresAt:  time.Now().Add(time.Minute),
+			wantBindingSource:   BindingSourceRetainedBinding,
+			wantOpenedSessionID: "pop3-from-retained-imap",
+		},
+		{
+			name:                "retained ManageSieve",
+			status:              affinityStatusRetained,
+			bindingStatus:       state.BindingStatusRetained,
+			retentionExpiresAt:  time.Now().Add(time.Minute),
+			wantBindingSource:   BindingSourceRetainedBinding,
+			wantOpenedSessionID: "pop3-from-retained-sieve",
+		},
+		{
+			name:                "retained LMTP",
+			status:              affinityStatusRetained,
+			bindingStatus:       state.BindingStatusRetained,
+			retentionExpiresAt:  time.Now().Add(time.Minute),
+			wantBindingSource:   BindingSourceRetainedBinding,
+			wantOpenedSessionID: "pop3-from-retained-lmtp",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := &placementStoreFixture{
+				affinity: state.AffinityRecord{
+					Key:                placementKey(),
+					ShardTag:           placementShardA,
+					BackendNode:        placementNodeA,
+					Status:             tt.status,
+					Present:            true,
+					BindingStatus:      tt.bindingStatus,
+					ActiveSessionCount: tt.activeSessionCount,
+					ActiveHolderCount:  tt.activeHolderCount,
+					RetentionExpiresAt: tt.retentionExpiresAt,
+				},
+			}
+			selector := &placementSelectorFixture{registry: placementRegistryFixture()}
+			service := mustPlacementService(t, selector, store)
+
+			lease, err := service.PlaceSession(context.Background(), placementPOP3Request(tt.wantOpenedSessionID, placementShardB))
+			if err != nil {
+				t.Fatalf("PlaceSession returned error: %v", err)
+			}
+
+			if selector.selectCalls != 0 || selector.nodeCalls != 1 {
+				t.Fatalf("selector calls select=%d node=%d, want node-only POP3 reuse", selector.selectCalls, selector.nodeCalls)
+			}
+
+			if lease.Backend().Backend.Identifier != placementBackendAPOP3 {
+				t.Fatalf("selected backend = %q, want POP3 backend in existing node", lease.Backend().Backend.Identifier)
+			}
+
+			if got := lease.Binding().Source; got != tt.wantBindingSource {
+				t.Fatalf("binding source = %q, want %q", got, tt.wantBindingSource)
+			}
+
+			if store.opened[0].Protocol != placementPOP3Protocol || store.opened[0].BackendNode != placementNodeA {
+				t.Fatalf("opened POP3 session = %#v, want existing backend node", store.opened[0])
+			}
+		})
+	}
+}
+
+// TestServiceAppliesMatchingPOP3BackendPin verifies POP3 pins stay protocol and pool scoped.
+func TestServiceAppliesMatchingPOP3BackendPin(t *testing.T) {
+	store := &placementStoreFixture{
+		pin: state.UserBackendPinRecord{
+			Present:           true,
+			Key:               placementKey(),
+			BackendIdentifier: placementBackendBPOP3,
+			Protocol:          placementPOP3Protocol,
+			BackendPool:       placementPOP3Pool,
+			ShardTag:          placementShardB,
+		},
+	}
+	selector := &placementSelectorFixture{registry: placementRegistryFixture()}
+	service := mustPlacementService(t, selector, store)
+
+	lease, err := service.PlaceSession(context.Background(), placementPOP3Request("pop3-pinned", placementShardB))
+	if err != nil {
+		t.Fatalf("PlaceSession returned error: %v", err)
+	}
+
+	if selector.lastSelect.OperatorBackendIdentifier != placementBackendBPOP3 {
+		t.Fatalf("operator backend = %q, want matching POP3 pin", selector.lastSelect.OperatorBackendIdentifier)
+	}
+
+	if lease.Backend().Backend.Identifier != placementBackendBPOP3 {
+		t.Fatalf("selected backend = %q, want pinned POP3 backend", lease.Backend().Backend.Identifier)
+	}
+
+	if got := lease.Binding().Source; got != BindingSourceOperatorBackendPin {
+		t.Fatalf("binding source = %q, want %q", got, BindingSourceOperatorBackendPin)
+	}
+}
+
+// TestServiceIgnoresCrossProtocolBackendPinForPOP3 verifies non-POP3 pins do not name POP3 targets.
+func TestServiceIgnoresCrossProtocolBackendPinForPOP3(t *testing.T) {
+	store := &placementStoreFixture{
+		pin: state.UserBackendPinRecord{
+			Present:           true,
+			Key:               placementKey(),
+			BackendIdentifier: placementBackendA,
+			Protocol:          placementProtocol,
+			BackendPool:       placementPool,
+			ShardTag:          placementShardA,
+		},
+	}
+	selector := &placementSelectorFixture{registry: placementRegistryFixture()}
+	service := mustPlacementService(t, selector, store)
+
+	lease, err := service.PlaceSession(context.Background(), placementPOP3Request("pop3-cross-pin", placementShardA))
+	if err != nil {
+		t.Fatalf("PlaceSession returned error: %v", err)
+	}
+
+	if selector.lastSelect.OperatorBackendIdentifier != "" {
+		t.Fatalf("operator backend = %q, want cross-protocol pin ignored", selector.lastSelect.OperatorBackendIdentifier)
+	}
+
+	if lease.Backend().Backend.Identifier != placementBackendAPOP3 {
+		t.Fatalf("selected backend = %q, want normal POP3 backend", lease.Backend().Backend.Identifier)
+	}
+}
+
 // TestServiceUsesMovementOverrideBeforeRetainedBinding verifies explicit moves supersede idle retention.
 func TestServiceUsesMovementOverrideBeforeRetainedBinding(t *testing.T) {
 	store := &placementStoreFixture{
@@ -570,6 +743,17 @@ func placementSieveRequest(sessionID string, shardTag string) Request {
 	return request
 }
 
+// placementPOP3Request creates one complete POP3 session placement request fixture.
+func placementPOP3Request(sessionID string, shardTag string) Request {
+	request := placementRequest(sessionID, shardTag)
+	request.Protocol = placementPOP3Protocol
+	request.BackendPool = placementPOP3Pool
+	request.ListenerName = "pop3"
+	request.ServiceName = "pop3"
+
+	return request
+}
+
 // placementKey returns the stable user-affinity key used by unit tests.
 func placementKey() state.AffinityKey {
 	return state.AffinityKey{Tenant: placementTenant, AccountKey: placementAccountKey}
@@ -581,8 +765,10 @@ func placementRegistryFixture() *placementRegistry {
 		backends: map[string]backend.Backend{
 			placementBackendA:      placementBackend(placementBackendA, placementNodeA, placementShardA),
 			placementBackendALMTP:  placementBackendWithProtocol(placementBackendALMTP, placementNodeA, placementShardA, "lmtp", "lmtp-default"),
+			placementBackendAPOP3:  placementBackendWithProtocol(placementBackendAPOP3, placementNodeA, placementShardA, placementPOP3Protocol, placementPOP3Pool),
 			placementBackendASieve: placementBackendWithProtocol(placementBackendASieve, placementNodeA, placementShardA, placementSieveProtocol, placementSievePool),
 			placementBackendB:      placementBackend(placementBackendB, placementNodeB, placementShardB),
+			placementBackendBPOP3:  placementBackendWithProtocol(placementBackendBPOP3, placementNodeB, placementShardB, placementPOP3Protocol, placementPOP3Pool),
 			placementBackendBSieve: placementBackendWithProtocol(placementBackendBSieve, placementNodeB, placementShardB, placementSieveProtocol, placementSievePool),
 		},
 	}

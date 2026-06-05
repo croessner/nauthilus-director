@@ -397,7 +397,7 @@ func (r *HealthRunner) Run(ctx context.Context) error {
 	}
 }
 
-// RunOnce performs one bounded health pass over configured IMAP backends.
+// RunOnce performs one bounded health pass over configured protocol backends.
 func (r *HealthRunner) RunOnce(ctx context.Context) error {
 	if r == nil {
 		return newBackendError(ErrorKindConfig, "health_runner", "runner unavailable", nil)
@@ -478,7 +478,7 @@ func (r *HealthRunner) checkBackend(ctx context.Context, candidate Backend) erro
 // healthSupportedProtocol reports whether a protocol has production health probes.
 func healthSupportedProtocol(protocol string) bool {
 	switch strings.ToLower(strings.TrimSpace(protocol)) {
-	case protocolIMAP, protocolLMTP, protocolSIEVE:
+	case protocolIMAP, protocolLMTP, protocolSIEVE, protocolPOP3:
 		return true
 	default:
 		return false

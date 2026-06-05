@@ -16,6 +16,13 @@ Verified source paths:
 - `internal/state/scripts/*.lua`
 - `internal/protocol/imap/placement.go`
 - `internal/protocol/lmtp/placement.go`
+- `internal/protocol/sieve/session.go`
+- `internal/protocol/sieve/placement.go`
+- `internal/protocol/sieve/proxy.go`
+- `internal/protocol/pop3/session.go`
+- `internal/protocol/pop3/auth.go`
+- `internal/protocol/pop3/placement.go`
+- `internal/protocol/pop3/proxy.go`
 - `internal/backend/selector.go`
 - `internal/backend/runtime.go`
 - `internal/backend/runtime_selector.go`
@@ -257,6 +264,113 @@ sequenceDiagram
 `kick`, `drain` and `move_generation_changed` into proxy control errors. The
 proxy lifecycle then closes the session through `CloseSession`.
 
+## ManageSieve Session Flow
+
+ManageSieve placement lives in `internal/protocol/sieve/placement.go`. Proxy
+handoff and lease heartbeats live in `internal/protocol/sieve/proxy.go`.
+
+ManageSieve uses the canonical protocol value `sieve` for routing, placement,
+runtime state, route lookup and metrics. Listener or service names such as
+`sieve` and `sieves` are transport-facing names only.
+
+Authenticated ManageSieve sessions use the same shared placement boundary as
+IMAP:
+
+1. `placeAuthenticatedSession` runs only after the frontend authentication
+   command has been accepted by Nauthilus.
+2. The routing request is built from canonical auth facts. The client-supplied
+   authorization identity is diagnostic input, not the affinity key.
+3. Missing route shard is filled from the listener default. Incomplete routing
+   fails before runtime state is opened.
+4. The shared placement gate checks user holds before placement reads, backend
+   selection, backend reservation or backend connect.
+5. `placement.SessionPlacer.PlaceSession` opens a `holder_kind=session` record
+   with protocol `sieve`, applies active or retained backend-node affinity,
+   scoped backend pins, movement overrides, backend health, maintenance,
+   runtime overrides and capacity reservation, and attaches the selected backend.
+6. `transitionAuthenticatedSession` connects to the selected ManageSieve
+   backend and completes configured backend authentication before the frontend
+   receives authentication success.
+7. If backend access or the frontend success write fails, `closePlacedSession`
+   rolls the lease back and releases the backend reservation through the shared
+   close path.
+8. After frontend success, `BufferedProxyHandoff` carries any read-ahead bytes
+   into opaque proxy mode. The director does not parse or log post-auth
+   ManageSieve script commands, literals or script names for routing.
+9. `placementLeaseLifecycle.Heartbeat` refreshes the Redis lease during proxy
+   mode and converts `kick`, `drain` and `move_generation_changed` into proxy
+   control errors. `Close` releases the lease when proxying ends.
+10. Closing the final ManageSieve holder leaves a retained backend-node binding
+    for the configured backend-retention window.
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Sieve as ManageSieve Session
+    participant Auth as Nauthilus Auth
+    participant Routing as Routing Resolver
+    participant Placer as Placement Service
+    participant Backend as ManageSieve Backend
+    participant Proxy
+
+    Client->>Sieve: AUTHENTICATE / LOGIN
+    Sieve->>Auth: Authenticate protocol=sieve
+    Auth-->>Sieve: canonical account facts
+    Sieve->>Routing: Resolve protocol=sieve route
+    Routing-->>Sieve: complete routing result
+    Sieve->>Placer: PlaceSession holder_kind=session
+    Placer-->>Sieve: lease, affinity, selected backend
+    Sieve->>Backend: connect, TLS, backend auth
+    Backend-->>Sieve: ready
+    Sieve-->>Client: OK authentication successful
+    Sieve->>Proxy: opaque bidirectional proxy
+    loop proxy heartbeat
+        Proxy->>Placer: Heartbeat lease
+    end
+    Proxy->>Placer: Close lease
+```
+
+## POP3 Session Flow
+
+POP3 placement lives in `internal/protocol/pop3/placement.go`. Authorization
+sequencing lives in `internal/protocol/pop3/auth.go`; proxy handoff and lease
+heartbeats live in `internal/protocol/pop3/proxy.go`.
+The canonical protocol value is `pop3`. Listener names such as `pop3` or
+`pop3s` must not introduce alternate runtime protocol values.
+
+Authenticated POP3 sessions use the same shared placement boundary as IMAP and
+ManageSieve:
+
+1. `USER` stores only provisional protocol input until `PASS` authenticates.
+   The provisional user string is not authoritative for holds, routing or
+   affinity.
+2. `PASS` or supported bearer `AUTH` calls Nauthilus with protocol `pop3` and
+   uses the authenticated canonical account as the affinity key.
+3. `placeAuthenticatedSession` resolves routing, fills the listener default
+   shard, checks the shared user-hold gate and calls
+   `placement.SessionPlacer.PlaceSession`.
+4. The POP3 placement request uses `holder_kind=session`, protocol `pop3`, the
+   configured POP3 backend pool, listener/service context, lease TTL, idle grace
+   and backend-retention TTL.
+5. The shared placement service applies active or retained backend-node
+   affinity, scoped backend pins, movement overrides, runtime backend state,
+   health, maintenance and capacity reservation exactly as it does for other
+   user-stateful sessions.
+6. `transitionAuthenticatedSession` connects to the selected POP3 backend and
+   authenticates it before any frontend success can be sent.
+7. After backend readiness, POP3 transitions to opaque proxy mode. The director
+   does not parse or transform post-auth POP3 transaction or update-state
+   commands for routing, policy or mailbox semantics.
+8. The POP3 proxy lifecycle heartbeats the placement lease while proxy mode is
+   active and closes the lease when proxying ends. Heartbeat control actions
+   such as `kick`, `drain` and `move_generation_changed` close the proxied stream
+   through the shared runtime-control path.
+9. On backend connect, backend auth, frontend success or proxy setup failure,
+   `closePlacedSession` rolls the placement lease back and releases backend
+   capacity through the shared close path.
+10. Closing the final POP3 holder leaves a retained backend-node binding for the
+    configured backend-retention window.
+
 ## LMTP Delivery Holds
 
 LMTP recipient placement lives in `internal/protocol/lmtp/placement.go`. It is
@@ -438,10 +552,10 @@ flowchart TD
     R -->|backend drain or hard maintenance| B["backend_runtime_set.lua"]
     B --> W["SScan backend-session shards"]
     W --> D["mark session_control_action=drain"]
-    M --> H["IMAP proxy heartbeat observes action"]
+    M --> H["IMAP / Sieve / POP3 proxy heartbeat observes action"]
     K --> H
     D --> H
-    H --> C["proxy closes through lease lifecycle"]
+    H --> C["IMAP / Sieve / POP3 proxy closes through lease lifecycle"]
 ```
 
 ## Reaper and Repair
@@ -490,6 +604,8 @@ Runtime session and user lists are cursor-paginated:
   cursor and optional offset.
 - Delivery holders are filtered out by `readRuntimeSession` when
   `holder_kind == delivery`.
+- User-stateful holders use `holder_kind == session`. IMAP, ManageSieve and
+  POP3 proxy sessions are visible through runtime session reads while active.
 
 `LookupAffinity` runs `lookup.lua`, which reads state without refreshing leases
 or key TTLs. It can return active, retained, expired or absent backend-binding
@@ -499,19 +615,31 @@ explains backend-node selection without opening, heartbeating, closing or
 attaching sessions. Its bounded source and reason classes distinguish active
 backend binding, retained backend binding, missing protocol entries, unusable
 backend nodes, backend-node mismatches, operator pins, movement overrides,
-initial placement and fail-closed decisions. For LMTP route diagnostics with a
-recipient and no supplied account key, route lookup first tries an existing
-active affinity for the normalized recipient lookup name, then falls back to the
-configured identity lookup.
+initial placement and fail-closed decisions. For `sieve` and `pop3` route
+diagnostics, the caller supplies the account identity facts; route lookup must
+not authenticate credentials, open protocol sessions or refresh leases. For LMTP
+route diagnostics with a recipient and no supplied account key, route lookup
+first tries an existing active affinity for the normalized recipient lookup name,
+then falls back to the configured identity lookup.
 
 ## Developer Rules
 
 - Open, heartbeat and close sessions only through `state.SessionStore`.
 - Reserve backend capacity before `AttachSelectedBackend`.
 - Release backend reservations after attach failure or close.
+- Route IMAP, ManageSieve and POP3 login-session placement through
+  `placement.SessionPlacer` instead of composing Redis affinity, backend pins or
+  selector calls in protocol packages.
+- Keep LMTP delivery-scoped placement on `placement.DeliveryPlacer` so delivery
+  holders remain hidden from runtime session lists.
 - Treat secondary indexes and aggregates as repairable, not authoritative.
 - Do not add routing decisions to Nauthilus-facing auth or identity calls.
 - Do not expose `delivery` holders through runtime session listings.
+- Do not use provisional protocol identities such as POP3 `USER` as affinity
+  keys. Use canonical account facts returned by Nauthilus.
+- For pre-auth protocols that must prove backend readiness before frontend auth
+  success, close the placement lease on backend connect, backend auth or success
+  write failure.
 - Keep new runtime reads cursor-bounded and shard-aware.
 - Do not store raw usernames, session secrets or bearer material in Redis key
   names, logs, metrics labels or operator output.

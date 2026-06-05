@@ -463,6 +463,69 @@ director:
           script_extensions: []
           language: en
 
+    pop3:
+      protocol: pop3
+      service_name: pop3
+      network: tcp
+      address: "127.0.0.1:10110"
+      authority: default
+      backend_pool: pop3-default
+
+      proxy_protocol:
+        enabled: false
+        trusted_cidrs: []
+
+      tls:
+        mode: starttls
+        cert: /etc/nauthilus-director/pop3.crt
+        key: /etc/nauthilus-director/pop3.key
+        client_ca: ""
+        require_client_cert: false
+        min_tls_version: TLS1.2
+
+      pop3:
+        auth_mechanisms:
+          - userpass
+          - xoauth2
+          - oauthbearer
+        capabilities:
+          # CAPA entries are bounded policy tokens. SASL mechanism content is
+          # derived from auth_mechanisms and TLS state by the POP3 renderer.
+          - STLS
+          - USER
+          - SASL
+
+    pop3s:
+      protocol: pop3
+      service_name: pop3s
+      network: tcp
+      address: "127.0.0.1:10995"
+      authority: default
+      backend_pool: pop3-default
+
+      proxy_protocol:
+        enabled: false
+        trusted_cidrs: []
+
+      tls:
+        mode: implicit
+        cert: /etc/nauthilus-director/pop3s.crt
+        key: /etc/nauthilus-director/pop3s.key
+        client_ca: ""
+        require_client_cert: false
+        min_tls_version: TLS1.2
+
+      pop3:
+        auth_mechanisms:
+          - userpass
+          - xoauth2
+          - oauthbearer
+        capabilities:
+          # The implicit TLS listener does not advertise STLS; credential
+          # methods are already protected when the frontend connection exists.
+          - USER
+          - SASL
+
   routing:
     default_selector: rendezvous_hash
     default_shard: default
@@ -569,6 +632,13 @@ director:
       backends:
         - mailstore-a-sieve
         - mailstore-b-sieve
+
+    pop3-default:
+      protocol: pop3
+      selector: rendezvous_hash
+      backends:
+        - mailstore-a-pop3
+        - mailstore-b-pop3
 
   backends:
     mailstore-a-imap:
@@ -803,6 +873,86 @@ director:
           preserve_mechanism: true
           allowed_mechanisms:
             - plain
+            - xoauth2
+            - oauthbearer
+
+      health_check:
+        enabled: true
+        deep_check: true
+        username: healthcheck@example.org
+        password_file: /etc/nauthilus-director/mailstore-health-password
+
+    mailstore-a-pop3:
+      protocol: pop3
+      shard_tag: mailstore-a
+      backend_node: mailstore-a-node-1
+      address: "127.0.0.1:1110"
+      weight: 100
+      max_connections: 1000
+      maintenance: disabled
+
+      haproxy:
+        enabled: false
+
+      tls:
+        mode: starttls
+        ca_file: /etc/nauthilus-director/mailstore-ca.pem
+        server_name: mailstore-a.example.org
+        min_tls_version: TLS1.2
+        insecure_skip_verify: false
+
+      auth:
+        mode: master_user # master_user or credential_replay
+        master_user:
+          username: nauthilus-director
+          password_file: /etc/nauthilus-director/pop3-backend-master-password
+          user_format: "{user}*{master_user}"
+          mechanism: plain
+        credential_replay:
+          require_backend_tls: true
+          preserve_mechanism: true
+          allowed_mechanisms:
+            - userpass
+            - xoauth2
+            - oauthbearer
+
+      health_check:
+        enabled: true
+        deep_check: true
+        username: healthcheck@example.org
+        password_file: /etc/nauthilus-director/mailstore-health-password
+
+    mailstore-b-pop3:
+      protocol: pop3
+      shard_tag: mailstore-b
+      backend_node: mailstore-b-node-1
+      address: "127.0.0.1:2110"
+      weight: 100
+      max_connections: 1000
+      maintenance: disabled
+
+      haproxy:
+        enabled: false
+
+      tls:
+        mode: starttls
+        ca_file: /etc/nauthilus-director/mailstore-ca.pem
+        server_name: mailstore-b.example.org
+        min_tls_version: TLS1.2
+        insecure_skip_verify: false
+
+      auth:
+        mode: master_user
+        master_user:
+          username: nauthilus-director
+          password_file: /etc/nauthilus-director/pop3-backend-master-password
+          user_format: "{user}*{master_user}"
+          mechanism: plain
+        credential_replay:
+          require_backend_tls: true
+          preserve_mechanism: true
+          allowed_mechanisms:
+            - userpass
             - xoauth2
             - oauthbearer
 

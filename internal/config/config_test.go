@@ -14,7 +14,7 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-//nolint:funlen,goconst,gocyclo,wsl_v5 // Tests keep config fixtures local for readability.
+//nolint:dupl,funlen,goconst,gocyclo,wsl_v5 // Tests keep config fixtures local for readability.
 package config
 
 import (
@@ -720,10 +720,10 @@ func TestLMTPValidationRejectsMissingProtocolConfig(t *testing.T) {
 func TestListenerValidationRejectsUnsupportedProtocol(t *testing.T) {
 	cfg := DefaultConfig()
 	entry := cfg.Director.Listeners["lmtp"]
-	entry.Protocol = "pop3"
+	entry.Protocol = "nntp"
 	cfg.Director.Listeners["lmtp"] = entry
 
-	expectValidationError(t, cfg, "director.listeners.lmtp.protocol must be imap, lmtp, or sieve")
+	expectValidationError(t, cfg, "director.listeners.lmtp.protocol must be imap, lmtp, pop3, or sieve")
 }
 
 // TestLMTPCapabilitiesNormalizeStableWireForms protects deterministic LHLO inputs.
@@ -1054,6 +1054,183 @@ func TestGeneratedConfigReferencesIncludeSievePaths(t *testing.T) {
 	} {
 		if strings.Contains(paths, forbidden) {
 			t.Fatalf("generated paths expose internal Sieve capability %q", forbidden)
+		}
+	}
+}
+
+// TestPOP3DefaultsValidate verifies M7.1 listener and backend examples are typed.
+func TestPOP3DefaultsValidate(t *testing.T) {
+	cfg := DefaultConfig()
+
+	for name, wantTLSMode := range map[string]string{"pop3": "starttls", "pop3s": "implicit"} {
+		listener := cfg.Director.Listeners[name]
+		if listener.Protocol != protocolPOP3 || listener.ServiceName != name || listener.BackendPool != "pop3-default" {
+			t.Fatalf("listener %s = %#v, want pop3 protocol and pop3-default pool", name, listener)
+		}
+		if listener.TLS.Mode != wantTLSMode {
+			t.Fatalf("listener %s TLS mode = %q, want %q", name, listener.TLS.Mode, wantTLSMode)
+		}
+		if listener.POP3 == nil {
+			t.Fatalf("listener %s missing pop3 sub-config", name)
+		}
+	}
+
+	pool := cfg.Director.BackendPools["pop3-default"]
+	if pool.Protocol != protocolPOP3 || pool.Selector != "rendezvous_hash" || !slices.Equal(pool.Backends, []string{"mailstore-a-pop3", "mailstore-b-pop3"}) {
+		t.Fatalf("pop3-default pool = %#v", pool)
+	}
+
+	for backendName, wantNode := range map[string]string{"mailstore-a-pop3": "mailstore-a-node-1", "mailstore-b-pop3": "mailstore-b-node-1"} {
+		backend := cfg.Director.Backends[backendName]
+		if backend.Protocol != protocolPOP3 || backend.BackendNode != wantNode || backend.Auth.Mode != backendAuthModeMasterUser {
+			t.Fatalf("pop3 backend %s = %#v", backendName, backend)
+		}
+	}
+
+	if err := NewLoader().Validate(cfg); err != nil {
+		t.Fatalf("Validate rejected POP3 defaults: %v", err)
+	}
+}
+
+// TestPOP3ValidationRejectsMissingProtocolConfig keeps POP3 listener config explicit.
+func TestPOP3ValidationRejectsMissingProtocolConfig(t *testing.T) {
+	cfg := DefaultConfig()
+	entry := cfg.Director.Listeners["pop3"]
+	entry.POP3 = nil
+	cfg.Director.Listeners["pop3"] = entry
+
+	expectValidationError(t, cfg, "director.listeners.pop3.pop3 is required")
+}
+
+// TestPOP3ValidationRejectsCrossProtocolPool keeps listener and pool protocols aligned.
+func TestPOP3ValidationRejectsCrossProtocolPool(t *testing.T) {
+	cfg := DefaultConfig()
+	entry := cfg.Director.Listeners["pop3"]
+	entry.BackendPool = "imap-default"
+	cfg.Director.Listeners["pop3"] = entry
+
+	expectValidationError(t, cfg, "director.listeners.pop3.backend_pool references pool with different protocol imap-default")
+}
+
+// TestPOP3ValidationRejectsUnsupportedAuthMethods checks frontend method vocabulary and authority policy.
+func TestPOP3ValidationRejectsUnsupportedAuthMethods(t *testing.T) {
+	t.Run("unsupported method", func(t *testing.T) {
+		cfg := DefaultConfig()
+		entry := cfg.Director.Listeners["pop3"]
+		entry.POP3.AuthMechanisms = append(entry.POP3.AuthMechanisms, "plain")
+		cfg.Director.Listeners["pop3"] = entry
+
+		expectValidationError(t, cfg, "auth_mechanisms contains unsupported method plain")
+	})
+
+	t.Run("authority disabled class", func(t *testing.T) {
+		cfg := DefaultConfig()
+		authority := cfg.Auth.Authorities["default"]
+		authority.Mechanisms.Password.Enabled = false
+		cfg.Auth.Authorities["default"] = authority
+
+		expectValidationError(t, cfg, "auth_mechanisms contains method not supported by authority userpass")
+	})
+}
+
+// TestPOP3ValidationRejectsUnsafeFrontendAuthTLS prevents credential methods without TLS gating.
+func TestPOP3ValidationRejectsUnsafeFrontendAuthTLS(t *testing.T) {
+	cfg := DefaultConfig()
+	entry := cfg.Director.Listeners["pop3"]
+	entry.TLS.Mode = "plaintext"
+	cfg.Director.Listeners["pop3"] = entry
+
+	expectValidationError(t, cfg, "auth_mechanisms requires frontend TLS mode starttls or implicit")
+}
+
+// TestPOP3ValidationRejectsMalformedCapabilities keeps config from becoming wire text.
+func TestPOP3ValidationRejectsMalformedCapabilities(t *testing.T) {
+	t.Run("transcript-shaped", func(t *testing.T) {
+		cfg := DefaultConfig()
+		entry := cfg.Director.Listeners["pop3"]
+		entry.POP3.Capabilities = append(entry.POP3.Capabilities, "SASL PLAIN")
+		cfg.Director.Listeners["pop3"] = entry
+
+		expectValidationError(t, cfg, "capabilities contains unsupported capability SASL PLAIN")
+	})
+
+	t.Run("stls on implicit tls", func(t *testing.T) {
+		cfg := DefaultConfig()
+		entry := cfg.Director.Listeners["pop3s"]
+		entry.POP3.Capabilities = append(entry.POP3.Capabilities, "STLS")
+		cfg.Director.Listeners["pop3s"] = entry
+
+		expectValidationError(t, cfg, "capabilities advertises STLS for non-starttls listener TLS mode")
+	})
+}
+
+// TestPOP3ValidationRejectsForeignProtocolSubConfig avoids active behavior ambiguity.
+func TestPOP3ValidationRejectsForeignProtocolSubConfig(t *testing.T) {
+	cfg := DefaultConfig()
+	entry := cfg.Director.Listeners["pop3"]
+	entry.Sieve = &SieveListenerConfig{AuthMechanisms: []string{"plain"}, Capabilities: SieveCapabilitiesConfig{Language: "en"}}
+	cfg.Director.Listeners["pop3"] = entry
+
+	expectValidationError(t, cfg, "director.listeners.pop3.sieve must not be set for pop3 listeners")
+}
+
+// TestPOP3CredentialReplayRequiresVerifiedBackendTLS keeps replay policy fail-closed.
+func TestPOP3CredentialReplayRequiresVerifiedBackendTLS(t *testing.T) {
+	cfg := DefaultConfig()
+	backend := cfg.Director.Backends["mailstore-a-pop3"]
+	backend.Auth.Mode = backendAuthModeCredentialReplay
+	backend.TLS.Mode = "plaintext"
+	backend.TLS.ServerName = ""
+	cfg.Director.Backends["mailstore-a-pop3"] = backend
+
+	expectValidationError(t, cfg, "director.backends.mailstore-a-pop3.auth.credential_replay requires verified backend TLS")
+}
+
+// TestConfigDumpRedactsPOP3ProtectedValuesByDefault preserves M7 protected metadata.
+func TestConfigDumpRedactsPOP3ProtectedValuesByDefault(t *testing.T) {
+	dump, err := NewLoader().DumpDefaults(DumpOptions{Format: "yaml"})
+	if err != nil {
+		t.Fatalf("DumpDefaults: %v", err)
+	}
+
+	text := string(dump)
+	for _, secret := range []string{
+		"/etc/nauthilus-director/pop3.key",
+		"/etc/nauthilus-director/pop3s.key",
+		"/etc/nauthilus-director/pop3-backend-master-password",
+	} {
+		if strings.Contains(text, secret) {
+			t.Fatalf("default dump leaked protected POP3 value %q:\n%s", secret, text)
+		}
+	}
+}
+
+// TestGeneratedConfigReferencesIncludePOP3Paths verifies generated M7 docs and metadata.
+func TestGeneratedConfigReferencesIncludePOP3Paths(t *testing.T) {
+	defaults := readTextFile(t, filepath.Join("..", "..", "docs", "reference", "config-defaults.yaml"))
+	paths := readTextFile(t, filepath.Join("..", "..", "docs", "reference", "config-paths.md"))
+
+	for _, want := range []string{
+		"pop3-default:",
+		"mailstore-a-pop3:",
+		"auth_mechanisms:",
+		"- userpass",
+		"- STLS",
+	} {
+		if !strings.Contains(defaults, want) {
+			t.Fatalf("generated defaults missing %q", want)
+		}
+	}
+
+	for _, want := range []string{
+		"`director.listeners.pop3.pop3.auth_mechanisms`",
+		"`director.listeners.pop3s.pop3.capabilities`",
+		"`director.backend_pools.pop3-default.protocol`",
+		"`director.backends.mailstore-a-pop3.auth.master_user.password_file` | string | `<redacted>` | stable | yes",
+		"`director.listeners.pop3.tls.key` | string | `<redacted>` | stable | yes",
+	} {
+		if !strings.Contains(paths, want) {
+			t.Fatalf("generated paths missing %q", want)
 		}
 	}
 }

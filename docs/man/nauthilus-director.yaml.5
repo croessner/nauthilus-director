@@ -239,14 +239,78 @@ Route lookup accepts
 with a caller-supplied user key for diagnostics.
 It is read-only: it does not authenticate credentials, create sessions, connect
 to ManageSieve backends or inspect script names or script contents.
+.SH POP3 LISTENERS AND BACKENDS
+POP3 listener entries use the canonical config protocol value
+.BR pop3 .
+Operator-facing listener names may be
+.B pop3
+for STLS-capable cleartext startup and
+.B pop3s
+for implicit TLS, but backend pools, route lookup, runtime state and metrics
+still use
+.BR protocol:\ pop3 .
+.PP
+Supported listener-specific settings live under
+.BR director.listeners.<name>.pop3 .
+.B auth_mechanisms
+is typed frontend method policy.
+.B userpass
+controls the POP3
+.B USER
+and
+.B PASS
+flow, while
+.B xoauth2
+and
+.B oauthbearer
+control the matching POP3
+.B AUTH
+mechanisms when the selected Nauthilus authority enables the corresponding
+class.
+Credential-bearing methods require frontend TLS gating; listeners must use
+.B tls.mode: starttls
+or
+.BR tls.mode:\ implicit .
+.PP
+POP3
+.B capabilities
+are bounded CAPA policy tokens, not raw protocol transcript lines.
+The protocol handler derives any SASL CAPA mechanism text from
+.B auth_mechanisms
+and must account for listener TLS state before advertising or accepting
+credential-bearing commands.
+The
+.B pop3s
+service name is never a protocol value.
+.PP
+POP3 backend pools use
+.B director.backend_pools.<name>.protocol: pop3
+with the
+.B rendezvous_hash
+selector.
+Backend entries use
+.B director.backends.<name>.protocol: pop3
+and should share
+.B shard_tag
+and
+.B backend_node
+values with sibling protocol endpoints for the same concrete mailstore.
+Supported backend auth modes are
+.B master_user
+and
+.BR credential_replay .
+.B credential_replay
+requires verified backend TLS and an explicit allowed-mechanism list.
 .SH OBSERVABILITY SAFETY
-LMTP and ManageSieve logs, traces and Prometheus metrics expose operation,
+LMTP, ManageSieve and POP3 logs, traces and Prometheus metrics expose operation,
 result, bounded
 reason class, backend pool, shard tag, mechanism, transport, TLS mode and status
 class where applicable.
-ManageSieve observations additionally include the pre-auth phase span
+ManageSieve and POP3 observations additionally include the pre-auth phase spans
 .B nauthilus_director.sieve.pre_auth
-and reuse the shared session, Nauthilus auth, routing, backend select, backend
+and
+.BR nauthilus_director.pop3.pre_auth ,
+then reuse the shared session, Nauthilus auth, routing, backend select, backend
 connect and proxy pipe trace boundaries.
 Backend-side PROXY observations use the operation
 .B backend_proxy_protocol
@@ -267,12 +331,14 @@ the operator-diagnostic policy permits them; they are never Prometheus labels.
 Observable LMTP output must not contain raw recipients, envelope senders,
 message IDs, subjects, DATA or BDAT content. Observable ManageSieve output must
 not contain raw usernames, script names, script contents, post-auth command
-bodies, client addresses or session IDs. Both protocol paths also keep peer
-passwords, bearer tokens, SASL blobs, private keys and raw authorization headers
-out of logs, traces, metrics and test failure output.
-Operators should use status classes and reason classes to distinguish routing,
-hold, backend-pin, backend, DATA, BDAT and proxy failures without exposing
-message or script content.
+bodies, client addresses or session IDs. Observable POP3 output must not
+contain raw usernames, mailbox command payloads, message numbers, UIDLs, message
+sizes, message contents, client addresses or session IDs. These protocol paths
+also keep peer passwords, bearer tokens, SASL blobs, private keys and raw
+authorization headers out of logs, traces, metrics and test failure output.
+Operators should use status classes and reason classes to distinguish POP3
+auth, routing, hold, backend-pin, backend and proxy failures, plus LMTP DATA and
+BDAT failures, without exposing message or script content.
 .SH INCLUDES AND PATCHES
 Loader-only keys
 .BR includes ,

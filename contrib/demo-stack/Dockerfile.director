@@ -38,7 +38,7 @@ RUN chmod 0755 /usr/local/bin/nauthilus-director /usr/local/bin/nauthilus-direct
 
 USER director:director
 
-EXPOSE 9090 10143 10993 11024
+EXPOSE 9090 10143 10993 11024 10110 10995 14190 14490
 
 ENTRYPOINT ["/usr/local/bin/director-entrypoint.sh"]
 CMD ["--config", "/etc/nauthilus-director/nauthilus-director.yml", "serve"]
