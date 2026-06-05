@@ -1440,6 +1440,36 @@ M6 is complete only when all items below are true:
 - [x] `make guardrails` is the final local gate before any commit or pull
       request that contains M6 implementation work.
 
+### Completion Evidence
+
+M6 closeout completed on 2026-06-05 after the required final review pass. The
+implementation includes typed `sieve` and `sieves` listener startup through the
+production server binary, frontend ManageSieve handling for greeting,
+`CAPABILITY`, `STARTTLS`, `AUTHENTICATE`, `NOOP`, `LOGOUT` and safe pre-auth
+failure paths, frontend TLS enforcement for credential-bearing SASL mechanisms,
+Nauthilus-backed password and bearer authentication, user placement hold
+enforcement, shared cross-protocol backend-node placement, protocol and
+backend-pool scoped backend pins, backend ManageSieve connect/TLS/auth handling,
+protocol-aware deep health and transparent post-auth proxy handoff.
+
+The deterministic fake-service E2E lane proves ManageSieve through public
+sockets, fake Nauthilus HTTP and gRPC authority sockets, fake IMAP, LMTP and
+ManageSieve backends, generated REST endpoints, real `nauthilus-directorctl`
+commands and the production `nauthilus-director` binary. It covers STARTTLS,
+implicit TLS, password and bearer authentication, user placement holds,
+backend-pin matching and fail-closed behavior, route lookup for
+`protocol=sieve`, runtime state, script-data secrecy and same-backend-node
+consistency with active or retained IMAP, LMTP and ManageSieve affinity.
+
+The real-server interoperability lane passed on a Docker-capable environment.
+It preserves the existing Dovecot IMAP and Postfix-to-Dovecot LMTP interop
+coverage, starts real Dovecot ManageSieve backends, authenticates through the
+director to the selected backend, performs script-management operations such as
+`LISTSCRIPTS`, `PUTSCRIPT`, `SETACTIVE` and `GETSCRIPT`, and verifies
+same-account backend-node consistency with IMAP. The demo stack carries the M6
+topology, config and proof-script updates and proves the final operator-facing
+ManageSieve path.
+
 ## Required M6 Review Pass
 
 Before closing M6, perform this review:

@@ -1336,6 +1336,15 @@ interop lane are in place. The detailed M5 completion evidence lives in
 
 ### M6: ManageSieve / Sieve proxy
 
+Status: completed. The production ManageSieve proxy path, `sieve` and `sieves`
+listener startup, frontend pre-auth handling, Nauthilus auth, user placement
+holds, cross-protocol backend-node affinity, runtime-aware backend selection,
+backend ManageSieve auth and health, transparent post-auth proxying,
+observability coverage, deterministic fake-service E2E proof, real Dovecot
+ManageSieve interop lane and demo-stack operator proof are in place. The
+detailed M6 completion evidence lives in
+`docs/specs/implementation/M6_MANAGESIEVE_PROXY_SPEC.md`.
+
 - ManageSieve pre-auth handling
 - Nauthilus auth
 - user placement hold gate after authoritative auth and before backend
