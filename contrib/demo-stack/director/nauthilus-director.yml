@@ -63,12 +63,13 @@ runtime:
       enabled: true
       address: "0.0.0.0:9090"
 
-      # The demo keeps the control API unauthenticated because the ports are
-      # expected to be bound only to a trusted workstation or accessed through
-      # SSH forwarding. Do not copy this part into an exposed deployment.
+      # The demo protects the control API with a local static bearer token file.
+      # Keep the port bound only to a trusted workstation or access it through
+      # SSH forwarding. Do not copy the demo token value into production.
       auth:
         bearer:
-          enabled: false
+          enabled: true
+          token_file: /run/nauthilus-director/control-token
         oidc:
           enabled: false
         mtls:
@@ -197,7 +198,21 @@ auth:
           enabled: false
 
       oidc:
-        enabled: false
+        enabled: true
+        authority_mode: nauthilus
+        issuer: "https://nauthilus-haproxy:8443"
+        required_scopes: []
+        client_credentials:
+          enabled: true
+          client_id: "nauthilus-director-demo"
+          client_secret_file: /run/nauthilus-director/oidc-client-secret
+          token_endpoint_auth_method: client_secret_basic
+          introspection_endpoint_auth_method: client_secret_basic
+          scopes:
+            - nauthilus:authenticate
+            - nauthilus:lookup_identity
+            - nauthilus:list_accounts
+          refresh_before_expiry: 30s
 
       http:
         endpoint: "http://nauthilus-haproxy:8080/api/v1/auth/json"
@@ -220,18 +235,18 @@ auth:
 
         caller_auth:
           # Nauthilus requires backchannel caller authentication for the gRPC
-          # authority server. Basic auth is enough for this isolated demo and
-          # matches auth.backchannel.basic_auth in the Nauthilus config.
+          # authority server. OIDC is the primary demo path; Basic remains here
+          # as an explicit compatibility fallback when both configs are changed.
           basic:
-            enabled: true
+            enabled: false
             username: director
             password_file: director-api-secret
 
-          # Bearer caller auth is disabled here. In a stronger split
-          # deployment this would usually be backed by short-lived OIDC tokens.
           bearer:
             enabled: false
             token_file: ""
+          oidc:
+            enabled: true
 
         tls:
           # Nauthilus deliberately rejects plaintext gRPC on non-loopback

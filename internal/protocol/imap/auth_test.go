@@ -308,6 +308,20 @@ func TestCredentialsBuildNauthilusRequest(t *testing.T) {
 
 	text := fmt.Sprintf("%v", request.Credential)
 	assertDoesNotContain(t, text, testPassword)
+
+	bearerCredentials, err := parseSASLCredentials(testMechanism(t, "XOAUTH2"), xoauth2Payload("bearer@example.test", testBearerToken), 256, 64)
+	if err != nil {
+		t.Fatalf("parse XOAUTH2 credentials: %v", err)
+	}
+	defer bearerCredentials.Clear()
+
+	bearerRequest := bearerCredentials.NauthilusAuthRequest(nauthilus.RequestContext{Protocol: "imap"})
+	if bearerRequest.Context.Username != "bearer@example.test" || bearerRequest.Context.Method != mechanismXOAUTH2 {
+		t.Fatalf("bearer request context = %#v, want XOAUTH2 identity", bearerRequest.Context)
+	}
+	if bearerRequest.Credential.Value() != testBearerToken {
+		t.Fatal("Nauthilus request did not carry the bearer token as credential material")
+	}
 }
 
 // parseTestCommand parses one test command line with the package parser.

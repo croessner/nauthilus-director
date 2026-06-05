@@ -8,9 +8,9 @@ This stack is a runnable integration playground for the production Director path
 - SMTP is handled by HAProxy and Postfix. Postfix relays accepted mail back through HAProxy over LMTPS to the two Director instances.
 - IMAP, IMAPS, LMTPS, POP3, POP3S, Sieve and Sieve-over-TLS traffic from HAProxy to the Directors uses the PROXY protocol.
 - The Directors own backend selection, health handling, affinity and metrics.
-- Nauthilus is intentionally lean in this stack: LDAP/cache identity, OpenLDAP-released `mailShard` routing facts and a small Lua environment hook only.
+- Nauthilus is intentionally lean in this stack: LDAP/cache identity, a built-in OIDC issuer for Director caller tokens, OpenLDAP-released `mailShard` routing facts and a small Lua environment hook only.
 - An internal HAProxy balances Director authority traffic across two Nauthilus instances.
-- The Directors authenticate through that internal HAProxy to the TLS-protected Nauthilus gRPC AuthService.
+- The Directors obtain Nauthilus-issued OIDC client-credentials tokens over HTTPS through that internal HAProxy, then authenticate to the TLS-protected Nauthilus gRPC AuthService with Bearer caller auth. HTTP Basic Auth is retained only as a disabled compatibility fallback example in the paired configs.
 - Three Dovecot 2.4 containers provide IMAPS, LMTPS, POP3 and ManageSieve backend shards. All three use OpenLDAP for passdb/userdb lookups.
 - `mailstore-c-imap` is intentionally wired with Director `master_user` backend auth; the other Dovecot IMAP shards use credential replay. ManageSieve backends use Director `master_user` auth so script operations remain backend-owned without retaining frontend passwords.
 - `mailstore-c` IMAP, LMTP, POP3 and ManageSieve are reached through internal HAProxy `accept-proxy` frontends, so that shard proves Director-to-backend outbound PROXY protocol while the other Dovecot shards keep the disabled path.
@@ -34,7 +34,7 @@ flowchart LR
     end
 
     subgraph authority["Nauthilus authority"]
-        nauthilusProxy["nauthilus-haproxy<br/>gRPC and HTTP"]
+        nauthilusProxy["nauthilus-haproxy<br/>gRPC and HTTPS OIDC"]
         nauthilusA["nauthilus-a"]
         nauthilusB["nauthilus-b"]
         openldap["openldap<br/>users and mailShard"]
@@ -55,7 +55,7 @@ flowchart LR
     end
 
     valkey["valkey<br/>Director runtime state<br/>Nauthilus cache<br/>Stalwart coordination"]
-    grpcTls["grpc-tls<br/>demo gRPC CA"]
+    grpcTls["grpc-tls<br/>demo gRPC and OIDC CA"]
 
     client -->|"SMTP :2525"| haproxy
     client -->|"IMAP :8143 / IMAPS :8993"| haproxy
@@ -64,8 +64,8 @@ flowchart LR
     haproxy -->|"PROXY protocol IMAP, IMAPS, LMTPS, POP3, POP3S, Sieve, Sieve-over-TLS"| directorA
     haproxy -->|"PROXY protocol IMAP, IMAPS, LMTPS, POP3, POP3S, Sieve, Sieve-over-TLS"| directorB
 
-    directorA -->|"AuthService gRPC TLS"| nauthilusProxy
-    directorB -->|"AuthService gRPC TLS"| nauthilusProxy
+    directorA -->|"OIDC token over HTTPS + AuthService gRPC TLS Bearer"| nauthilusProxy
+    directorB -->|"OIDC token over HTTPS + AuthService gRPC TLS Bearer"| nauthilusProxy
     nauthilusProxy --> nauthilusA
     nauthilusProxy --> nauthilusB
     nauthilusA -->|"LDAP lookup"| openldap
@@ -177,7 +177,8 @@ Useful host ports:
 ```
 
 The scripts also accept the other demo users. To keep the demo simple, frontend and backend TLS certificates are self-signed and the test fetcher disables certificate verification.
-The stack also generates an internal demo CA for Director-to-Nauthilus gRPC TLS in the `grpc-tls` volume. HAProxy passes gRPC TLS through to the selected Nauthilus instance.
+The stack also generates an internal demo CA for Director-to-Nauthilus gRPC TLS, the internal HTTPS OIDC issuer and an OIDC signing key in the `grpc-tls` volume. HAProxy terminates HTTPS for OIDC discovery/token requests and passes gRPC TLS through to the selected Nauthilus instance. Director containers trust the demo CA through `SSL_CERT_FILE`.
+Because the demo Director config enables OIDC caller auth and disables gRPC Basic caller auth, every successful smoke script proves the public mail path can authenticate users while Director-to-Nauthilus authority calls use Nauthilus-issued Bearer tokens.
 
 The demo also includes public-boundary affinity proofs:
 
@@ -222,6 +223,12 @@ login resumes on the target backend. It accepts `DEMO_HOLD_DURATION_SECONDS`,
 `DEMO_HOLD_PROBE_SECONDS`, `DEMO_HOLD_TARGET_BACKEND`,
 `DEMO_KEEP_BACKEND_PIN`, `DEMO_CONTROL_URL` and the same host and credential
 overrides as the other proof scripts.
+
+The deterministic repository proof for missing or insufficient OIDC caller
+auth is `make e2e`, and the real Dovecot/Postfix interoperability proof is
+`make e2e-interop` on a Docker-capable host. Both lanes use public sockets and
+record that the fake Nauthilus authority saw Bearer caller auth instead of
+Basic Auth.
 
 The Stalwart pair is initialized from the command line by a one-shot Compose service. The same plan configures Stalwart storage to use the shared FoundationDB cluster file mounted at `/var/fdb/fdb.cluster`:
 

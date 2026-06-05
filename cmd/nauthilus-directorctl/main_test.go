@@ -22,6 +22,7 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -770,6 +771,57 @@ func TestProtectedConfigForbiddenDoesNotPrintPartialOutput(t *testing.T) {
 	}
 }
 
+// TestGeneratedControlClientSendsBearerTokenFromFile verifies auth material is sent but not printed.
+func TestGeneratedControlClientSendsBearerTokenFromFile(t *testing.T) {
+	const token = "cli-secret-token"
+
+	tokenFile := filepath.Join(t.TempDir(), "control-token")
+	if err := os.WriteFile(tokenFile, []byte(token+"\n"), 0o600); err != nil {
+		t.Fatalf("write token file: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if got := request.Header.Get("Authorization"); got != "Bearer "+token {
+			t.Fatalf("Authorization = %q, want bearer token", got)
+		}
+
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"version":"test","api_version":"v1"}`))
+	}))
+	defer server.Close()
+
+	client, err := newGeneratedControlClient(commandOptions{
+		Address:             server.URL,
+		Timeout:             time.Second,
+		AuthBearerTokenFile: tokenFile,
+	})
+	if err != nil {
+		t.Fatalf("newGeneratedControlClient returned error: %v", err)
+	}
+
+	response, err := client.GetVersionWithResponse(context.Background())
+	if err != nil {
+		t.Fatalf("GetVersionWithResponse returned error: %v", err)
+	}
+	if response.StatusCode() != http.StatusOK {
+		t.Fatalf("status = %d, want 200", response.StatusCode())
+	}
+}
+
+// TestBearerTokenOptionIsNotPrinted keeps CLI auth material out of operator output.
+func TestBearerTokenOptionIsNotPrinted(t *testing.T) {
+	const token = "cli-secret-token"
+
+	fake := newFakeControlClient()
+	stdout, stderr, code := runWithFakeClient([]string{"--auth-bearer-token", token, "backends", "list"}, fake)
+	if code != 0 {
+		t.Fatalf("run returned exit code %d, want 0; stderr=%q", code, stderr)
+	}
+	if strings.Contains(stdout, token) || strings.Contains(stderr, token) {
+		t.Fatalf("CLI output leaked bearer token: stdout=%q stderr=%q", stdout, stderr)
+	}
+}
+
 // TestListenerUsageValidationKeepsRequestsLocal verifies listener command errors fail before dispatch.
 func TestListenerUsageValidationKeepsRequestsLocal(t *testing.T) {
 	tests := []struct {
@@ -1356,9 +1408,9 @@ func TestManpagesDocumentImplementedSurface(t *testing.T) {
 // runWithFakeClient runs the CLI with a fake generated client.
 func runWithFakeClient(args []string, fake *fakeControlClient) (string, string, int) {
 	previousClient := newControlClient
-	newControlClient = func(address string, timeout time.Duration) (generated.ClientWithResponsesInterface, error) {
-		fake.address = address
-		fake.timeout = timeout
+	newControlClient = func(options commandOptions) (generated.ClientWithResponsesInterface, error) {
+		fake.address = options.Address
+		fake.timeout = options.Timeout
 		return fake, nil
 	}
 	defer func() {

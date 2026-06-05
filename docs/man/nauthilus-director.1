@@ -65,6 +65,14 @@ boundary.
 Listener runtime drain and resume state is process-local and non-persistent;
 after restart, configured frontend listeners are started from the typed config
 snapshot.
+Safe reload is explicit through the authenticated control API or
+.BR nauthilus-directorctl " reload" .
+It accepts listener additions/removals and backend registry changes for new
+sessions, rejects restart-required changes atomically, and never rewrites YAML.
+.PP
+Production deployment, control-plane security, Nauthilus OIDC, reload,
+failure-mode and migration runbooks are maintained under
+.BR docs/operations/ .
 .SH OPTIONS
 .TP
 .B --version

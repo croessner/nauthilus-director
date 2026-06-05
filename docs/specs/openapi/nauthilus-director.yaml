@@ -6,11 +6,19 @@ info:
     Administrative control API for nauthilus-director. The v1 surface is
     OpenAPI-first; generated server and client code stay at the REST boundary.
 x-control-auth-modes:
-  - disabled
   - static_bearer
   - mtls
-  - reverse_proxy_headers
   - oidc_jwt_via_nauthilus
+security:
+  - StaticBearerAuth: []
+  - OIDCBearerAuth: []
+x-mtls-auth:
+  enabled_when_configured: true
+  description: >
+    Control mTLS authentication uses verified TLS client certificates on the
+    control listener. OpenAPI 3.0.3 has no standard mutualTLS security scheme,
+    so this extension documents the configured mTLS mode while bearer modes use
+    standard HTTP security schemes.
 servers:
   - url: http://127.0.0.1:9090
     description: Default local control listener
@@ -39,6 +47,7 @@ paths:
       operationId: getHealthz
       tags:
         - health
+      security: []
       summary: Check process liveness.
       responses:
         "200":
@@ -54,6 +63,7 @@ paths:
       operationId: getReadyz
       tags:
         - health
+      security: []
       summary: Check control-plane readiness.
       responses:
         "200":
@@ -821,6 +831,23 @@ paths:
         default:
           $ref: "#/components/responses/Error"
 components:
+  securitySchemes:
+    StaticBearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: static-token
+      description: >
+        Static bearer token loaded from
+        runtime.servers.control.auth.bearer.token_file.
+    OIDCBearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: Nauthilus OIDC access token
+      description: >
+        Bearer token validated by Nauthilus token introspection through the
+        configured runtime.servers.control.auth.oidc.authority. The token must
+        be active and satisfy configured ordinary scopes. Protected config and
+        diagnostics require configured protected scopes.
   parameters:
     ConfigFormat:
       name: format

@@ -1054,26 +1054,29 @@ Reload should be explicit and safe.
 Reloadable:
 
 - listener additions
-- listener removals with graceful drain
-- backend additions/removals
-- backend maintenance defaults
-- weights
-- routing resolver configuration
-- health intervals
-- logging level
+- listener removals that stop new accepts without rewriting YAML
+- backend additions/removals and backend field changes for new sessions
+- backend-pool membership changes validated against the current listener
+  inventory
 
 Not safely reloadable without restart, at least initially:
 
-- changing REST listener bind address
-- changing global telemetry exporter setup
-- changing core protocol behavior
+- changing REST listener enablement, bind address, auth or TLS
+- changing runtime process, timeout, client, reaper or state settings
+- changing Nauthilus authority, caller auth or control auth configuration
+- changing Redis topology, credentials, TLS or namespace settings
+- changing logging, metrics, tracing or diagnostic profile settings
+- changing routing resolver, affinity, runtime override, health, maintenance or
+  security policy
+- changing existing listener socket, TLS, authority, protocol or backend-pool
+  semantics
 
 On reload:
 
 1. Parse new config.
 2. Validate new config.
 3. Build new runtime snapshot.
-4. Apply listener/backend/resolver changes.
+4. Apply listener inventory and backend registry changes.
 5. Keep existing sessions on old backend object until closed.
 6. New sessions use the new snapshot.
 
@@ -1385,16 +1388,23 @@ are complete. Detailed closeout commands and evidence are recorded in
 
 ### M8: Production hardening
 
-- hardened Docker image
-- systemd unit
-- reload semantics
-- pprof optional
-- operational docs
-- failure-mode docs
-- rollout and operational migration guide
-- document operator migration workflows that combine user placement holds,
-  user moves, backend pins and active-affinity draining without rewriting YAML
-  runtime configuration
+Status: completed. The production hardening milestone is closed with concrete
+evidence in `docs/specs/implementation/M8_PRODUCTION_HARDENING_SPEC.md`.
+
+- hardened production Docker image and Docker smoke proof
+- restrictive systemd unit and reload path through `nauthilus-directorctl reload`
+- safe reload semantics shared by REST, CLI and systemd
+- optional protected pprof on the control listener
+- enforced control-plane auth for REST, CLI workflows, metrics, diagnostics,
+  profiles, reload and mutation endpoints
+- Nauthilus-backed OIDC caller auth for HTTP/gRPC authority requests, with
+  in-memory per-process token caching only
+- mail SASL bearer forwarding to Nauthilus without local token validation or
+  bearer-token caching
+- operational deployment, failure-mode, reload/upgrade, OIDC and migration docs
+- operator migration workflows that combine user placement holds, user moves,
+  backend pins and active-affinity draining without rewriting YAML runtime
+  configuration
 
 ## 23. Open decisions
 
@@ -1404,23 +1414,24 @@ Known future decisions:
 
 - Exact HTTP/gRPC routing resolver service contract for external routing services.
 - Whether recipient lookup for LMTP should call a dedicated Nauthilus lookup mode, a generic routing service or a separate mailbox-directory service.
-- Whether local OIDC token validation should ever be supported as an explicit non-default mode.
-- Exact REST authorization model beyond initial bearer token and Nauthilus-backed OIDC delegation.
+- Whether local OIDC token validation should ever be supported as an explicit
+  non-default mode.
+- Whether future fine-grained REST authorization should extend M8's configured
+  bearer, mTLS and Nauthilus-backed OIDC scope model.
 
 ## 24. Immediate next steps
 
 1. Treat the production `nauthilus-director` binary as the mandatory service
    entrypoint for future externally visible E2E and interoperability proof.
-2. Keep the fast fake-service lane deterministic, but add or preserve at least
-   one real-binary assertion whenever listener, control, routing, Redis or proxy
-   bootstrap changes.
-3. Proceed to M4 observability polish: OTLP exporter configuration, trace
-   exporter lifecycle, richer Prometheus registration and operator-facing
-   observability documentation.
-4. Keep `make e2e-interop` as the real IMAP regression lane and run it whenever
-   IMAP backend/proxy/bootstrap-sensitive code, runtime control, route lookup
-   health ownership, or active-affinity behavior changes.
-5. Start later protocol milestones only after the binary-entry IMAP/control
-   baseline remains green.
+2. Keep the fast fake-service lane deterministic, and preserve real-binary
+   assertions whenever listener, control, routing, Redis, auth or proxy bootstrap
+   behavior changes.
+3. Keep `make e2e-interop` as the real protocol regression lane and run it
+   whenever IMAP, LMTP, ManageSieve, POP3, backend/proxy/bootstrap-sensitive
+   code, runtime control, route lookup, health ownership or active-affinity
+   behavior changes.
+4. Keep production Docker and systemd proof as additive environment-capable
+   checks outside default Docker-independent guardrails.
+5. Start later milestones only from the completed M8 production baseline.
 
 The project should evolve as a small, sharp director: protocol-aware only where necessary, authenticated through Nauthilus, routed through director-owned facts and selectors, observable by default, and operationally safe enough to sit in front of real mail backends.

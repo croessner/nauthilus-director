@@ -5,7 +5,7 @@
 name: ${COMPOSE_PROJECT_NAME:-nauthilus-director-demo}
 
 x-nauthilus-service: &nauthilus-service
-  image: ${NAUTHILUS_IMAGE:-ghcr.io/croessner/nauthilus:v3.0.0-rc.4}
+  image: ${NAUTHILUS_IMAGE:-ghcr.io/croessner/nauthilus:v3.0.0-rc.5}
   depends_on:
     grpc-tls:
       condition: service_completed_successfully
@@ -124,6 +124,7 @@ services:
     <<: *nauthilus-service
     environment:
       NAUTHILUS_INSTANCE_NAME: demo-nauthilus-a
+      DIRECTOR_OIDC_CLIENT_SECRET: ${DIRECTOR_OIDC_CLIENT_SECRET:-demo-director-oidc-secret}
     networks:
       demo:
         aliases:
@@ -133,6 +134,7 @@ services:
     <<: *nauthilus-service
     environment:
       NAUTHILUS_INSTANCE_NAME: demo-nauthilus-b
+      DIRECTOR_OIDC_CLIENT_SECRET: ${DIRECTOR_OIDC_CLIENT_SECRET:-demo-director-oidc-secret}
     networks:
       demo:
         aliases:
@@ -147,6 +149,7 @@ services:
         condition: service_healthy
     volumes:
       - ./haproxy/nauthilus.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+      - grpc-tls:/run/nauthilus-demo/grpc-tls:ro
     networks:
       demo:
         aliases:
@@ -260,6 +263,10 @@ services:
     environment:
       DIRECTOR_INSTANCE_NAME: demo-director-a
       DOVECOT_MASTER_PASSWORD: ${DOVECOT_MASTER_PASSWORD:-demo-master-secret}
+      DIRECTOR_CONTROL_TOKEN: ${DIRECTOR_CONTROL_TOKEN:-demo-control-token}
+      DIRECTOR_OIDC_CLIENT_SECRET: ${DIRECTOR_OIDC_CLIENT_SECRET:-demo-director-oidc-secret}
+      NAUTHILUS_DIRECTORCTL_BEARER_TOKEN_FILE: /run/nauthilus-director/control-token
+      SSL_CERT_FILE: /run/nauthilus-demo/grpc-tls/ca.crt
     depends_on:
       valkey:
         condition: service_healthy
@@ -295,6 +302,10 @@ services:
     environment:
       DIRECTOR_INSTANCE_NAME: demo-director-b
       DOVECOT_MASTER_PASSWORD: ${DOVECOT_MASTER_PASSWORD:-demo-master-secret}
+      DIRECTOR_CONTROL_TOKEN: ${DIRECTOR_CONTROL_TOKEN:-demo-control-token}
+      DIRECTOR_OIDC_CLIENT_SECRET: ${DIRECTOR_OIDC_CLIENT_SECRET:-demo-director-oidc-secret}
+      NAUTHILUS_DIRECTORCTL_BEARER_TOKEN_FILE: /run/nauthilus-director/control-token
+      SSL_CERT_FILE: /run/nauthilus-demo/grpc-tls/ca.crt
     depends_on:
       valkey:
         condition: service_healthy

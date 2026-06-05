@@ -1,9 +1,19 @@
 # Variables
 APP_NAME := nauthilus-director
-VERSION := $(shell git describe --tags --always --dirty 2>/dev/null)
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -ldflags "-X main.version=$(VERSION)"
 BIN_DIR ?= ./bin
 COMMANDS := $(APP_NAME) $(APP_NAME)ctl
+DOCKER ?= docker
+SYSTEMD_ANALYZE ?= systemd-analyze
+IMAGE_TAG ?= $(APP_NAME):$(VERSION)
+GO_IMAGE ?= golang:1.26-alpine3.23
+CERTS_IMAGE ?= alpine:3.23
+RUNTIME_IMAGE ?= scratch
+REVISION ?= $(shell git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)
+BUILD_DATE ?= unknown
+IMAGE_SOURCE ?= https://github.com/croessner/nauthilus-director
+DOCKER_BUILD_FLAGS ?=
 MAN1_PAGES := docs/man/nauthilus-director.1 docs/man/nauthilus-directorctl.1
 MAN5_PAGES := docs/man/nauthilus-director.yaml.5
 DESTDIR ?=
@@ -179,6 +189,86 @@ docs-check:
 	@test -d docs/man || { echo "docs/man/ is required for manpages"; exit 1; }
 	@$(MAKE) check-docs
 
+check-packaging:
+	bash ./scripts/check-packaging.sh
+
+systemd-verify:
+	@set -e; \
+	if ! command -v $(SYSTEMD_ANALYZE) >/dev/null 2>&1; then \
+		echo "systemd-verify: systemd-analyze is unavailable; skipping offline unit verification"; \
+		exit 0; \
+	fi; \
+	$(SYSTEMD_ANALYZE) verify packaging/systemd/nauthilus-director.service
+
+docker-build:
+	@set -e; \
+	if ! command -v $(DOCKER) >/dev/null 2>&1; then \
+		echo "docker-build: Docker is unavailable; skipping $(DOCKER) build"; \
+		exit 0; \
+	fi; \
+	if ! $(DOCKER) info >/dev/null 2>&1; then \
+		echo "docker-build: Docker daemon is unavailable; skipping $(DOCKER) build"; \
+		exit 0; \
+	fi; \
+	$(DOCKER) build \
+		--file packaging/docker/Dockerfile \
+		--build-arg VERSION="$(VERSION)" \
+		--build-arg REVISION="$(REVISION)" \
+		--build-arg BUILD_DATE="$(BUILD_DATE)" \
+		--build-arg SOURCE="$(IMAGE_SOURCE)" \
+		--build-arg GO_IMAGE="$(GO_IMAGE)" \
+		--build-arg CERTS_IMAGE="$(CERTS_IMAGE)" \
+		--build-arg RUNTIME_IMAGE="$(RUNTIME_IMAGE)" \
+		--tag "$(IMAGE_TAG)" \
+		$(DOCKER_BUILD_FLAGS) \
+		.
+
+docker-smoke: docker-build
+	@set -e; \
+	if ! command -v $(DOCKER) >/dev/null 2>&1; then \
+		echo "docker-smoke: Docker is unavailable; skipping $(DOCKER) run"; \
+		exit 0; \
+	fi; \
+	if ! $(DOCKER) info >/dev/null 2>&1; then \
+		echo "docker-smoke: Docker daemon is unavailable; skipping $(DOCKER) run"; \
+		exit 0; \
+	fi; \
+	if ! $(DOCKER) image inspect "$(IMAGE_TAG)" >/dev/null 2>&1; then \
+		echo "docker-smoke: image $(IMAGE_TAG) is unavailable after docker-build"; \
+		exit 1; \
+	fi; \
+	director_output="$$( \
+		$(DOCKER) run --rm --network=none --read-only \
+			--tmpfs /tmp:rw,noexec,nosuid,size=16m \
+			--tmpfs /run/nauthilus-director:rw,noexec,nosuid,size=16m \
+			"$(IMAGE_TAG)" --version \
+	)"; \
+	case "$$director_output" in \
+		"nauthilus-director "*) printf '%s\n' "$$director_output" ;; \
+		*) printf 'docker-smoke: unexpected server version output: %s\n' "$$director_output" >&2; exit 1 ;; \
+	esac; \
+	ctl_output="$$( \
+		$(DOCKER) run --rm --network=none --read-only \
+			--tmpfs /tmp:rw,noexec,nosuid,size=16m \
+			--tmpfs /run/nauthilus-director:rw,noexec,nosuid,size=16m \
+			--entrypoint /usr/local/bin/nauthilus-directorctl \
+			"$(IMAGE_TAG)" --version \
+	)"; \
+	case "$$ctl_output" in \
+		"nauthilus-directorctl "*) printf '%s\n' "$$ctl_output" ;; \
+		*) printf 'docker-smoke: unexpected client version output: %s\n' "$$ctl_output" >&2; exit 1 ;; \
+	esac; \
+	config_output="$$( \
+		$(DOCKER) run --rm --network=none --read-only \
+			--tmpfs /tmp:rw,noexec,nosuid,size=16m \
+			--tmpfs /run/nauthilus-director:rw,noexec,nosuid,size=16m \
+			"$(IMAGE_TAG)" config dump -d --format yaml \
+	)"; \
+	case "$$config_output" in \
+		*"<redacted>"*) printf '%s\n' "docker-smoke: default config redaction present" ;; \
+		*) printf '%s\n' "docker-smoke: default config dump did not show redacted protected values" >&2; exit 1 ;; \
+	esac
+
 generate-openapi:
 	bash ./scripts/generate-openapi.sh
 
@@ -194,7 +284,7 @@ check-docs:
 copyright-check:
 	sh ./scripts/check-go-headers.sh
 
-guardrails: docs-check copyright-check check-openapi fix vet lint test race e2e build-check
+guardrails: docs-check check-packaging copyright-check check-openapi fix vet lint test race e2e build-check
 
 scale-smoke:
 	@if [ -z "$(SCALE_REDIS_ADDR)$(SCALE_REDIS_CLUSTER_ADDRS)" ]; then \
@@ -248,4 +338,4 @@ poc-race:
 version:
 	@echo $(VERSION)
 
-.PHONY: all build install install-bin install-man uninstall uninstall-bin uninstall-man build-check clean fix vet lint-config lint test race e2e e2e-interop docs-check generate-openapi check-openapi generate-docs check-docs copyright-check guardrails scale-smoke scale-stress poc-test poc-race version
+.PHONY: all build install install-bin install-man uninstall uninstall-bin uninstall-man build-check clean fix vet lint-config lint test race e2e e2e-interop docs-check check-packaging systemd-verify docker-build docker-smoke generate-openapi check-openapi generate-docs check-docs copyright-check guardrails scale-smoke scale-stress poc-test poc-race version

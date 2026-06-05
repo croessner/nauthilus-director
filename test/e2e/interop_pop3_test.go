@@ -50,7 +50,12 @@ func TestDovecotPOP3Interop(t *testing.T) {
 	redisFixture := startValkeySessionStore(t)
 	identities := lmtpAuthorityIdentities()
 	identities[interopPOP3User] = lmtpAuthorityIdentity{Account: interopPOP3User, Tenant: e2eTenant, Shard: e2eShardTag}
-	authority := startLMTPAuthority(t, identities)
+	authority := startMappedFakeOIDCHTTPAuthority(
+		t,
+		mappedAttributesFromLMTPIdentities(identities),
+		nil,
+		fakeOIDCAuthorityOptions{},
+	)
 	pop3Address := loopbackAddress(t)
 	imapAddress := loopbackAddress(t)
 	lmtpAddress := loopbackAddress(t)
@@ -59,6 +64,7 @@ func TestDovecotPOP3Interop(t *testing.T) {
 	configPath := writeDovecotPOP3ProcessConfig(t, dovecotPOP3ProcessConfigOptions{
 		RedisAddress:   redisFixture.addr,
 		AuthorityURL:   authority.URL(),
+		AuthorityOIDC:  processAuthorityOIDCForFake(authority, nil),
 		POP3Address:    pop3Address,
 		IMAPAddress:    imapAddress,
 		LMTPAddress:    lmtpAddress,
@@ -98,6 +104,7 @@ func TestDovecotPOP3Interop(t *testing.T) {
 	pop3Client.Close()
 	assertOutputOmits(t, routeOutput, deliveryToken, e2ePassword)
 	assertOutputOmits(t, process.output.String(), deliveryToken, e2ePassword)
+	authority.ExpectOIDCCallerAuth(t)
 }
 
 // provePOP3InteropRecipientAccepted verifies the POP3 mailbox seed recipient crosses public LMTP RCPT.
@@ -123,6 +130,7 @@ func provePOP3InteropRecipientAccepted(t *testing.T, lmtpAddress string, recipie
 type dovecotPOP3ProcessConfigOptions struct {
 	RedisAddress   string
 	AuthorityURL   string
+	AuthorityOIDC  processAuthorityOIDCOptions
 	POP3Address    string
 	IMAPAddress    string
 	LMTPAddress    string
@@ -192,6 +200,7 @@ runtime:
     control:
       enabled: true
       address: %q
+%s
   timeouts:
     preauth: 3s
     auth: 3s
@@ -213,6 +222,7 @@ auth:
   authorities:
     default:
       transport: http
+%s
       http:
         endpoint: %q
         basic_auth:
@@ -371,8 +381,10 @@ director:
       health_check:
         enabled: false
 `, options.ControlAddress,
+		processControlAuthYAML(t),
 		e2eProcessKeyPrefix,
 		options.RedisAddress,
+		processAuthorityOIDCYAMLForOptions(t, options.AuthorityOIDC),
 		options.AuthorityURL,
 		e2eShardTag,
 		options.IMAPAddress,

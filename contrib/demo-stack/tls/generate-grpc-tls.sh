@@ -15,16 +15,18 @@ ca_key="${tls_dir}/ca.key"
 ca_cert="${tls_dir}/ca.crt"
 server_key="${tls_dir}/server.key"
 server_cert="${tls_dir}/server.crt"
+server_pem="${tls_dir}/server.pem"
+oidc_key="${tls_dir}/oidc-signing.key"
 
 fix_permissions() {
-  chmod 0600 "${ca_key}" "${server_key}"
-  chmod 0644 "${ca_cert}" "${server_cert}"
-  chown "${nauthilus_uid}:${nauthilus_gid}" "${server_key}" "${server_cert}"
+  chmod 0600 "${ca_key}" "${server_key}" "${oidc_key}"
+  chmod 0644 "${ca_cert}" "${server_cert}" "${server_pem}"
+  chown "${nauthilus_uid}:${nauthilus_gid}" "${server_key}" "${server_cert}" "${oidc_key}"
 }
 
 mkdir -p "${tls_dir}"
 
-if [ -s "${ca_key}" ] && [ -s "${ca_cert}" ] && [ -s "${server_key}" ] && [ -s "${server_cert}" ]; then
+if [ -s "${ca_key}" ] && [ -s "${ca_cert}" ] && [ -s "${server_key}" ] && [ -s "${server_cert}" ] && [ -s "${server_pem}" ] && [ -s "${oidc_key}" ]; then
   fix_permissions
   exit 0
 fi
@@ -32,10 +34,10 @@ fi
 work_dir="$(mktemp -d)"
 trap 'rm -rf "${work_dir}"' EXIT
 
-rm -f "${ca_key}" "${ca_cert}" "${tls_dir}/ca.srl" "${server_key}" "${server_cert}" "${work_dir}/server.csr"
+rm -f "${ca_key}" "${ca_cert}" "${tls_dir}/ca.srl" "${server_key}" "${server_cert}" "${server_pem}" "${oidc_key}" "${work_dir}/server.csr"
 
 cat >"${work_dir}/server.ext" <<EOF
-subjectAltName=DNS:${server_name},DNS:localhost,IP:127.0.0.1
+subjectAltName=DNS:${server_name},DNS:nauthilus-haproxy,DNS:localhost,IP:127.0.0.1
 extendedKeyUsage=serverAuth
 keyUsage=digitalSignature,keyEncipherment
 EOF
@@ -67,5 +69,8 @@ openssl x509 \
   -days 7 \
   -sha256 \
   -extfile "${work_dir}/server.ext" >/dev/null 2>&1
+
+openssl genrsa -out "${oidc_key}" 2048 >/dev/null 2>&1
+cat "${server_cert}" "${server_key}" >"${server_pem}"
 
 fix_permissions

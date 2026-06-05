@@ -441,6 +441,7 @@ runtime:
     control:
       enabled: true
       address: %q
+%s
   timeouts:
     preauth: 2s
     auth: 2s
@@ -462,6 +463,7 @@ auth:
   authorities:
     default:
       transport: http
+%s
       http:
         endpoint: %q
         basic_auth:
@@ -571,8 +573,10 @@ director:
       backends: [mailstore-a-sieve, mailstore-b-sieve]
   backends:
 %s`, options.ControlAddress,
+		processControlAuthYAML(t),
 		e2eProcessKeyPrefix,
 		options.RedisAddress,
+		processAuthorityOIDCYAML(),
 		options.AuthorityURL,
 		userHold,
 		e2eShardTag,
@@ -590,6 +594,7 @@ director:
 		keyPath,
 		sieveProductionBackendsYAML(options),
 	)
+	content = strings.ReplaceAll(content, "\t", "")
 
 	path := filepath.Join(t.TempDir(), "nauthilus-director-sieve-production.yml")
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {

@@ -48,13 +48,13 @@ func TestDovecotManageSieveInterop(t *testing.T) {
 	}
 
 	redisFixture := startValkeySessionStore(t)
-	authority := startMappedFakeHTTPAuthority(t, map[string]map[string][]string{
+	authority := startMappedFakeOIDCHTTPAuthority(t, map[string]map[string][]string{
 		interopManageSieveUser: {
 			"account":   {interopManageSieveUser},
 			"tenant":    {e2eTenant},
 			"mailShard": {e2eShardTag},
 		},
-	}, nil)
+	}, nil, fakeOIDCAuthorityOptions{})
 	tlsBundle := writeLMTPPeerTLSBundle(t)
 	sieveAddress := loopbackAddress(t)
 	imapAddress := loopbackAddress(t)
@@ -62,6 +62,7 @@ func TestDovecotManageSieveInterop(t *testing.T) {
 	configPath := writeDovecotManageSieveProcessConfig(t, interopManageSieveProcessConfigOptions{
 		RedisAddress:    redisFixture.addr,
 		AuthorityURL:    authority.URL(),
+		AuthorityOIDC:   processAuthorityOIDCForFake(authority, nil),
 		SieveAddress:    sieveAddress,
 		IMAPAddress:     imapAddress,
 		ControlAddress:  controlAddress,
@@ -118,11 +119,13 @@ func TestDovecotManageSieveInterop(t *testing.T) {
 	}
 
 	assertOutputOmits(t, process.output.String(), interopManageSieveScriptName, interopManageSieveScriptBody, e2ePassword)
+	authority.ExpectOIDCCallerAuth(t)
 }
 
 type interopManageSieveProcessConfigOptions struct {
 	RedisAddress    string
 	AuthorityURL    string
+	AuthorityOIDC   processAuthorityOIDCOptions
 	SieveAddress    string
 	IMAPAddress     string
 	ControlAddress  string
@@ -210,6 +213,7 @@ runtime:
     control:
       enabled: true
       address: %q
+%s
   timeouts:
     preauth: 2s
     auth: 2s
@@ -231,6 +235,7 @@ auth:
   authorities:
     default:
       transport: http
+%s
       http:
         endpoint: %q
         basic_auth:
@@ -396,7 +401,9 @@ director:
       health_check:
         enabled: false
 `, options.ControlAddress,
+		processControlAuthYAML(t),
 		options.RedisAddress,
+		processAuthorityOIDCYAMLForOptions(t, options.AuthorityOIDC),
 		options.AuthorityURL,
 		e2eShardTag,
 		options.IMAPAddress,

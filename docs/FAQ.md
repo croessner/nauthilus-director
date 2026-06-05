@@ -7,6 +7,10 @@ unless the text explicitly calls out an external system.
 ## Table of Contents
 
 - [What should I check first when a Director instance looks wrong?](#what-should-i-check-first-when-a-director-instance-looks-wrong)
+- [Where are the production deployment and security runbooks?](#where-are-the-production-deployment-and-security-runbooks)
+- [How do I migrate Director-to-Nauthilus caller auth from Basic Auth to OIDC?](#how-do-i-migrate-director-to-nauthilus-caller-auth-from-basic-auth-to-oidc)
+- [Why is pprof unavailable or forbidden?](#why-is-pprof-unavailable-or-forbidden)
+- [What should I do when reload is rejected?](#what-should-i-do-when-reload-is-rejected)
 - [How do I explain why a user would route to a shard or backend?](#how-do-i-explain-why-a-user-would-route-to-a-shard-or-backend)
 - [How do I move a user from one shard to another?](#how-do-i-move-a-user-from-one-shard-to-another)
 - [When do I add a backend pin during a migration?](#when-do-i-add-a-backend-pin-during-a-migration)
@@ -45,6 +49,73 @@ $CTL listeners show imap
 $CTL users show alice@example.org
 $CTL users sessions alice@example.org
 ```
+
+## Where are the production deployment and security runbooks?
+
+The operations index is `docs/operations/README.md`. Start with:
+
+- `docs/operations/production-deployment.md` for binaries, Docker, systemd and
+  production artifact validation.
+- `docs/operations/security.md` for control-plane authentication, protected
+  config and pprof risk.
+- `docs/operations/oidc-nauthilus.md` for Nauthilus OIDC caller auth and
+  migration from Basic Auth.
+- `docs/operations/reload-upgrade.md` for safe reload, graceful shutdown and
+  upgrade flow.
+- `docs/operations/failure-modes.md` and
+  `docs/operations/migration-workflows.md` for incident and migration
+  runbooks.
+
+The manpages remain the command reference. Operations docs explain how to
+combine commands safely.
+
+## How do I migrate Director-to-Nauthilus caller auth from Basic Auth to OIDC?
+
+Use Nauthilus-issued client-credentials tokens for production authority caller
+auth. Register a Director OIDC client in Nauthilus, mount the client secret or
+private key as a file, configure `auth.authorities.<name>.oidc` with the
+required backchannel scopes, then restart because authority auth is
+process-owned configuration.
+
+For HTTP authority transport, enabled OIDC caller auth sends bearer caller
+tokens to Nauthilus and does not also send Basic Auth. For gRPC authority
+transport, enable `grpc.caller_auth.oidc.enabled` so RPCs carry bearer metadata.
+The token cache is per process and in-memory only; it is not stored in Redis
+and is lost on restart.
+
+See `docs/operations/oidc-nauthilus.md` for the full migration and rollback
+workflow. End-user mail `XOAUTH2` and `OAUTHBEARER` credentials are separate:
+the Director forwards that bearer material to Nauthilus and does not locally
+introspect or cache it.
+
+## Why is pprof unavailable or forbidden?
+
+pprof is disabled by default. When
+`observability.profiles.pprof.enabled: false`, `/debug/pprof/*` returns `404`.
+When pprof is enabled, every profile route lives on the control listener, uses
+the same control-plane authentication as `/api/v1/*` and `/metrics`, and then
+requires protected authorization.
+
+An ordinary static bearer or mTLS actor does not automatically receive
+protected profile access. OIDC callers need the ordinary control scope and the
+configured protected scope, for example `nauthilus-director.protected`.
+
+Treat profile files as sensitive incident artifacts. They can contain stack
+frames, allocation paths, command-line detail and timing data.
+
+## What should I do when reload is rejected?
+
+Safe reload is atomic. A rejected reload leaves the old accepted config snapshot
+active and does not rewrite YAML. Read the reload response and journal entry,
+then either roll back the config edit and reload again or schedule a restart
+for restart-required changes.
+
+Reload is for listener additions/removals and backend or backend-pool changes
+for new sessions. Restart remains required for auth, Redis, runtime control
+listener settings, observability and pprof, routing, affinity, health,
+maintenance, runtime override policy and edits to existing listener definitions.
+
+See `docs/operations/reload-upgrade.md` for the full lifecycle checklist.
 
 ## How do I explain why a user would route to a shard or backend?
 

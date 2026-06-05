@@ -21,6 +21,8 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -43,6 +45,9 @@ var version = "dev"
 const (
 	defaultControlAddress = "http://127.0.0.1:9090"
 	defaultTimeout        = 5 * time.Second
+	envBearerToken        = "NAUTHILUS_DIRECTORCTL_BEARER_TOKEN"
+	envBearerTokenFile    = "NAUTHILUS_DIRECTORCTL_BEARER_TOKEN_FILE"
+	maxCLISecretFileBytes = 64 << 10
 )
 
 const (
@@ -62,7 +67,7 @@ const (
 	commandReload    = "reload"
 )
 
-type controlClientFactory func(address string, timeout time.Duration) (generated.ClientWithResponsesInterface, error)
+type controlClientFactory func(options commandOptions) (generated.ClientWithResponsesInterface, error)
 
 var newControlClient controlClientFactory = newGeneratedControlClient
 
@@ -71,9 +76,16 @@ type outputMode string
 
 // commandOptions carries global settings shared by all subcommands.
 type commandOptions struct {
-	Address string
-	Timeout time.Duration
-	Output  outputMode
+	Address               string
+	Timeout               time.Duration
+	Output                outputMode
+	AuthBearerToken       string
+	AuthBearerTokenFile   string
+	TLSCAFile             string
+	TLSClientCert         string
+	TLSClientKey          string
+	TLSServerName         string
+	TLSInsecureSkipVerify bool
 }
 
 // application owns command execution state for one invocation.
@@ -172,6 +184,13 @@ func newDirectorCtlCommand(stdout io.Writer, stderr io.Writer) *cobra.Command {
 	root.PersistentFlags().String("address", defaultControlAddress, "control API base URL")
 	root.PersistentFlags().Duration("timeout", defaultTimeout, "control API request timeout")
 	root.PersistentFlags().String("output", string(outputText), "output mode: text or json")
+	root.PersistentFlags().String("auth-bearer-token", "", "control API bearer token; prefer --auth-bearer-token-file for scripts")
+	root.PersistentFlags().String("auth-bearer-token-file", "", "control API bearer token file")
+	root.PersistentFlags().String("tls-ca-file", "", "control API TLS CA certificate file")
+	root.PersistentFlags().String("tls-client-cert", "", "control API mTLS client certificate file")
+	root.PersistentFlags().String("tls-client-key", "", "control API mTLS client key file")
+	root.PersistentFlags().String("tls-server-name", "", "control API TLS server name override")
+	root.PersistentFlags().Bool("tls-insecure-skip-verify", false, "skip control API TLS verification")
 	root.PersistentFlags().Bool("version", false, "print version and exit")
 
 	root.AddCommand(newStatusCommand(stdout, stderr))
@@ -571,6 +590,13 @@ func applicationFromCommand(cmd *cobra.Command, stdout io.Writer, stderr io.Writ
 	address, _ := flags.GetString("address")
 	timeout, _ := flags.GetDuration("timeout")
 	output, _ := flags.GetString("output")
+	authBearerToken, _ := flags.GetString("auth-bearer-token")
+	authBearerTokenFile, _ := flags.GetString("auth-bearer-token-file")
+	tlsCAFile, _ := flags.GetString("tls-ca-file")
+	tlsClientCert, _ := flags.GetString("tls-client-cert")
+	tlsClientKey, _ := flags.GetString("tls-client-key")
+	tlsServerName, _ := flags.GetString("tls-server-name")
+	tlsInsecureSkipVerify, _ := flags.GetBool("tls-insecure-skip-verify")
 
 	mode, err := parseOutputMode(output)
 	if err != nil {
@@ -581,12 +607,37 @@ func applicationFromCommand(cmd *cobra.Command, stdout io.Writer, stderr io.Writ
 		_, _ = fmt.Fprintln(stderr, "timeout must be greater than zero")
 		return application{}, 2
 	}
+	if strings.TrimSpace(authBearerToken) == "" {
+		authBearerToken = os.Getenv(envBearerToken)
+	}
+	if strings.TrimSpace(authBearerTokenFile) == "" {
+		authBearerTokenFile = os.Getenv(envBearerTokenFile)
+	}
+	if strings.TrimSpace(authBearerToken) != "" && strings.TrimSpace(authBearerTokenFile) != "" {
+		_, _ = fmt.Fprintln(stderr, "configure only one bearer token source")
+		return application{}, 2
+	}
+	if strings.TrimSpace(tlsClientCert) != "" && strings.TrimSpace(tlsClientKey) == "" {
+		_, _ = fmt.Fprintln(stderr, "tls client key is required when tls client cert is configured")
+		return application{}, 2
+	}
+	if strings.TrimSpace(tlsClientKey) != "" && strings.TrimSpace(tlsClientCert) == "" {
+		_, _ = fmt.Fprintln(stderr, "tls client cert is required when tls client key is configured")
+		return application{}, 2
+	}
 
 	return application{
 		options: commandOptions{
-			Address: address,
-			Timeout: timeout,
-			Output:  mode,
+			Address:               address,
+			Timeout:               timeout,
+			Output:                mode,
+			AuthBearerToken:       authBearerToken,
+			AuthBearerTokenFile:   authBearerTokenFile,
+			TLSCAFile:             tlsCAFile,
+			TLSClientCert:         tlsClientCert,
+			TLSClientKey:          tlsClientKey,
+			TLSServerName:         tlsServerName,
+			TLSInsecureSkipVerify: tlsInsecureSkipVerify,
 		},
 		stdout: stdout,
 		stderr: stderr,
@@ -693,7 +744,7 @@ func (app application) dispatch(args []string) int {
 
 // client creates the generated OpenAPI client for one command.
 func (app application) client() (generated.ClientWithResponsesInterface, int) {
-	client, err := newControlClient(app.options.Address, app.options.Timeout)
+	client, err := newControlClient(app.options)
 	if err != nil {
 		_, _ = fmt.Fprintf(app.stderr, "control client failed: %v\n", err)
 		return nil, 2
@@ -2829,13 +2880,127 @@ func (app application) configDumpServerError(status int, problem *generated.Erro
 }
 
 // newGeneratedControlClient creates the OpenAPI-generated client-with-responses SDK.
-func newGeneratedControlClient(address string, timeout time.Duration) (generated.ClientWithResponsesInterface, error) {
-	baseURL, err := normalizeAddress(address)
+func newGeneratedControlClient(options commandOptions) (generated.ClientWithResponsesInterface, error) {
+	baseURL, err := normalizeAddress(options.Address)
 	if err != nil {
 		return nil, err
 	}
 
-	return generated.NewClientWithResponses(baseURL, generated.WithHTTPClient(&http.Client{Timeout: timeout}))
+	httpClient, err := httpClientFromOptions(options)
+	if err != nil {
+		return nil, err
+	}
+
+	clientOptions := []generated.ClientOption{generated.WithHTTPClient(httpClient)}
+	token, err := bearerTokenFromOptions(options)
+	if err != nil {
+		return nil, err
+	}
+	if token != "" {
+		clientOptions = append(clientOptions, generated.WithRequestEditorFn(func(_ context.Context, request *http.Request) error {
+			request.Header.Set("Authorization", "Bearer "+token)
+			return nil
+		}))
+	}
+
+	return generated.NewClientWithResponses(baseURL, clientOptions...)
+}
+
+// httpClientFromOptions builds the transport used by the generated client.
+func httpClientFromOptions(options commandOptions) (*http.Client, error) {
+	client := &http.Client{Timeout: options.Timeout}
+	if !options.requiresCustomTLS() {
+		return client, nil
+	}
+
+	tlsConfig := &tls.Config{
+		ServerName:         strings.TrimSpace(options.TLSServerName),
+		InsecureSkipVerify: options.TLSInsecureSkipVerify, //nolint:gosec // Explicit operator-controlled compatibility setting.
+	}
+	if strings.TrimSpace(options.TLSCAFile) != "" {
+		caPEM, err := os.ReadFile(options.TLSCAFile)
+		if err != nil {
+			return nil, fmt.Errorf("read tls ca file: %w", err)
+		}
+
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(caPEM) {
+			return nil, fmt.Errorf("tls ca file did not contain PEM certificates")
+		}
+		tlsConfig.RootCAs = pool
+	}
+	if strings.TrimSpace(options.TLSClientCert) != "" {
+		certificate, err := tls.LoadX509KeyPair(options.TLSClientCert, options.TLSClientKey)
+		if err != nil {
+			return nil, fmt.Errorf("load tls client certificate: %w", err)
+		}
+		tlsConfig.Certificates = []tls.Certificate{certificate}
+	}
+
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.TLSClientConfig = tlsConfig
+	client.Transport = transport
+
+	return client, nil
+}
+
+// requiresCustomTLS reports whether the generated client needs a custom transport.
+func (options commandOptions) requiresCustomTLS() bool {
+	return strings.TrimSpace(options.TLSCAFile) != "" ||
+		strings.TrimSpace(options.TLSClientCert) != "" ||
+		strings.TrimSpace(options.TLSClientKey) != "" ||
+		strings.TrimSpace(options.TLSServerName) != "" ||
+		options.TLSInsecureSkipVerify
+}
+
+// bearerTokenFromOptions resolves the configured external bearer token.
+func bearerTokenFromOptions(options commandOptions) (string, error) {
+	token := strings.TrimSpace(options.AuthBearerToken)
+	tokenFile := strings.TrimSpace(options.AuthBearerTokenFile)
+	if token != "" && tokenFile != "" {
+		return "", fmt.Errorf("configure only one bearer token source")
+	}
+	if tokenFile != "" {
+		resolved, err := readCLISecretFile(tokenFile)
+		if err != nil {
+			return "", fmt.Errorf("read bearer token file: %w", err)
+		}
+		token = resolved
+	}
+	if token == "" {
+		return "", nil
+	}
+	if strings.ContainsAny(token, " \t\r\n") {
+		return "", fmt.Errorf("bearer token must not contain whitespace")
+	}
+
+	return token, nil
+}
+
+// readCLISecretFile reads one bounded secret file without exposing its contents.
+func readCLISecretFile(path string) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer func() {
+		_ = file.Close()
+	}()
+
+	body, err := io.ReadAll(io.LimitReader(file, maxCLISecretFileBytes+1))
+	if err != nil {
+		return "", err
+	}
+	if len(body) > maxCLISecretFileBytes {
+		return "", fmt.Errorf("secret file is too large")
+	}
+
+	secret := strings.TrimRight(string(body), "\r\n")
+	if secret == "" {
+		return "", fmt.Errorf("secret file is empty")
+	}
+
+	return secret, nil
 }
 
 // normalizeAddress returns a generated-client-compatible base URL.

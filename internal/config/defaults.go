@@ -60,10 +60,11 @@ func DefaultConfig() Config {
 							TokenFile: Secret("/etc/nauthilus-director/control-token"),
 						},
 						OIDC: ControlOIDCAuthConfig{
-							Enabled:        true,
-							Authority:      "default",
-							Validation:     "nauthilus",
-							RequiredScopes: []string{"nauthilus-director.admin"},
+							Enabled:         true,
+							Authority:       "default",
+							Validation:      "nauthilus",
+							RequiredScopes:  []string{"nauthilus-director.admin"},
+							ProtectedScopes: []string{"nauthilus-director.protected"},
 						},
 						MTLS: ControlMTLSAuthConfig{},
 					},
@@ -140,8 +141,10 @@ func defaultObservability() ObservabilityConfig {
 			SampleRatio: 0.1,
 		},
 		Profiles: ProfilesConfig{
-			PProf: ProfileConfig{},
-			Block: ProfileConfig{},
+			PProf:     ProfileConfig{},
+			Block:     ProfileConfig{},
+			Mutex:     ProfileConfig{},
+			Goroutine: ProfileConfig{},
 		},
 	}
 }
@@ -224,8 +227,23 @@ func defaultAuthority() AuthorityConfig {
 			Enabled:        true,
 			AuthorityMode:  "nauthilus",
 			IssuerHint:     "https://auth.example.org",
+			Issuer:         "https://auth.example.org",
+			DiscoveryURL:   "",
 			AudienceHint:   "mail",
 			RequiredScopes: []string{"email"},
+			ClientCredentials: AuthorityOIDCClientCredentialsConfig{
+				Enabled:                         true,
+				ClientID:                        "nauthilus-director",
+				ClientSecretFile:                Secret("/etc/nauthilus-director/nauthilus-oidc-client-secret"),
+				TokenEndpointAuthMethod:         "client_secret_basic",
+				IntrospectionEndpointAuthMethod: "client_secret_basic",
+				Scopes: []string{
+					"nauthilus:authenticate",
+					"nauthilus:lookup_identity",
+					"nauthilus:list_accounts",
+				},
+				RefreshBeforeExpiry: NewDuration(1 * time.Minute),
+			},
 		},
 		HTTP: AuthorityHTTPTransportConfig{
 			Endpoint:    "http://127.0.0.1:8080/api/v1/auth/json",
@@ -251,6 +269,7 @@ func defaultAuthority() AuthorityConfig {
 				Bearer: BearerCallerAuthConfig{
 					TokenFile: Secret("/etc/nauthilus-director/nauthilus-grpc-token"),
 				},
+				OIDC: OIDCCallerAuthConfig{},
 			},
 			TLS: AuthorityTLSConfig{
 				Enabled:    true,

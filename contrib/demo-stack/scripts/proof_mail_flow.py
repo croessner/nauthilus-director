@@ -42,6 +42,7 @@ class DemoConfig:
     hold_duration_seconds: int
     hold_probe_seconds: float
     control_url: str
+    control_token: str
     imap_host: str
     imaps_port: int
     smtp_host: str
@@ -94,6 +95,23 @@ def int_env(name: str, default: int) -> int:
     return value
 
 
+def load_control_token() -> str:
+    """Load the public control API bearer token from environment or file."""
+
+    for name in ("DEMO_CONTROL_TOKEN_FILE", "NAUTHILUS_DIRECTORCTL_BEARER_TOKEN_FILE"):
+        path = os.environ.get(name, "").strip()
+        if not path:
+            continue
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as handle:
+                return handle.read().strip()
+
+    return os.environ.get(
+        "DEMO_CONTROL_TOKEN",
+        os.environ.get("DIRECTOR_CONTROL_TOKEN", "demo-control-token"),
+    ).strip()
+
+
 def load_config() -> DemoConfig:
     """Load runtime proof configuration from the shell environment."""
 
@@ -123,6 +141,7 @@ def load_config() -> DemoConfig:
         hold_duration_seconds=int_env("DEMO_HOLD_DURATION_SECONDS", 30),
         hold_probe_seconds=float(os.environ.get("DEMO_HOLD_PROBE_SECONDS", "2")),
         control_url=os.environ.get("DEMO_CONTROL_URL", "http://127.0.0.1:9090").rstrip("/"),
+        control_token=load_control_token(),
         imap_host=os.environ.get("DEMO_IMAP_HOST", "127.0.0.1"),
         imaps_port=int_env("DEMO_IMAPS_PORT", 8993),
         smtp_host=os.environ.get("DEMO_SMTP_HOST", "127.0.0.1"),
@@ -152,6 +171,8 @@ def request_json(
     statuses = ok_statuses or {200}
     data = None
     headers = {"Accept": "application/json"}
+    if config.control_token:
+        headers["Authorization"] = f"Bearer {config.control_token}"
     if payload is not None:
         data = json.dumps(payload).encode("utf-8")
         headers["Content-Type"] = "application/json"

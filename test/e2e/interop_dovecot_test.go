@@ -89,15 +89,16 @@ func TestDovecotCredentialReplayInterop(t *testing.T) {
 	}
 
 	redisFixture := startValkeySessionStore(t)
-	authority := startFakeHTTPAuthority(t, map[string][]string{
+	authority := startFakeOIDCHTTPAuthority(t, map[string][]string{
 		"account":   {e2eAccount},
 		"tenant":    {e2eTenant},
 		"mailShard": {e2eShardTag},
-	})
+	}, fakeOIDCAuthorityOptions{})
 	directorAddress := "127.0.0.1:" + strconv.Itoa(reserveLoopbackPort(t))
 	configPath := writeProcessConfig(t, processConfigOptions{
 		RedisAddress:    redisFixture.addr,
 		AuthorityURL:    authority.URL(),
+		AuthorityOIDC:   processAuthorityOIDCForFake(authority, nil),
 		DirectorAddress: directorAddress,
 		BackendAddress:  backendAddress,
 		BackendAuth:     credentialReplayBackendAuth(false),
@@ -127,6 +128,7 @@ func TestDovecotCredentialReplayInterop(t *testing.T) {
 	}
 
 	authority.ExpectRequest(t, e2eProtocol, "login", "")
+	authority.ExpectOIDCCallerAuth(t)
 }
 
 // TestDovecotClusterRuntimeInterop proves multi-director affinity and control against real Dovecot backends.
@@ -145,7 +147,7 @@ func TestDovecotClusterRuntimeInterop(t *testing.T) {
 	}
 
 	redisFixture := startValkeySessionStore(t)
-	authority := startClusterHTTPAuthority(t)
+	authority := startClusterOIDCHTTPAuthority(t)
 
 	directorAAddress := net.JoinHostPort("127.0.0.1", strconv.Itoa(reserveLoopbackPort(t)))
 	directorBAddress := net.JoinHostPort("127.0.0.1", strconv.Itoa(reserveLoopbackPort(t)))
@@ -159,6 +161,7 @@ func TestDovecotClusterRuntimeInterop(t *testing.T) {
 		InstanceName:     interopDirectorAInstance,
 		RedisAddress:     redisFixture.addr,
 		AuthorityURL:     authority.URL(),
+		AuthorityOIDC:    processAuthorityOIDCForFake(authority, nil),
 		DirectorAddress:  directorAAddress,
 		ControlAddress:   controlAAddress,
 		BackendAddresses: backendAddresses,
@@ -167,6 +170,7 @@ func TestDovecotClusterRuntimeInterop(t *testing.T) {
 		InstanceName:     interopDirectorBInstance,
 		RedisAddress:     redisFixture.addr,
 		AuthorityURL:     authority.URL(),
+		AuthorityOIDC:    processAuthorityOIDCForFake(authority, nil),
 		DirectorAddress:  directorBAddress,
 		ControlAddress:   controlBAddress,
 		BackendAddresses: backendAddresses,
@@ -175,6 +179,7 @@ func TestDovecotClusterRuntimeInterop(t *testing.T) {
 		InstanceName:     interopDirectorCInstance,
 		RedisAddress:     redisFixture.addr,
 		AuthorityURL:     authority.URL(),
+		AuthorityOIDC:    processAuthorityOIDCForFake(authority, nil),
 		DirectorAddress:  directorCAddress,
 		ControlAddress:   controlCAddress,
 		BackendAddresses: backendAddresses,
@@ -272,6 +277,7 @@ func TestDovecotClusterRuntimeInterop(t *testing.T) {
 	waitForDirectorctlSessions(t, ctl, controlAURL, 0)
 
 	runDirectorctl(t, ctl, controlAURL, "users", "affinity", "clear", interopMovedUser, "--reason", "cluster cleanup")
+	authority.ExpectOIDCCallerAuth(t)
 }
 
 type staticInteropAuthenticator struct{}
@@ -293,6 +299,7 @@ type interopClusterProcessConfigOptions struct {
 	InstanceName     string
 	RedisAddress     string
 	AuthorityURL     string
+	AuthorityOIDC    processAuthorityOIDCOptions
 	DirectorAddress  string
 	ControlAddress   string
 	BackendAddresses map[string]string
@@ -343,6 +350,7 @@ runtime:
     control:
       enabled: true
       address: %q
+%s
   timeouts:
     preauth: 2s
     auth: 2s
@@ -363,6 +371,8 @@ storage:
 auth:
   authorities:
     default:
+      transport: http
+%s
       http:
         endpoint: %q
         basic_auth:
@@ -395,8 +405,10 @@ director:
   backends:
 `, options.InstanceName,
 		options.ControlAddress,
+		processControlAuthYAML(t),
 		interopClusterRedisKeyPrefix,
 		options.RedisAddress,
+		processAuthorityOIDCYAMLForOptions(t, options.AuthorityOIDC),
 		options.AuthorityURL,
 		interopDefaultShard,
 		options.DirectorAddress,
@@ -571,6 +583,18 @@ func startClusterHTTPAuthority(t *testing.T) *clusterHTTPAuthority {
 	})
 
 	return fake
+}
+
+// startClusterOIDCHTTPAuthority starts OIDC-backed fake Nauthilus auth for shard interop.
+func startClusterOIDCHTTPAuthority(t *testing.T) *fakeHTTPAuthority {
+	t.Helper()
+
+	return startMappedFakeOIDCHTTPAuthority(t, map[string]map[string][]string{
+		interopDefaultUser: interopAttributesForUser(interopDefaultUser),
+		interopShard1User:  interopAttributesForUser(interopShard1User),
+		interopShard2User:  interopAttributesForUser(interopShard2User),
+		interopMovedUser:   interopAttributesForUser(interopMovedUser),
+	}, interopAttributesForUser(interopShard1User), fakeOIDCAuthorityOptions{})
 }
 
 type clusterHTTPAuthority struct {

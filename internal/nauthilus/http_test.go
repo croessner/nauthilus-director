@@ -149,6 +149,41 @@ func TestHTTPListAccountsUsesAuthorityBoundary(t *testing.T) {
 	}
 }
 
+// TestHTTPAuthorityOIDCCallerAuthSendsBearerOnly verifies OIDC caller auth replaces Basic auth.
+func TestHTTPAuthorityOIDCCallerAuthSendsBearerOnly(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if got := request.Header.Get("Authorization"); got != "Bearer oidc-caller-token" {
+			t.Fatalf("authorization = %q, want OIDC bearer", got)
+		}
+		if _, _, ok := request.BasicAuth(); ok {
+			t.Fatal("OIDC caller auth also sent HTTP Basic credentials")
+		}
+
+		writer.Header().Set("Content-Type", defaultHTTPContentType)
+		_, _ = writer.Write([]byte(`{"ok":true,"account_field":"uid","attributes":{"uid":["alice"]}}`))
+	}))
+	defer server.Close()
+
+	client, err := NewHTTPClient(HTTPClientConfig{
+		Endpoint:          server.URL + "/api/v1/auth/json",
+		ContentType:       defaultHTTPContentType,
+		BasicAuthUsername: "director",
+		BasicAuthPassword: NewSecret("basic-secret"),
+		TokenSource:       staticCallerTokenSource{token: "oidc-caller-token"},
+	})
+	if err != nil {
+		t.Fatalf("NewHTTPClient: %v", err)
+	}
+
+	result, err := client.Authenticate(context.Background(), testAuthRequest())
+	if err != nil {
+		t.Fatalf("Authenticate returned error: %v", err)
+	}
+	if result.Decision != DecisionAuthenticated {
+		t.Fatalf("decision = %q, want authenticated", result.Decision)
+	}
+}
+
 // TestHTTPAuthorityOutcomeClassification verifies rejection and fail-closed errors.
 func TestHTTPAuthorityOutcomeClassification(t *testing.T) {
 	cases := []struct {
@@ -213,6 +248,16 @@ type roundTripFunc func(request *http.Request) (*http.Response, error)
 // RoundTrip implements http.RoundTripper for focused transport tests.
 func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
 	return f(request)
+}
+
+type staticCallerTokenSource struct {
+	token string
+	err   error
+}
+
+// BearerToken returns the configured fake caller token.
+func (s staticCallerTokenSource) BearerToken(context.Context) (string, error) {
+	return s.token, s.err
 }
 
 // newTestHTTPClient creates a test client for the supplied endpoint.

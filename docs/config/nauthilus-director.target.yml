@@ -39,6 +39,8 @@ runtime:
           validation: nauthilus
           required_scopes:
             - nauthilus-director.admin
+          protected_scopes:
+            - nauthilus-director.protected
         mtls:
           enabled: false
 
@@ -113,6 +115,10 @@ observability:
     pprof:
       enabled: false
     block:
+      enabled: false
+    mutex:
+      enabled: false
+    goroutine:
       enabled: false
 
 storage:
@@ -203,9 +209,36 @@ auth:
         enabled: true
         authority_mode: nauthilus
         issuer_hint: https://auth.example.org
+        issuer: https://auth.example.org
+        discovery_url: ""
         audience_hint: mail
         required_scopes:
           - email
+        client_credentials:
+          enabled: true
+          client_id: nauthilus-director
+          client_secret: ""
+          client_secret_file: /etc/nauthilus-director/nauthilus-oidc-client-secret
+          token_endpoint_auth_method: client_secret_basic
+          introspection_endpoint_auth_method: client_secret_basic
+          # For Nauthilus private_key_jwt, set token endpoint auth and,
+          # when Discovery announces it, introspection auth to private_key_jwt:
+          # token_endpoint_auth_method: private_key_jwt
+          # introspection_endpoint_auth_method: private_key_jwt
+          # client_private_key_file: /etc/nauthilus-director/nauthilus-oidc-client-key.pem
+          # client_key_id: director-key-1
+          # client_assertion_alg: RS256
+          # audience: https://auth.example.org/oidc/token
+          client_private_key_file: ""
+          client_key_id: ""
+          client_assertion_alg: RS256
+          audience: ""
+          scopes:
+            - nauthilus:authenticate
+            - nauthilus:lookup_identity
+            - nauthilus:list_accounts
+          refresh_before_expiry: 1m
+          token_endpoint: ""
 
       http:
         endpoint: "http://127.0.0.1:8080/api/v1/auth/json"
@@ -230,6 +263,8 @@ auth:
           bearer:
             enabled: false
             token_file: /etc/nauthilus-director/nauthilus-grpc-token
+          oidc:
+            enabled: false
         tls:
           enabled: true
           ca_file: /etc/nauthilus-director/nauthilus-grpc-ca.pem

@@ -450,6 +450,7 @@ runtime:
     control:
       enabled: true
       address: %q
+%s
   timeouts:
     preauth: 2s
     auth: 2s
@@ -471,6 +472,7 @@ auth:
   authorities:
     default:
       transport: http
+%s
       http:
         endpoint: %q
         basic_auth:
@@ -604,8 +606,10 @@ director:
       backends: [mailstore-a-pop3, mailstore-b-pop3]
   backends:
 %s`, options.ControlAddress,
+		processControlAuthYAML(t),
 		e2eProcessKeyPrefix,
 		options.RedisAddress,
+		processAuthorityOIDCYAML(),
 		options.AuthorityURL,
 		options.UserHoldMaxWait.String(),
 		options.UserHoldPollInterval.String(),
@@ -627,6 +631,7 @@ director:
 		keyPath,
 		pop3ProductionBackendsYAML(options),
 	)
+	content = strings.ReplaceAll(content, "\t", "")
 
 	path := filepath.Join(t.TempDir(), "nauthilus-director-pop3-production.yml")
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {

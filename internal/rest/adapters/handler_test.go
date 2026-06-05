@@ -375,7 +375,9 @@ func TestSetUserBackendPinMapsGeneratedRequest(t *testing.T) {
 		Strategy: generated.KickExisting,
 	}
 
-	response, err := handler.SetUserBackendPin(context.Background(), generated.SetUserBackendPinRequestObject{
+	actor := runtime.Actor{ID: "operator-a", AuthMethod: "oidc", Authenticated: true}
+
+	response, err := handler.SetUserBackendPin(runtime.WithActor(context.Background(), actor), generated.SetUserBackendPinRequestObject{
 		UserKey: testBackendPinUserKey,
 		Body:    &body,
 	})
@@ -395,7 +397,8 @@ func TestSetUserBackendPinMapsGeneratedRequest(t *testing.T) {
 	if service.setRequest.Key != wantKey ||
 		service.setRequest.BackendIdentifier != testPinnedBackend ||
 		service.setRequest.Strategy != runtime.MoveStrategyKickExisting ||
-		service.setRequest.Reason != testBackendPinReason {
+		service.setRequest.Reason != testBackendPinReason ||
+		service.setRequest.Actor != actor {
 		t.Fatalf("set request = %#v, want trimmed runtime request", service.setRequest)
 	}
 }

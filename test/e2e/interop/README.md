@@ -12,6 +12,12 @@ available or when the matching production protocol entrypoint does not exist.
 It must use pinned container images or digests so local and CI runs do not
 drift silently.
 
+Director-to-Nauthilus calls in this lane use a fake Nauthilus issuer that
+publishes OIDC discovery and token endpoints, then requires `Authorization:
+Bearer` on the Nauthilus-compatible HTTP authority endpoint. The fake authority
+records discovery, token and backchannel requests so the interop lane proves
+OIDC caller auth is primary and Basic Auth is not used.
+
 The LMTP scenario runs `swaks` and `curl` from a short-lived pinned tool
 container. `swaks` submits into the real Postfix SMTP listener, and
 `curl --url imap...` verifies the delivered test message through the real
@@ -26,9 +32,9 @@ names and the `-dev` test flavor; the script pins that tag instead of using
 The current lane has five scenarios:
 
 - a single production `nauthilus-director` process with fake Nauthilus
-  authentication and one real Dovecot IMAP backend, proving frontend `LOGIN`,
-  configured backend credential replay and post-auth proxy handoff through the
-  public director listener
+  OIDC-authenticated HTTP authority and one real Dovecot IMAP backend, proving
+  frontend `LOGIN`, configured backend credential replay and post-auth proxy
+  handoff through the public director listener
 - three production `nauthilus-director` processes sharing one Redis-compatible
   Valkey state service and proxying to six real Dovecot IMAP backends: two
   backends with no configured `shard_tag`, two explicit `test_shard1` backends
@@ -49,7 +55,7 @@ The current lane has five scenarios:
   placement through public sockets and `nauthilus-directorctl`
 - one production `nauthilus-director` process proxying public ManageSieve
   STARTTLS traffic to real Dovecot ManageSieve backends. The scenario proves
-  frontend auth through fake Nauthilus, Dovecot master-user backend auth,
+  frontend auth through fake Nauthilus OIDC caller auth, Dovecot master-user backend auth,
   `LISTSCRIPTS`, `PUTSCRIPT`, `SETACTIVE` and `GETSCRIPT` through the Director,
   safe route lookup for `protocol=sieve`, and same-account backend-node
   consistency between an active ManageSieve session and a later IMAP session

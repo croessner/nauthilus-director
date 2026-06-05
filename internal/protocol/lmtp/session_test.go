@@ -316,6 +316,60 @@ func TestSASLPeerAuthUsesSubmitterIdentity(t *testing.T) {
 	}
 }
 
+// TestSASLPeerBearerAuthForwardsTokensToNauthilus proves mail bearer material stays authority-owned.
+func TestSASLPeerBearerAuthForwardsTokensToNauthilus(t *testing.T) {
+	tests := []struct {
+		name     string
+		command  string
+		method   string
+		username string
+		token    string
+	}{
+		{
+			name:     "xoauth2",
+			command:  "AUTH XOAUTH2 " + xoauth2Payload("xoauth-submit@example.test", "xoauth-submit-token") + "\r\n",
+			method:   mechanismXOAUTH2,
+			username: "xoauth-submit@example.test",
+			token:    "xoauth-submit-token",
+		},
+		{
+			name:     "oauthbearer",
+			command:  "AUTH OAUTHBEARER " + oauthBearerPayload("oauth-submit@example.test", "oauth-submit-token") + "\r\n",
+			method:   mechanismOAuthBearer,
+			username: "oauth-submit@example.test",
+			token:    "oauth-submit-token",
+		},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			authenticator := &recordingAuthenticator{}
+			config := testSessionConfig()
+			config.TLSMode = TLSModeImplicit
+			config.RequirePeerAuth = true
+			config.Authenticator = authenticator
+			config.Capabilities = []string{testAllAuthCapability}
+
+			harness := startLMTPHarness(t, config)
+			harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+			harness.write(t, "LHLO submitter.example\r\n")
+			harness.expectLine(t, "250-nauthilus-director\r\n")
+			harness.expectLine(t, "250 AUTH PLAIN LOGIN XOAUTH2 OAUTHBEARER\r\n")
+			harness.write(t, testCase.command)
+			harness.expectLine(t, "235 2.7.0 Authentication successful\r\n")
+
+			request := authenticator.singleRequest(t)
+			if request.Context.Protocol != protocolLMTP || request.Context.Method != testCase.method {
+				t.Fatalf("request context protocol/method = %q/%q, want lmtp/%s", request.Context.Protocol, request.Context.Method, testCase.method)
+			}
+
+			if request.Context.Username != testCase.username || request.Credential.Value() != testCase.token {
+				t.Fatalf("request username/token = %q/%q, want forwarded bearer material", request.Context.Username, request.Credential.String())
+			}
+		})
+	}
+}
+
 // TestSASLPeerAuthPassesVerifiedTLSFacts verifies client certificate metadata reaches Nauthilus.
 func TestSASLPeerAuthPassesVerifiedTLSFacts(t *testing.T) {
 	authenticator := &recordingAuthenticator{}
@@ -2880,6 +2934,13 @@ func plainPayload(username string, password string) string {
 // xoauth2Payload builds a base64 XOAUTH2 envelope.
 func xoauth2Payload(username string, token string) string {
 	payload := "user=" + username + "\x01auth=Bearer " + token + "\x01\x01"
+
+	return base64.StdEncoding.EncodeToString([]byte(payload))
+}
+
+// oauthBearerPayload builds a base64 OAUTHBEARER envelope.
+func oauthBearerPayload(username string, token string) string {
+	payload := "n,a=" + username + ",\x01auth=Bearer " + token + "\x01\x01"
 
 	return base64.StdEncoding.EncodeToString([]byte(payload))
 }

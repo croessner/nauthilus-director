@@ -439,6 +439,7 @@ func authenticatedLMTPClient(t *testing.T, address string) *lmtpClient {
 type lmtpProcessConfigOptions struct {
 	RedisAddress                string
 	AuthorityURL                string
+	AuthorityOIDC               processAuthorityOIDCOptions
 	LMTPAddress                 string
 	LMTPSAddress                string
 	IMAPAddress                 string
@@ -498,6 +499,7 @@ runtime:
     control:
       enabled: true
       address: %q
+%s
   timeouts:
     preauth: 2s
     auth: 2s
@@ -519,6 +521,7 @@ auth:
   authorities:
     default:
       transport: http
+%s
       http:
         endpoint: %q
         basic_auth:
@@ -730,8 +733,10 @@ director:
         deep_check: %t
         username: healthcheck@example.test
         password_file: %q
-`, options.ControlAddress,
+	`, options.ControlAddress,
+		processControlAuthYAML(t),
 		options.RedisAddress,
+		processAuthorityOIDCYAMLForOptions(t, options.AuthorityOIDC),
 		options.AuthorityURL,
 		backendRetentionTTL,
 		e2eShardTag,
@@ -773,6 +778,7 @@ director:
 		options.LMTPBackendDeepHealth[e2eLMTPBackendBID],
 		e2ePassword,
 	)
+	content = strings.ReplaceAll(content, "\t", "")
 
 	path := filepath.Join(t.TempDir(), "nauthilus-director-lmtp.yml")
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {

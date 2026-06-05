@@ -113,6 +113,7 @@ runtime:
     control:
       enabled: false
       address: "127.0.0.1:0"
+%s
   timeouts:
     preauth: 2s
     auth: 2s
@@ -134,6 +135,7 @@ auth:
   authorities:
     default:
       transport: grpc
+%s
       grpc:
         address: %q
         authority: ""
@@ -201,7 +203,9 @@ director:
           mechanism: plain
       health_check:
         enabled: false
-`, options.RedisAddress,
+`, processControlAuthYAML(t),
+		options.RedisAddress,
+		processAuthorityOIDCYAML(),
 		options.GRPCAddress,
 		e2ePOP3GRPCCallerUser,
 		e2ePOP3GRPCCallerSecret,
@@ -213,6 +217,7 @@ director:
 		options.POP3Backend,
 		e2ePassword,
 	)
+	content = strings.ReplaceAll(content, "\t", "")
 
 	path := filepath.Join(t.TempDir(), "nauthilus-director-pop3-grpc.yml")
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {

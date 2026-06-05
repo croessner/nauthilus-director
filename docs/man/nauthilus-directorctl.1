@@ -12,6 +12,12 @@ nauthilus-directorctl \- control a running Nauthilus Director
 .IR duration ]
 .RB [ --output
 .IR text|json ]
+.RB [ --auth-bearer-token-file
+.IR path ]
+.RB [ --tls-client-cert
+.IR path ]
+.RB [ --tls-client-key
+.IR path ]
 .RB [ --help ]
 .IR command
 .RI [ arguments ]
@@ -42,6 +48,10 @@ by
 and does not fan out across a cluster.
 Drain state is runtime-only and is not persisted after process restart; the
 typed configuration snapshot remains the source of listener transport truth.
+.PP
+Production runbooks for control-plane security, Nauthilus OIDC caller auth,
+reload, failure diagnosis and migration workflows are maintained under
+.BR docs/operations/ .
 .SH GLOBAL OPTIONS
 .TP
 .BR --address " " \fIurl\fR
@@ -57,6 +67,49 @@ The default is
 .TP
 .BR --output " " \fItext|json\fR
 Select output mode.
+.TP
+.BR --auth-bearer-token-file " " \fIpath\fR
+Read a control-plane bearer token from a mounted secret file and send it as
+.B Authorization: Bearer
+on generated OpenAPI client requests.
+The file value is trimmed only for line endings and is never printed.
+.TP
+.BR --auth-bearer-token " " \fItoken\fR
+Send an inline control-plane bearer token.
+This option exists for explicit operator use and tests; prefer
+.B --auth-bearer-token-file
+or
+.B NAUTHILUS_DIRECTORCTL_BEARER_TOKEN_FILE
+for production shells.
+The token value is never included in command output or error messages.
+.TP
+.BR --tls-ca-file " " \fIpath\fR
+Use the given CA bundle for the control API TLS connection.
+.TP
+.BR --tls-client-cert " " \fIpath\fR
+Use the given client certificate for mTLS control-plane authentication.
+It must be paired with
+.BR --tls-client-key .
+.TP
+.BR --tls-client-key " " \fIpath\fR
+Use the given client private key for mTLS control-plane authentication.
+It must be paired with
+.BR --tls-client-cert .
+.TP
+.BR --tls-server-name " " \fIname\fR
+Override the TLS server name used for control API verification.
+.TP
+.B --tls-insecure-skip-verify
+Disable control API server certificate verification.
+This is a compatibility or emergency option and should not be used for
+production control-plane access.
+.PP
+Bearer authentication may also be configured with
+.B NAUTHILUS_DIRECTORCTL_BEARER_TOKEN_FILE
+or
+.BR NAUTHILUS_DIRECTORCTL_BEARER_TOKEN .
+Configuring both inline and file-based bearer token input is rejected before
+any request is sent.
 .TP
 .B --version
 Print the client version and exit.
@@ -382,6 +435,17 @@ sent.
 .TP
 .B reload
 Request a safe runtime reload from the running Director.
+The command calls
+.B POST /api/v1/reload
+through the generated OpenAPI client and requires the same control-plane
+authentication as other protected
+.B /api/v1
+operations.
+Reload never rewrites YAML.
+It accepts listener additions/removals and backend registry or backend-pool
+changes for new sessions, and rejects restart-required classes atomically.
+Existing sessions, active affinities, backend pins and placement holds are
+preserved unless a separate explicit runtime command changes them.
 .SH EXIT STATUS
 .TP
 .B 0

@@ -17,6 +17,11 @@ import (
 	"github.com/oapi-codegen/runtime"
 )
 
+const (
+	OIDCBearerAuthScopes   oIDCBearerAuthContextKey   = "OIDCBearerAuth.Scopes"
+	StaticBearerAuthScopes staticBearerAuthContextKey = "StaticBearerAuth.Scopes"
+)
+
 // Defines values for AcceptedResponseStatus.
 const (
 	Accepted AcceptedResponseStatus = "accepted"
@@ -706,6 +711,12 @@ type BadRequest = ErrorResponse
 
 // Error defines model for Error.
 type Error = ErrorResponse
+
+// oIDCBearerAuthContextKey is the context key for OIDCBearerAuth security scheme
+type oIDCBearerAuthContextKey string
+
+// staticBearerAuthContextKey is the context key for StaticBearerAuth security scheme
+type staticBearerAuthContextKey string
 
 // GetDefaultConfigParams defines parameters for GetDefaultConfig.
 type GetDefaultConfigParams struct {

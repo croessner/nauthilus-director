@@ -12,6 +12,8 @@ auth:
                     bearer:
                         enabled: false
                         token_file: <redacted>
+                    oidc:
+                        enabled: false
                 tls:
                     ca_file: /etc/nauthilus-director/nauthilus-grpc-ca.pem
                     enabled: true
@@ -44,7 +46,26 @@ auth:
             oidc:
                 audience_hint: mail
                 authority_mode: nauthilus
+                client_credentials:
+                    audience: ""
+                    client_assertion_alg: ""
+                    client_id: nauthilus-director
+                    client_key_id: ""
+                    client_private_key_file: ""
+                    client_secret: ""
+                    client_secret_file: <redacted>
+                    enabled: true
+                    introspection_endpoint_auth_method: client_secret_basic
+                    refresh_before_expiry: 1m0s
+                    scopes:
+                        - nauthilus:authenticate
+                        - nauthilus:lookup_identity
+                        - nauthilus:list_accounts
+                    token_endpoint: ""
+                    token_endpoint_auth_method: client_secret_basic
+                discovery_url: ""
                 enabled: true
+                issuer: https://auth.example.org
                 issuer_hint: https://auth.example.org
                 required_scopes:
                     - email
@@ -753,6 +774,10 @@ observability:
     profiles:
         block:
             enabled: false
+        goroutine:
+            enabled: false
+        mutex:
+            enabled: false
         pprof:
             enabled: false
     tracing:
@@ -783,6 +808,8 @@ runtime:
                 oidc:
                     authority: default
                     enabled: true
+                    protected_scopes:
+                        - nauthilus-director.protected
                     required_scopes:
                         - nauthilus-director.admin
                     validation: nauthilus

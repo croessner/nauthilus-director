@@ -59,7 +59,12 @@ func TestDovecotLMTPInterop(t *testing.T) {
 	identities := lmtpAuthorityIdentities()
 	identities[interopLMTPRecipientA] = lmtpAuthorityIdentity{Account: interopLMTPRecipientA, Tenant: e2eTenant, Shard: e2eShardTag}
 	identities[interopLMTPRecipientB] = lmtpAuthorityIdentity{Account: interopLMTPRecipientB, Tenant: e2eTenant, Shard: e2eShardTagB}
-	authority := startLMTPAuthority(t, identities)
+	authority := startMappedFakeOIDCHTTPAuthority(
+		t,
+		mappedAttributesFromLMTPIdentities(identities),
+		nil,
+		fakeOIDCAuthorityOptions{},
+	)
 	tlsBundle := writeLMTPPeerTLSBundle(t)
 	lmtpAddress := loopbackAddress(t)
 	lmtpsAddress := loopbackAddress(t)
@@ -69,6 +74,7 @@ func TestDovecotLMTPInterop(t *testing.T) {
 	configPath := writeLMTPProcessConfig(t, lmtpProcessConfigOptions{
 		RedisAddress:                redisFixture.addr,
 		AuthorityURL:                authority.URL(),
+		AuthorityOIDC:               processAuthorityOIDCForFake(authority, nil),
 		LMTPAddress:                 lmtpAddress,
 		LMTPSAddress:                lmtpsAddress,
 		IMAPAddress:                 imapAddress,
@@ -98,6 +104,7 @@ func TestDovecotLMTPInterop(t *testing.T) {
 	if strings.Contains(process.output.String(), interopLMTPRecipientA) || strings.Contains(process.output.String(), interopLMTPRecipientB) {
 		t.Fatalf("process output leaked interop recipients: %s", process.output.String())
 	}
+	authority.ExpectOIDCCallerAuth(t)
 }
 
 // proveRealDeliveryHoldPinsIMAP verifies real LMTP backend acceptance pins concurrent IMAP placement.

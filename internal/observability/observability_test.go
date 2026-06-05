@@ -350,6 +350,7 @@ func TestRuntimeEventVocabularyCoversControlSurface(t *testing.T) {
 		EventAffinityClear:               false,
 		EventRouteLookup:                 false,
 		EventReload:                      false,
+		EventDiagnosticProfileAccess:     false,
 		EventRedisOperation:              false,
 		EventRuntimePagination:           false,
 	}

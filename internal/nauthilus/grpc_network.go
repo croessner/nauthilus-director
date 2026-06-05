@@ -21,6 +21,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
+	"net/http"
 	"os"
 	"strings"
 
@@ -39,6 +40,7 @@ const authorizationMetadataKey = "authorization"
 type networkGRPCAuthService struct {
 	client        authv1.AuthServiceClient
 	authorization string
+	tokenSource   callerTokenSource
 }
 
 // NewGRPCClientFromAuthority creates a gRPC authority client from typed config.
@@ -71,7 +73,7 @@ func newNetworkGRPCAuthServiceWithDialOptions(
 		return nil, err
 	}
 
-	authorization, err := grpcAuthorizationHeader(authority.GRPC.CallerAuth)
+	authorization, tokenSource, err := grpcCallerAuthorization(authority)
 	if err != nil {
 		return nil, err
 	}
@@ -94,12 +96,18 @@ func newNetworkGRPCAuthServiceWithDialOptions(
 	return &networkGRPCAuthService{
 		client:        authv1.NewAuthServiceClient(connection),
 		authorization: authorization,
+		tokenSource:   tokenSource,
 	}, nil
 }
 
 // Authenticate maps an internal auth request to the protobuf AuthService request.
 func (s *networkGRPCAuthService) Authenticate(ctx context.Context, request *GRPCAuthRequest) (*GRPCAuthResponse, error) {
-	response, err := s.client.Authenticate(s.authorizedContext(ctx), newProtoAuthRequest(request))
+	callCtx, err := s.authorizedContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	response, err := s.client.Authenticate(callCtx, newProtoAuthRequest(request))
 	if err != nil {
 		return nil, err
 	}
@@ -112,7 +120,12 @@ func (s *networkGRPCAuthService) LookupIdentity(
 	ctx context.Context,
 	request *GRPCLookupIdentityRequest,
 ) (*GRPCAuthResponse, error) {
-	response, err := s.client.LookupIdentity(s.authorizedContext(ctx), newProtoLookupIdentityRequest(request))
+	callCtx, err := s.authorizedContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	response, err := s.client.LookupIdentity(callCtx, newProtoLookupIdentityRequest(request))
 	if err != nil {
 		return nil, err
 	}
@@ -125,7 +138,12 @@ func (s *networkGRPCAuthService) ListAccounts(
 	ctx context.Context,
 	request *GRPCListAccountsRequest,
 ) (*GRPCListAccountsResponse, error) {
-	response, err := s.client.ListAccounts(s.authorizedContext(ctx), newProtoListAccountsRequest(request))
+	callCtx, err := s.authorizedContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	response, err := s.client.ListAccounts(callCtx, newProtoListAccountsRequest(request))
 	if err != nil {
 		return nil, err
 	}
@@ -134,12 +152,21 @@ func (s *networkGRPCAuthService) ListAccounts(
 }
 
 // authorizedContext adds configured caller authentication metadata to one RPC context.
-func (s *networkGRPCAuthService) authorizedContext(ctx context.Context) context.Context {
-	if s.authorization == "" {
-		return ctx
+func (s *networkGRPCAuthService) authorizedContext(ctx context.Context) (context.Context, error) {
+	if s.tokenSource != nil {
+		token, err := s.tokenSource.BearerToken(ctx)
+		if err != nil {
+			return ctx, err
+		}
+
+		return metadata.AppendToOutgoingContext(ctx, authorizationMetadataKey, "Bearer "+token), nil
 	}
 
-	return metadata.AppendToOutgoingContext(ctx, authorizationMetadataKey, s.authorization)
+	if s.authorization == "" {
+		return ctx, nil
+	}
+
+	return metadata.AppendToOutgoingContext(ctx, authorizationMetadataKey, s.authorization), nil
 }
 
 // grpcTransportCredentials builds the authority transport security policy.
@@ -172,10 +199,19 @@ func grpcTransportCredentials(tlsConfig config.AuthorityTLSConfig) (credentials.
 	}), nil
 }
 
-// grpcAuthorizationHeader builds the secret-bearing gRPC authorization metadata value.
-func grpcAuthorizationHeader(callerAuth config.GRPCCallerAuthConfig) (string, error) {
-	if callerAuth.Basic.Enabled && callerAuth.Bearer.Enabled {
-		return "", configError("only one grpc caller auth method may be enabled")
+// grpcCallerAuthorization builds the selected static or OIDC caller auth source.
+func grpcCallerAuthorization(authority config.AuthorityConfig) (string, callerTokenSource, error) {
+	callerAuth := authority.GRPC.CallerAuth
+	enabledMethods := 0
+
+	for _, enabled := range []bool{callerAuth.Basic.Enabled, callerAuth.Bearer.Enabled, callerAuth.OIDC.Enabled} {
+		if enabled {
+			enabledMethods++
+		}
+	}
+
+	if enabledMethods > 1 {
+		return "", nil, configError("only one grpc caller auth method may be enabled")
 	}
 
 	if callerAuth.Basic.Enabled {
@@ -183,22 +219,31 @@ func grpcAuthorizationHeader(callerAuth config.GRPCCallerAuthConfig) (string, er
 		password := callerAuth.Basic.PasswordFile.Value()
 
 		if username == "" || password == "" {
-			return "", configError("grpc basic caller auth requires username and password")
+			return "", nil, configError("grpc basic caller auth requires username and password")
 		}
 
-		return "Basic " + base64.StdEncoding.EncodeToString([]byte(username+":"+password)), nil
+		return "Basic " + base64.StdEncoding.EncodeToString([]byte(username+":"+password)), nil, nil
 	}
 
 	if callerAuth.Bearer.Enabled {
 		token := strings.TrimSpace(callerAuth.Bearer.TokenFile.Value())
 		if token == "" {
-			return "", configError("grpc bearer caller auth requires token")
+			return "", nil, configError("grpc bearer caller auth requires token")
 		}
 
-		return "Bearer " + token, nil
+		return "Bearer " + token, nil, nil
 	}
 
-	return "", nil
+	if callerAuth.OIDC.Enabled {
+		tokenSource, err := newOIDCTokenSourceFromAuthority(authority, http.DefaultClient)
+		if err != nil {
+			return "", nil, err
+		}
+
+		return "", tokenSource, nil
+	}
+
+	return "", nil, nil
 }
 
 // newProtoAuthRequest maps internal credential auth input into the generated protobuf request.

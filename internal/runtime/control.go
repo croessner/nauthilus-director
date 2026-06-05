@@ -18,6 +18,7 @@ package runtime
 
 import (
 	"context"
+	"maps"
 	"reflect"
 	"sort"
 	"strconv"
@@ -237,6 +238,19 @@ func (s *SafeReloadService) Reload(ctx context.Context) (ReloadResult, error) {
 // unsafeReloadChanges returns operator-readable reasons for unsupported live changes.
 func unsafeReloadChanges(current config.Config, next config.Config) []string {
 	var rejected []string
+
+	if current.Runtime.InstanceName != next.Runtime.InstanceName {
+		rejected = append(rejected, "runtime.instance_name requires restart")
+	}
+
+	if !reflect.DeepEqual(current.Runtime.Process, next.Runtime.Process) {
+		rejected = append(rejected, "runtime.process requires restart")
+	}
+
+	if current.Runtime.Servers.Control.Enabled != next.Runtime.Servers.Control.Enabled {
+		rejected = append(rejected, "runtime.servers.control.enabled requires restart")
+	}
+
 	if current.Runtime.Servers.Control.Address != next.Runtime.Servers.Control.Address {
 		rejected = append(rejected, "runtime.servers.control.address requires restart")
 	}
@@ -249,8 +263,64 @@ func unsafeReloadChanges(current config.Config, next config.Config) []string {
 		rejected = append(rejected, "runtime.servers.control.tls requires restart")
 	}
 
+	if !reflect.DeepEqual(current.Runtime.State, next.Runtime.State) {
+		rejected = append(rejected, "runtime.state requires restart")
+	}
+
+	if !reflect.DeepEqual(current.Runtime.Timeouts, next.Runtime.Timeouts) {
+		rejected = append(rejected, "runtime.timeouts requires restart")
+	}
+
+	if !reflect.DeepEqual(current.Runtime.Clients, next.Runtime.Clients) {
+		rejected = append(rejected, "runtime.clients requires restart")
+	}
+
+	if !reflect.DeepEqual(current.Auth, next.Auth) {
+		rejected = append(rejected, "auth requires restart")
+	}
+
 	if !reflect.DeepEqual(current.Storage.Redis, next.Storage.Redis) {
 		rejected = append(rejected, "storage.redis requires restart")
+	}
+
+	if !reflect.DeepEqual(current.Observability.Log, next.Observability.Log) {
+		rejected = append(rejected, "observability.log requires restart")
+	}
+
+	if !reflect.DeepEqual(current.Observability.Metrics, next.Observability.Metrics) {
+		rejected = append(rejected, "observability.metrics requires restart")
+	}
+
+	if !reflect.DeepEqual(current.Observability.Tracing, next.Observability.Tracing) {
+		rejected = append(rejected, "observability.tracing requires restart")
+	}
+
+	if !reflect.DeepEqual(current.Observability.Profiles, next.Observability.Profiles) {
+		rejected = append(rejected, "observability.profiles requires restart")
+	}
+
+	if !reflect.DeepEqual(current.Director.Security, next.Director.Security) {
+		rejected = append(rejected, "director.security requires restart")
+	}
+
+	if !reflect.DeepEqual(current.Director.Routing, next.Director.Routing) {
+		rejected = append(rejected, "director.routing requires restart")
+	}
+
+	if !reflect.DeepEqual(current.Director.Affinity, next.Director.Affinity) {
+		rejected = append(rejected, "director.affinity requires restart")
+	}
+
+	if !reflect.DeepEqual(current.Director.RuntimeOverrides, next.Director.RuntimeOverrides) {
+		rejected = append(rejected, "director.runtime_overrides requires restart")
+	}
+
+	if !reflect.DeepEqual(current.Director.Health, next.Director.Health) {
+		rejected = append(rejected, "director.health requires restart")
+	}
+
+	if !reflect.DeepEqual(current.Director.Maintenance, next.Director.Maintenance) {
+		rejected = append(rejected, "director.maintenance requires restart")
 	}
 
 	for _, listenerName := range changedExistingListeners(current.Director.Listeners, next.Director.Listeners) {
@@ -283,7 +353,7 @@ func changedExistingListeners(current map[string]config.ListenerConfig, next map
 // safeReloadChanges classifies supported live changes that the service applies to its snapshot.
 func safeReloadChanges(current config.Config, next config.Config) []string {
 	var applied []string
-	if !reflect.DeepEqual(current.Director.Listeners, next.Director.Listeners) {
+	if listenerInventoryChanged(current.Director.Listeners, next.Director.Listeners) {
 		applied = append(applied, "director.listeners")
 	}
 
@@ -295,23 +365,26 @@ func safeReloadChanges(current config.Config, next config.Config) []string {
 		applied = append(applied, "director.backend_pools")
 	}
 
-	if !reflect.DeepEqual(current.Director.Routing, next.Director.Routing) {
-		applied = append(applied, "director.routing")
-	}
-
-	if !reflect.DeepEqual(current.Director.Health, next.Director.Health) {
-		applied = append(applied, "director.health")
-	}
-
-	if !reflect.DeepEqual(current.Observability.Log, next.Observability.Log) {
-		applied = append(applied, "observability.log")
-	}
-
 	if len(applied) == 0 {
 		applied = append(applied, "no_change")
 	}
 
 	return applied
+}
+
+// listenerInventoryChanged reports safe add/remove changes after in-place changes are rejected.
+func listenerInventoryChanged(current map[string]config.ListenerConfig, next map[string]config.ListenerConfig) bool {
+	if len(current) != len(next) {
+		return true
+	}
+
+	for name := range current {
+		if _, ok := next[name]; !ok {
+			return true
+		}
+	}
+
+	return false
 }
 
 // reloadGeneration formats the local applied snapshot generation.
@@ -374,5 +447,30 @@ func (s *SafeReloadService) recordReload(ctx context.Context, result string, rea
 		return
 	}
 
+	fields = reloadObservationFields(ctx, fields)
+
 	recordRuntimeObservation(ctx, s.recorder, observability.EventReload, observability.TraceBoundaryRESTRequest, operationReload, result, reasonClass, fields, nil)
+}
+
+// reloadObservationFields adds audit-only actor facts to reload observations.
+func reloadObservationFields(ctx context.Context, fields map[string]string) map[string]string {
+	actor := ActorFromContext(ctx)
+	if actor.ID == "" && actor.AuthMethod == "" && !actor.Authenticated {
+		return fields
+	}
+
+	out := make(map[string]string, len(fields)+3)
+	maps.Copy(out, fields)
+
+	if actor.ID != "" {
+		out[runtimeObservationFieldActorID] = actor.ID
+	}
+
+	if actor.AuthMethod != "" {
+		out[runtimeObservationFieldAuthMethod] = actor.AuthMethod
+	}
+
+	out[runtimeObservationFieldActorAuthenticated] = strconv.FormatBool(actor.Authenticated)
+
+	return out
 }

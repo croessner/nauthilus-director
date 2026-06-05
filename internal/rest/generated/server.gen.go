@@ -17,6 +17,11 @@ import (
 	"github.com/oapi-codegen/runtime"
 )
 
+const (
+	OIDCBearerAuthScopes   oIDCBearerAuthContextKey   = "OIDCBearerAuth.Scopes"
+	StaticBearerAuthScopes staticBearerAuthContextKey = "StaticBearerAuth.Scopes"
+)
+
 // Defines values for AcceptedResponseStatus.
 const (
 	Accepted AcceptedResponseStatus = "accepted"
@@ -707,6 +712,12 @@ type BadRequest = ErrorResponse
 // Error defines model for Error.
 type Error = ErrorResponse
 
+// oIDCBearerAuthContextKey is the context key for OIDCBearerAuth security scheme
+type oIDCBearerAuthContextKey string
+
+// staticBearerAuthContextKey is the context key for StaticBearerAuth security scheme
+type staticBearerAuthContextKey string
+
 // GetDefaultConfigParams defines parameters for GetDefaultConfig.
 type GetDefaultConfigParams struct {
 	Format *GetDefaultConfigParamsFormat `form:"format,omitempty" json:"format,omitempty"`
@@ -957,6 +968,14 @@ type MiddlewareFunc func(http.Handler) http.Handler
 // ListBackends operation middleware
 func (siw *ServerInterfaceWrapper) ListBackends(w http.ResponseWriter, r *http.Request) {
 
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, StaticBearerAuthScopes, []string{})
+
+	ctx = context.WithValue(ctx, OIDCBearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
+
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.ListBackends(w, r)
 	}))
@@ -982,6 +1001,14 @@ func (siw *ServerInterfaceWrapper) GetBackend(w http.ResponseWriter, r *http.Req
 		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "identifier", Err: err})
 		return
 	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, StaticBearerAuthScopes, []string{})
+
+	ctx = context.WithValue(ctx, OIDCBearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.GetBackend(w, r, identifier)
@@ -1009,6 +1036,14 @@ func (siw *ServerInterfaceWrapper) DisableBackendMaintenance(w http.ResponseWrit
 		return
 	}
 
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, StaticBearerAuthScopes, []string{})
+
+	ctx = context.WithValue(ctx, OIDCBearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
+
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.DisableBackendMaintenance(w, r, identifier)
 	}))
@@ -1034,6 +1069,14 @@ func (siw *ServerInterfaceWrapper) EnableBackendMaintenance(w http.ResponseWrite
 		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "identifier", Err: err})
 		return
 	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, StaticBearerAuthScopes, []string{})
+
+	ctx = context.WithValue(ctx, OIDCBearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.EnableBackendMaintenance(w, r, identifier)
@@ -1061,6 +1104,14 @@ func (siw *ServerInterfaceWrapper) ClearBackendRuntime(w http.ResponseWriter, r 
 		return
 	}
 
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, StaticBearerAuthScopes, []string{})
+
+	ctx = context.WithValue(ctx, OIDCBearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
+
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.ClearBackendRuntime(w, r, identifier)
 	}))
@@ -1086,6 +1137,14 @@ func (siw *ServerInterfaceWrapper) DrainBackend(w http.ResponseWriter, r *http.R
 		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "identifier", Err: err})
 		return
 	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, StaticBearerAuthScopes, []string{})
+
+	ctx = context.WithValue(ctx, OIDCBearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.DrainBackend(w, r, identifier)
@@ -1113,6 +1172,14 @@ func (siw *ServerInterfaceWrapper) MarkBackendIn(w http.ResponseWriter, r *http.
 		return
 	}
 
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, StaticBearerAuthScopes, []string{})
+
+	ctx = context.WithValue(ctx, OIDCBearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
+
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.MarkBackendIn(w, r, identifier)
 	}))
@@ -1138,6 +1205,14 @@ func (siw *ServerInterfaceWrapper) MarkBackendOut(w http.ResponseWriter, r *http
 		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "identifier", Err: err})
 		return
 	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, StaticBearerAuthScopes, []string{})
+
+	ctx = context.WithValue(ctx, OIDCBearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.MarkBackendOut(w, r, identifier)
@@ -1165,6 +1240,14 @@ func (siw *ServerInterfaceWrapper) SetBackendWeight(w http.ResponseWriter, r *ht
 		return
 	}
 
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, StaticBearerAuthScopes, []string{})
+
+	ctx = context.WithValue(ctx, OIDCBearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
+
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.SetBackendWeight(w, r, identifier)
 	}))
@@ -1181,6 +1264,14 @@ func (siw *ServerInterfaceWrapper) GetDefaultConfig(w http.ResponseWriter, r *ht
 
 	var err error
 	_ = err
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, StaticBearerAuthScopes, []string{})
+
+	ctx = context.WithValue(ctx, OIDCBearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
 
 	// Parameter object where we will unmarshal all parameters from the context
 	var params GetDefaultConfigParams
@@ -1228,6 +1319,14 @@ func (siw *ServerInterfaceWrapper) GetEffectiveConfig(w http.ResponseWriter, r *
 	var err error
 	_ = err
 
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, StaticBearerAuthScopes, []string{})
+
+	ctx = context.WithValue(ctx, OIDCBearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
+
 	// Parameter object where we will unmarshal all parameters from the context
 	var params GetEffectiveConfigParams
 
@@ -1274,6 +1373,14 @@ func (siw *ServerInterfaceWrapper) GetNonDefaultConfig(w http.ResponseWriter, r 
 	var err error
 	_ = err
 
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, StaticBearerAuthScopes, []string{})
+
+	ctx = context.WithValue(ctx, OIDCBearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
+
 	// Parameter object where we will unmarshal all parameters from the context
 	var params GetNonDefaultConfigParams
 
@@ -1317,6 +1424,14 @@ func (siw *ServerInterfaceWrapper) GetNonDefaultConfig(w http.ResponseWriter, r 
 // ListListeners operation middleware
 func (siw *ServerInterfaceWrapper) ListListeners(w http.ResponseWriter, r *http.Request) {
 
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, StaticBearerAuthScopes, []string{})
+
+	ctx = context.WithValue(ctx, OIDCBearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
+
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.ListListeners(w, r)
 	}))
@@ -1342,6 +1457,14 @@ func (siw *ServerInterfaceWrapper) GetListener(w http.ResponseWriter, r *http.Re
 		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "name", Err: err})
 		return
 	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, StaticBearerAuthScopes, []string{})
+
+	ctx = context.WithValue(ctx, OIDCBearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.GetListener(w, r, name)
@@ -1369,6 +1492,14 @@ func (siw *ServerInterfaceWrapper) DrainListener(w http.ResponseWriter, r *http.
 		return
 	}
 
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, StaticBearerAuthScopes, []string{})
+
+	ctx = context.WithValue(ctx, OIDCBearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
+
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.DrainListener(w, r, name)
 	}))
@@ -1395,6 +1526,14 @@ func (siw *ServerInterfaceWrapper) ResumeListener(w http.ResponseWriter, r *http
 		return
 	}
 
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, StaticBearerAuthScopes, []string{})
+
+	ctx = context.WithValue(ctx, OIDCBearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
+
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.ResumeListener(w, r, name)
 	}))
@@ -1408,6 +1547,14 @@ func (siw *ServerInterfaceWrapper) ResumeListener(w http.ResponseWriter, r *http
 
 // Reload operation middleware
 func (siw *ServerInterfaceWrapper) Reload(w http.ResponseWriter, r *http.Request) {
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, StaticBearerAuthScopes, []string{})
+
+	ctx = context.WithValue(ctx, OIDCBearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.Reload(w, r)
@@ -1423,6 +1570,14 @@ func (siw *ServerInterfaceWrapper) Reload(w http.ResponseWriter, r *http.Request
 // LookupRoute operation middleware
 func (siw *ServerInterfaceWrapper) LookupRoute(w http.ResponseWriter, r *http.Request) {
 
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, StaticBearerAuthScopes, []string{})
+
+	ctx = context.WithValue(ctx, OIDCBearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
+
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.LookupRoute(w, r)
 	}))
@@ -1436,6 +1591,14 @@ func (siw *ServerInterfaceWrapper) LookupRoute(w http.ResponseWriter, r *http.Re
 
 // GetRuntimeSummary operation middleware
 func (siw *ServerInterfaceWrapper) GetRuntimeSummary(w http.ResponseWriter, r *http.Request) {
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, StaticBearerAuthScopes, []string{})
+
+	ctx = context.WithValue(ctx, OIDCBearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.GetRuntimeSummary(w, r)
@@ -1453,6 +1616,14 @@ func (siw *ServerInterfaceWrapper) ListSessions(w http.ResponseWriter, r *http.R
 
 	var err error
 	_ = err
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, StaticBearerAuthScopes, []string{})
+
+	ctx = context.WithValue(ctx, OIDCBearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
 
 	// Parameter object where we will unmarshal all parameters from the context
 	var params ListSessionsParams
@@ -1535,6 +1706,14 @@ func (siw *ServerInterfaceWrapper) DeleteSession(w http.ResponseWriter, r *http.
 		return
 	}
 
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, StaticBearerAuthScopes, []string{})
+
+	ctx = context.WithValue(ctx, OIDCBearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
+
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.DeleteSession(w, r, sessionID)
 	}))
@@ -1561,6 +1740,14 @@ func (siw *ServerInterfaceWrapper) GetSession(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, StaticBearerAuthScopes, []string{})
+
+	ctx = context.WithValue(ctx, OIDCBearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
+
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.GetSession(w, r, sessionID)
 	}))
@@ -1577,6 +1764,14 @@ func (siw *ServerInterfaceWrapper) ListUsers(w http.ResponseWriter, r *http.Requ
 
 	var err error
 	_ = err
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, StaticBearerAuthScopes, []string{})
+
+	ctx = context.WithValue(ctx, OIDCBearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
 
 	// Parameter object where we will unmarshal all parameters from the context
 	var params ListUsersParams
@@ -1633,6 +1828,14 @@ func (siw *ServerInterfaceWrapper) GetUser(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, StaticBearerAuthScopes, []string{})
+
+	ctx = context.WithValue(ctx, OIDCBearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
+
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.GetUser(w, r, userKey)
 	}))
@@ -1658,6 +1861,14 @@ func (siw *ServerInterfaceWrapper) ClearUserAffinity(w http.ResponseWriter, r *h
 		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "user_key", Err: err})
 		return
 	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, StaticBearerAuthScopes, []string{})
+
+	ctx = context.WithValue(ctx, OIDCBearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.ClearUserAffinity(w, r, userKey)
@@ -1685,6 +1896,14 @@ func (siw *ServerInterfaceWrapper) GetUserAffinity(w http.ResponseWriter, r *htt
 		return
 	}
 
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, StaticBearerAuthScopes, []string{})
+
+	ctx = context.WithValue(ctx, OIDCBearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
+
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.GetUserAffinity(w, r, userKey)
 	}))
@@ -1710,6 +1929,14 @@ func (siw *ServerInterfaceWrapper) SetUserAffinity(w http.ResponseWriter, r *htt
 		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "user_key", Err: err})
 		return
 	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, StaticBearerAuthScopes, []string{})
+
+	ctx = context.WithValue(ctx, OIDCBearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.SetUserAffinity(w, r, userKey)
@@ -1737,6 +1964,14 @@ func (siw *ServerInterfaceWrapper) ClearUserBackendPin(w http.ResponseWriter, r 
 		return
 	}
 
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, StaticBearerAuthScopes, []string{})
+
+	ctx = context.WithValue(ctx, OIDCBearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
+
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.ClearUserBackendPin(w, r, userKey)
 	}))
@@ -1762,6 +1997,14 @@ func (siw *ServerInterfaceWrapper) GetUserBackendPin(w http.ResponseWriter, r *h
 		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "user_key", Err: err})
 		return
 	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, StaticBearerAuthScopes, []string{})
+
+	ctx = context.WithValue(ctx, OIDCBearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.GetUserBackendPin(w, r, userKey)
@@ -1789,6 +2032,14 @@ func (siw *ServerInterfaceWrapper) SetUserBackendPin(w http.ResponseWriter, r *h
 		return
 	}
 
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, StaticBearerAuthScopes, []string{})
+
+	ctx = context.WithValue(ctx, OIDCBearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
+
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.SetUserBackendPin(w, r, userKey)
 	}))
@@ -1814,6 +2065,14 @@ func (siw *ServerInterfaceWrapper) ClearUserHold(w http.ResponseWriter, r *http.
 		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "user_key", Err: err})
 		return
 	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, StaticBearerAuthScopes, []string{})
+
+	ctx = context.WithValue(ctx, OIDCBearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.ClearUserHold(w, r, userKey)
@@ -1841,6 +2100,14 @@ func (siw *ServerInterfaceWrapper) GetUserHold(w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, StaticBearerAuthScopes, []string{})
+
+	ctx = context.WithValue(ctx, OIDCBearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
+
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.GetUserHold(w, r, userKey)
 	}))
@@ -1866,6 +2133,14 @@ func (siw *ServerInterfaceWrapper) SetUserHold(w http.ResponseWriter, r *http.Re
 		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "user_key", Err: err})
 		return
 	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, StaticBearerAuthScopes, []string{})
+
+	ctx = context.WithValue(ctx, OIDCBearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.SetUserHold(w, r, userKey)
@@ -1893,6 +2168,14 @@ func (siw *ServerInterfaceWrapper) KickUser(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, StaticBearerAuthScopes, []string{})
+
+	ctx = context.WithValue(ctx, OIDCBearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
+
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.KickUser(w, r, userKey)
 	}))
@@ -1918,6 +2201,14 @@ func (siw *ServerInterfaceWrapper) MoveUser(w http.ResponseWriter, r *http.Reque
 		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "user_key", Err: err})
 		return
 	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, StaticBearerAuthScopes, []string{})
+
+	ctx = context.WithValue(ctx, OIDCBearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.MoveUser(w, r, userKey)
@@ -1945,6 +2236,14 @@ func (siw *ServerInterfaceWrapper) GetUserSessions(w http.ResponseWriter, r *htt
 		return
 	}
 
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, StaticBearerAuthScopes, []string{})
+
+	ctx = context.WithValue(ctx, OIDCBearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
+
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.GetUserSessions(w, r, userKey)
 	}))
@@ -1958,6 +2257,14 @@ func (siw *ServerInterfaceWrapper) GetUserSessions(w http.ResponseWriter, r *htt
 
 // GetVersion operation middleware
 func (siw *ServerInterfaceWrapper) GetVersion(w http.ResponseWriter, r *http.Request) {
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, StaticBearerAuthScopes, []string{})
+
+	ctx = context.WithValue(ctx, OIDCBearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.GetVersion(w, r)
@@ -1986,6 +2293,14 @@ func (siw *ServerInterfaceWrapper) GetHealthz(w http.ResponseWriter, r *http.Req
 
 // GetMetrics operation middleware
 func (siw *ServerInterfaceWrapper) GetMetrics(w http.ResponseWriter, r *http.Request) {
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, StaticBearerAuthScopes, []string{})
+
+	ctx = context.WithValue(ctx, OIDCBearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.GetMetrics(w, r)

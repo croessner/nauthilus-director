@@ -25,7 +25,19 @@ import (
 	"strings"
 )
 
-const lmtpBDATImplemented = true
+const (
+	lmtpBDATImplemented = true
+
+	oidcClientSecretBasic   = "client_secret_basic"
+	oidcClientSecretPost    = "client_secret_post"
+	oidcPrivateKeyJWT       = "private_key_jwt"
+	oidcValidationNauthilus = "nauthilus"
+)
+
+const (
+	oidcAssertionAlgRS256 = "RS256"
+	oidcAssertionAlgEdDSA = "EdDSA"
+)
 
 // Validate checks decoded typed config with validator/v10 and domain rules.
 func (l *Loader) Validate(config Config) error {
@@ -39,7 +51,7 @@ func (l *Loader) Validate(config Config) error {
 	}
 
 	var problems []string
-	validateRuntime(config.Runtime, &problems)
+	validateRuntime(config.Runtime, config.Auth.Authorities, &problems)
 	validateObservability(config.Observability, &problems)
 	validateRedis(config.Storage.Redis, &problems)
 	validateAuthorities(config.Auth.Authorities, &problems)
@@ -56,6 +68,18 @@ func (l *Loader) Validate(config Config) error {
 func validateObservability(observability ObservabilityConfig, problems *[]string) {
 	if strings.TrimSpace(observability.Metrics.Path) != "/metrics" {
 		addProblem(problems, "observability.metrics.path must be /metrics")
+	}
+
+	if !observability.Profiles.PProf.Enabled {
+		if observability.Profiles.Block.Enabled {
+			addProblem(problems, "observability.profiles.block.enabled requires observability.profiles.pprof.enabled")
+		}
+		if observability.Profiles.Mutex.Enabled {
+			addProblem(problems, "observability.profiles.mutex.enabled requires observability.profiles.pprof.enabled")
+		}
+		if observability.Profiles.Goroutine.Enabled {
+			addProblem(problems, "observability.profiles.goroutine.enabled requires observability.profiles.pprof.enabled")
+		}
 	}
 
 	if observability.Tracing.SampleRatio < 0 || observability.Tracing.SampleRatio > 1 {
@@ -82,12 +106,19 @@ func validateObservability(observability ObservabilityConfig, problems *[]string
 }
 
 // validateRuntime enforces safe listener, auth and timeout defaults for process wiring.
-func validateRuntime(runtime RuntimeConfig, problems *[]string) {
+func validateRuntime(runtime RuntimeConfig, authorities map[string]AuthorityConfig, problems *[]string) {
 	if runtime.Process.ShutdownTimeout <= 0 {
 		addProblem(problems, "runtime.process.shutdown_timeout must be greater than zero")
 	}
 	if runtime.Servers.Control.Enabled && strings.TrimSpace(runtime.Servers.Control.Address) == "" {
 		addProblem(problems, "runtime.servers.control.address is required when control server is enabled")
+	}
+	if runtime.Servers.Control.Enabled && enabledCount(
+		runtime.Servers.Control.Auth.Bearer.Enabled,
+		runtime.Servers.Control.Auth.OIDC.Enabled,
+		runtime.Servers.Control.Auth.MTLS.Enabled,
+	) == 0 {
+		addProblem(problems, "runtime.servers.control.auth must enable at least one authentication mode")
 	}
 	if runtime.Servers.Control.Auth.Bearer.Enabled && runtime.Servers.Control.Auth.Bearer.TokenFile.IsZero() {
 		addProblem(problems, "runtime.servers.control.auth.bearer.token_file is required when bearer auth is enabled")
@@ -96,8 +127,49 @@ func validateRuntime(runtime RuntimeConfig, problems *[]string) {
 		if strings.TrimSpace(runtime.Servers.Control.Auth.OIDC.Authority) == "" {
 			addProblem(problems, "runtime.servers.control.auth.oidc.authority is required when OIDC auth is enabled")
 		}
-		if strings.TrimSpace(runtime.Servers.Control.Auth.OIDC.Validation) == "" {
-			addProblem(problems, "runtime.servers.control.auth.oidc.validation is required when OIDC auth is enabled")
+		if strings.ToLower(strings.TrimSpace(runtime.Servers.Control.Auth.OIDC.Validation)) != "nauthilus" {
+			addProblem(problems, "runtime.servers.control.auth.oidc.validation must be nauthilus when OIDC auth is enabled")
+		}
+		if len(runtime.Servers.Control.Auth.OIDC.RequiredScopes) == 0 {
+			addProblem(problems, "runtime.servers.control.auth.oidc.required_scopes is required when OIDC auth is enabled")
+		}
+		if len(runtime.Servers.Control.Auth.OIDC.ProtectedScopes) == 0 {
+			addProblem(problems, "runtime.servers.control.auth.oidc.protected_scopes is required when OIDC auth is enabled")
+		}
+		if authority, ok := authorities[strings.TrimSpace(runtime.Servers.Control.Auth.OIDC.Authority)]; ok {
+			if !authorityOIDCCallerAuthEnabled(authority) {
+				addProblem(problems, "runtime.servers.control.auth.oidc.authority must reference an authority with OIDC client credentials enabled")
+			} else {
+				credentials := authority.OIDC.ClientCredentials
+				method := normalizedOIDCConfigMethod(credentials.IntrospectionEndpointAuthMethod)
+				if method == "" {
+					method = fallbackIntrospectionAuthMethod(credentials.TokenEndpointAuthMethod)
+				}
+				switch method {
+				case oidcClientSecretBasic, oidcClientSecretPost:
+					if enabledSecretCount(credentials.ClientSecret, credentials.ClientSecretFile) != 1 {
+						addProblem(problems, "runtime.servers.control.auth.oidc.authority requires exactly one client_secret or client_secret_file for introspection")
+					}
+				case oidcPrivateKeyJWT:
+					if credentials.ClientPrivateKeyFile.IsZero() {
+						addProblem(problems, "runtime.servers.control.auth.oidc.authority requires client_private_key_file for private_key_jwt introspection")
+					}
+				case "":
+					addProblem(problems, "runtime.servers.control.auth.oidc.authority requires introspection_endpoint_auth_method when OIDC auth is enabled")
+				default:
+					addProblem(problems, "runtime.servers.control.auth.oidc.authority introspection_endpoint_auth_method must be client_secret_basic, client_secret_post or private_key_jwt")
+				}
+			}
+		} else if strings.TrimSpace(runtime.Servers.Control.Auth.OIDC.Authority) != "" {
+			addProblem(problems, "runtime.servers.control.auth.oidc.authority must reference a configured authority")
+		}
+	}
+	if runtime.Servers.Control.Auth.MTLS.Enabled {
+		if !runtime.Servers.Control.TLS.Enabled {
+			addProblem(problems, "runtime.servers.control.auth.mtls requires runtime.servers.control.tls.enabled")
+		}
+		if strings.TrimSpace(runtime.Servers.Control.TLS.ClientCA) == "" {
+			addProblem(problems, "runtime.servers.control.auth.mtls requires runtime.servers.control.tls.client_ca")
 		}
 	}
 	if runtime.Servers.Control.TLS.Enabled {
@@ -210,14 +282,22 @@ func validateAuthorities(authorities map[string]AuthorityConfig, problems *[]str
 			if strings.TrimSpace(authority.HTTP.ContentType) == "" {
 				addProblem(problems, path+".http.content_type is required when transport is http")
 			}
-			if authority.HTTP.BasicAuth.PasswordFile.IsZero() {
+			if !authorityOIDCCallerAuthEnabled(authority) && strings.TrimSpace(authority.HTTP.BasicAuth.Username) == "" {
+				addProblem(problems, path+".http.basic_auth.username is required when HTTP basic caller auth is used")
+			}
+			if !authorityOIDCCallerAuthEnabled(authority) && authority.HTTP.BasicAuth.PasswordFile.IsZero() {
 				addProblem(problems, path+".http.basic_auth.password_file is required when transport is http")
 			}
 		case transportGRPC:
 			if strings.TrimSpace(authority.GRPC.Address) == "" {
 				addProblem(problems, path+".grpc.address is required when transport is grpc")
 			}
-			if authority.GRPC.CallerAuth.Basic.Enabled && authority.GRPC.CallerAuth.Bearer.Enabled {
+			grpcCallerAuthMethods := enabledCount(
+				authority.GRPC.CallerAuth.Basic.Enabled,
+				authority.GRPC.CallerAuth.Bearer.Enabled,
+				authority.GRPC.CallerAuth.OIDC.Enabled,
+			)
+			if grpcCallerAuthMethods > 1 {
 				addProblem(problems, path+".grpc.caller_auth must enable only one caller auth method")
 			}
 			if authority.GRPC.CallerAuth.Basic.Enabled && strings.TrimSpace(authority.GRPC.CallerAuth.Basic.Username) == "" {
@@ -229,9 +309,14 @@ func validateAuthorities(authorities map[string]AuthorityConfig, problems *[]str
 			if authority.GRPC.CallerAuth.Bearer.Enabled && authority.GRPC.CallerAuth.Bearer.TokenFile.IsZero() {
 				addProblem(problems, path+".grpc.caller_auth.bearer.token_file is required when bearer caller auth is enabled")
 			}
+			if authority.GRPC.CallerAuth.OIDC.Enabled && !authorityOIDCCallerAuthEnabled(authority) {
+				addProblem(problems, path+".grpc.caller_auth.oidc requires auth.authorities."+name+".oidc.client_credentials.enabled")
+			}
 		default:
 			addProblem(problems, path+".transport must be http or grpc")
 		}
+
+		validateAuthorityOIDC(path+".oidc", authority.OIDC, problems)
 
 		if authority.Mechanisms.Password.Enabled && len(authority.Mechanisms.Password.Names) == 0 {
 			addProblem(problems, path+".mechanisms.password.names is required when password mechanisms are enabled")
@@ -243,6 +328,114 @@ func validateAuthorities(authorities map[string]AuthorityConfig, problems *[]str
 			requirePositiveInt(path+".mechanisms.bearer.token_max_bytes", authority.Mechanisms.Bearer.TokenMaxBytes, problems)
 		}
 	}
+}
+
+// validateAuthorityOIDC checks OIDC caller-auth inputs only when the flow is enabled.
+func validateAuthorityOIDC(path string, oidc AuthorityOIDCConfig, problems *[]string) {
+	if !oidc.Enabled {
+		return
+	}
+
+	clientCredentials := oidc.ClientCredentials
+	if !clientCredentials.Enabled {
+		return
+	}
+
+	if strings.TrimSpace(oidc.Issuer) == "" && strings.TrimSpace(oidc.DiscoveryURL) == "" {
+		addProblem(problems, path+".issuer or "+path+".discovery_url is required when client_credentials is enabled")
+	}
+	if strings.TrimSpace(clientCredentials.ClientID) == "" {
+		addProblem(problems, path+".client_credentials.client_id is required when client_credentials is enabled")
+	}
+	secretCount := enabledSecretCount(clientCredentials.ClientSecret, clientCredentials.ClientSecretFile)
+	if secretCount > 1 {
+		addProblem(problems, path+".client_credentials must not configure both client_secret and client_secret_file")
+	}
+	tokenMethod := normalizedOIDCConfigMethod(clientCredentials.TokenEndpointAuthMethod)
+	switch tokenMethod {
+	case oidcClientSecretBasic, oidcClientSecretPost:
+		if secretCount != 1 {
+			addProblem(problems, path+".client_credentials must configure exactly one of client_secret or client_secret_file for secret-based token endpoint auth")
+		}
+	case oidcPrivateKeyJWT:
+		if clientCredentials.ClientPrivateKeyFile.IsZero() {
+			addProblem(problems, path+".client_credentials.client_private_key_file is required when token_endpoint_auth_method is private_key_jwt")
+		}
+	case "":
+		addProblem(problems, path+".client_credentials.token_endpoint_auth_method is required when client_credentials is enabled")
+	default:
+		addProblem(problems, path+".client_credentials.token_endpoint_auth_method must be client_secret_basic, client_secret_post or private_key_jwt")
+	}
+	introspectionMethod := normalizedOIDCConfigMethod(clientCredentials.IntrospectionEndpointAuthMethod)
+	if introspectionMethod == "" {
+		introspectionMethod = fallbackIntrospectionAuthMethod(tokenMethod)
+	}
+	switch introspectionMethod {
+	case "":
+	case oidcClientSecretBasic, oidcClientSecretPost:
+		if secretCount != 1 {
+			addProblem(problems, path+".client_credentials must configure exactly one of client_secret or client_secret_file for introspection endpoint auth")
+		}
+	case oidcPrivateKeyJWT:
+		if clientCredentials.ClientPrivateKeyFile.IsZero() {
+			addProblem(problems, path+".client_credentials.client_private_key_file is required when introspection_endpoint_auth_method is private_key_jwt")
+		}
+	default:
+		addProblem(problems, path+".client_credentials.introspection_endpoint_auth_method must be client_secret_basic, client_secret_post or private_key_jwt")
+	}
+	switch strings.TrimSpace(clientCredentials.ClientAssertionAlg) {
+	case "", oidcAssertionAlgRS256, oidcAssertionAlgEdDSA:
+	default:
+		addProblem(problems, path+".client_credentials.client_assertion_alg must be RS256 or EdDSA")
+	}
+	if len(clientCredentials.Scopes) == 0 {
+		addProblem(problems, path+".client_credentials.scopes is required when client_credentials is enabled")
+	}
+	requirePositiveDuration(path+".client_credentials.refresh_before_expiry", clientCredentials.RefreshBeforeExpiry, problems)
+}
+
+// authorityOIDCCallerAuthEnabled reports whether OIDC caller auth can affect authority calls.
+func authorityOIDCCallerAuthEnabled(authority AuthorityConfig) bool {
+	return authority.OIDC.Enabled && authority.OIDC.ClientCredentials.Enabled
+}
+
+// fallbackIntrospectionAuthMethod inherits only Nauthilus-supported secret methods.
+func fallbackIntrospectionAuthMethod(tokenMethod string) string {
+	switch normalizedOIDCConfigMethod(tokenMethod) {
+	case oidcClientSecretBasic, oidcClientSecretPost, oidcPrivateKeyJWT:
+		return normalizedOIDCConfigMethod(tokenMethod)
+	default:
+		return ""
+	}
+}
+
+// normalizedOIDCConfigMethod canonicalizes configured OIDC client auth method names.
+func normalizedOIDCConfigMethod(value string) string {
+	return strings.ToLower(strings.TrimSpace(value))
+}
+
+// enabledSecretCount counts configured protected secret scalar values.
+func enabledSecretCount(values ...SecretString) int {
+	count := 0
+	for _, value := range values {
+		if !value.IsZero() {
+			count++
+		}
+	}
+
+	return count
+}
+
+// enabledCount counts selected mutually exclusive boolean options.
+func enabledCount(values ...bool) int {
+	count := 0
+	for _, value := range values {
+		if value {
+			count++
+		}
+	}
+
+	return count
 }
 
 // validateDirector checks director-owned references, runtime override safety and backend auth.

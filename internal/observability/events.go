@@ -111,6 +111,8 @@ const (
 	EventRouteLookup = "route.lookup"
 	// EventRESTRequest records one generated REST control API request.
 	EventRESTRequest = "rest.request"
+	// EventDiagnosticProfileAccess records protected diagnostic profile reads.
+	EventDiagnosticProfileAccess = "diagnostic.profile"
 	// EventReload records safe reload attempts and outcomes.
 	EventReload = "reload"
 	// EventRedisOperation records one Redis state operation class.
@@ -186,6 +188,7 @@ func RuntimeEventNames() []string {
 		EventAffinityClear,
 		EventRouteLookup,
 		EventReload,
+		EventDiagnosticProfileAccess,
 		EventRedisOperation,
 		EventRuntimePagination,
 	}

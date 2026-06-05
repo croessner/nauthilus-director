@@ -40,6 +40,7 @@ type HTTPClientConfig struct {
 	ContentType       string
 	BasicAuthUsername string
 	BasicAuthPassword Secret
+	TokenSource       callerTokenSource
 	Client            *http.Client
 }
 
@@ -49,6 +50,7 @@ type HTTPClient struct {
 	contentType       string
 	basicAuthUsername string
 	basicAuthPassword Secret
+	tokenSource       callerTokenSource
 	client            *http.Client
 }
 
@@ -117,17 +119,28 @@ func NewHTTPClient(config HTTPClientConfig) (*HTTPClient, error) {
 		contentType:       contentType,
 		basicAuthUsername: config.BasicAuthUsername,
 		basicAuthPassword: config.BasicAuthPassword,
+		tokenSource:       config.TokenSource,
 		client:            client,
 	}, nil
 }
 
 // NewHTTPClientFromAuthority builds an HTTP client from typed config.
 func NewHTTPClientFromAuthority(authority config.AuthorityConfig, client *http.Client) (*HTTPClient, error) {
+	if client == nil {
+		client = http.DefaultClient
+	}
+
+	tokenSource, err := httpCallerTokenSource(authority, client)
+	if err != nil {
+		return nil, err
+	}
+
 	return NewHTTPClient(HTTPClientConfig{
 		Endpoint:          authority.HTTP.Endpoint,
 		ContentType:       authority.HTTP.ContentType,
 		BasicAuthUsername: authority.HTTP.BasicAuth.Username,
 		BasicAuthPassword: NewSecret(authority.HTTP.BasicAuth.PasswordFile.Value()),
+		TokenSource:       tokenSource,
 		Client:            client,
 	})
 }
@@ -250,7 +263,14 @@ func (c *HTTPClient) postJSON(
 	request.Header.Set("Content-Type", c.contentType)
 	request.Header.Set("Accept", defaultHTTPContentType)
 
-	if !c.basicAuthPassword.IsZero() || c.basicAuthUsername != "" {
+	if c.tokenSource != nil {
+		token, tokenErr := c.tokenSource.BearerToken(ctx)
+		if tokenErr != nil {
+			return nil, 0, tokenErr
+		}
+
+		request.Header.Set("Authorization", "Bearer "+token)
+	} else if !c.basicAuthPassword.IsZero() || c.basicAuthUsername != "" {
 		request.SetBasicAuth(c.basicAuthUsername, c.basicAuthPassword.Value())
 	}
 
@@ -260,6 +280,15 @@ func (c *HTTPClient) postJSON(
 	}
 
 	return response, response.StatusCode, nil
+}
+
+// httpCallerTokenSource creates the optional OIDC caller-token source for HTTP authority calls.
+func httpCallerTokenSource(authority config.AuthorityConfig, client *http.Client) (callerTokenSource, error) {
+	if !authority.OIDC.Enabled || !authority.OIDC.ClientCredentials.Enabled {
+		return nil, nil
+	}
+
+	return newOIDCTokenSourceFromAuthority(authority, client)
 }
 
 // endpointForOperation adds the Nauthilus mode query when required.

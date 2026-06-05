@@ -211,6 +211,35 @@ func TestStartTLSListenerStartsWithoutImplicitTLS(t *testing.T) {
 	}
 }
 
+// TestProtocolListenerDoesNotServeProfileHTTPRoutes verifies pprof stays on the control listener.
+func TestProtocolListenerDoesNotServeProfileHTTPRoutes(t *testing.T) {
+	cfg := singleListenerConfig(t, testIMAPListener, tlsModeStartTLS)
+	cfg.Observability.Profiles.PProf.Enabled = true
+	cfg.Observability.Profiles.Goroutine.Enabled = true
+	handler := newRecordingHandler()
+
+	_, address := startManager(t, cfg, testIMAPListener, WithSessionHandlerFactory(handler.factory))
+
+	conn, err := net.Dial(networkTCP, address)
+	if err != nil {
+		t.Fatalf("dial listener: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	if _, err := io.WriteString(conn, "GET /debug/pprof/goroutine HTTP/1.1\r\nHost: local\r\n\r\n"); err != nil {
+		t.Fatalf("write pprof-looking request: %v", err)
+	}
+
+	line := readLine(t, conn)
+	if strings.HasPrefix(line, "HTTP/") || strings.Contains(line, "goroutine profile") {
+		t.Fatalf("protocol listener served HTTP profile data: %q", line)
+	}
+
+	if !strings.HasPrefix(line, "* OK ") {
+		t.Fatalf("greeting = %q, want protocol greeting", line)
+	}
+}
+
 // TestSupportedListenersStartThroughProtocolFactory verifies shared transport startup is protocol-generic.
 func TestSupportedListenersStartThroughProtocolFactory(t *testing.T) {
 	cfg := config.DefaultConfig()

@@ -43,6 +43,7 @@ type Runtime struct {
 	logger   *structuredLogger
 	metrics  *prometheusRuntime
 	tracing  *traceRuntime
+	profiles *ProfileRuntime
 	recorder *sharedRecorder
 
 	shutdownOnce sync.Once
@@ -90,10 +91,14 @@ func NewRuntime(cfg config.ObservabilityConfig, opts ...RuntimeOption) (*Runtime
 		return nil, err
 	}
 
+	profiles := newProfileRuntime(cfg.Profiles, nil)
+	profiles.Apply()
+
 	runtime := &Runtime{
-		logger:  logger,
-		metrics: metrics,
-		tracing: tracing,
+		logger:   logger,
+		metrics:  metrics,
+		tracing:  tracing,
+		profiles: profiles,
 	}
 	runtime.recorder = newSharedRecorder(sharedRecorderOptions{
 		logger:             logger,
@@ -162,6 +167,10 @@ func (r *Runtime) Shutdown(ctx context.Context) error {
 		if r.tracing != nil {
 			r.tracing.Shutdown(ctx)
 		}
+
+		if r.profiles != nil {
+			_ = r.profiles.Shutdown(ctx)
+		}
 	})
 
 	return nil
@@ -213,6 +222,20 @@ func defaultRuntimeOptions() runtimeOptions {
 func validateRuntimeConfig(cfg config.ObservabilityConfig) error {
 	if strings.TrimSpace(cfg.Metrics.Path) != defaultMetricsPath {
 		return fmt.Errorf("observability.metrics.path must be %q", defaultMetricsPath)
+	}
+
+	if !cfg.Profiles.PProf.Enabled {
+		if cfg.Profiles.Block.Enabled {
+			return fmt.Errorf("observability.profiles.block.enabled requires observability.profiles.pprof.enabled")
+		}
+
+		if cfg.Profiles.Mutex.Enabled {
+			return fmt.Errorf("observability.profiles.mutex.enabled requires observability.profiles.pprof.enabled")
+		}
+
+		if cfg.Profiles.Goroutine.Enabled {
+			return fmt.Errorf("observability.profiles.goroutine.enabled requires observability.profiles.pprof.enabled")
+		}
 	}
 
 	if cfg.Tracing.SampleRatio < 0 || cfg.Tracing.SampleRatio > 1 {

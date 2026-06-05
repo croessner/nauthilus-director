@@ -48,11 +48,30 @@ type BearerMechanismConfig struct {
 }
 
 type AuthorityOIDCConfig struct {
-	Enabled        bool     `mapstructure:"enabled" yaml:"enabled"`
-	AuthorityMode  string   `mapstructure:"authority_mode" yaml:"authority_mode"`
-	IssuerHint     string   `mapstructure:"issuer_hint" yaml:"issuer_hint"`
-	AudienceHint   string   `mapstructure:"audience_hint" yaml:"audience_hint"`
-	RequiredScopes []string `mapstructure:"required_scopes" yaml:"required_scopes"`
+	Enabled           bool                                 `mapstructure:"enabled" yaml:"enabled"`
+	AuthorityMode     string                               `mapstructure:"authority_mode" yaml:"authority_mode"`
+	IssuerHint        string                               `mapstructure:"issuer_hint" yaml:"issuer_hint"`
+	Issuer            string                               `mapstructure:"issuer" yaml:"issuer"`
+	DiscoveryURL      string                               `mapstructure:"discovery_url" yaml:"discovery_url"`
+	AudienceHint      string                               `mapstructure:"audience_hint" yaml:"audience_hint"`
+	RequiredScopes    []string                             `mapstructure:"required_scopes" yaml:"required_scopes"`
+	ClientCredentials AuthorityOIDCClientCredentialsConfig `mapstructure:"client_credentials" yaml:"client_credentials" validate:"required"`
+}
+
+type AuthorityOIDCClientCredentialsConfig struct {
+	Enabled                         bool         `mapstructure:"enabled" yaml:"enabled"`
+	ClientID                        string       `mapstructure:"client_id" yaml:"client_id"`
+	ClientSecret                    SecretString `mapstructure:"client_secret" yaml:"client_secret" protected:"true"`
+	ClientSecretFile                SecretString `mapstructure:"client_secret_file" yaml:"client_secret_file" protected:"true"`
+	TokenEndpointAuthMethod         string       `mapstructure:"token_endpoint_auth_method" yaml:"token_endpoint_auth_method"`
+	IntrospectionEndpointAuthMethod string       `mapstructure:"introspection_endpoint_auth_method" yaml:"introspection_endpoint_auth_method"`
+	ClientPrivateKeyFile            SecretString `mapstructure:"client_private_key_file" yaml:"client_private_key_file" protected:"true"`
+	ClientKeyID                     string       `mapstructure:"client_key_id" yaml:"client_key_id"`
+	ClientAssertionAlg              string       `mapstructure:"client_assertion_alg" yaml:"client_assertion_alg"`
+	Audience                        string       `mapstructure:"audience" yaml:"audience"`
+	Scopes                          []string     `mapstructure:"scopes" yaml:"scopes"`
+	RefreshBeforeExpiry             Duration     `mapstructure:"refresh_before_expiry" yaml:"refresh_before_expiry"`
+	TokenEndpoint                   string       `mapstructure:"token_endpoint" yaml:"token_endpoint"`
 }
 
 type AuthorityHTTPTransportConfig struct {
@@ -84,6 +103,7 @@ type AuthorityGRPCTransportConfig struct {
 type GRPCCallerAuthConfig struct {
 	Basic  BasicCallerAuthConfig  `mapstructure:"basic" yaml:"basic" validate:"required"`
 	Bearer BearerCallerAuthConfig `mapstructure:"bearer" yaml:"bearer" validate:"required"`
+	OIDC   OIDCCallerAuthConfig   `mapstructure:"oidc" yaml:"oidc" validate:"required"`
 }
 
 type BasicCallerAuthConfig struct {
@@ -95,4 +115,8 @@ type BasicCallerAuthConfig struct {
 type BearerCallerAuthConfig struct {
 	Enabled   bool         `mapstructure:"enabled" yaml:"enabled"`
 	TokenFile SecretString `mapstructure:"token_file" yaml:"token_file" protected:"true"`
+}
+
+type OIDCCallerAuthConfig struct {
+	Enabled bool `mapstructure:"enabled" yaml:"enabled"`
 }

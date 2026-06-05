@@ -374,8 +374,12 @@ func provideControlHandle(
 	runtimeReader := runtimectl.NewRedisRuntimeReader(store)
 	userBackendPinService := runtimectl.NewUserBackendPinService(store, registry, runtimectl.WithObservabilityRecorder(recorder))
 	handler := rest.NewServer(rest.Options{
-		Version:    options.Version,
-		ConfigPath: options.ConfigPath,
+		Version:        options.Version,
+		ConfigPath:     options.ConfigPath,
+		Control:        cfg.Runtime.Servers.Control,
+		Authorities:    cfg.Auth.Authorities,
+		Profiles:       cfg.Observability.Profiles,
+		AuthHTTPClient: &http.Client{Timeout: cfg.Runtime.Timeouts.Nauthilus.Std()},
 		HandlerOptions: adapters.HandlerOptions{
 			Version:               options.Version,
 			ConfigPath:            options.ConfigPath,

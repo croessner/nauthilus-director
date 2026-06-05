@@ -37,6 +37,7 @@ class DemoConfig:
     sieve_port: int
     sieves_port: int
     control_url: str
+    control_token: str
     wait_seconds: float
 
 
@@ -150,6 +151,23 @@ def int_env(name: str, default: int) -> int:
     return value
 
 
+def load_control_token() -> str:
+    """Load the public control API bearer token from environment or file."""
+
+    for name in ("DEMO_CONTROL_TOKEN_FILE", "NAUTHILUS_DIRECTORCTL_BEARER_TOKEN_FILE"):
+        path = os.environ.get(name, "").strip()
+        if not path:
+            continue
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as handle:
+                return handle.read().strip()
+
+    return os.environ.get(
+        "DEMO_CONTROL_TOKEN",
+        os.environ.get("DIRECTOR_CONTROL_TOKEN", "demo-control-token"),
+    ).strip()
+
+
 def load_config() -> DemoConfig:
     """Load runtime proof configuration from the shell environment."""
 
@@ -164,6 +182,7 @@ def load_config() -> DemoConfig:
         sieve_port=int_env("DEMO_SIEVE_PORT", 4190),
         sieves_port=int_env("DEMO_SIEVES_PORT", 8490),
         control_url=os.environ.get("DEMO_CONTROL_URL", "http://127.0.0.1:9090").rstrip("/"),
+        control_token=load_control_token(),
         wait_seconds=float(os.environ.get("DEMO_WAIT_SECONDS", "20")),
     )
 
@@ -180,10 +199,14 @@ def request_json(config: DemoConfig, path: str, payload: dict[str, object]) -> d
     """Perform one JSON POST request against the public control API."""
 
     data = json.dumps(payload).encode("utf-8")
+    headers = {"Accept": "application/json", "Content-Type": "application/json"}
+    if config.control_token:
+        headers["Authorization"] = f"Bearer {config.control_token}"
+
     request = urllib.request.Request(
         config.control_url + path,
         data=data,
-        headers={"Accept": "application/json", "Content-Type": "application/json"},
+        headers=headers,
         method="POST",
     )
     try:

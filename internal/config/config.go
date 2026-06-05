@@ -161,10 +161,11 @@ type ControlBearerAuthConfig struct {
 }
 
 type ControlOIDCAuthConfig struct {
-	Enabled        bool     `mapstructure:"enabled" yaml:"enabled"`
-	Authority      string   `mapstructure:"authority" yaml:"authority"`
-	Validation     string   `mapstructure:"validation" yaml:"validation"`
-	RequiredScopes []string `mapstructure:"required_scopes" yaml:"required_scopes"`
+	Enabled         bool     `mapstructure:"enabled" yaml:"enabled"`
+	Authority       string   `mapstructure:"authority" yaml:"authority"`
+	Validation      string   `mapstructure:"validation" yaml:"validation"`
+	RequiredScopes  []string `mapstructure:"required_scopes" yaml:"required_scopes"`
+	ProtectedScopes []string `mapstructure:"protected_scopes" yaml:"protected_scopes"`
 }
 
 type ControlMTLSAuthConfig struct {
@@ -230,8 +231,10 @@ type TracingConfig struct {
 }
 
 type ProfilesConfig struct {
-	PProf ProfileConfig `mapstructure:"pprof" yaml:"pprof" validate:"required"`
-	Block ProfileConfig `mapstructure:"block" yaml:"block" validate:"required"`
+	PProf     ProfileConfig `mapstructure:"pprof" yaml:"pprof" validate:"required"`
+	Block     ProfileConfig `mapstructure:"block" yaml:"block" validate:"required"`
+	Mutex     ProfileConfig `mapstructure:"mutex" yaml:"mutex" validate:"required"`
+	Goroutine ProfileConfig `mapstructure:"goroutine" yaml:"goroutine" validate:"required"`
 }
 
 type ProfileConfig struct {

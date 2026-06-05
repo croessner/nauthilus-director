@@ -1,0 +1,53 @@
+# Production Failure Modes
+
+Use this runbook to map observable symptoms to safe diagnostics. Commands use
+the control API and do not rewrite YAML configuration.
+
+Common setup:
+
+```sh
+CTL='nauthilus-directorctl --address http://127.0.0.1:9090'
+```
+
+Add `--auth-bearer-token-file`, TLS or mTLS flags as required by the control
+listener.
+
+## Failure Table
+
+| Failure | Symptoms | Likely causes | Safe diagnostics | Safe response |
+| --- | --- | --- | --- | --- |
+| Config validation failure | Server exits before ready; `config dump -n` exits non-zero. | Unknown path, invalid duration, missing required field, unsupported auth mode. | `nauthilus-director --config /etc/nauthilus-director/nauthilus-director.yml config dump -n --format yaml` | Fix the mounted config from version control or rollback the file, then restart. |
+| Missing environment placeholder | Config load fails closed without printing the expanded value. | Required `${NAME}` variable absent from service environment. | `systemctl show nauthilus-director.service --property=EnvironmentFiles`; inspect non-secret env file names. | Set the missing variable to an absolute file path or remove the placeholder. |
+| Redis unavailable | New user-stateful sessions fail; runtime summary or session reads fail. | Redis DNS/network/TLS/auth failure, Sentinel/Cluster mismatch, wrong namespace. | `$CTL status`; `$CTL runtime summary`; Redis health checks from the host. | Restore Redis connectivity. Do not delete runtime keys while active sessions may exist. |
+| Redis ambiguous state | Placement fails closed; route lookup reports ambiguity or backend-node mismatch. | Conflicting active affinity, retained binding, pin or move state. | `$CTL users affinity show <user>`; `$CTL users backend-pin show <user>`; `$CTL route lookup --protocol imap --user <user> --include-affinity` | Clear only inactive stale state after durable routing is correct and no active sessions remain. |
+| Nauthilus unavailable | Protocol auth fails; authority calls time out or return unavailable. | Nauthilus service down, network/TLS failure, wrong HTTP/gRPC endpoint. | Check Director logs for bounded authority error class; verify Nauthilus readiness from the Director host. | Restore Nauthilus or roll back authority endpoint config and restart. |
+| OIDC discovery unavailable | OIDC-enabled authority or control auth fails closed before token/introspection use. | Issuer unreachable, discovery URL wrong, TLS trust root missing. | Check `auth.authorities.<name>.oidc.issuer` or `discovery_url`; test HTTPS from the host without printing secrets. | Fix issuer/discovery/TLS trust and restart if auth config changed. |
+| OIDC token endpoint unavailable | Authority calls fail when no unexpired cached token exists. | Token endpoint down, network/TLS failure, discovery stale. | Check Nauthilus token endpoint health and Director bounded auth errors. | Restore token endpoint; existing unexpired in-memory tokens may carry traffic until refresh is required. |
+| Bad OIDC client secret or key | Token acquisition denied; no caller token cached. | Wrong mounted secret file, bad file permissions, mismatched client registration. | Check file path, owner and mode; compare Nauthilus client metadata without exposing secret bytes. | Fix or rotate the client secret/key and restart if config or mounted files changed. |
+| OIDC introspection denied or inactive | Control requests return `401` or `403`; protected output denied. | Expired control token, wrong audience, inactive token, introspection client auth failure. | `$CTL --auth-bearer-token-file <path> status`; Nauthilus introspection logs. | Issue a valid control token for the Director control client and required scopes. |
+| OIDC scope or audience mismatch | Ordinary control may fail with `403`; protected config/pprof fails with `403`; introspection can report inactive. | Missing `nauthilus-director.admin`, missing `nauthilus-director.protected`, token audience not accepted by Nauthilus introspection. | Check configured `required_scopes` and `protected_scopes`; inspect token metadata through approved IdP tooling. | Adjust Nauthilus client/scopes and issue a new token. |
+| Backend health hard-down | Route lookup avoids backend; sessions to that backend fail or move elsewhere. | Health threshold exceeded, backend unavailable, protocol preface/auth failure. | `$CTL backends show <backend>`; `$CTL route lookup --protocol imap --user <user> --backend-pool <pool>` | Repair backend and let health recover. Avoid forcing placement to hard-down backends. |
+| Backend TLS identity failure | Backend connect/auth fails; health may mark backend down. | Wrong `server_name`, CA file, certificate chain or expired certificate. | `$CTL backends show <backend>`; check mounted CA and backend certificate chain. | Fix backend TLS material or config, then restart if backend TLS config changed. |
+| Backend capacity exhaustion | Route lookup reports no usable backend or capacity reason; new sessions fail closed. | Max connections reached, reservations not released yet, all weights zero. | `$CTL runtime summary`; `$CTL backends list`; `$CTL sessions list --backend <backend>` | Add capacity, wait for leases to expire, drain overloaded backend or restore runtime weight. |
+| User placement hold timeout | Waiting sessions resume normal placement after hold expiry. | Hold duration shorter than mailbox migration window. | `$CTL users hold show <user>`; `$CTL route lookup --protocol imap --user <user> --include-affinity` | Set a fresh bounded hold if the migration is still active. |
+| Backend pin mismatch | Route lookup reports pin mismatch or unusable pinned backend. | Pin target is wrong shard, wrong backend node, wrong protocol/pool or unhealthy. | `$CTL users backend-pin show <user>`; `$CTL backends show <backend>`; route lookup with affinity context. | Clear or correct the pin. Use `users move` for shard changes. |
+| Route lookup rejected input | CLI rejects request or REST returns invalid request before routing. | Credential-bearing attributes, missing user/recipient, unsupported protocol. | Re-run with `--protocol`, `--user` or `--recipient` and secret-free `--attribute k=v`. | Remove credentials, SASL blobs, mailbox contents and secret material from diagnostic input. |
+| Protected config denied | `config dump --protected` returns `403` and prints no partial config. | Actor has ordinary control access but lacks protected authorization. | `$CTL config dump --non-default --protected --format yaml` with approved token. | Use an OIDC token with protected scope or inspect locally with explicit `-P` under host policy. |
+| Control auth denied | `/api/v1/*` and `/metrics` return `401`; CLI command fails before operation. | Missing bearer token, wrong token file, missing mTLS cert, OIDC inactive. | `$CTL status`; check CLI auth flags and mounted file permissions. | Supply the correct auth material; do not disable auth to recover production control. |
+| Safe reload rejected | `reload` returns conflict or restart-required reason; service keeps old snapshot. | Changed restart-scoped config such as auth, Redis, existing listener TLS or pprof. | `$CTL reload`; inspect response and journal. | Roll back the config edit or schedule a restart. |
+| pprof disabled or unauthorized | `/debug/pprof/*` returns `404`, `401` or `403`. | pprof disabled, missing ordinary auth, missing protected scope. | Check `observability.profiles.pprof.enabled`; use a protected OIDC token for profile access. | Enable pprof only for a bounded incident and restart; collect profiles as sensitive artifacts. |
+| Docker image start failure | Container exits before ready. | Missing mounted config, wrong secret file paths, read-only root without tmpfs, bad listener bind. | `docker logs <container>`; run `nauthilus-director --version`; run default config dump in smoke target. | Fix mounts, tmpfs, config or port publishing; do not bake secrets into a replacement image. |
+| systemd service start failure | `systemctl status` reports failed; no ready control listener. | Missing user/group, unreadable config or secret, invalid unit override, low port without capability. | `systemctl status nauthilus-director.service`; `journalctl -u nauthilus-director.service`; `systemd-analyze verify packaging/systemd/nauthilus-director.service` | Fix host layout, permissions or drop-ins and restart. |
+
+## General Recovery Rules
+
+- Prefer `status`, `runtime summary`, route lookup and bounded list commands
+  before mutation commands.
+- Treat runtime commands as Redis-backed runtime state changes only. They do
+  not edit YAML and they do not move mailbox data.
+- Use `users affinity clear` only for inactive stale state after the durable
+  routing source is correct.
+- Do not paste bearer tokens, protected config output, private keys, profile
+  payloads or SASL bearer material into tickets or chat.
+- Keep Basic Auth fallback explicit and temporary when migrating authority
+  caller auth to OIDC.

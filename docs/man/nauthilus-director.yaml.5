@@ -64,6 +64,194 @@ Backend pool protocol, selector and backend membership.
 Backend protocol, shard, backend-node identity, address, weight, max
 connections, maintenance baseline, transport security, authentication and
 health checks.
+.SH CONTROL PLANE AUTHENTICATION
+The control API listener under
+.B runtime.servers.control
+protects generated
+.B /api/v1/*
+routes by default.
+When metrics are served by the same control process,
+.B /metrics
+uses the same authentication boundary.
+.B /healthz
+and
+.B /readyz
+remain unauthenticated liveness and readiness endpoints because they return
+secret-safe process state only.
+.PP
+Static bearer authentication is configured with
+.BR runtime.servers.control.auth.bearer .
+Set
+.B enabled: true
+and provide
+.B token_file
+as a mounted secret file.
+The token is compared in constant time and is never printed by server or CLI
+diagnostics.
+.PP
+mTLS control authentication is configured with
+.BR runtime.servers.control.auth.mtls .
+It requires
+.B runtime.servers.control.tls.enabled: true
+and
+.BR runtime.servers.control.tls.client_ca .
+Only certificates verified by the TLS stack are accepted as authenticated
+actors.
+.PP
+OIDC control authentication is configured with
+.BR runtime.servers.control.auth.oidc .
+The configured
+.B authority
+must reference an enabled Nauthilus authority with OIDC client credentials.
+Incoming bearer tokens are introspected through Nauthilus; inactive tokens,
+tokens with the wrong audience for the introspecting client, missing required
+scopes and malformed bearer input fail closed.
+.B required_scopes
+authorize ordinary control reads and mutations.
+.B protected_scopes
+are additionally required for protected configuration output.
+.PP
+Unauthorized requests return
+.B 401
+with generic problem details.
+Authenticated actors without sufficient scope return
+.BR 403 .
+Protected config dumps and mutation commands fail as a whole when unauthorized;
+partial protected output is not returned.
+.SH PROTECTED DIAGNOSTIC PROFILES
+Runtime profiles are disabled by default.
+The master switch is
+.BR observability.profiles.pprof.enabled .
+When false, requests under
+.B /debug/pprof/
+return
+.B 404
+and behave like absent routes.
+.PP
+When pprof is enabled, profile endpoints are registered only on the
+.B runtime.servers.control
+listener. They are not registered on IMAP, LMTP, ManageSieve or POP3
+listeners and are not exposed through a separate debug process or port.
+Every pprof route uses the same control-plane authentication boundary as
+.B /api/v1/*
+and
+.BR /metrics ,
+then requires protected authorization. Ordinary static bearer or mTLS control
+authentication does not grant protected profile access by itself.
+OIDC callers need both
+.B required_scopes
+and a configured
+.B protected_scopes
+value.
+.PP
+The goroutine, block and mutex profile classes are independently explicit:
+.BR observability.profiles.goroutine.enabled ,
+.B observability.profiles.block.enabled
+and
+.BR observability.profiles.mutex.enabled .
+Each requires
+.B observability.profiles.pprof.enabled: true
+and defaults to
+.BR false .
+Block and mutex sampling add process-wide runtime overhead and should be
+enabled only for a bounded incident window.
+.PP
+Profiles can include goroutine stacks, allocation paths, command-line
+arguments, timing data and contention information. Treat profile payloads as
+sensitive diagnostic artifacts. Store them outside long-lived logs, avoid
+sharing them broadly and delete or expire collected files after the incident or
+performance investigation is complete.
+.PP
+Diagnostic access emits a bounded audit event with route class, result,
+auth method and actor context. It does not log profile bodies, bearer tokens,
+private keys, protected config values or raw certificates, and profile route
+metrics use only low-cardinality labels.
+.SH NAUTHILUS AUTHORITY CALLER AUTH
+Director-to-Nauthilus caller authentication is configured under
+.BR auth.authorities.<name> .
+The
+.B oidc.client_credentials
+subtree enables Nauthilus-issued client-credentials access tokens for authority
+calls.
+The token endpoint is resolved from the configured
+.B issuer
+or
+.BR discovery_url ,
+and the discovery document must advertise the configured token endpoint client
+authentication method.
+.PP
+The initial supported token endpoint authentication methods are
+.B client_secret_basic
+,
+.B client_secret_post
+and
+.BR private_key_jwt .
+Client secrets are protected config values. Operators may provide
+.B client_secret
+directly through protected config inspection paths or reference mounted secret
+material with
+.BR client_secret_file .
+Both values are redacted by default in generated config dumps and REST config
+readbacks.
+.PP
+For
+.BR private_key_jwt ,
+configure
+.B token_endpoint_auth_method: private_key_jwt
+with
+.BR client_private_key_file .
+Optional
+.BR client_key_id ,
+.B client_assertion_alg
+and
+.B audience
+values control the JWT header and audience claim.
+Supported assertion algorithms are
+.B RS256
+and
+.BR EdDSA .
+The same authority may use
+.B introspection_endpoint_auth_method
+with
+.BR client_secret_basic ,
+.B client_secret_post
+or
+.B private_key_jwt
+for control-plane OIDC introspection, subject to the methods announced by the
+Nauthilus discovery document.
+.PP
+When HTTP authority transport is selected and
+.B oidc.client_credentials.enabled
+is true, authority requests send
+.B Authorization: Bearer
+caller tokens and do not also send Basic authentication.
+Disabling OIDC client credentials keeps the explicit
+.B http.basic_auth
+compatibility path available.
+.PP
+For gRPC authority transport, enable
+.B grpc.caller_auth.oidc.enabled
+to send
+.B authorization: Bearer
+metadata. The
+.B grpc.caller_auth.basic
+and
+.B grpc.caller_auth.bearer
+subtrees remain explicit compatibility or emergency modes, but only one gRPC
+caller-auth method may be enabled at a time.
+.PP
+These caller tokens are separate from mail-protocol
+.B XOAUTH2
+and
+.B OAUTHBEARER
+credentials. Mail bearer material is parsed only enough to extract the SASL
+identity and credential material, then forwarded to Nauthilus as auth input.
+Director does not locally validate, introspect, log or cache end-user mail
+bearer tokens.
+.PP
+Operational setup and migration guidance for Nauthilus OIDC caller auth lives
+in
+.BR docs/operations/oidc-nauthilus.md .
 .SH BACKEND OUTBOUND PROXY PROTOCOL
 Backend entries may enable backend-side HAProxy PROXY protocol with
 .B director.backends.<name>.haproxy.enabled: true.
@@ -386,6 +574,33 @@ For example,
 maps to
 .BR NAUTHILUS_DIRECTOR_RUNTIME_SERVERS_CONTROL_ADDRESS .
 Overrides are applied after placeholder expansion and before typed validation.
+.SH RELOAD AND RESTART SCOPE
+Safe reload validates the mounted configuration again and applies only config
+classes with live owners in the running process.
+The reloadable classes are listener additions/removals,
+.BR director.backends.* ,
+and
+.BR director.backend_pools.* .
+Existing listener definitions are not hot-swapped in place.
+.PP
+Restart is required for
+.BR runtime.* ,
+.BR auth.* ,
+.BR storage.redis.* ,
+.BR observability.* ,
+.BR director.routing ,
+.BR director.affinity ,
+.BR director.runtime_overrides ,
+.BR director.health ,
+.BR director.maintenance ,
+.BR director.security ,
+and edits to existing
+.B director.listeners.*
+entries.
+A rejected reload leaves the previously accepted runtime snapshot active and
+does not rewrite YAML.
+Existing sessions, active affinities, backend pins and placement holds are
+preserved unless a separate explicit runtime command changes them.
 .SH REDACTION AND PROTECTED VALUES
 Passwords, token files, private keys and other secret-bearing fields are marked
 as protected in the typed config model.
@@ -399,6 +614,12 @@ Remote protected output additionally requires the Director to authorize the
 protected config request; a
 .B 403
 response means no protected output is printed.
+.SH OPERATIONS DOCUMENTATION
+Deployment, security, OIDC, reload, failure-mode and migration runbooks are
+maintained under
+.BR docs/operations/ .
+Those documents use placeholder or file-path examples for credentials and must
+not contain literal passwords, bearer tokens or private keys.
 .SH SEE ALSO
 .BR nauthilus-director (1),
 .BR nauthilus-directorctl (1)

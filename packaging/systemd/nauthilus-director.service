@@ -1,0 +1,61 @@
+# Copyright (C) 2026 Christian Rößner
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
+[Unit]
+Description=Nauthilus Director mail protocol proxy
+Documentation=man:nauthilus-director(1) man:nauthilus-directorctl(1) man:nauthilus-director.yaml(5)
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=300s
+StartLimitBurst=5
+
+[Service]
+Type=exec
+User=nauthilus-director
+Group=nauthilus-director
+EnvironmentFile=-/etc/default/nauthilus-director
+ExecStart=/usr/local/bin/nauthilus-director --config /etc/nauthilus-director/nauthilus-director.yml serve
+ExecReload=/usr/local/bin/nauthilus-directorctl --address http://127.0.0.1:9090 --timeout 10s reload
+Restart=on-failure
+RestartSec=5s
+TimeoutStartSec=60s
+TimeoutStopSec=35s
+KillSignal=SIGTERM
+RestartKillSignal=SIGTERM
+KillMode=control-group
+RuntimeDirectory=nauthilus-director
+RuntimeDirectoryMode=0750
+ConfigurationDirectory=nauthilus-director
+ConfigurationDirectoryMode=0750
+ReadOnlyPaths=/etc/nauthilus-director
+UMask=0077
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=nauthilus-director
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RemoveIPC=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target

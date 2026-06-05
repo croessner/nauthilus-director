@@ -15,6 +15,8 @@ requires an external artifact.
 The default lane is fake-service based and deterministic:
 
 - fake Nauthilus HTTP authority under `test/e2e/fakes/nauthilus_http/`
+  with deterministic OIDC discovery, token and introspection fixtures for
+  Director caller-auth proofs
 - scaffolded fake Nauthilus gRPC authority under
   `test/e2e/fakes/nauthilus_grpc/`
 - fake IMAP backend under `test/e2e/fakes/imap_backend/`
@@ -24,6 +26,9 @@ The default lane is fake-service based and deterministic:
 - CLI commands through `nauthilus-directorctl` when the control API exists
 - REST calls through the control listener when `runtime.servers.control` is
   runnable from the server binary
+- OIDC client-credentials caller auth for Director-to-Nauthilus requests,
+  including an insufficient-scope negative proof that fails closed before
+  backend placement
 - listener runtime control proof through `nauthilus-directorctl listeners ...`,
   including process-local soft drain, resume, hard drain with explicit zero
   grace, and public frontend socket observations
@@ -54,8 +59,9 @@ runs through `make e2e-interop`. It is documented in
 coverage for edge cases, forced failures, routing decisions, or secret-safe
 observability.
 
-The current Docker lane starts production `nauthilus-director` binaries, real
-Dovecot IMAP and LMTP backends, and a pinned Postfix submitter image. Its
+The current Docker lane starts production `nauthilus-director` binaries, a
+fake Nauthilus authority that requires OIDC Bearer caller tokens, real Dovecot
+IMAP and LMTP backends, and a pinned Postfix submitter image. Its
 cluster scenario shares one Redis-compatible state service across three
 Director processes and six Dovecot IMAP backends: two untagged default
 backends, two `test_shard1` backends and two `test_shard2` backends. It verifies

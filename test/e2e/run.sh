@@ -20,6 +20,7 @@ trap 'rm -rf "$tmpdir"' EXIT HUP INT TERM
 
 printf 'nauthilus-director e2e: starting deterministic fake-service guardrail lane\n'
 printf 'nauthilus-director e2e: public sockets only for externally visible behavior\n'
+printf 'nauthilus-director e2e: fake Nauthilus OIDC issuer proves Bearer caller auth and fail-closed scope denial\n'
 printf 'nauthilus-director e2e: credentials, SASL blobs and bearer material must remain redacted\n'
 
 expected_paths=(
@@ -48,7 +49,7 @@ printf 'ok e2e: required fake-service and interoperability scaffold files exist\
 NAUTHILUS_DIRECTOR_E2E_SERVER_BINARY="$tmpdir/nauthilus-director" \
 	"$go_cmd" test -mod=vendor -count=1 ./test/e2e
 
-printf 'ok e2e: fake Nauthilus HTTP/gRPC authority, real server binary, fake IMAP, LMTP, ManageSieve and POP3 backends, outbound backend PROXY, backend pinning, user placement holds, listener drain/resume, DATA/BDAT, TLS, route lookup and observability checks passed\n'
+printf 'ok e2e: fake Nauthilus HTTP/gRPC authority, OIDC Bearer caller auth, insufficient-scope denial, real server binary, fake IMAP, LMTP, ManageSieve and POP3 backends, outbound backend PROXY, backend pinning, user placement holds, listener drain/resume, DATA/BDAT, TLS, route lookup and observability checks passed\n'
 
 "$go_cmd" run -mod=vendor ./cmd/nauthilus-director --version >"$tmpdir/nauthilus-director.version"
 "$go_cmd" run -mod=vendor ./cmd/nauthilus-directorctl --version >"$tmpdir/nauthilus-directorctl.version"

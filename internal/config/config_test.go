@@ -529,6 +529,46 @@ func TestObservabilityValidationRejectsUnsupportedMetricsPath(t *testing.T) {
 	}
 }
 
+// TestDefaultConfigDisablesDiagnosticProfiles verifies sensitive profiles are absent by default.
+func TestDefaultConfigDisablesDiagnosticProfiles(t *testing.T) {
+	profiles := DefaultConfig().Observability.Profiles
+
+	if profiles.PProf.Enabled || profiles.Block.Enabled || profiles.Mutex.Enabled || profiles.Goroutine.Enabled {
+		t.Fatalf("default profiles = %#v, want all disabled", profiles)
+	}
+}
+
+// TestObservabilityProfileSubtreesRequirePProf verifies profile samplers cannot turn on invisibly.
+func TestObservabilityProfileSubtreesRequirePProf(t *testing.T) {
+	tests := map[string]func(*ProfilesConfig){
+		"block":     func(profiles *ProfilesConfig) { profiles.Block.Enabled = true },
+		"mutex":     func(profiles *ProfilesConfig) { profiles.Mutex.Enabled = true },
+		"goroutine": func(profiles *ProfilesConfig) { profiles.Goroutine.Enabled = true },
+	}
+
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			mutate(&cfg.Observability.Profiles)
+
+			expectValidationError(t, cfg, "observability.profiles."+name+".enabled")
+		})
+	}
+}
+
+// TestObservabilityProfileSubtreesValidateWhenPProfEnabled verifies explicit diagnostics pass validation.
+func TestObservabilityProfileSubtreesValidateWhenPProfEnabled(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Observability.Profiles.PProf.Enabled = true
+	cfg.Observability.Profiles.Block.Enabled = true
+	cfg.Observability.Profiles.Mutex.Enabled = true
+	cfg.Observability.Profiles.Goroutine.Enabled = true
+
+	if err := NewLoader().Validate(cfg); err != nil {
+		t.Fatalf("Validate rejected explicit profile config: %v", err)
+	}
+}
+
 // TestGRPCCallerAuthValidationRejectsAmbiguousMethods verifies caller auth is fail-closed.
 func TestGRPCCallerAuthValidationRejectsAmbiguousMethods(t *testing.T) {
 	cfg := DefaultConfig()
@@ -536,6 +576,17 @@ func TestGRPCCallerAuthValidationRejectsAmbiguousMethods(t *testing.T) {
 	authority.Transport = "grpc"
 	authority.GRPC.CallerAuth.Bearer.Enabled = true
 	authority.GRPC.CallerAuth.Bearer.TokenFile = Secret("bearer-token")
+	cfg.Auth.Authorities["default"] = authority
+
+	expectValidationError(t, cfg, "auth.authorities.default.grpc.caller_auth must enable only one caller auth method")
+}
+
+// TestGRPCCallerAuthValidationRejectsOIDCAmbiguity verifies OIDC caller auth is exclusive.
+func TestGRPCCallerAuthValidationRejectsOIDCAmbiguity(t *testing.T) {
+	cfg := DefaultConfig()
+	authority := cfg.Auth.Authorities["default"]
+	authority.Transport = "grpc"
+	authority.GRPC.CallerAuth.OIDC.Enabled = true
 	cfg.Auth.Authorities["default"] = authority
 
 	expectValidationError(t, cfg, "auth.authorities.default.grpc.caller_auth must enable only one caller auth method")
@@ -554,6 +605,148 @@ func TestGRPCCallerAuthValidationRequiresBasicUsername(t *testing.T) {
 		cfg,
 		"auth.authorities.default.grpc.caller_auth.basic.username is required when basic caller auth is enabled",
 	)
+}
+
+// TestOIDCCallerAuthValidationRejectsIncompleteClientCredentials keeps caller auth fail-closed.
+func TestOIDCCallerAuthValidationRejectsIncompleteClientCredentials(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*AuthorityConfig)
+		want   string
+	}{
+		{
+			name: "missing issuer and discovery",
+			mutate: func(authority *AuthorityConfig) {
+				authority.OIDC.Issuer = ""
+				authority.OIDC.DiscoveryURL = ""
+			},
+			want: "auth.authorities.default.oidc.issuer or auth.authorities.default.oidc.discovery_url is required",
+		},
+		{
+			name: "missing client id",
+			mutate: func(authority *AuthorityConfig) {
+				authority.OIDC.ClientCredentials.ClientID = ""
+			},
+			want: "auth.authorities.default.oidc.client_credentials.client_id is required",
+		},
+		{
+			name: "missing secret material",
+			mutate: func(authority *AuthorityConfig) {
+				authority.OIDC.ClientCredentials.ClientSecret = Secret("")
+				authority.OIDC.ClientCredentials.ClientSecretFile = Secret("")
+			},
+			want: "auth.authorities.default.oidc.client_credentials must configure exactly one of client_secret or client_secret_file for secret-based token endpoint auth",
+		},
+		{
+			name: "ambiguous secret material",
+			mutate: func(authority *AuthorityConfig) {
+				authority.OIDC.ClientCredentials.ClientSecret = Secret("inline-secret")
+				authority.OIDC.ClientCredentials.ClientSecretFile = Secret("/run/secret")
+			},
+			want: "auth.authorities.default.oidc.client_credentials must not configure both client_secret and client_secret_file",
+		},
+		{
+			name: "missing token auth method",
+			mutate: func(authority *AuthorityConfig) {
+				authority.OIDC.ClientCredentials.TokenEndpointAuthMethod = ""
+			},
+			want: "auth.authorities.default.oidc.client_credentials.token_endpoint_auth_method is required",
+		},
+		{
+			name: "unsupported token auth method",
+			mutate: func(authority *AuthorityConfig) {
+				authority.OIDC.ClientCredentials.TokenEndpointAuthMethod = "client_secret_jwt"
+			},
+			want: "auth.authorities.default.oidc.client_credentials.token_endpoint_auth_method must be client_secret_basic, client_secret_post or private_key_jwt",
+		},
+		{
+			name: "private key jwt missing key file",
+			mutate: func(authority *AuthorityConfig) {
+				authority.OIDC.ClientCredentials.TokenEndpointAuthMethod = "private_key_jwt"
+				authority.OIDC.ClientCredentials.IntrospectionEndpointAuthMethod = "client_secret_basic"
+			},
+			want: "auth.authorities.default.oidc.client_credentials.client_private_key_file is required when token_endpoint_auth_method is private_key_jwt",
+		},
+		{
+			name: "unsupported assertion alg",
+			mutate: func(authority *AuthorityConfig) {
+				authority.OIDC.ClientCredentials.ClientAssertionAlg = "ES256"
+			},
+			want: "auth.authorities.default.oidc.client_credentials.client_assertion_alg must be RS256 or EdDSA",
+		},
+		{
+			name: "unsupported introspection auth method",
+			mutate: func(authority *AuthorityConfig) {
+				authority.OIDC.ClientCredentials.IntrospectionEndpointAuthMethod = "client_secret_jwt"
+			},
+			want: "auth.authorities.default.oidc.client_credentials.introspection_endpoint_auth_method must be client_secret_basic, client_secret_post or private_key_jwt",
+		},
+		{
+			name: "missing scopes",
+			mutate: func(authority *AuthorityConfig) {
+				authority.OIDC.ClientCredentials.Scopes = nil
+			},
+			want: "auth.authorities.default.oidc.client_credentials.scopes is required",
+		},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			authority := cfg.Auth.Authorities["default"]
+			testCase.mutate(&authority)
+			cfg.Auth.Authorities["default"] = authority
+
+			expectValidationError(t, cfg, testCase.want)
+		})
+	}
+}
+
+// TestOIDCCallerAuthValidationAcceptsPrivateKeyJWT keeps Nauthilus token auth compatibility.
+func TestOIDCCallerAuthValidationAcceptsPrivateKeyJWT(t *testing.T) {
+	cfg := DefaultConfig()
+	authority := cfg.Auth.Authorities["default"]
+	authority.OIDC.ClientCredentials.TokenEndpointAuthMethod = "private_key_jwt"
+	authority.OIDC.ClientCredentials.IntrospectionEndpointAuthMethod = "private_key_jwt"
+	authority.OIDC.ClientCredentials.ClientSecret = Secret("")
+	authority.OIDC.ClientCredentials.ClientSecretFile = Secret("")
+	authority.OIDC.ClientCredentials.ClientPrivateKeyFile = Secret("/run/nauthilus-director/oidc-client-key.pem")
+	authority.OIDC.ClientCredentials.ClientKeyID = "director-key-1"
+	authority.OIDC.ClientCredentials.ClientAssertionAlg = "RS256"
+	cfg.Auth.Authorities["default"] = authority
+
+	if err := NewLoader().Validate(cfg); err != nil {
+		t.Fatalf("Validate rejected private_key_jwt OIDC caller auth: %v", err)
+	}
+}
+
+// TestOIDCCallerAuthValidationAcceptsExplicitDisable verifies inherited defaults can be disabled.
+func TestOIDCCallerAuthValidationAcceptsExplicitDisable(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Runtime.Servers.Control.Auth.OIDC.Enabled = false
+	authority := cfg.Auth.Authorities["default"]
+	authority.OIDC.Enabled = false
+	cfg.Auth.Authorities["default"] = authority
+
+	if err := NewLoader().Validate(cfg); err != nil {
+		t.Fatalf("Validate rejected disabled OIDC authority: %v", err)
+	}
+}
+
+// TestOIDCCallerAuthProtectedDefaults verifies client secrets are redacted in dumps and docs.
+func TestOIDCCallerAuthProtectedDefaults(t *testing.T) {
+	dump, err := NewLoader().DumpDefaults(DumpOptions{Format: "yaml"})
+	if err != nil {
+		t.Fatalf("DumpDefaults: %v", err)
+	}
+
+	text := string(dump)
+	if strings.Contains(text, "/etc/nauthilus-director/nauthilus-oidc-client-secret") {
+		t.Fatalf("default dump leaked OIDC client secret file:\n%s", text)
+	}
+	if !strings.Contains(text, "client_secret_file: <redacted>") {
+		t.Fatalf("default dump missing redacted OIDC client secret file:\n%s", text)
+	}
 }
 
 // TestUnknownFieldsAreRejected verifies strict decode behavior for typo safety.

@@ -18,6 +18,7 @@
 package runtime
 
 import (
+	"context"
 	"errors"
 	"maps"
 	"strings"
@@ -145,6 +146,31 @@ type Actor struct {
 	ID            string
 	AuthMethod    string
 	Authenticated bool
+}
+
+type actorContextKey struct{}
+
+// WithActor stores authenticated control-plane actor metadata in a request context.
+func WithActor(ctx context.Context, actor Actor) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	return context.WithValue(ctx, actorContextKey{}, normalizeActor(actor))
+}
+
+// ActorFromContext returns authenticated actor metadata stored by the control boundary.
+func ActorFromContext(ctx context.Context) Actor {
+	if ctx == nil {
+		return Actor{}
+	}
+
+	actor, ok := ctx.Value(actorContextKey{}).(Actor)
+	if !ok {
+		return Actor{}
+	}
+
+	return normalizeActor(actor)
 }
 
 // AuditInput contains the fields used to create secret-safe audit metadata.

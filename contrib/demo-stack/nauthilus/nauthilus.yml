@@ -27,6 +27,71 @@ observability:
     add_source: false
     debug_modules: []
 
+identity:
+  frontend:
+    enabled: true
+    encryption_secret: "directorDemoFrontendSecret2026!"
+    assets:
+      html_static_content_path: "/usr/app/static/templates"
+      language_resources: "/usr/app/server/resources"
+    localization:
+      languages: [en]
+      default_language: "en"
+
+  mfa:
+    totp:
+      issuer: "Nauthilus Director Demo"
+      skew: 1
+    webauthn:
+      rp_display_name: "Nauthilus Director Demo"
+      rp_id: "demo.local"
+      rp_origins:
+        - "https://nauthilus-haproxy:8443"
+      resident_key: "discouraged"
+      user_verification: "preferred"
+
+  oidc:
+    enabled: true
+    issuer: "https://nauthilus-haproxy:8443"
+    access_token_type: "opaque"
+    response_types_supported: [code]
+    subject_types_supported: [public]
+    id_token_signing_alg_values_supported: [RS256]
+    token_endpoint_auth_methods_supported:
+      - client_secret_basic
+      - client_secret_post
+    code_challenge_methods_supported: [S256]
+    scopes_supported:
+      - openid
+      - nauthilus:authenticate
+      - nauthilus:lookup_identity
+      - nauthilus:list_accounts
+    claims_supported:
+      - sub
+      - client_id
+      - scope
+    tokens:
+      default_access_token_lifetime: 5m
+      default_refresh_token_lifetime: 30m
+    signing_keys:
+      - id: "director-demo-rs256"
+        key_file: "/run/nauthilus-demo/grpc-tls/oidc-signing.key"
+        algorithm: "RS256"
+        active: true
+    clients:
+      - name: "Nauthilus Director Demo"
+        client_id: "nauthilus-director-demo"
+        client_secret: "${DIRECTOR_OIDC_CLIENT_SECRET}"
+        grant_types:
+          - client_credentials
+        token_endpoint_auth_method: "client_secret_basic"
+        access_token_type: "opaque"
+        access_token_lifetime: 5m
+        scopes:
+          - nauthilus:authenticate
+          - nauthilus:lookup_identity
+          - nauthilus:list_accounts
+
 storage:
   redis:
     primary:
@@ -43,9 +108,11 @@ storage:
 auth:
   backchannel:
     basic_auth:
-      enabled: true
+      enabled: false
       username: director
       password: director-api-secret
+    oidc_bearer:
+      enabled: true
 
   pipeline:
     max_concurrent_requests: 64

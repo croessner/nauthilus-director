@@ -1958,8 +1958,8 @@ func formatUserKey(key runtime.UserKey) string {
 }
 
 // actorFromContext returns authenticated actor metadata when auth middleware adds it.
-func actorFromContext(_ context.Context) runtime.Actor {
-	return runtime.Actor{}
+func actorFromContext(ctx context.Context) runtime.Actor {
+	return runtime.ActorFromContext(ctx)
 }
 
 // pointerString unwraps optional generated string fields.

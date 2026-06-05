@@ -212,6 +212,7 @@ passdb users {
 DOVECOT_MASTER_CONF
 
 printf 'nauthilus-director e2e-interop: using Dovecot image %s\n' "$dovecot_image"
+printf 'nauthilus-director e2e-interop: fake Nauthilus requires OIDC Bearer caller auth for authority requests\n'
 
 if ! command -v "$docker_cmd" >/dev/null 2>&1; then
 	printf 'SKIP e2e-interop: docker command not found\n'
@@ -416,4 +417,4 @@ NAUTHILUS_DIRECTOR_INTEROP_BACKEND_ADDR="${mapped_by_name[default_a]}" \
 	NAUTHILUS_DIRECTOR_E2E_SERVER_BINARY="$tmpdir/nauthilus-director" \
 	"$go_cmd" test -mod=vendor -tags=interop -count=1 -run 'TestDovecot(CredentialReplayInterop|ClusterRuntimeInterop|LMTPInterop|ManageSieveInterop|POP3Interop)' ./test/e2e
 
-printf 'ok e2e-interop: real server binary, six Dovecot IMAP backends, Dovecot LMTP backend, Dovecot ManageSieve and POP3 backends when available, swaks-to-Postfix submitter, curl IMAP delivery proof, health ownership, cluster affinity and runtime control passed\n'
+printf 'ok e2e-interop: OIDC Bearer caller-auth proof, real server binary, six Dovecot IMAP backends, Dovecot LMTP backend, Dovecot ManageSieve and POP3 backends when available, swaks-to-Postfix submitter, curl IMAP delivery proof, health ownership, cluster affinity and runtime control passed\n'

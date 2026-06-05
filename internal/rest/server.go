@@ -19,15 +19,21 @@ package rest
 import (
 	"net/http"
 
+	"github.com/croessner/nauthilus-director/internal/config"
 	"github.com/croessner/nauthilus-director/internal/rest/adapters"
 	"github.com/croessner/nauthilus-director/internal/rest/generated"
 )
 
 // Options configures the generated REST boundary wrapper.
 type Options struct {
-	Version        string
-	ConfigPath     string
-	HandlerOptions adapters.HandlerOptions
+	Version          string
+	ConfigPath       string
+	Control          config.ControlServerConfig
+	Authorities      map[string]config.AuthorityConfig
+	Profiles         config.ProfilesConfig
+	AuthHTTPClient   *http.Client
+	OIDCIntrospector OIDCIntrospector
+	HandlerOptions   adapters.HandlerOptions
 }
 
 // Server owns the control API HTTP handler and generated route registration.
@@ -46,6 +52,10 @@ func NewServer(options Options) *Server {
 		handlerOptions.ConfigPath = options.ConfigPath
 	}
 
+	if handlerOptions.ProtectedConfigAuthorizer == nil {
+		handlerOptions.ProtectedConfigAuthorizer = ProtectedContextAuthorizer{}
+	}
+
 	handler := adapters.NewHandler(handlerOptions)
 	strict := generated.NewStrictHandlerWithOptions(handler, []generated.StrictMiddlewareFunc{
 		traceRESTRequests(handlerOptions.Observability),
@@ -58,9 +68,17 @@ func NewServer(options Options) *Server {
 		},
 	})
 	registered := generated.Handler(strict)
-	guarded := NewControlAuthenticator().Wrap(registered)
+	authenticator := NewControlAuthenticator(ControlAuthOptions{
+		Config:           options.Control,
+		Authorities:      options.Authorities,
+		HTTPClient:       options.AuthHTTPClient,
+		OIDCIntrospector: options.OIDCIntrospector,
+	})
+	guarded := authenticator.Wrap(registered)
+	profiles := newDiagnosticProfileHandler(options.Profiles, handlerOptions.Observability)
+	handlerWithProfiles := profileControlHandler(guarded, options.Profiles, authenticator.Wrap(profiles))
 
-	return &Server{handler: guarded}
+	return &Server{handler: handlerWithProfiles}
 }
 
 // Handler returns the registered control API handler.

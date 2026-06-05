@@ -92,6 +92,35 @@ func TestGRPCNetworkClientRejectsAmbiguousCallerAuth(t *testing.T) {
 	}
 }
 
+// TestGRPCNetworkOIDCCallerAuthSendsBearerOnly verifies OIDC metadata replaces Basic auth.
+func TestGRPCNetworkOIDCCallerAuthSendsBearerOnly(t *testing.T) {
+	service, server := newTestProtoAuthority(t)
+	service.authorization = ""
+	service.tokenSource = staticCallerTokenSource{token: "grpc-oidc-token"}
+	client := newTestGRPCClient(t, service)
+
+	result, err := client.Authenticate(context.Background(), AuthRequest{
+		Context: RequestContext{
+			Username: "alice@example.test",
+			Protocol: "imap",
+			Method:   "plain",
+		},
+		Credential: NewSecret("secret-password"),
+	})
+	if err != nil {
+		t.Fatalf("Authenticate returned error: %v", err)
+	}
+	if result.Decision != DecisionAuthenticated {
+		t.Fatalf("decision = %q, want authenticated", result.Decision)
+	}
+	if server.authorization != "Bearer grpc-oidc-token" {
+		t.Fatalf("authorization metadata = %q, want OIDC bearer", server.authorization)
+	}
+	if strings.HasPrefix(server.authorization, "Basic ") {
+		t.Fatalf("OIDC caller auth sent Basic metadata: %q", server.authorization)
+	}
+}
+
 type recordingProtoAuthServer struct {
 	authv1.UnimplementedAuthServiceServer
 

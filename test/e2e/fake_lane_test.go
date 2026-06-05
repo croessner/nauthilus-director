@@ -38,6 +38,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -97,6 +98,12 @@ const (
 	e2eShardTag         = "mailstore-a"
 	e2eTenant           = "default"
 	e2eToken            = "e2e-bearer-token"
+	e2eOIDCClientID     = "nauthilus-director-e2e"
+	e2eOIDCClientSecret = "nauthilus-director-e2e-secret"
+	e2eOIDCScopeAuth    = "nauthilus:authenticate"
+	e2eOIDCScopeLookup  = "nauthilus:lookup_identity"
+	e2eOIDCScopeList    = "nauthilus:list_accounts"
+	e2eOIDCDiscovery    = "/.well-known/openid-configuration"
 	fakeBackendReady    = "* OK fake IMAP backend ready\r\n"
 	fakeProxyPrefix     = "PROXY "
 	fakeProxyReadLimit  = 256
@@ -194,6 +201,138 @@ func TestServerBinaryPublicIMAPFlow(t *testing.T) {
 
 	fakeBackend.ExpectProxyLine(t, "A002 NOOP")
 	authority.ExpectRequest(t, e2eProtocol, "login", "")
+}
+
+// TestServerBinaryOIDCAuthorityCallerAuthPublicIMAPFlow proves public auth uses OIDC caller tokens.
+func TestServerBinaryOIDCAuthorityCallerAuthPublicIMAPFlow(t *testing.T) {
+	binary := e2eServerBinary(t)
+	redisFixture := startValkeySessionStore(t)
+	authority := startFakeOIDCHTTPAuthority(t, map[string][]string{
+		"account":   {e2eAccount},
+		"tenant":    {e2eTenant},
+		"mailShard": {e2eShardTag},
+	}, fakeOIDCAuthorityOptions{})
+	fakeBackend := startFakeIMAPBackend(t, fakeBackendOptions{})
+	directorAddress := loopbackAddress(t)
+	configPath := writeProcessConfig(t, processConfigOptions{
+		RedisAddress:    redisFixture.addr,
+		AuthorityURL:    authority.URL(),
+		AuthorityOIDC:   processAuthorityOIDCForFake(authority, nil),
+		DirectorAddress: directorAddress,
+		BackendAddress:  fakeBackend.Address(),
+		BackendTLS: config.BackendTLSConfig{
+			Mode:          "plaintext",
+			MinTLSVersion: "TLS1.2",
+		},
+		BackendAuth: masterUserBackendAuth(),
+	})
+	process := startDirectorProcess(t, binary, configPath)
+
+	waitForDirectorGreeting(t, directorAddress, process)
+
+	client := dialPlain(t, directorAddress)
+	defer func() { _ = client.Close() }()
+
+	reader := bufio.NewReader(client)
+	expectLine(t, reader, "* OK nauthilus-director IMAP session ready\r\n")
+	client, reader = upgradeIMAPStartTLS(t, client, reader)
+	writeLine(t, client, `A001 LOGIN "`+e2eAccount+`" "`+e2ePassword+`"`)
+	expectLine(t, reader, "A001 OK Authentication completed\r\n")
+	writeLine(t, client, "A002 NOOP")
+	expectLine(t, reader, "A002 OK backend noop\r\n")
+
+	fakeBackend.ExpectProxyLine(t, "A002 NOOP")
+	authority.ExpectRequest(t, e2eProtocol, "login", "")
+	authority.ExpectOIDCCallerAuth(t)
+	assertNoSecretText(t, process.output.String())
+}
+
+// TestServerBinaryOIDCAuthorityCallerAuthRejectsInsufficientScope proves Nauthilus denial is fail-closed.
+func TestServerBinaryOIDCAuthorityCallerAuthRejectsInsufficientScope(t *testing.T) {
+	binary := e2eServerBinary(t)
+	redisFixture := startValkeySessionStore(t)
+	authority := startFakeOIDCHTTPAuthority(t, map[string][]string{
+		"account":   {e2eAccount},
+		"tenant":    {e2eTenant},
+		"mailShard": {e2eShardTag},
+	}, fakeOIDCAuthorityOptions{})
+	fakeBackend := startFakeIMAPBackend(t, fakeBackendOptions{})
+	directorAddress := loopbackAddress(t)
+	configPath := writeProcessConfig(t, processConfigOptions{
+		RedisAddress:    redisFixture.addr,
+		AuthorityURL:    authority.URL(),
+		AuthorityOIDC:   processAuthorityOIDCForFake(authority, []string{e2eOIDCScopeList}),
+		DirectorAddress: directorAddress,
+		BackendAddress:  fakeBackend.Address(),
+		BackendTLS: config.BackendTLSConfig{
+			Mode:          "plaintext",
+			MinTLSVersion: "TLS1.2",
+		},
+		BackendAuth: masterUserBackendAuth(),
+	})
+	process := startDirectorProcess(t, binary, configPath)
+
+	waitForDirectorGreeting(t, directorAddress, process)
+
+	client := dialPlain(t, directorAddress)
+	defer func() { _ = client.Close() }()
+
+	reader := bufio.NewReader(client)
+	expectLine(t, reader, "* OK nauthilus-director IMAP session ready\r\n")
+	client, reader = upgradeIMAPStartTLS(t, client, reader)
+	writeLine(t, client, `A001 LOGIN "`+e2eAccount+`" "`+e2ePassword+`"`)
+	expectLine(t, reader, "A001 NO [AUTHENTICATIONFAILED] Authentication failed\r\n")
+
+	if fakeBackend.ConnectionCount() != 0 {
+		t.Fatalf("backend connections = %d, want no placement after OIDC denial", fakeBackend.ConnectionCount())
+	}
+	authority.ExpectOIDCCallerAuth(t)
+	assertNoSecretText(t, process.output.String())
+}
+
+// TestServerBinaryOIDCAuthorityCallerAuthRejectsBadSecret proves token acquisition fails closed.
+func TestServerBinaryOIDCAuthorityCallerAuthRejectsBadSecret(t *testing.T) {
+	binary := e2eServerBinary(t)
+	redisFixture := startValkeySessionStore(t)
+	authority := startFakeOIDCHTTPAuthority(t, map[string][]string{
+		"account":   {e2eAccount},
+		"tenant":    {e2eTenant},
+		"mailShard": {e2eShardTag},
+	}, fakeOIDCAuthorityOptions{})
+	fakeBackend := startFakeIMAPBackend(t, fakeBackendOptions{})
+	directorAddress := loopbackAddress(t)
+	oidcOptions := processAuthorityOIDCForFake(authority, nil)
+	oidcOptions.ClientSecret = "wrong-client-secret"
+	configPath := writeProcessConfig(t, processConfigOptions{
+		RedisAddress:    redisFixture.addr,
+		AuthorityURL:    authority.URL(),
+		AuthorityOIDC:   oidcOptions,
+		DirectorAddress: directorAddress,
+		BackendAddress:  fakeBackend.Address(),
+		BackendTLS: config.BackendTLSConfig{
+			Mode:          "plaintext",
+			MinTLSVersion: "TLS1.2",
+		},
+		BackendAuth: masterUserBackendAuth(),
+	})
+	process := startDirectorProcess(t, binary, configPath)
+
+	waitForDirectorGreeting(t, directorAddress, process)
+
+	client := dialPlain(t, directorAddress)
+	defer func() { _ = client.Close() }()
+
+	reader := bufio.NewReader(client)
+	expectLine(t, reader, "* OK nauthilus-director IMAP session ready\r\n")
+	client, reader = upgradeIMAPStartTLS(t, client, reader)
+	writeLine(t, client, `A001 LOGIN "`+e2eAccount+`" "`+e2ePassword+`"`)
+	expectLine(t, reader, "A001 NO [UNAVAILABLE] Authentication service temporarily unavailable\r\n")
+
+	if fakeBackend.ConnectionCount() != 0 {
+		t.Fatalf("backend connections = %d, want no placement after OIDC token denial", fakeBackend.ConnectionCount())
+	}
+	authority.ExpectOIDCTokenAttemptWithoutBackchannel(t)
+	assertNoSecretText(t, process.output.String())
 }
 
 // TestServerBinaryControlRESTCLIParity proves the real process exposes shared REST and CLI state.
@@ -1317,6 +1456,7 @@ type directorProcess struct {
 type processConfigOptions struct {
 	RedisAddress           string
 	AuthorityURL           string
+	AuthorityOIDC          processAuthorityOIDCOptions
 	DirectorAddress        string
 	ControlAddress         string
 	ControlEnabled         bool
@@ -1328,6 +1468,16 @@ type processConfigOptions struct {
 	BackendAuth            backend.AuthConfig
 	UserHoldMaxWait        time.Duration
 	UserHoldPollInterval   time.Duration
+}
+
+type processAuthorityOIDCOptions struct {
+	Enabled                 bool
+	Issuer                  string
+	ClientID                string
+	ClientSecret            string
+	ClientSecretFile        string
+	TokenEndpointAuthMethod string
+	Scopes                  []string
 }
 
 type processBackendDefinition struct {
@@ -1479,6 +1629,7 @@ runtime:
     control:
       enabled: %t
       address: %q
+%s
   timeouts:
     preauth: 2s
     auth: 2s
@@ -1499,6 +1650,8 @@ storage:
 auth:
   authorities:
     default:
+      transport: http
+%s
       http:
         endpoint: %q
         basic_auth:
@@ -1556,8 +1709,10 @@ director:
         password_file: %q
 	`, options.ControlEnabled,
 		controlAddress,
+		processControlAuthYAML(t),
 		e2eProcessKeyPrefix,
 		options.RedisAddress,
+		processAuthorityOIDCYAMLForOptions(t, options.AuthorityOIDC),
 		options.AuthorityURL,
 		processUserHoldConfigYAML(options),
 		options.DirectorAddress,
@@ -1624,6 +1779,7 @@ runtime:
     control:
       enabled: %t
       address: %q
+%s
   timeouts:
     preauth: 2s
     auth: 2s
@@ -1644,6 +1800,8 @@ storage:
 auth:
   authorities:
     default:
+      transport: http
+%s
       http:
         endpoint: %q
         basic_auth:
@@ -1738,8 +1896,10 @@ director:
         enabled: false
 	`, options.ControlEnabled,
 		controlAddress,
+		processControlAuthYAML(t),
 		e2eProcessKeyPrefix,
 		options.RedisAddress,
+		processAuthorityOIDCYAMLForOptions(t, options.AuthorityOIDC),
 		options.AuthorityURL,
 		sieveAddress,
 		listenerCertPath,
@@ -1813,6 +1973,7 @@ runtime:
     control:
       enabled: %t
       address: %q
+%s
   timeouts:
     preauth: 2s
     auth: 2s
@@ -1833,6 +1994,8 @@ storage:
 auth:
   authorities:
     default:
+      transport: http
+%s
       http:
         endpoint: %q
         basic_auth:
@@ -1863,8 +2026,10 @@ director:
   backends:
 	%s`, options.ControlEnabled,
 		controlAddress,
+		processControlAuthYAML(t),
 		e2eProcessKeyPrefix,
 		options.RedisAddress,
+		processAuthorityOIDCYAMLForOptions(t, options.AuthorityOIDC),
 		options.AuthorityURL,
 		processUserHoldConfigYAML(options),
 		options.DirectorAddress,
@@ -2988,12 +3153,143 @@ func startE2EControlPlane(
 		Observability:             recorder,
 		ProtectedConfigAudit:      audit,
 		ProtectedConfigAuthorizer: deniedProtectedConfigAuthorizer{},
-	}})
+	}, Control: e2eControlServerConfig(t, cfg.Runtime.Servers.Control)})
 
 	return &e2eControlPlane{
 		server: httptest.NewServer(server),
 		audit:  audit,
 		reload: reload,
+	}
+}
+
+// e2eControlServerConfig configures public control E2E calls with static bearer auth.
+func e2eControlServerConfig(t *testing.T, base config.ControlServerConfig) config.ControlServerConfig {
+	t.Helper()
+
+	base.Auth.Bearer.Enabled = true
+	base.Auth.Bearer.TokenFile = config.Secret(writeE2EControlTokenFile(t))
+	base.Auth.OIDC.Enabled = false
+	base.Auth.MTLS.Enabled = false
+
+	return base
+}
+
+// writeE2EControlTokenFile writes the mounted secret used by E2E control calls.
+func writeE2EControlTokenFile(t *testing.T) string {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "control-token")
+	if err := os.WriteFile(path, []byte(e2eToken+"\n"), 0o600); err != nil {
+		t.Fatalf("write control token file: %v", err)
+	}
+
+	return path
+}
+
+// processControlAuthYAML renders the static bearer auth expected by real-process E2E calls.
+func processControlAuthYAML(t *testing.T) string {
+	t.Helper()
+
+	return fmt.Sprintf(`      auth:
+        bearer:
+          enabled: true
+          token_file: %q
+        oidc:
+          enabled: false
+        mtls:
+          enabled: false
+`, writeE2EControlTokenFile(t))
+}
+
+// processAuthorityOIDCYAML disables caller-token acquisition for fake HTTP authorities.
+func processAuthorityOIDCYAML() string {
+	return `      oidc:
+        enabled: false
+        client_credentials:
+          enabled: false
+`
+}
+
+// processAuthorityOIDCYAMLForOptions renders optional OIDC caller auth for real-process fixtures.
+func processAuthorityOIDCYAMLForOptions(t *testing.T, options processAuthorityOIDCOptions) string {
+	t.Helper()
+
+	if !options.Enabled {
+		return processAuthorityOIDCYAML()
+	}
+
+	clientID := strings.TrimSpace(options.ClientID)
+	if clientID == "" {
+		clientID = e2eOIDCClientID
+	}
+	clientSecretFile := strings.TrimSpace(options.ClientSecretFile)
+	if clientSecretFile == "" {
+		clientSecret := options.ClientSecret
+		if clientSecret == "" {
+			clientSecret = e2eOIDCClientSecret
+		}
+		clientSecretFile = writeProcessOIDCSecretFile(t, clientSecret)
+	}
+	method := strings.TrimSpace(options.TokenEndpointAuthMethod)
+	if method == "" {
+		method = "client_secret_basic"
+	}
+	scopes := options.Scopes
+	if len(scopes) == 0 {
+		scopes = []string{e2eOIDCScopeAuth, e2eOIDCScopeLookup, e2eOIDCScopeList}
+	}
+
+	return fmt.Sprintf(`      oidc:
+        enabled: true
+        authority_mode: nauthilus
+        issuer_hint: ""
+        issuer: %q
+        discovery_url: ""
+        audience_hint: ""
+        required_scopes: []
+        client_credentials:
+          enabled: true
+          client_id: %q
+          client_secret: ""
+          client_secret_file: %q
+          token_endpoint_auth_method: %q
+          introspection_endpoint_auth_method: %q
+          client_private_key_file: ""
+          client_key_id: ""
+          client_assertion_alg: ""
+          audience: ""
+          scopes: [%s]
+          refresh_before_expiry: 30s
+          token_endpoint: ""
+`, strings.TrimRight(strings.TrimSpace(options.Issuer), "/"),
+		clientID,
+		clientSecretFile,
+		method,
+		method,
+		quotedYAMLStrings(scopes),
+	)
+}
+
+// writeProcessOIDCSecretFile writes the authority client secret used by OIDC process fixtures.
+func writeProcessOIDCSecretFile(t *testing.T, clientSecret string) string {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "oidc-client-secret")
+	if err := os.WriteFile(path, []byte(clientSecret+"\n"), 0o600); err != nil {
+		t.Fatalf("write OIDC client secret: %v", err)
+	}
+
+	return path
+}
+
+// processAuthorityOIDCForFake returns a real-process OIDC config for the fake Nauthilus issuer.
+func processAuthorityOIDCForFake(authority *fakeHTTPAuthority, scopes []string) processAuthorityOIDCOptions {
+	return processAuthorityOIDCOptions{
+		Enabled:      true,
+		Issuer:       authority.Issuer(),
+		ClientID:     e2eOIDCClientID,
+		ClientSecret: e2eOIDCClientSecret,
+		Scopes:       scopes,
 	}
 }
 
@@ -3377,6 +3673,7 @@ func requestJSON(t *testing.T, method string, target string, body any, wantStatu
 	if body != nil {
 		request.Header.Set("Content-Type", "application/json")
 	}
+	authorizeE2EControlRequest(request)
 
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {
@@ -3420,6 +3717,7 @@ func requestStatus(t *testing.T, method string, target string, body any) int {
 	if body != nil {
 		request.Header.Set("Content-Type", "application/json")
 	}
+	authorizeE2EControlRequest(request)
 
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {
@@ -3453,6 +3751,7 @@ func runDirectorctl(t *testing.T, binary string, baseURL string, args ...string)
 
 	fullArgs := append([]string{"--address", baseURL}, args...)
 	cmd := exec.Command(binary, fullArgs...)
+	cmd.Env = e2eDirectorctlEnv()
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("nauthilus-directorctl %v failed: %v\n%s", args, err, output)
@@ -3470,6 +3769,7 @@ func runDirectorctlStatus(t *testing.T, binary string, baseURL string, args ...s
 
 	fullArgs := append([]string{"--address", baseURL}, args...)
 	cmd := exec.Command(binary, fullArgs...)
+	cmd.Env = e2eDirectorctlEnv()
 	output, err := cmd.CombinedOutput()
 	code := 0
 	if err != nil {
@@ -3484,6 +3784,16 @@ func runDirectorctlStatus(t *testing.T, binary string, baseURL string, args ...s
 	assertNoSecretText(t, rendered)
 
 	return code, rendered
+}
+
+// authorizeE2EControlRequest adds the static bearer token expected by E2E control servers.
+func authorizeE2EControlRequest(request *http.Request) {
+	request.Header.Set("Authorization", "Bearer "+e2eToken)
+}
+
+// e2eDirectorctlEnv provides secret-safe auth material to the real CLI binary.
+func e2eDirectorctlEnv() []string {
+	return append(os.Environ(), "NAUTHILUS_DIRECTORCTL_BEARER_TOKEN="+e2eToken)
 }
 
 type pendingIMAPLogin struct {
@@ -3836,8 +4146,27 @@ type fakeHTTPAuthority struct {
 	listener     net.Listener
 	attributes   map[string][]string
 	identities   map[string]map[string][]string
+	oidc         *fakeOIDCAuthority
 	requests     []map[string]any
+	authSchemes  []string
 	requestsLock sync.Mutex
+}
+
+type fakeOIDCAuthority struct {
+	clientID       string
+	clientSecret   string
+	requiredScopes []string
+	issuedTokens   map[string][]string
+	discoveryCalls int
+	tokenAttempts  int
+	tokenCalls     int
+	tokenCounter   int
+}
+
+type fakeOIDCAuthorityOptions struct {
+	ClientID       string
+	ClientSecret   string
+	RequiredScopes []string
 }
 
 // startFakeHTTPAuthority starts a public HTTP auth socket.
@@ -3845,6 +4174,17 @@ func startFakeHTTPAuthority(t *testing.T, attributes map[string][]string) *fakeH
 	t.Helper()
 
 	return startMappedFakeHTTPAuthority(t, nil, attributes)
+}
+
+// startFakeOIDCHTTPAuthority starts a public HTTP auth socket with Nauthilus-compatible OIDC endpoints.
+func startFakeOIDCHTTPAuthority(
+	t *testing.T,
+	attributes map[string][]string,
+	options fakeOIDCAuthorityOptions,
+) *fakeHTTPAuthority {
+	t.Helper()
+
+	return startMappedFakeOIDCHTTPAuthority(t, nil, attributes, options)
 }
 
 // startMappedFakeHTTPAuthority starts an HTTP auth socket with per-login identities.
@@ -3855,13 +4195,42 @@ func startMappedFakeHTTPAuthority(
 ) *fakeHTTPAuthority {
 	t.Helper()
 
+	return startMappedFakeHTTPAuthorityWithOIDC(t, identities, fallback, nil)
+}
+
+// startMappedFakeOIDCHTTPAuthority starts an OIDC-backed HTTP auth socket with per-login identities.
+func startMappedFakeOIDCHTTPAuthority(
+	t *testing.T,
+	identities map[string]map[string][]string,
+	fallback map[string][]string,
+	options fakeOIDCAuthorityOptions,
+) *fakeHTTPAuthority {
+	t.Helper()
+
+	oidc := newFakeOIDCAuthority(options)
+
+	return startMappedFakeHTTPAuthorityWithOIDC(t, identities, fallback, oidc)
+}
+
+// startMappedFakeHTTPAuthorityWithOIDC starts the shared fake authority listener.
+func startMappedFakeHTTPAuthorityWithOIDC(
+	t *testing.T,
+	identities map[string]map[string][]string,
+	fallback map[string][]string,
+	oidc *fakeOIDCAuthority,
+) *fakeHTTPAuthority {
+	t.Helper()
+
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen fake HTTP authority: %v", err)
 	}
-	fake := &fakeHTTPAuthority{listener: ln, attributes: fallback, identities: identities}
+	fake := &fakeHTTPAuthority{listener: ln, attributes: fallback, identities: identities, oidc: oidc}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/auth/json", fake.handle)
+	mux.HandleFunc(e2eOIDCDiscovery, fake.handleOIDCDiscovery)
+	mux.HandleFunc("/oidc/token", fake.handleOIDCToken)
+	mux.HandleFunc("/oidc/introspect", fake.handleOIDCIntrospection)
 	fake.server = &http.Server{Handler: mux, ReadHeaderTimeout: time.Second}
 
 	go func() {
@@ -3876,9 +4245,37 @@ func startMappedFakeHTTPAuthority(
 	return fake
 }
 
+// newFakeOIDCAuthority returns deterministic client-credentials settings.
+func newFakeOIDCAuthority(options fakeOIDCAuthorityOptions) *fakeOIDCAuthority {
+	clientID := strings.TrimSpace(options.ClientID)
+	if clientID == "" {
+		clientID = e2eOIDCClientID
+	}
+	clientSecret := options.ClientSecret
+	if clientSecret == "" {
+		clientSecret = e2eOIDCClientSecret
+	}
+	requiredScopes := options.RequiredScopes
+	if len(requiredScopes) == 0 {
+		requiredScopes = []string{e2eOIDCScopeAuth}
+	}
+
+	return &fakeOIDCAuthority{
+		clientID:       clientID,
+		clientSecret:   clientSecret,
+		requiredScopes: append([]string(nil), requiredScopes...),
+		issuedTokens:   map[string][]string{},
+	}
+}
+
 // URL returns the fake authority endpoint.
 func (f *fakeHTTPAuthority) URL() string {
 	return "http://" + f.listener.Addr().String() + "/api/v1/auth/json"
+}
+
+// Issuer returns the fake Nauthilus OIDC issuer URL.
+func (f *fakeHTTPAuthority) Issuer() string {
+	return "http://" + f.listener.Addr().String()
 }
 
 // ExpectRequest verifies the fake authority saw the expected safe context.
@@ -3902,6 +4299,59 @@ func (f *fakeHTTPAuthority) ExpectRequest(t *testing.T, protocol string, method 
 	}
 }
 
+// ExpectOIDCCallerAuth verifies the caller obtained and used a Bearer token instead of Basic auth.
+func (f *fakeHTTPAuthority) ExpectOIDCCallerAuth(t *testing.T) {
+	t.Helper()
+
+	f.requestsLock.Lock()
+	defer f.requestsLock.Unlock()
+
+	if f.oidc == nil {
+		t.Fatal("fake authority was not configured for OIDC")
+	}
+	if f.oidc.discoveryCalls == 0 {
+		t.Fatal("fake authority did not receive OIDC discovery")
+	}
+	if f.oidc.tokenCalls == 0 {
+		t.Fatal("fake authority did not receive a client-credentials token request")
+	}
+	if len(f.authSchemes) == 0 {
+		t.Fatal("fake authority did not receive an authenticated backchannel request")
+	}
+	for _, scheme := range f.authSchemes {
+		if scheme != "bearer" {
+			t.Fatalf("fake authority saw caller auth scheme %q, want bearer only", scheme)
+		}
+	}
+}
+
+// ExpectOIDCTokenAttemptWithoutBackchannel verifies token denial stopped authority use.
+func (f *fakeHTTPAuthority) ExpectOIDCTokenAttemptWithoutBackchannel(t *testing.T) {
+	t.Helper()
+
+	f.requestsLock.Lock()
+	defer f.requestsLock.Unlock()
+
+	if f.oidc == nil {
+		t.Fatal("fake authority was not configured for OIDC")
+	}
+	if f.oidc.discoveryCalls == 0 {
+		t.Fatal("fake authority did not receive OIDC discovery")
+	}
+	if f.oidc.tokenAttempts == 0 {
+		t.Fatal("fake authority did not receive a client-credentials token attempt")
+	}
+	if f.oidc.tokenCalls != 0 {
+		t.Fatalf("fake authority issued %d tokens, want none", f.oidc.tokenCalls)
+	}
+	if len(f.requests) != 0 {
+		t.Fatalf("fake authority received %d backchannel requests, want none", len(f.requests))
+	}
+	if len(f.authSchemes) != 0 {
+		t.Fatalf("fake authority saw caller auth schemes %v, want none", f.authSchemes)
+	}
+}
+
 // matchesOptionalString treats an omitted optional JSON field as an empty string.
 func matchesOptionalString(value any, want string) bool {
 	if want == "" && value == nil {
@@ -3921,6 +4371,10 @@ func (f *fakeHTTPAuthority) RequestCount() int {
 
 // handle maps one JSON auth request into a successful Nauthilus-shaped response.
 func (f *fakeHTTPAuthority) handle(writer http.ResponseWriter, request *http.Request) {
+	if !f.authorizeBackchannel(writer, request) {
+		return
+	}
+
 	var body map[string]any
 	if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
 		http.Error(writer, "bad request", http.StatusBadRequest)
@@ -3938,6 +4392,201 @@ func (f *fakeHTTPAuthority) handle(writer http.ResponseWriter, request *http.Req
 		"account_field": "account",
 		"attributes":    f.attributesForRequest(body),
 	})
+}
+
+// authorizeBackchannel enforces fake Nauthilus OIDC bearer auth when enabled.
+func (f *fakeHTTPAuthority) authorizeBackchannel(writer http.ResponseWriter, request *http.Request) bool {
+	if f.oidc == nil {
+		return true
+	}
+
+	scheme, payload, ok := splitFakeAuthorization(request.Header.Get("Authorization"))
+	f.requestsLock.Lock()
+	if scheme != "" {
+		f.authSchemes = append(f.authSchemes, scheme)
+	}
+	f.requestsLock.Unlock()
+	if !ok || scheme != "bearer" {
+		http.Error(writer, "missing or invalid authorization header", http.StatusUnauthorized)
+
+		return false
+	}
+
+	scopes, ok := f.oidcScopesForToken(payload)
+	if !ok {
+		http.Error(writer, "invalid token", http.StatusUnauthorized)
+
+		return false
+	}
+	if !hasAllStrings(scopes, f.oidc.requiredScopes) {
+		http.Error(writer, "missing required scope", http.StatusForbidden)
+
+		return false
+	}
+
+	return true
+}
+
+// handleOIDCDiscovery returns a minimal Nauthilus-compatible discovery document.
+func (f *fakeHTTPAuthority) handleOIDCDiscovery(writer http.ResponseWriter, request *http.Request) {
+	if f.oidc == nil {
+		http.NotFound(writer, request)
+
+		return
+	}
+
+	f.requestsLock.Lock()
+	f.oidc.discoveryCalls++
+	f.requestsLock.Unlock()
+
+	issuer := f.Issuer()
+	writer.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(writer).Encode(map[string]any{
+		"issuer":                                issuer,
+		"token_endpoint":                        issuer + "/oidc/token",
+		"introspection_endpoint":                issuer + "/oidc/introspect",
+		"jwks_uri":                              issuer + "/oidc/jwks",
+		"grant_types_supported":                 []string{"client_credentials"},
+		"token_endpoint_auth_methods_supported": []string{"client_secret_basic", "client_secret_post"},
+		"introspection_endpoint_auth_methods_supported": []string{"client_secret_basic", "client_secret_post"},
+		"response_types_supported":                      []string{"code"},
+		"subject_types_supported":                       []string{"public"},
+		"id_token_signing_alg_values_supported":         []string{"RS256"},
+		"code_challenge_methods_supported":              []string{"S256"},
+		"scopes_supported":                              []string{e2eOIDCScopeAuth, e2eOIDCScopeLookup, e2eOIDCScopeList},
+		"claims_supported":                              []string{"sub", "client_id", "scope"},
+		"backchannel_logout_supported":                  false,
+		"backchannel_logout_session_supported":          false,
+		"frontchannel_logout_supported":                 false,
+		"frontchannel_logout_session_supported":         false,
+	})
+}
+
+// handleOIDCToken issues an opaque fake client-credentials token.
+func (f *fakeHTTPAuthority) handleOIDCToken(writer http.ResponseWriter, request *http.Request) {
+	if f.oidc == nil {
+		http.NotFound(writer, request)
+
+		return
+	}
+	if request.Method != http.MethodPost {
+		http.Error(writer, "method not allowed", http.StatusMethodNotAllowed)
+
+		return
+	}
+	if err := request.ParseForm(); err != nil {
+		http.Error(writer, "bad request", http.StatusBadRequest)
+
+		return
+	}
+	f.requestsLock.Lock()
+	f.oidc.tokenAttempts++
+	f.requestsLock.Unlock()
+	clientID, clientSecret, ok := request.BasicAuth()
+	if !ok {
+		clientID = request.Form.Get("client_id")
+		clientSecret = request.Form.Get("client_secret")
+	}
+	if clientID != f.oidc.clientID || clientSecret != f.oidc.clientSecret {
+		http.Error(writer, "invalid client", http.StatusUnauthorized)
+
+		return
+	}
+	if request.Form.Get("grant_type") != "client_credentials" {
+		http.Error(writer, "unsupported grant", http.StatusBadRequest)
+
+		return
+	}
+
+	scopes := strings.Fields(request.Form.Get("scope"))
+	if len(scopes) == 0 {
+		scopes = []string{e2eOIDCScopeAuth}
+	}
+
+	f.requestsLock.Lock()
+	f.oidc.tokenCalls++
+	f.oidc.tokenCounter++
+	token := fmt.Sprintf("fake-oidc-token-%d", f.oidc.tokenCounter)
+	f.oidc.issuedTokens[token] = append([]string(nil), scopes...)
+	f.requestsLock.Unlock()
+
+	writer.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(writer).Encode(map[string]any{
+		"access_token": token,
+		"token_type":   "Bearer",
+		"expires_in":   3600,
+		"scope":        strings.Join(scopes, " "),
+	})
+}
+
+// handleOIDCIntrospection marks known fake tokens active for control-auth tests.
+func (f *fakeHTTPAuthority) handleOIDCIntrospection(writer http.ResponseWriter, request *http.Request) {
+	if f.oidc == nil {
+		http.NotFound(writer, request)
+
+		return
+	}
+	if request.Method != http.MethodPost {
+		http.Error(writer, "method not allowed", http.StatusMethodNotAllowed)
+
+		return
+	}
+	if err := request.ParseForm(); err != nil {
+		http.Error(writer, "bad request", http.StatusBadRequest)
+
+		return
+	}
+
+	token := request.Form.Get("token")
+	scopes, ok := f.oidcScopesForToken(token)
+	writer.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(writer).Encode(map[string]any{
+		"active":    ok,
+		"sub":       f.oidc.clientID,
+		"client_id": f.oidc.clientID,
+		"aud":       f.oidc.clientID,
+		"scope":     strings.Join(scopes, " "),
+	})
+}
+
+// oidcScopesForToken returns scopes for an issued fake token without exposing it in failures.
+func (f *fakeHTTPAuthority) oidcScopesForToken(token string) ([]string, bool) {
+	f.requestsLock.Lock()
+	defer f.requestsLock.Unlock()
+
+	if f.oidc == nil {
+		return nil, false
+	}
+	scopes, ok := f.oidc.issuedTokens[token]
+
+	return append([]string(nil), scopes...), ok
+}
+
+// splitFakeAuthorization parses a single Authorization header for fake services.
+func splitFakeAuthorization(header string) (string, string, bool) {
+	scheme, payload, ok := strings.Cut(strings.TrimSpace(header), " ")
+	if !ok {
+		return "", "", false
+	}
+	scheme = strings.ToLower(strings.TrimSpace(scheme))
+	payload = strings.TrimSpace(payload)
+	if scheme == "" || payload == "" {
+		return "", "", false
+	}
+
+	return scheme, payload, true
+}
+
+// hasAllStrings reports whether every required value is present.
+func hasAllStrings(values []string, required []string) bool {
+	for _, want := range required {
+		found := slices.Contains(values, want)
+		if !found {
+			return false
+		}
+	}
+
+	return true
 }
 
 // attributesForRequest returns fixed or per-login Nauthilus attributes.
