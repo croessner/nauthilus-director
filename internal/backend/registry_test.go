@@ -31,10 +31,13 @@ const (
 	testBackendIDBIMAP = "mailstore-b-imap"
 	testBackendIDLMTP  = "mailstore-a-lmtp"
 	testBackendIDBLMTP = "mailstore-b-lmtp"
+	testBackendIDSIEVE = "mailstore-a-sieve"
 	testBackendNode    = "mailstore-a-node-1"
 	testPoolIMAP       = "imap-default"
 	testPoolLMTP       = "lmtp-default"
+	testPoolSIEVE      = "sieve-default"
 	testProtocolLMTP   = "lmtp"
+	testProtocolSIEVE  = "sieve"
 	testShardTag       = "mailstore-a"
 	testTenant         = "default"
 )
@@ -173,6 +176,24 @@ func TestStaticRegistryResolvesProtocolEntryInsideBackendNode(t *testing.T) {
 	})
 	if !IsErrorKind(err, ErrorKindNoBackend) {
 		t.Fatalf("missing node protocol entry error = %v, want no_backend", err)
+	}
+}
+
+// TestStaticRegistryResolvesSieveEntryInsideBackendNode verifies ManageSieve shares backend-node identity.
+func TestStaticRegistryResolvesSieveEntryInsideBackendNode(t *testing.T) {
+	registry := mustStaticRegistry(t, config.DefaultConfig())
+
+	backend, err := registry.LookupInBackendNode(context.Background(), NodeLookupRequest{
+		BackendNode: testBackendNode,
+		Protocol:    testProtocolSIEVE,
+		BackendPool: testPoolSIEVE,
+	})
+	if err != nil {
+		t.Fatalf("LookupInBackendNode Sieve returned error: %v", err)
+	}
+
+	if backend.Identifier != testBackendIDSIEVE {
+		t.Fatalf("backend = %q, want %q", backend.Identifier, testBackendIDSIEVE)
 	}
 }
 
@@ -343,6 +364,26 @@ func TestStaticSelectorEnforcesListenerBackendPool(t *testing.T) {
 
 	if result.Backend.Auth.SASL.Username == "" || result.Backend.Auth.OAuthBearer.Token.IsZero() {
 		t.Fatalf("LMTP backend auth fields were not copied: %#v", result.Backend.Auth)
+	}
+}
+
+// TestStaticSelectorSupportsSieveRendezvousHash verifies ManageSieve uses the shared user-stateful selector.
+func TestStaticSelectorSupportsSieveRendezvousHash(t *testing.T) {
+	selector := mustStaticSelector(t, config.DefaultConfig(), SelectionPolicy{SoftAllowsActivePins: true})
+
+	result, err := selector.Select(context.Background(), SelectionRequest{
+		AccountKey:  testAccountKey,
+		Tenant:      testTenant,
+		ShardTag:    testShardTag,
+		Protocol:    testProtocolSIEVE,
+		BackendPool: testPoolSIEVE,
+	})
+	if err != nil {
+		t.Fatalf("Sieve Select returned error: %v", err)
+	}
+
+	if result.Backend.Identifier != testBackendIDSIEVE {
+		t.Fatalf("Sieve selected backend = %q, want %q", result.Backend.Identifier, testBackendIDSIEVE)
 	}
 }
 

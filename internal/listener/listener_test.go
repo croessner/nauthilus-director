@@ -49,6 +49,8 @@ const (
 	testIMAPSListener    = "imaps"
 	testLMTPListener     = "lmtp"
 	testLMTPSListener    = "lmtps"
+	testSieveListener    = "sieve"
+	testSievesListener   = "sieves"
 	testLoopbackAny      = "127.0.0.1:0"
 	trustedLocalhostCIDR = "127.0.0.1/32"
 )
@@ -64,7 +66,7 @@ func TestManagerSelectsSupportedProtocolListeners(t *testing.T) {
 	}
 
 	got := manager.ListenerNames()
-	want := []string{testIMAPListener, testIMAPSListener, testLMTPListener, testLMTPSListener}
+	want := []string{testIMAPListener, testIMAPSListener, testLMTPListener, testLMTPSListener, testSieveListener, testSievesListener}
 
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("listener names = %v, want %v", got, want)
@@ -198,8 +200,8 @@ func TestStartTLSListenerStartsWithoutImplicitTLS(t *testing.T) {
 	}
 }
 
-// TestIMAPAndLMTPListenersStartThroughProtocolFactory verifies shared transport startup is protocol-generic.
-func TestIMAPAndLMTPListenersStartThroughProtocolFactory(t *testing.T) {
+// TestIMAPLMTPAndSieveListenersStartThroughProtocolFactory verifies shared transport startup is protocol-generic.
+func TestIMAPLMTPAndSieveListenersStartThroughProtocolFactory(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg = withTestListenerCertificates(t, cfg)
 
@@ -212,12 +214,18 @@ func TestIMAPAndLMTPListenersStartThroughProtocolFactory(t *testing.T) {
 	lmtpEntry.TLS.Mode = tlsModeStartTLS
 	cfg.Director.Listeners[testLMTPListener] = lmtpEntry
 
+	sieveEntry := cfg.Director.Listeners[testSieveListener]
+	sieveEntry.Address = testLoopbackAny
+	sieveEntry.TLS.Mode = tlsModeStartTLS
+	cfg.Director.Listeners[testSieveListener] = sieveEntry
+
 	cfg.Director.Listeners = map[string]config.ListenerConfig{
-		testIMAPListener: imapEntry,
-		testLMTPListener: lmtpEntry,
+		testIMAPListener:  imapEntry,
+		testLMTPListener:  lmtpEntry,
+		testSieveListener: sieveEntry,
 	}
 
-	protocols := make(chan string, 2)
+	protocols := make(chan string, 3)
 
 	manager, err := NewManagerWithConfig(
 		cfg,
@@ -253,12 +261,16 @@ func TestIMAPAndLMTPListenersStartThroughProtocolFactory(t *testing.T) {
 		t.Fatal("LMTP listener did not bind")
 	}
 
-	if got := manager.ListenerNames(); !reflect.DeepEqual(got, []string{testIMAPListener, testLMTPListener}) {
-		t.Fatalf("listener names = %v, want IMAP and LMTP", got)
+	if _, ok := manager.BoundAddress(testSieveListener); !ok {
+		t.Fatal("Sieve listener did not bind")
 	}
 
-	if len(protocols) != 2 {
-		t.Fatalf("handler factory calls = %d, want 2", len(protocols))
+	if got := manager.ListenerNames(); !reflect.DeepEqual(got, []string{testIMAPListener, testLMTPListener, testSieveListener}) {
+		t.Fatalf("listener names = %v, want IMAP, LMTP and Sieve", got)
+	}
+
+	if len(protocols) != 3 {
+		t.Fatalf("handler factory calls = %d, want 3", len(protocols))
 	}
 }
 

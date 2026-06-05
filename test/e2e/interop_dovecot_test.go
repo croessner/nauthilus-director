@@ -299,10 +299,11 @@ type interopClusterProcessConfigOptions struct {
 }
 
 type directorctlSession struct {
-	ID      string
-	User    string
-	Backend string
-	Shard   string
+	ID          string
+	User        string
+	Backend     string
+	BackendNode string
+	Shard       string
 }
 
 type interopClusterBackend struct {
@@ -327,13 +328,13 @@ func writeDovecotClusterProcessConfig(t *testing.T, options interopClusterProces
 	fmt.Fprintf(&content, `patch:
   - op: remove
     path: director.listeners
-    value: [imaps, lmtp, lmtps]
+    value: [imaps, lmtp, lmtps, sieve, sieves]
   - op: remove
     path: director.backend_pools
-    value: [lmtp-default]
+    value: [lmtp-default, sieve-default]
   - op: remove
     path: director.backends
-    value: [mailstore-a-lmtp, mailstore-b-lmtp]
+    value: [mailstore-a-lmtp, mailstore-b-lmtp, mailstore-a-sieve, mailstore-b-sieve]
 runtime:
   instance_name: %q
   process:
@@ -425,11 +426,12 @@ func writeDovecotClusterBackendConfig(
 ) {
 	fmt.Fprintf(content, `    %s:
       protocol: imap
+      backend_node: %s-node
       address: %q
       weight: 100
       max_connections: 100
       maintenance: disabled
-`, configured.ID, configured.Address)
+`, configured.ID, strings.TrimSuffix(configured.ID, "-imap"), configured.Address)
 	if configured.DeclareShard {
 		fmt.Fprintf(content, "      shard_tag: %q\n", configured.ShardTag)
 	}
@@ -813,10 +815,11 @@ func parseDirectorctlSessions(output string) []directorctlSession {
 		}
 
 		sessions = append(sessions, directorctlSession{
-			ID:      fields["session_id"],
-			User:    fields["user_key"],
-			Backend: fields["backend"],
-			Shard:   fields["shard_tag"],
+			ID:          fields["session_id"],
+			User:        fields["user_key"],
+			Backend:     fields["backend"],
+			BackendNode: fields["backend_node"],
+			Shard:       fields["shard_tag"],
 		})
 	}
 

@@ -14,6 +14,7 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
+//nolint:dupl,goconst // Selector test matrices intentionally mirror protocol-specific cases.
 package backend
 
 import (
@@ -78,6 +79,78 @@ func TestRuntimeSelectorSupportsLMTPRecipientHash(t *testing.T) {
 
 	if result.Backend.Protocol != testProtocolLMTP {
 		t.Fatalf("selected protocol = %q, want lmtp", result.Backend.Protocol)
+	}
+}
+
+// TestRuntimeSelectorSupportsSieveRendezvousHash verifies ManageSieve uses the shared runtime selector.
+func TestRuntimeSelectorSupportsSieveRendezvousHash(t *testing.T) {
+	selector := mustRuntimeSelector(t, config.DefaultConfig(), nil, runtimeSelectionPolicy(true))
+
+	result, err := selector.Select(context.Background(), sieveSelectionRequest(testAccountKey))
+	if err != nil {
+		t.Fatalf("Select returned error: %v", err)
+	}
+
+	if result.Backend.Identifier != testBackendIDSIEVE {
+		t.Fatalf("selected backend = %q, want %q", result.Backend.Identifier, testBackendIDSIEVE)
+	}
+
+	if result.Backend.Protocol != testProtocolSIEVE {
+		t.Fatalf("selected protocol = %q, want sieve", result.Backend.Protocol)
+	}
+}
+
+// TestRuntimeSelectorAppliesRuntimeConstraintsToSieve verifies shared runtime gates affect ManageSieve.
+func TestRuntimeSelectorAppliesRuntimeConstraintsToSieve(t *testing.T) {
+	for _, testCase := range []struct {
+		name     string
+		snapshot RuntimeSnapshot
+	}{
+		{
+			name: "runtime out",
+			snapshot: RuntimeSnapshot{RuntimeOverride: RuntimeOverride{
+				InService: new(false),
+			}},
+		},
+		{
+			name: "runtime drain",
+			snapshot: RuntimeSnapshot{RuntimeOverride: RuntimeOverride{
+				Drain: &DrainState{Enabled: true, Mode: DrainModeSoft},
+			}},
+		},
+		{
+			name: "runtime soft maintenance",
+			snapshot: RuntimeSnapshot{RuntimeOverride: RuntimeOverride{
+				Maintenance: &MaintenanceState{Mode: MaintenanceModeSoft},
+			}},
+		},
+		{
+			name: "runtime hard maintenance",
+			snapshot: RuntimeSnapshot{RuntimeOverride: RuntimeOverride{
+				Maintenance: &MaintenanceState{Mode: MaintenanceModeHard},
+			}},
+		},
+		{
+			name: "runtime weight zero",
+			snapshot: RuntimeSnapshot{RuntimeOverride: RuntimeOverride{
+				Weight: new(0),
+			}},
+		},
+		{
+			name:     "max connections",
+			snapshot: RuntimeSnapshot{ActiveSessions: 1000},
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			selector := mustRuntimeSelector(t, config.DefaultConfig(), fakeSnapshots{
+				testBackendIDSIEVE: testCase.snapshot,
+			}, runtimeSelectionPolicy(true))
+
+			_, err := selector.Select(context.Background(), sieveSelectionRequest(testAccountKey))
+			if !IsErrorKind(err, ErrorKindNoBackend) {
+				t.Fatalf("Select error = %v, want no_backend", err)
+			}
+		})
 	}
 }
 
@@ -654,6 +727,19 @@ func TestHealthTransitionThresholdsRequireConsecutiveResults(t *testing.T) {
 	}
 }
 
+// TestHealthRunnerSupportsSieveProtocol verifies ManageSieve deep health is not filtered out.
+func TestHealthRunnerSupportsSieveProtocol(t *testing.T) {
+	for _, protocol := range []string{protocolIMAP, protocolLMTP, protocolSIEVE} {
+		if !healthSupportedProtocol(protocol) {
+			t.Fatalf("protocol %q should support health checks", protocol)
+		}
+	}
+
+	if healthSupportedProtocol("pop3") {
+		t.Fatal("unsupported protocol pop3 should not support health checks")
+	}
+}
+
 // TestHealthRunnerOnlyCurrentOwnerPerformsDeepCheck verifies credentialed checks are owner-only.
 func TestHealthRunnerOnlyCurrentOwnerPerformsDeepCheck(t *testing.T) {
 	cfg := singleBackendConfig(string(MaintenanceModeDisabled), 100)
@@ -863,6 +949,17 @@ func lmtpSelectionRequest(account string) SelectionRequest {
 		ShardTag:    testShardTag,
 		Protocol:    testProtocolLMTP,
 		BackendPool: testPoolLMTP,
+	}
+}
+
+// sieveSelectionRequest returns a complete Sieve selection request fixture.
+func sieveSelectionRequest(account string) SelectionRequest {
+	return SelectionRequest{
+		AccountKey:  account,
+		Tenant:      testTenant,
+		ShardTag:    testShardTag,
+		Protocol:    testProtocolSIEVE,
+		BackendPool: testPoolSIEVE,
 	}
 }
 

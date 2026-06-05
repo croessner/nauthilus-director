@@ -18,6 +18,7 @@ package runtime
 
 import (
 	"context"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -249,6 +250,7 @@ type RouteLookupService struct {
 	userHoldRead     RouteLookupUserHoldReader
 	identityLookup   RouteLookupIdentityLookuper
 	listenerContexts map[string]RouteLookupListenerContext
+	defaultPools     map[string]string
 	defaultPool      string
 	defaultShard     string
 	defaultTenant    string
@@ -284,6 +286,7 @@ func NewRouteLookupService(options RouteLookupServiceOptions) (*RouteLookupServi
 		userHoldRead:     options.UserHoldRead,
 		identityLookup:   options.IdentityLookup,
 		listenerContexts: routeLookupListenerContexts(options.ListenerContexts),
+		defaultPools:     routeLookupDefaultPools(options.ListenerContexts),
 		defaultPool:      strings.TrimSpace(options.DefaultPool),
 		defaultShard:     strings.TrimSpace(options.DefaultShard),
 		defaultTenant:    strings.TrimSpace(options.DefaultTenant),
@@ -500,7 +503,7 @@ func (s *RouteLookupService) applyDefaults(request *RouteLookupRequest) error {
 	}
 
 	if request.BackendPool == "" {
-		request.BackendPool = s.defaultPool
+		request.BackendPool = s.defaultPoolForProtocol(request.Protocol)
 	}
 
 	if request.BackendPool == "" {
@@ -508,6 +511,18 @@ func (s *RouteLookupService) applyDefaults(request *RouteLookupRequest) error {
 	}
 
 	return nil
+}
+
+// defaultPoolForProtocol returns the listener-derived fallback for one protocol.
+func (s *RouteLookupService) defaultPoolForProtocol(protocol string) string {
+	protocol = strings.ToLower(strings.TrimSpace(protocol))
+	if protocol != "" && s.defaultPools != nil {
+		if pool := strings.TrimSpace(s.defaultPools[protocol]); pool != "" {
+			return pool
+		}
+	}
+
+	return s.defaultPool
 }
 
 // resolveLookupIdentity resolves optional LMTP recipient input before routing.
@@ -1346,6 +1361,31 @@ func routeLookupListenerContexts(contexts []RouteLookupListenerContext) map[stri
 	}
 
 	return index
+}
+
+// routeLookupDefaultPools derives stable per-protocol route lookup defaults from listeners.
+func routeLookupDefaultPools(contexts []RouteLookupListenerContext) map[string]string {
+	ordered := append([]RouteLookupListenerContext(nil), contexts...)
+	sort.Slice(ordered, func(left int, right int) bool {
+		return ordered[left].Name < ordered[right].Name
+	})
+
+	pools := make(map[string]string)
+
+	for _, context := range ordered {
+		protocol := strings.ToLower(strings.TrimSpace(context.Protocol))
+		pool := strings.TrimSpace(context.BackendPool)
+
+		if protocol == "" || pool == "" {
+			continue
+		}
+
+		if _, exists := pools[protocol]; !exists {
+			pools[protocol] = pool
+		}
+	}
+
+	return pools
 }
 
 // cloneAttributes returns detached route lookup attributes for diagnostics.

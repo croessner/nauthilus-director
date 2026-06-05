@@ -1,7 +1,7 @@
 # Real Interoperability Lane
 
 `make e2e-interop` is the real-server interoperability lane for IMAP regression
-coverage and LMTP delivery proof. It is separate from the deterministic
+coverage, LMTP delivery proof and ManageSieve script-management proof. It is separate from the deterministic
 fake-service guardrail lane run by `make e2e`, and it must not replace
 fake-service coverage for edge cases, forced failures, routing, active affinity,
 runtime control, or secret-safe observability.
@@ -22,7 +22,7 @@ submitting peer. Dovecot's own Docker documentation describes versioned image
 names and the `-dev` test flavor; the script pins that tag instead of using
 `latest`.
 
-The current lane has three scenarios:
+The current lane has four scenarios:
 
 - a single production `nauthilus-director` process with fake Nauthilus
   authentication and one real Dovecot IMAP backend, proving frontend `LOGIN`,
@@ -46,6 +46,12 @@ The current lane has three scenarios:
   same-backend recipient handling, different-backend temporary failure before
   message body, and a delivery-scoped LMTP hold influencing concurrent IMAP
   placement through public sockets and `nauthilus-directorctl`
+- one production `nauthilus-director` process proxying public ManageSieve
+  STARTTLS traffic to real Dovecot ManageSieve backends. The scenario proves
+  frontend auth through fake Nauthilus, Dovecot master-user backend auth,
+  `LISTSCRIPTS`, `PUTSCRIPT`, `SETACTIVE` and `GETSCRIPT` through the Director,
+  safe route lookup for `protocol=sieve`, and same-account backend-node
+  consistency between an active ManageSieve session and a later IMAP session
 
 The cluster scenario optionally confirms backend identity through `doveadm who`
 inside the Dovecot containers when that command is available. The Director

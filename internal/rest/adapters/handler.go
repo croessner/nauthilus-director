@@ -1335,10 +1335,6 @@ func routeLookupShardTags(cfg config.Config, registry backend.Registry) []string
 	if registry != nil {
 		if backends, err := registry.AllBackends(context.Background()); err == nil {
 			for _, entry := range backends {
-				if entry.Protocol != protocolIMAP {
-					continue
-				}
-
 				if shard := strings.TrimSpace(entry.ShardTag); shard != "" {
 					shards[shard] = struct{}{}
 				}

@@ -14,6 +14,7 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
+//nolint:goconst // REST secret-safety tests repeat sensitive key names intentionally.
 package rest_test
 
 import (
@@ -84,19 +85,31 @@ func TestServerBackendListIsImplemented(t *testing.T) {
 // TestRouteLookupRejectsCredentialBearingInput enforces diagnostic-only input.
 func TestRouteLookupRejectsCredentialBearingInput(t *testing.T) {
 	server := rest.NewServer(rest.Options{Version: testVersion})
-	response := request(t, server, http.MethodPost, pathRouteLookup, `{"protocol":"imap","user_key":"user@example.org","password":"`+secretLeakSentinel+`"}`)
-
-	if response.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want %d", response.Code, http.StatusBadRequest)
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "password", body: `{"protocol":"imap","user_key":"user@example.org","password":"` + secretLeakSentinel + `"}`},
+		{name: "script", body: `{"protocol":"sieve","user_key":"user@example.org","script_name":"` + secretLeakSentinel + `"}`},
 	}
 
-	problem := decodeProblem(t, response)
-	if problem.Code != codeCredentialRejected {
-		t.Fatalf("problem code = %q, want credential_input_rejected", problem.Code)
-	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			response := request(t, server, http.MethodPost, pathRouteLookup, test.body)
 
-	if strings.Contains(problem.Message, secretLeakSentinel) {
-		t.Fatalf("problem leaked request value: %#v", problem)
+			if response.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d", response.Code, http.StatusBadRequest)
+			}
+
+			problem := decodeProblem(t, response)
+			if problem.Code != codeCredentialRejected {
+				t.Fatalf("problem code = %q, want credential_input_rejected", problem.Code)
+			}
+
+			if strings.Contains(problem.Message, secretLeakSentinel) {
+				t.Fatalf("problem leaked request value: %#v", problem)
+			}
+		})
 	}
 }
 

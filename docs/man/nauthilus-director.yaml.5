@@ -1,7 +1,7 @@
 .\" Copyright (C) 2026 Christian Rößner
 .\"
 .\" SPDX-License-Identifier: AGPL-3.0-only
-.TH NAUTHILUS-DIRECTOR.YAML 5 "2026-06-02" "nauthilus-director" "File Formats"
+.TH NAUTHILUS-DIRECTOR.YAML 5 "2026-06-05" "nauthilus-director" "File Formats"
 .SH NAME
 nauthilus-director.yaml \- Nauthilus Director YAML configuration format
 .SH DESCRIPTION
@@ -171,10 +171,83 @@ for recipient diagnostics.
 It is a read-only route explanation; it may use the configured no-auth
 Nauthilus identity lookup path, but it does not authenticate credentials, create
 sessions, open backend connections or mutate Redis state.
+.SH MANAGESIEVE LISTENERS AND BACKENDS
+ManageSieve listener entries use the canonical config protocol value
+.BR sieve .
+Operator-facing listener names may be
+.B sieve
+for STARTTLS and
+.B sieves
+for implicit TLS, but backend pools, route lookup, runtime state and metrics
+still use
+.BR protocol:\ sieve .
+.PP
+Supported listener-specific settings live under
+.BR director.listeners.<name>.sieve .
+.B auth_mechanisms
+is typed SASL mechanism policy and supports
+.BR plain ,
+.B xoauth2
+and
+.BR oauthbearer
+when the selected Nauthilus authority enables the corresponding mechanism
+class.
+Credential-bearing SASL requires frontend TLS gating; listeners must use
+.B tls.mode: starttls
+or
+.BR tls.mode:\ implicit .
+.PP
+ManageSieve capability settings are typed facts, not raw protocol transcript
+lines.
+.B capabilities.script_extensions
+is the operator-declared common backend-pool Sieve extension set that may be
+advertised before a user backend is selected.
+.B capabilities.language
+is a safe language tag for response text.
+RFC 5804
+.B IMPLEMENTATION
+and
+.B VERSION
+facts are not operator-configurable; the protocol handler derives
+.B IMPLEMENTATION
+from the binary version and uses the RFC 5804 protocol version
+.BR 1.0 .
+RFC 5804 wire rendering belongs to the protocol handler and must also account
+for listener TLS state, configured mechanisms and backend transport safety.
+.PP
+ManageSieve backend pools use
+.B director.backend_pools.<name>.protocol: sieve
+with the
+.B rendezvous_hash
+selector.
+Backend entries use
+.B director.backends.<name>.protocol: sieve
+and should share
+.B shard_tag
+and
+.B backend_node
+values with sibling protocol endpoints for the same concrete mailstore.
+Supported backend auth modes are
+.B master_user
+and
+.BR credential_replay .
+.B credential_replay
+requires verified backend TLS and an explicit allowed-mechanism list.
+.PP
+Route lookup accepts
+.B --protocol sieve
+with a caller-supplied user key for diagnostics.
+It is read-only: it does not authenticate credentials, create sessions, connect
+to ManageSieve backends or inspect script names or script contents.
 .SH OBSERVABILITY SAFETY
-LMTP logs, traces and Prometheus metrics expose operation, result, bounded
+LMTP and ManageSieve logs, traces and Prometheus metrics expose operation,
+result, bounded
 reason class, backend pool, shard tag, mechanism, transport, TLS mode and status
 class where applicable.
+ManageSieve observations additionally include the pre-auth phase span
+.B nauthilus_director.sieve.pre_auth
+and reuse the shared session, Nauthilus auth, routing, backend select, backend
+connect and proxy pipe trace boundaries.
 Backend-side PROXY observations use the operation
 .B backend_proxy_protocol
 and bounded reason classes such as
@@ -188,13 +261,18 @@ and
 Metric labels remain low-cardinality and do not include usernames, recipients,
 client addresses, session IDs, backend identifiers, backend nodes, raw errors,
 raw frontend or backend socket addresses, or secrets.
+Backend identifiers and backend nodes may appear only in logs and traces where
+the operator-diagnostic policy permits them; they are never Prometheus labels.
 .PP
 Observable LMTP output must not contain raw recipients, envelope senders,
-message IDs, subjects, DATA or BDAT content, peer passwords, bearer tokens,
-SASL blobs, private keys or raw authorization headers.
+message IDs, subjects, DATA or BDAT content. Observable ManageSieve output must
+not contain raw usernames, script names, script contents, post-auth command
+bodies, client addresses or session IDs. Both protocol paths also keep peer
+passwords, bearer tokens, SASL blobs, private keys and raw authorization headers
+out of logs, traces, metrics and test failure output.
 Operators should use status classes and reason classes to distinguish routing,
-same-backend policy, backend, DATA and BDAT failures without exposing message
-content.
+hold, backend-pin, backend, DATA, BDAT and proxy failures without exposing
+message or script content.
 .SH INCLUDES AND PATCHES
 Loader-only keys
 .BR includes ,

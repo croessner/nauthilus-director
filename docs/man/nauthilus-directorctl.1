@@ -1,7 +1,7 @@
 .\" Copyright (C) 2026 Christian Rößner
 .\"
 .\" SPDX-License-Identifier: AGPL-3.0-only
-.TH NAUTHILUS-DIRECTORCTL 1 "2026-06-02" "nauthilus-director" "User Commands"
+.TH NAUTHILUS-DIRECTORCTL 1 "2026-06-05" "nauthilus-director" "User Commands"
 .SH NAME
 nauthilus-directorctl \- control a running Nauthilus Director
 .SH SYNOPSIS
@@ -158,6 +158,11 @@ YAML is the default.
 .TP
 .BI "sessions list [--protocol " protocol "] [--backend " identifier "] [--limit " n "] [--cursor " token "] [--all]"
 List active sessions, optionally filtered by protocol or backend.
+The protocol filter accepts the canonical runtime protocol values such as
+.BR imap ,
+.BR lmtp
+and
+.BR sieve .
 The command reads one bounded page by default.
 If more records are available, text output prints
 .B more=true
@@ -307,6 +312,8 @@ The output is operator summary state and is not routing authority.
 .TP
 .BI "route lookup --protocol imap --user " user-key
 .br
+.BI "route lookup --protocol sieve --user " user-key
+.br
 .BI "route lookup --protocol lmtp --recipient " address
 Run a side-effect-free route lookup diagnostic.
 Optional flags are
@@ -329,6 +336,12 @@ when the routing identity is already known.
 Use
 .B --recipient
 for LMTP recipient diagnostics.
+ManageSieve route lookup uses the canonical protocol value
+.B sieve
+and
+.B --user
+with caller-supplied user facts and never accepts script names or script
+contents as routing input.
 LMTP recipient diagnostics may resolve the supplied recipient through the
 configured Nauthilus no-auth identity lookup path before explaining the dry-run
 route.

@@ -14,7 +14,7 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-//nolint:goconst // Route lookup fixtures repeat public diagnostic strings intentionally.
+//nolint:funlen,goconst,wsl_v5 // Route lookup fixtures repeat public diagnostic strings intentionally.
 package runtime
 
 import (
@@ -38,13 +38,17 @@ const (
 	routeLookupAttributeToken = "token"
 	routeLookupBackendA       = "mailstore-a-imap"
 	routeLookupBackendALMTP   = "mailstore-a-lmtp"
+	routeLookupBackendASieve  = "mailstore-a-sieve"
 	routeLookupBackendB       = "mailstore-b-imap"
+	routeLookupBackendBSieve  = "mailstore-b-sieve"
 	routeLookupCanonicalLMTP  = "canonical@example.test"
 	routeLookupDefaultPool    = "imap-default"
 	routeLookupHoldGeneration = "hold-7"
 	routeLookupListener       = "imap"
 	routeLookupPoolLMTP       = "lmtp-default"
+	routeLookupPoolSieve      = "sieve-default"
 	routeLookupProtocol       = "imap"
+	routeLookupProtocolSieve  = "sieve"
 	routeLookupSecretValue    = "super-secret-value"
 	routeLookupShardA         = "mailstore-a"
 	routeLookupShardB         = "mailstore-b"
@@ -59,6 +63,151 @@ type routeLookupExclusionCase struct {
 	health     bool
 	wantEffect func(RouteLookupEffects) bool
 	wantReason backend.EffectiveExclusionReason
+}
+
+// TestRouteLookupAcceptsSieveProtocol verifies ManageSieve diagnostics use shared selector input.
+func TestRouteLookupAcceptsSieveProtocol(t *testing.T) {
+	service := newRouteLookupTestService(t, &countingRouteState{}, false)
+
+	response, err := service.Lookup(context.Background(), RouteLookupRequest{
+		Protocol:     routeLookupProtocolSieve,
+		ListenerName: routeLookupProtocolSieve,
+		AccountKey:   routeLookupAccount,
+		Attributes: map[string][]string{
+			routeLookupAttributeShard: {routeLookupShardA},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Lookup returned error: %v", err)
+	}
+
+	if response.SelectedBackend != routeLookupBackendASieve {
+		t.Fatalf("selected backend = %q, want %s", response.SelectedBackend, routeLookupBackendASieve)
+	}
+
+	foundPool := false
+	for _, candidate := range response.Backends {
+		if candidate.Identifier == routeLookupBackendASieve && candidate.BackendPool == routeLookupPoolSieve && candidate.Protocol == routeLookupProtocolSieve {
+			foundPool = true
+		}
+	}
+	if !foundPool {
+		t.Fatalf("backends = %#v, want selected Sieve backend in sieve-default pool", response.Backends)
+	}
+}
+
+// TestRouteLookupDefaultsBackendPoolByProtocol verifies listener defaults support bare Sieve lookups.
+func TestRouteLookupDefaultsBackendPoolByProtocol(t *testing.T) {
+	service := newRouteLookupTestService(t, &countingRouteState{}, false)
+
+	response, err := service.Lookup(context.Background(), RouteLookupRequest{
+		Protocol:   routeLookupProtocolSieve,
+		AccountKey: routeLookupAccount,
+		Attributes: map[string][]string{
+			routeLookupAttributeShard: {routeLookupShardA},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Lookup returned error: %v", err)
+	}
+
+	if response.SelectedBackend != routeLookupBackendASieve {
+		t.Fatalf("selected backend = %q, want Sieve backend from protocol default pool", response.SelectedBackend)
+	}
+}
+
+// TestRouteLookupReportsSieveBackendPinContexts verifies Sieve pin diagnostics stay shared.
+func TestRouteLookupReportsSieveBackendPinContexts(t *testing.T) {
+	tests := []struct {
+		name         string
+		pin          state.UserBackendPinRecord
+		snapshots    map[string]backend.RuntimeSnapshot
+		shard        string
+		wantSelected string
+		wantApplied  bool
+		wantReason   string
+		wantFail     bool
+	}{
+		{
+			name: "matching",
+			pin: state.UserBackendPinRecord{
+				Present:           true,
+				BackendIdentifier: routeLookupBackendBSieve,
+				Protocol:          routeLookupProtocolSieve,
+				BackendPool:       routeLookupPoolSieve,
+				ShardTag:          routeLookupShardB,
+				Generation:        "sieve-pin-1",
+			},
+			shard:        routeLookupShardB,
+			wantSelected: routeLookupBackendBSieve,
+			wantApplied:  true,
+			wantReason:   routeLookupBackendPinApplied,
+		},
+		{
+			name: "mismatched",
+			pin: state.UserBackendPinRecord{
+				Present:           true,
+				BackendIdentifier: routeLookupBackendA,
+				Protocol:          routeLookupProtocol,
+				BackendPool:       routeLookupDefaultPool,
+				ShardTag:          routeLookupShardA,
+				Generation:        "imap-pin-1",
+			},
+			shard:        routeLookupShardA,
+			wantSelected: routeLookupBackendASieve,
+			wantReason:   routeLookupBackendPinMismatch,
+		},
+		{
+			name: "unusable",
+			pin: state.UserBackendPinRecord{
+				Present:           true,
+				BackendIdentifier: routeLookupBackendASieve,
+				Protocol:          routeLookupProtocolSieve,
+				BackendPool:       routeLookupPoolSieve,
+				ShardTag:          routeLookupShardA,
+				Generation:        "sieve-pin-2",
+			},
+			snapshots: map[string]backend.RuntimeSnapshot{
+				routeLookupBackendASieve: {
+					RuntimeOverride: backend.RuntimeOverride{
+						InService: new(false),
+					},
+				},
+			},
+			shard:      routeLookupShardA,
+			wantReason: string(backend.EffectiveExclusionRuntimeOut),
+			wantFail:   true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store := &countingRouteState{backendPin: test.pin, snapshots: test.snapshots}
+			service := newRouteLookupTestService(t, store, false)
+
+			response, err := service.Lookup(context.Background(), RouteLookupRequest{
+				Protocol:     routeLookupProtocolSieve,
+				ListenerName: routeLookupProtocolSieve,
+				AccountKey:   routeLookupAccount,
+				Attributes: map[string][]string{
+					routeLookupAttributeShard: {test.shard},
+				},
+			})
+			if err != nil {
+				t.Fatalf("Lookup returned error: %v", err)
+			}
+
+			if response.SelectedBackend != test.wantSelected || response.FailClosed != test.wantFail {
+				t.Fatalf("response selected/fail = %q/%t, want %q/%t", response.SelectedBackend, response.FailClosed, test.wantSelected, test.wantFail)
+			}
+
+			if response.BackendPin.Applied != test.wantApplied || response.BackendPin.ReasonClass != test.wantReason {
+				t.Fatalf("backend pin = %#v, want applied=%t reason=%s", response.BackendPin, test.wantApplied, test.wantReason)
+			}
+
+			assertNoRouteLookupMutations(t, store)
+		})
+	}
 }
 
 // TestRouteLookupUsesResolverSelectorAndReadOnlyAffinity verifies the shared read-only path.
@@ -953,6 +1102,12 @@ func newRouteLookupTestService(t *testing.T, store *countingRouteState, enforceH
 				Protocol:    routeLookupProtocol,
 				ServiceName: routeLookupListener,
 				BackendPool: routeLookupDefaultPool,
+			},
+			{
+				Name:        routeLookupProtocolSieve,
+				Protocol:    routeLookupProtocolSieve,
+				ServiceName: routeLookupProtocolSieve,
+				BackendPool: routeLookupPoolSieve,
 			},
 		},
 		DefaultPool:   routeLookupDefaultPool,

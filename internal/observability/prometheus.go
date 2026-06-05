@@ -397,7 +397,7 @@ func (m *prometheusRuntime) recordLifecycleMetric(event Event) bool {
 		m.recordListenerLifecycle(event)
 	case EventSessionStart, EventSessionEnd:
 		m.recordSessionLifecycle(event)
-	case EventIMAPPreAuth:
+	case EventIMAPPreAuth, EventSievePreAuth:
 		m.instrument.preAuthCommands.WithLabelValues(metricValues(event, protocolSessionLabels)...).Inc()
 	default:
 		return false

@@ -507,6 +507,19 @@ func TestRuntimeSessionListFlagsPassPaginationParams(t *testing.T) {
 	assertSessionListPaginationParams(t, fake)
 }
 
+// TestRuntimeSessionListFlagsPassSieveProtocol verifies Sieve filters use the generated request params.
+func TestRuntimeSessionListFlagsPassSieveProtocol(t *testing.T) {
+	fake := newFakeControlClient()
+	_, stderr, code := runWithFakeClient([]string{"sessions", "list", "--protocol", "sieve"}, fake)
+	if code != 0 {
+		t.Fatalf("sessions list returned exit code %d, want 0; stderr=%q", code, stderr)
+	}
+
+	if fake.listSessionsParams == nil || fake.listSessionsParams.Protocol == nil || *fake.listSessionsParams.Protocol != "sieve" {
+		t.Fatalf("protocol param = %#v, want sieve", fake.listSessionsParams)
+	}
+}
+
 // TestRuntimeUserListFlagsPassPaginationParams verifies user list pagination fields.
 func TestRuntimeUserListFlagsPassPaginationParams(t *testing.T) {
 	fake := newFakeControlClient()
@@ -848,6 +861,34 @@ func TestRouteLookupRecipient(t *testing.T) {
 	}
 }
 
+// TestRouteLookupSieveUsesGeneratedDTO verifies Sieve route lookup stays on the generated client model.
+func TestRouteLookupSieveUsesGeneratedDTO(t *testing.T) {
+	fake := newFakeControlClient()
+	_, stderr, code := runWithFakeClient([]string{
+		"route", "lookup",
+		"--protocol", "sieve",
+		"--user", "user-a",
+		"--listener", "sieve",
+		"--backend-pool", "sieve-default",
+	}, fake)
+	if code != 0 {
+		t.Fatalf("run returned exit code %d, want 0; stderr=%q", code, stderr)
+	}
+
+	request := fake.routeRequest
+	if request.Protocol != "sieve" || request.UserKey == nil || *request.UserKey != "user-a" {
+		t.Fatalf("route request = %#v, want Sieve user diagnostic", request)
+	}
+
+	if request.Listener == nil || *request.Listener != "sieve" || request.BackendPool == nil || *request.BackendPool != "sieve-default" {
+		t.Fatalf("route request = %#v, want Sieve listener and pool", request)
+	}
+
+	if request.Recipient != nil {
+		t.Fatalf("route request = %#v, want no recipient for Sieve", request)
+	}
+}
+
 // TestRouteLookupTextOutputIncludesUserHoldDiagnostics keeps hold context visible.
 func TestRouteLookupTextOutputIncludesUserHoldDiagnostics(t *testing.T) {
 	fake := newFakeControlClient()
@@ -1129,24 +1170,36 @@ func TestTextAndJSONOutputDeterministic(t *testing.T) {
 
 // TestUsageErrorsDoNotPrintSecrets verifies rejected route facts do not echo secret values.
 func TestUsageErrorsDoNotPrintSecrets(t *testing.T) {
-	fake := newFakeControlClient()
-	stdout, stderr, code := runWithFakeClient([]string{
-		"route", "lookup",
-		"--protocol", "imap",
-		"--user", "user-a",
-		"--attribute", "token=super-secret-value",
-	}, fake)
-	if code != 2 {
-		t.Fatalf("run returned exit code %d, want 2", code)
+	tests := []struct {
+		name      string
+		attribute string
+	}{
+		{name: "token", attribute: "token=super-secret-value"},
+		{name: "script", attribute: "script_name=super-secret-value"},
 	}
-	if stdout != "" {
-		t.Fatalf("stdout = %q, want empty output", stdout)
-	}
-	if strings.Contains(stderr, "super-secret-value") || strings.Contains(stderr, "token=") {
-		t.Fatalf("stderr leaked secret-bearing input: %q", stderr)
-	}
-	if len(fake.calls) != 0 {
-		t.Fatalf("calls = %#v, want none", fake.calls)
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fake := newFakeControlClient()
+			stdout, stderr, code := runWithFakeClient([]string{
+				"route", "lookup",
+				"--protocol", "sieve",
+				"--user", "user-a",
+				"--attribute", test.attribute,
+			}, fake)
+			if code != 2 {
+				t.Fatalf("run returned exit code %d, want 2", code)
+			}
+			if stdout != "" {
+				t.Fatalf("stdout = %q, want empty output", stdout)
+			}
+			if strings.Contains(stderr, "super-secret-value") || strings.Contains(stderr, test.attribute) {
+				t.Fatalf("stderr leaked secret-bearing input: %q", stderr)
+			}
+			if len(fake.calls) != 0 {
+				t.Fatalf("calls = %#v, want none", fake.calls)
+			}
+		})
 	}
 }
 

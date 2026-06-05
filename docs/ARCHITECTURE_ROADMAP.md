@@ -1004,6 +1004,11 @@ such as operation, protocol, backend pool, result and reason class. Backend
 nodes may be structured diagnostics for permitted logs and traces, but they are
 not Prometheus labels.
 LMTP observability must also keep raw recipients, envelope senders, message identifiers, subjects and DATA/BDAT content out of logs, traces and metric labels.
+ManageSieve observability must also keep raw usernames, script names, script
+contents, post-auth command bodies, client IPs, session IDs, SASL blobs, bearer
+tokens and passwords out of logs, traces, metric labels and test failure output.
+The observable protocol value is `sieve`; `managesieve` is human-facing prose,
+not a second config, runtime or metric protocol value.
 
 ## 18. Health checks and maintenance
 

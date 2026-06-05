@@ -39,8 +39,9 @@ const (
 	transportHTTP = "http"
 	transportGRPC = "grpc"
 
-	protocolIMAP = "imap"
-	protocolLMTP = "lmtp"
+	protocolIMAP  = "imap"
+	protocolLMTP  = "lmtp"
+	protocolSIEVE = "sieve"
 
 	backendAuthModeMasterUser       = "master_user"
 	backendAuthModeCredentialReplay = "credential_replay"
@@ -336,16 +337,17 @@ type DirectorSecurityConfig struct {
 }
 
 type ListenerConfig struct {
-	Protocol      string              `mapstructure:"protocol" yaml:"protocol" validate:"required"`
-	ServiceName   string              `mapstructure:"service_name" yaml:"service_name" validate:"required"`
-	Network       string              `mapstructure:"network" yaml:"network" validate:"required"`
-	Address       string              `mapstructure:"address" yaml:"address" validate:"required"`
-	Authority     string              `mapstructure:"authority" yaml:"authority" validate:"required"`
-	BackendPool   string              `mapstructure:"backend_pool" yaml:"backend_pool" validate:"required"`
-	ProxyProtocol ProxyProtocolConfig `mapstructure:"proxy_protocol" yaml:"proxy_protocol" validate:"required"`
-	TLS           ListenerTLSConfig   `mapstructure:"tls" yaml:"tls" validate:"required"`
-	IMAP          *IMAPListenerConfig `mapstructure:"imap" yaml:"imap,omitempty"`
-	LMTP          *LMTPListenerConfig `mapstructure:"lmtp" yaml:"lmtp,omitempty"`
+	Protocol      string               `mapstructure:"protocol" yaml:"protocol" validate:"required"`
+	ServiceName   string               `mapstructure:"service_name" yaml:"service_name" validate:"required"`
+	Network       string               `mapstructure:"network" yaml:"network" validate:"required"`
+	Address       string               `mapstructure:"address" yaml:"address" validate:"required"`
+	Authority     string               `mapstructure:"authority" yaml:"authority" validate:"required"`
+	BackendPool   string               `mapstructure:"backend_pool" yaml:"backend_pool" validate:"required"`
+	ProxyProtocol ProxyProtocolConfig  `mapstructure:"proxy_protocol" yaml:"proxy_protocol" validate:"required"`
+	TLS           ListenerTLSConfig    `mapstructure:"tls" yaml:"tls" validate:"required"`
+	IMAP          *IMAPListenerConfig  `mapstructure:"imap" yaml:"imap,omitempty"`
+	LMTP          *LMTPListenerConfig  `mapstructure:"lmtp" yaml:"lmtp,omitempty"`
+	Sieve         *SieveListenerConfig `mapstructure:"sieve" yaml:"sieve,omitempty"`
 }
 
 type ProxyProtocolConfig struct {
@@ -383,6 +385,16 @@ type LMTPClientAuthConfig struct {
 type LMTPClientMTLSAuthConfig struct {
 	SatisfiesRequired bool   `mapstructure:"satisfies_required" yaml:"satisfies_required"`
 	IdentitySource    string `mapstructure:"identity_source" yaml:"identity_source"`
+}
+
+type SieveListenerConfig struct {
+	AuthMechanisms []string                `mapstructure:"auth_mechanisms" yaml:"auth_mechanisms"`
+	Capabilities   SieveCapabilitiesConfig `mapstructure:"capabilities" yaml:"capabilities" validate:"required"`
+}
+
+type SieveCapabilitiesConfig struct {
+	ScriptExtensions []string `mapstructure:"script_extensions" yaml:"script_extensions"`
+	Language         string   `mapstructure:"language" yaml:"language"`
 }
 
 type RoutingConfig struct {

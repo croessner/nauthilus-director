@@ -14,6 +14,7 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
+//nolint:goconst // OpenAPI contract tests repeat schema sentinel strings intentionally.
 package rest_test
 
 import (
@@ -387,12 +388,12 @@ func TestOpenAPIContractIncludesRuntimeReadPagination(t *testing.T) {
 	}
 }
 
-// TestRouteLookupContractExcludesCredentials keeps credential-bearing fields out of the DTO.
-func TestRouteLookupContractExcludesCredentials(t *testing.T) {
+// TestRouteLookupContractExcludesForbiddenFields keeps credential and script fields out of the DTO.
+func TestRouteLookupContractExcludesForbiddenFields(t *testing.T) {
 	contract := loadContract(t)
 	schema := contract.Components.Schemas["RouteLookupRequest"].Value
 
-	for _, field := range []string{"password", "credential", "token", "secret", "bearer"} {
+	for _, field := range []string{"password", "credential", "token", "secret", "bearer", "script_name", "script_content"} {
 		if _, ok := schema.Properties[field]; ok {
 			t.Fatalf("RouteLookupRequest exposes credential field %q", field)
 		}

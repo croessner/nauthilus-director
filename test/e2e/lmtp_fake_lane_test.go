@@ -483,7 +483,13 @@ func writeLMTPProcessConfig(t *testing.T, options lmtpProcessConfigOptions) stri
 	content := fmt.Sprintf(`patch:
   - op: remove
     path: director.listeners
-    value: [imaps]
+    value: [imaps, sieve, sieves]
+  - op: remove
+    path: director.backend_pools
+    value: [sieve-default]
+  - op: remove
+    path: director.backends
+    value: [mailstore-a-sieve, mailstore-b-sieve]
 runtime:
   instance_name: "e2e-director"
   process:

@@ -398,6 +398,7 @@ func TestReasonClassNormalizationKeepsMetricValuesBounded(t *testing.T) {
 		reasonClassAuth:                            reasonClassAuth,
 		reasonClassBackendStatus:                   reasonClassBackendStatus,
 		reasonClassBDAT:                            reasonClassBDAT,
+		"credential input":                         "credential_input",
 		reasonClassData:                            reasonClassData,
 		reasonClassParser:                          reasonClassParser,
 		reasonClassRouting:                         reasonClassRouting,

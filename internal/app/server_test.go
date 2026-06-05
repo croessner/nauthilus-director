@@ -17,11 +17,16 @@
 package app
 
 import (
+	"bufio"
 	"context"
+	"net"
 	"testing"
+	"time"
 
 	"github.com/croessner/nauthilus-director/internal/backend"
 	"github.com/croessner/nauthilus-director/internal/config"
+	"github.com/croessner/nauthilus-director/internal/listener"
+	"github.com/croessner/nauthilus-director/internal/protocol/sieve"
 	"github.com/croessner/nauthilus-director/internal/routing"
 )
 
@@ -71,5 +76,66 @@ func TestRoutingResolverUsesConfiguredAuthAttributeNames(t *testing.T) {
 
 	if result.Tenant != expectedTenant || result.ShardTag != expectedShardTag || result.AccountKey != expectedAccountKey {
 		t.Fatalf("routing result = %#v, want configured tenant/shard attributes and account_field-derived account", result)
+	}
+}
+
+// TestSessionHandlerFactoryDispatchesSieve verifies the app path recognizes ManageSieve listeners.
+func TestSessionHandlerFactoryDispatchesSieve(t *testing.T) {
+	factory := sessionHandlerFactory(nil, nil, nil, nil, nil, 0, nil, nil, "test-version")
+	handler := factory(listener.SessionOptions{
+		ListenerName: "sieve",
+		Config:       config.DefaultConfig().Director.Listeners["sieve"],
+	})
+
+	sieveHandler, ok := handler.(*sieve.Handler)
+	if !ok {
+		t.Fatalf("handler type = %T, want Sieve handler", handler)
+	}
+
+	capabilities := sieveHandler.Capabilities()
+	if capabilities.ProtocolVersion != sieve.ProtocolVersionRFC5804 {
+		t.Fatalf("Sieve protocol version = %q, want %q", capabilities.ProtocolVersion, sieve.ProtocolVersionRFC5804)
+	}
+
+	if capabilities.Implementation != "nauthilus-director test-version" {
+		t.Fatalf("Sieve implementation = %q, want build-version implementation", capabilities.Implementation)
+	}
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- handler.Serve(context.Background(), server)
+	}()
+
+	reader := bufio.NewReader(client)
+
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		t.Fatalf("read Sieve greeting: %v", err)
+	}
+
+	if line != "\"IMPLEMENTATION\" \"nauthilus-director test-version\"\r\n" {
+		t.Fatalf("Sieve greeting line = %q, want implementation capability", line)
+	}
+
+	for line != "OK\r\n" {
+		line, err = reader.ReadString('\n')
+		if err != nil {
+			t.Fatalf("read Sieve greeting terminator: %v", err)
+		}
+	}
+
+	_ = client.Close()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Sieve handler error = %v, want clean close", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Sieve handler did not stop after client close")
 	}
 }

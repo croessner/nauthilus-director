@@ -393,7 +393,7 @@ func isClosedError(err error) bool {
 
 // resultError suppresses ordinary EOF while preserving actionable failures.
 func resultError(err error) error {
-	if errors.Is(err, io.EOF) {
+	if errors.Is(err, io.EOF) || isClosedError(err) {
 		return nil
 	}
 

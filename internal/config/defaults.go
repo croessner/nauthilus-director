@@ -270,10 +270,12 @@ func defaultDirector() DirectorConfig {
 			MaxPreauthLiteralBytes: 65536,
 		},
 		Listeners: map[string]ListenerConfig{
-			"imap":  defaultIMAPListener("imap", "127.0.0.1:10143", "starttls", "/etc/nauthilus-director/imap.crt", "/etc/nauthilus-director/imap.key"),
-			"imaps": defaultIMAPListener("imaps", "127.0.0.1:10993", "implicit", "/etc/nauthilus-director/imaps.crt", "/etc/nauthilus-director/imaps.key"),
-			"lmtp":  defaultLMTPListener("lmtp", "127.0.0.1:10024", "starttls", "/etc/nauthilus-director/lmtp.crt", "/etc/nauthilus-director/lmtp.key"),
-			"lmtps": defaultLMTPListener("lmtps", "127.0.0.1:11024", "implicit", "/etc/nauthilus-director/lmtps.crt", "/etc/nauthilus-director/lmtps.key"),
+			"imap":   defaultIMAPListener("imap", "127.0.0.1:10143", "starttls", "/etc/nauthilus-director/imap.crt", "/etc/nauthilus-director/imap.key"),
+			"imaps":  defaultIMAPListener("imaps", "127.0.0.1:10993", "implicit", "/etc/nauthilus-director/imaps.crt", "/etc/nauthilus-director/imaps.key"),
+			"lmtp":   defaultLMTPListener("lmtp", "127.0.0.1:10024", "starttls", "/etc/nauthilus-director/lmtp.crt", "/etc/nauthilus-director/lmtp.key"),
+			"lmtps":  defaultLMTPListener("lmtps", "127.0.0.1:11024", "implicit", "/etc/nauthilus-director/lmtps.crt", "/etc/nauthilus-director/lmtps.key"),
+			"sieve":  defaultSieveListener("sieve", "127.0.0.1:14190", "starttls", "/etc/nauthilus-director/sieve.crt", "/etc/nauthilus-director/sieve.key"),
+			"sieves": defaultSieveListener("sieves", "127.0.0.1:14490", "implicit", "/etc/nauthilus-director/sieves.crt", "/etc/nauthilus-director/sieves.key"),
 		},
 		Routing: RoutingConfig{
 			DefaultSelector: "rendezvous_hash",
@@ -367,12 +369,19 @@ func defaultDirector() DirectorConfig {
 				Selector: "recipient_hash",
 				Backends: []string{"mailstore-a-lmtp", "mailstore-b-lmtp"},
 			},
+			"sieve-default": {
+				Protocol: "sieve",
+				Selector: "rendezvous_hash",
+				Backends: []string{"mailstore-a-sieve", "mailstore-b-sieve"},
+			},
 		},
 		Backends: map[string]BackendConfig{
-			"mailstore-a-imap": defaultIMAPBackend("mailstore-a", "mailstore-a-node-1", "127.0.0.1:1143", "mailstore-a.example.org"),
-			"mailstore-b-imap": defaultIMAPBackend("mailstore-b", "mailstore-b-node-1", "127.0.0.1:2143", "mailstore-b.example.org"),
-			"mailstore-a-lmtp": defaultLMTPBackend("mailstore-a", "mailstore-a-node-1", "127.0.0.1:2424", "mailstore-a.example.org"),
-			"mailstore-b-lmtp": defaultLMTPBackend("mailstore-b", "mailstore-b-node-1", "127.0.0.1:3424", "mailstore-b.example.org"),
+			"mailstore-a-imap":  defaultIMAPBackend("mailstore-a", "mailstore-a-node-1", "127.0.0.1:1143", "mailstore-a.example.org"),
+			"mailstore-b-imap":  defaultIMAPBackend("mailstore-b", "mailstore-b-node-1", "127.0.0.1:2143", "mailstore-b.example.org"),
+			"mailstore-a-lmtp":  defaultLMTPBackend("mailstore-a", "mailstore-a-node-1", "127.0.0.1:2424", "mailstore-a.example.org"),
+			"mailstore-b-lmtp":  defaultLMTPBackend("mailstore-b", "mailstore-b-node-1", "127.0.0.1:3424", "mailstore-b.example.org"),
+			"mailstore-a-sieve": defaultSieveBackend("mailstore-a", "mailstore-a-node-1", "127.0.0.1:4190", "mailstore-a.example.org"),
+			"mailstore-b-sieve": defaultSieveBackend("mailstore-b", "mailstore-b-node-1", "127.0.0.1:5190", "mailstore-b.example.org"),
 		},
 	}
 }
@@ -451,6 +460,34 @@ func defaultLMTPListener(serviceName string, address string, tlsMode string, cer
 	}
 }
 
+// defaultSieveListener builds conservative ManageSieve listener defaults.
+func defaultSieveListener(serviceName string, address string, tlsMode string, cert string, key string) ListenerConfig {
+	return ListenerConfig{
+		Protocol:    "sieve",
+		ServiceName: serviceName,
+		Network:     "tcp",
+		Address:     address,
+		Authority:   "default",
+		BackendPool: "sieve-default",
+		ProxyProtocol: ProxyProtocolConfig{
+			TrustedCIDRs: []string{},
+		},
+		TLS: ListenerTLSConfig{
+			Mode:          tlsMode,
+			Cert:          cert,
+			Key:           Secret(key),
+			MinTLSVersion: "TLS1.2",
+		},
+		Sieve: &SieveListenerConfig{
+			AuthMechanisms: []string{"plain", "xoauth2", "oauthbearer"},
+			Capabilities: SieveCapabilitiesConfig{
+				ScriptExtensions: []string{},
+				Language:         "en",
+			},
+		},
+	}
+}
+
 // defaultIMAPBackend builds an IMAP backend using master-user authentication.
 func defaultIMAPBackend(shardTag string, backendNode string, address string, serverName string) BackendConfig {
 	return BackendConfig{
@@ -517,6 +554,42 @@ func defaultLMTPBackend(shardTag string, backendNode string, address string, ser
 			OAuthBearer: BackendOAuthBearerConfig{
 				TokenFile:  Secret("/etc/nauthilus-director/lmtp-backend-token"),
 				RequireTLS: true,
+			},
+		},
+		HealthCheck: defaultBackendHealthCheck(),
+	}
+}
+
+// defaultSieveBackend builds a ManageSieve backend using master-user authentication.
+func defaultSieveBackend(shardTag string, backendNode string, address string, serverName string) BackendConfig {
+	return BackendConfig{
+		Protocol:       "sieve",
+		ShardTag:       shardTag,
+		BackendNode:    backendNode,
+		Address:        address,
+		Weight:         100,
+		MaxConnections: 1000,
+		Maintenance:    "disabled",
+		HAProxy:        HAProxyConfig{},
+		TLS: BackendTLSConfig{
+			Mode:               "starttls",
+			CAFile:             "/etc/nauthilus-director/mailstore-ca.pem",
+			ServerName:         serverName,
+			MinTLSVersion:      "TLS1.2",
+			InsecureSkipVerify: false,
+		},
+		Auth: BackendAuthConfig{
+			Mode: "master_user",
+			MasterUser: BackendMasterUserConfig{
+				Username:     "nauthilus-director",
+				PasswordFile: Secret("/etc/nauthilus-director/sieve-backend-master-password"),
+				UserFormat:   "{user}*{master_user}",
+				Mechanism:    "plain",
+			},
+			CredentialReplay: BackendCredentialReplayConfig{
+				RequireBackendTLS: true,
+				PreserveMechanism: true,
+				AllowedMechanisms: []string{"plain", "xoauth2", "oauthbearer"},
 			},
 		},
 		HealthCheck: defaultBackendHealthCheck(),

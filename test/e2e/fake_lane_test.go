@@ -53,6 +53,7 @@ import (
 	"github.com/croessner/nauthilus-director/internal/observability"
 	"github.com/croessner/nauthilus-director/internal/placement"
 	"github.com/croessner/nauthilus-director/internal/protocol/imap"
+	"github.com/croessner/nauthilus-director/internal/protocol/sieve"
 	"github.com/croessner/nauthilus-director/internal/proxy"
 	"github.com/croessner/nauthilus-director/internal/rest"
 	"github.com/croessner/nauthilus-director/internal/rest/adapters"
@@ -74,6 +75,14 @@ const (
 	e2eProtocol         = "imap"
 	e2eProcessKeyPrefix = "nauthilus-director-e2e-process"
 	e2eService          = "imap"
+	e2eSieveAccount     = "sieve-alice@example.test"
+	e2eSieveBackendAID  = "mailstore-a-sieve"
+	e2eSieveBackendBID  = "mailstore-b-sieve"
+	e2eSieveBackendPool = "sieve-default"
+	e2eSieveListener    = "sieve"
+	e2eSieveProtocol    = "sieve"
+	e2eSieveService     = "sieve"
+	e2eSievesListener   = "sieves"
 	e2eHoldAccountKey   = "hold-account-key-e2e"
 	e2eHoldLogin        = "hold-login@example.test"
 	e2eHoldOtherKey     = "hold-other-account-key-e2e"
@@ -764,6 +773,54 @@ func TestServerBinaryListenerDrainResumeKeepsActiveStream(t *testing.T) {
 	expectRuntimeClosedConnection(t, activeClient)
 }
 
+// TestServerBinarySieveListenersAndRouteLookup proves Sieve M6.1 wiring through the real process.
+func TestServerBinarySieveListenersAndRouteLookup(t *testing.T) {
+	binary := e2eServerBinary(t)
+	ctl := buildDirectorctl(t)
+	redisFixture := startValkeySessionStore(t)
+	authority := startFakeHTTPAuthority(t, map[string][]string{
+		"account":   {e2eSieveAccount},
+		"tenant":    {e2eTenant},
+		"mailShard": {e2eShardTag},
+	})
+	sieveAddress := loopbackAddress(t)
+	sievesAddress := loopbackAddress(t)
+	controlAddress := loopbackAddress(t)
+	controlURL := "http://" + controlAddress
+	configPath := writeSieveProcessConfig(t, processConfigOptions{
+		RedisAddress:   redisFixture.addr,
+		AuthorityURL:   authority.URL(),
+		ControlAddress: controlAddress,
+		ControlEnabled: true,
+	}, sieveAddress, sievesAddress)
+	process := startDirectorProcess(t, binary, configPath)
+
+	waitForTCPListener(t, sieveAddress, process)
+	waitForTCPListener(t, sievesAddress, process)
+	waitForControlReady(t, controlURL, process)
+
+	listOutput := runDirectorctl(t, ctl, controlURL, "listeners", "list")
+	assertCLIOutputFields(
+		t,
+		listOutput,
+		"name="+e2eSieveListener+" protocol="+e2eSieveProtocol+" service_name="+e2eSieveService,
+		"bound_address="+sieveAddress,
+		"name="+e2eSievesListener+" protocol="+e2eSieveProtocol+" service_name="+e2eSievesListener,
+		"bound_address="+sievesAddress,
+	)
+
+	routeOutput := runDirectorctl(
+		t,
+		ctl,
+		controlURL,
+		"route", "lookup",
+		"--protocol", e2eSieveProtocol,
+		"--user", e2eSieveAccount,
+		"--listener", e2eSieveListener,
+	)
+	assertCLIOutputFields(t, routeOutput, "selected_backend=mailstore-", "routing_source=hash")
+}
+
 // TestFakeHTTPAuthorityUsesRedisLeaseStore proves active affinity through Redis-compatible state.
 func TestFakeHTTPAuthorityUsesRedisLeaseStore(t *testing.T) {
 	fixture := startValkeySessionStore(t)
@@ -946,6 +1003,58 @@ func TestPublicSTARTTLSAndImplicitTLSSockets(t *testing.T) {
 	implicit := dialTLS(t, implicitDirector.Address())
 	defer func() { _ = implicit.Close() }()
 	expectLine(t, bufio.NewReader(implicit), "* OK nauthilus-director IMAP session ready\r\n")
+}
+
+// TestSieveListenersAndRouteLookupPublicBoundaries proves M6.1 listener dispatch over public boundaries.
+func TestSieveListenersAndRouteLookupPublicBoundaries(t *testing.T) {
+	certPath, keyPath, _ := writeTestCertificate(t)
+	redisFixture := startValkeySessionStore(t)
+	store := newTrackingSessionStore(redisFixture.store)
+	recorder := newCapturedRecorder()
+	cfg := e2eSieveConfig(certPath, keyPath)
+	selector := mustRuntimeSelector(t, cfg, store)
+	manager := startSieveDirector(t, cfg, recorder)
+	defer stopListenerManager(t, manager)
+
+	sieveAddress := requireBoundListener(t, manager, e2eSieveListener)
+	sievesAddress := requireBoundListener(t, manager, e2eSievesListener)
+	assertListenerSnapshot(t, manager, e2eSieveListener, e2eSieveProtocol, "starttls", false)
+	assertListenerSnapshot(t, manager, e2eSievesListener, e2eSieveProtocol, "implicit", true)
+
+	sieveConn := dialPlain(t, sieveAddress)
+	_ = sieveConn.Close()
+	sievesConn := dialPlain(t, sievesAddress)
+	_ = sievesConn.Close()
+
+	control := startE2EControlPlane(t, cfg, store, selector, runtimectl.NewLocalSessionRegistry(), recorder, manager)
+	defer control.Close()
+
+	ctl := buildDirectorctl(t)
+	listOutput := runDirectorctl(t, ctl, control.URL(), "listeners", "list")
+	assertCLIOutputFields(
+		t,
+		listOutput,
+		"name="+e2eSieveListener+" protocol="+e2eSieveProtocol+" service_name="+e2eSieveService,
+		"bound_address="+sieveAddress,
+		"name="+e2eSievesListener+" protocol="+e2eSieveProtocol+" service_name="+e2eSievesListener,
+		"bound_address="+sievesAddress,
+	)
+
+	route := lookupRouteFor(t, control.URL(), e2eSieveProtocol, e2eSieveListener, e2eSieveAccount, false)
+	if route.SelectedBackend != e2eSieveBackendAID && route.SelectedBackend != e2eSieveBackendBID {
+		t.Fatalf("sieve route selected backend = %q, want configured sieve backend", route.SelectedBackend)
+	}
+
+	routeOutput := runDirectorctl(
+		t,
+		ctl,
+		control.URL(),
+		"route", "lookup",
+		"--protocol", e2eSieveProtocol,
+		"--user", e2eSieveAccount,
+		"--listener", e2eSieveListener,
+	)
+	assertCLIOutputFields(t, routeOutput, "selected_backend="+route.SelectedBackend, "routing_source=hash")
 }
 
 // TestRuntimeControlPublicBoundaries proves runtime control behavior through IMAP, REST and CLI.
@@ -1313,6 +1422,25 @@ func waitForDirectorGreeting(t *testing.T, address string, process *directorProc
 	t.Fatalf("director process did not expose IMAP at %s:\n%s", address, process.output.String())
 }
 
+// waitForTCPListener waits until a process exposes one public TCP listener.
+func waitForTCPListener(t *testing.T, address string, process *directorProcess) {
+	t.Helper()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		conn, err := net.DialTimeout("tcp", address, 100*time.Millisecond)
+		if err == nil {
+			_ = conn.Close()
+
+			return
+		}
+
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	t.Fatalf("director process did not expose TCP listener at %s:\n%s", address, process.output.String())
+}
+
 // writeProcessConfig writes a minimal production config for real-binary E2E.
 func writeProcessConfig(t *testing.T, options processConfigOptions) string {
 	t.Helper()
@@ -1336,13 +1464,13 @@ func writeProcessConfig(t *testing.T, options processConfigOptions) string {
 	content := fmt.Sprintf(`patch:
   - op: remove
     path: director.listeners
-    value: [imaps, lmtp, lmtps]
+    value: [imaps, lmtp, lmtps, sieve, sieves]
   - op: remove
     path: director.backend_pools
-    value: [lmtp-default]
+    value: [lmtp-default, sieve-default]
   - op: remove
     path: director.backends
-    value: [mailstore-b-imap, mailstore-a-lmtp, mailstore-b-lmtp]
+    value: [mailstore-b-imap, mailstore-a-lmtp, mailstore-b-lmtp, mailstore-a-sieve, mailstore-b-sieve]
 runtime:
   instance_name: "e2e-director"
   process:
@@ -1467,6 +1595,181 @@ director:
 	return path
 }
 
+// writeSieveProcessConfig writes a real-process config with STARTTLS and implicit Sieve listeners.
+func writeSieveProcessConfig(t *testing.T, options processConfigOptions, sieveAddress string, sievesAddress string) string {
+	t.Helper()
+
+	controlAddress := options.ControlAddress
+	if controlAddress == "" {
+		controlAddress = "127.0.0.1:0"
+	}
+	listenerCertPath, listenerKeyPath, _ := writeTestCertificate(t)
+	backendAuth := masterUserBackendAuth()
+
+	content := fmt.Sprintf(`patch:
+  - op: remove
+    path: director.listeners
+    value: [imap, imaps, lmtp, lmtps]
+  - op: remove
+    path: director.backend_pools
+    value: [imap-default, lmtp-default]
+  - op: remove
+    path: director.backends
+    value: [mailstore-a-imap, mailstore-b-imap, mailstore-a-lmtp, mailstore-b-lmtp]
+runtime:
+  instance_name: "e2e-director"
+  process:
+    shutdown_timeout: 2s
+  servers:
+    control:
+      enabled: %t
+      address: %q
+  timeouts:
+    preauth: 2s
+    auth: 2s
+    nauthilus: 2s
+    backend_connect: 2s
+    proxy_idle: 2s
+storage:
+  redis:
+    protocol: 2
+    key_prefix: %q
+    standalone:
+      address: %q
+    auth:
+      username: ""
+      password_file: ""
+    tls:
+      enabled: false
+auth:
+  authorities:
+    default:
+      http:
+        endpoint: %q
+        basic_auth:
+          password_file: "unused"
+director:
+  health:
+    interval: 200ms
+    timeout: 1s
+    jitter: 0s
+    unhealthy_after: 1
+    healthy_after: 1
+  listeners:
+    sieve:
+      protocol: sieve
+      service_name: sieve
+      network: tcp
+      address: %q
+      authority: default
+      backend_pool: sieve-default
+      tls:
+        mode: starttls
+        cert: %q
+        key: %q
+      sieve:
+        auth_mechanisms: [plain]
+        capabilities:
+          script_extensions: []
+          language: en
+    sieves:
+      protocol: sieve
+      service_name: sieves
+      network: tcp
+      address: %q
+      authority: default
+      backend_pool: sieve-default
+      tls:
+        mode: implicit
+        cert: %q
+        key: %q
+      sieve:
+        auth_mechanisms: [plain]
+        capabilities:
+          script_extensions: []
+          language: en
+  backend_pools:
+    sieve-default:
+      protocol: sieve
+      selector: rendezvous_hash
+      backends: [mailstore-a-sieve, mailstore-b-sieve]
+  backends:
+    mailstore-a-sieve:
+      protocol: sieve
+      shard_tag: %q
+      backend_node: mailstore-a-node-1
+      address: "127.0.0.1:1"
+      weight: 100
+      max_connections: 100
+      maintenance: disabled
+      tls:
+        mode: starttls
+        server_name: mailstore-a-sieve.example.test
+        min_tls_version: TLS1.2
+      auth:
+        mode: %q
+        master_user:
+          username: %q
+          password_file: %q
+          user_format: %q
+          mechanism: %q
+      health_check:
+        enabled: false
+    mailstore-b-sieve:
+      protocol: sieve
+      shard_tag: %q
+      backend_node: mailstore-b-node-1
+      address: "127.0.0.1:2"
+      weight: 100
+      max_connections: 100
+      maintenance: disabled
+      tls:
+        mode: starttls
+        server_name: mailstore-b-sieve.example.test
+        min_tls_version: TLS1.2
+      auth:
+        mode: %q
+        master_user:
+          username: %q
+          password_file: %q
+          user_format: %q
+          mechanism: %q
+      health_check:
+        enabled: false
+	`, options.ControlEnabled,
+		controlAddress,
+		e2eProcessKeyPrefix,
+		options.RedisAddress,
+		options.AuthorityURL,
+		sieveAddress,
+		listenerCertPath,
+		listenerKeyPath,
+		sievesAddress,
+		listenerCertPath,
+		listenerKeyPath,
+		e2eShardTag,
+		backendAuth.Mode,
+		backendAuth.MasterUser.Username,
+		backendAuth.MasterUser.Password.Value(),
+		backendAuth.MasterUser.UserFormat,
+		backendAuth.MasterUser.Mechanism,
+		e2eShardTag,
+		backendAuth.Mode,
+		backendAuth.MasterUser.Username,
+		backendAuth.MasterUser.Password.Value(),
+		backendAuth.MasterUser.UserFormat,
+		backendAuth.MasterUser.Mechanism,
+	)
+	content = strings.ReplaceAll(content, "\t", "")
+
+	path := filepath.Join(t.TempDir(), "nauthilus-director-sieve.yml")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write sieve process config: %v", err)
+	}
+
+	return path
+}
+
 // writeBackendPinProcessConfig writes a real-process config with one IMAP pool and explicit backend weights.
 func writeBackendPinProcessConfig(t *testing.T, options processConfigOptions, backends []processBackendDefinition) string {
 	t.Helper()
@@ -1495,13 +1798,13 @@ func writeBackendPinProcessConfig(t *testing.T, options processConfigOptions, ba
 	content := fmt.Sprintf(`patch:
   - op: remove
     path: director.listeners
-    value: [imaps, lmtp, lmtps]
+    value: [imaps, lmtp, lmtps, sieve, sieves]
   - op: remove
     path: director.backend_pools
-    value: [lmtp-default]
+    value: [lmtp-default, sieve-default]
   - op: remove
     path: director.backends
-    value: [mailstore-a-lmtp, mailstore-b-lmtp]
+    value: [mailstore-a-lmtp, mailstore-b-lmtp, mailstore-a-sieve, mailstore-b-sieve]
 runtime:
   instance_name: "e2e-director"
   process:
@@ -1884,6 +2187,93 @@ func startDirector(t *testing.T, options directorOptions) directorInstance {
 	return directorInstance{address: address, manager: manager}
 }
 
+// startSieveDirector starts only M6.1 ManageSieve listeners over the shared manager path.
+func startSieveDirector(t *testing.T, cfg config.Config, recorder observability.Recorder) *listener.Manager {
+	t.Helper()
+
+	manager, err := listener.NewManagerWithConfig(
+		cfg,
+		listener.WithNauthilusClientFactory(func(config.AuthorityConfig) (nauthilus.Authenticator, error) {
+			return unavailableAuthenticator{}, nil
+		}),
+		listener.WithObservabilityRecorder(recorder),
+		listener.WithSessionHandlerFactory(func(listenerOptions listener.SessionOptions) listener.SessionHandler {
+			if listenerOptions.Config.Sieve == nil {
+				t.Fatalf("listener %q missing sieve config", listenerOptions.ListenerName)
+			}
+
+			capabilities := listenerOptions.Config.Sieve.Capabilities
+
+			return sieve.NewHandler(sieve.SessionConfig{
+				ListenerName:   listenerOptions.ListenerName,
+				ServiceName:    listenerOptions.Config.ServiceName,
+				Network:        listenerOptions.Config.Network,
+				BackendPool:    listenerOptions.Config.BackendPool,
+				TLSMode:        listenerOptions.Config.TLS.Mode,
+				AuthMechanisms: listenerOptions.Config.Sieve.AuthMechanisms,
+				Capabilities: sieve.CapabilitiesConfig{
+					Implementation:   sieve.ImplementationCapability("e2e"),
+					ProtocolVersion:  sieve.ProtocolVersionRFC5804,
+					ScriptExtensions: capabilities.ScriptExtensions,
+					Language:         capabilities.Language,
+				},
+			})
+		}),
+	)
+	if err != nil {
+		t.Fatalf("NewManagerWithConfig: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := manager.Start(ctx); err != nil {
+		t.Fatalf("start sieve director: %v", err)
+	}
+
+	return manager
+}
+
+// stopListenerManager stops one test manager through the production lifecycle.
+func stopListenerManager(t *testing.T, manager *listener.Manager) {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := manager.Stop(ctx); err != nil {
+		t.Fatalf("stop listener manager: %v", err)
+	}
+}
+
+// requireBoundListener returns the bound public address for one listener.
+func requireBoundListener(t *testing.T, manager *listener.Manager, name string) string {
+	t.Helper()
+
+	address, ok := manager.BoundAddress(name)
+	if !ok {
+		t.Fatalf("listener %q did not expose a bound address", name)
+	}
+
+	return address
+}
+
+// assertListenerSnapshot verifies shared listener runtime state for one protocol.
+func assertListenerSnapshot(t *testing.T, manager *listener.Manager, name string, protocol string, tlsMode string, implicit bool) {
+	t.Helper()
+
+	for _, snapshot := range manager.Snapshots() {
+		if snapshot.Name != name {
+			continue
+		}
+		if snapshot.Protocol != protocol || snapshot.TLSMode != tlsMode || snapshot.ImplicitTLS != implicit {
+			t.Fatalf("listener snapshot = %#v, want protocol=%s tls=%s implicit=%t", snapshot, protocol, tlsMode, implicit)
+		}
+
+		return
+	}
+
+	t.Fatalf("listener %q missing from snapshots", name)
+}
+
 // e2eConfig builds a narrow typed config for one public IMAP listener and backend.
 func e2eConfig(options directorOptions) config.Config {
 	cfg := config.DefaultConfig()
@@ -1932,6 +2322,60 @@ func e2eConfig(options directorOptions) config.Config {
 	}
 
 	return cfg
+}
+
+// e2eSieveConfig builds a narrow typed config for public STARTTLS and implicit ManageSieve listeners.
+func e2eSieveConfig(certPath string, keyPath string) config.Config {
+	cfg := config.DefaultConfig()
+	sieveListener := cfg.Director.Listeners[e2eSieveListener]
+	sieveListener.Address = "127.0.0.1:0"
+	sieveListener.TLS.Mode = "starttls"
+	sieveListener.TLS.Cert = certPath
+	sieveListener.TLS.Key = config.Secret(keyPath)
+
+	sievesListener := cfg.Director.Listeners[e2eSievesListener]
+	sievesListener.Address = "127.0.0.1:0"
+	sievesListener.TLS.Mode = "implicit"
+	sievesListener.TLS.Cert = certPath
+	sievesListener.TLS.Key = config.Secret(keyPath)
+	cfg.Director.Listeners = map[string]config.ListenerConfig{
+		e2eSieveListener:  sieveListener,
+		e2eSievesListener: sievesListener,
+	}
+	cfg.Director.BackendPools = map[string]config.BackendPoolConfig{
+		e2eSieveBackendPool: {
+			Protocol: e2eSieveProtocol,
+			Selector: "rendezvous_hash",
+			Backends: []string{e2eSieveBackendAID, e2eSieveBackendBID},
+		},
+	}
+	cfg.Director.Backends = map[string]config.BackendConfig{
+		e2eSieveBackendAID: e2eSieveBackendConfig(e2eSieveBackendAID, "127.0.0.1:1"),
+		e2eSieveBackendBID: e2eSieveBackendConfig(e2eSieveBackendBID, "127.0.0.1:2"),
+	}
+
+	return cfg
+}
+
+// e2eSieveBackendConfig creates a verified-TLS backend entry without opening sockets.
+func e2eSieveBackendConfig(identifier string, address string) config.BackendConfig {
+	return config.BackendConfig{
+		Protocol:       e2eSieveProtocol,
+		ShardTag:       e2eShardTag,
+		Address:        address,
+		Weight:         100,
+		MaxConnections: 100,
+		Maintenance:    "disabled",
+		TLS: config.BackendTLSConfig{
+			Mode:          "starttls",
+			ServerName:    identifier + ".example.test",
+			MinTLSVersion: "TLS1.2",
+		},
+		Auth: backendAuthConfig(masterUserBackendAuth()),
+		HealthCheck: config.BackendHealthConfig{
+			Enabled: false,
+		},
+	}
 }
 
 // e2eBackendIdentifiers returns configured backend identifiers in deterministic order.
@@ -2491,6 +2935,7 @@ func startE2EControlPlane(
 	selector backend.Selector,
 	localSessions *runtimectl.LocalSessionRegistry,
 	recorder observability.Recorder,
+	listenerManagers ...runtimectl.ListenerManager,
 ) *e2eControlPlane {
 	t.Helper()
 
@@ -2510,20 +2955,15 @@ func startE2EControlPlane(
 	}
 
 	lookup, err := runtimectl.NewRouteLookupService(runtimectl.RouteLookupServiceOptions{
-		Resolver:     mustRoutingResolver(t),
-		Selector:     selector,
-		BackendRead:  reader,
-		AffinityRead: store,
-		ListenerContexts: []runtimectl.RouteLookupListenerContext{{
-			Name:        e2eListenerName,
-			Protocol:    e2eProtocol,
-			ServiceName: e2eService,
-			BackendPool: e2eBackendPool,
-		}},
-		DefaultPool:   e2eBackendPool,
-		DefaultShard:  e2eShardTag,
-		DefaultTenant: e2eTenant,
-		Observability: recorder,
+		Resolver:         mustRoutingResolver(t),
+		Selector:         selector,
+		BackendRead:      reader,
+		AffinityRead:     store,
+		ListenerContexts: routeLookupListenerContextsFromConfig(cfg),
+		DefaultPool:      routeLookupDefaultPool(cfg),
+		DefaultShard:     e2eShardTag,
+		DefaultTenant:    e2eTenant,
+		Observability:    recorder,
 	})
 	if err != nil {
 		t.Fatalf("NewRouteLookupService: %v", err)
@@ -2531,6 +2971,10 @@ func startE2EControlPlane(
 
 	reload := &switchingReloadService{current: cfg, next: cfg, recorder: recorder}
 	audit := &recordingProtectedConfigAudit{}
+	var listenerRuntime adapters.ListenerRuntimeService
+	if len(listenerManagers) > 0 && listenerManagers[0] != nil {
+		listenerRuntime = runtimectl.NewListenerService(listenerManagers[0], runtimectl.WithObservabilityRecorder(recorder))
+	}
 	server := rest.NewServer(rest.Options{HandlerOptions: adapters.HandlerOptions{
 		BackendReader:             reader,
 		BackendMutator:            runtimectl.NewBackendService(store, localSessions, runtimectl.WithObservabilityRecorder(recorder)),
@@ -2539,6 +2983,7 @@ func startE2EControlPlane(
 		UserReader:                store,
 		UserMutator:               runtimectl.NewUserService(store, localSessions, runtimectl.WithObservabilityRecorder(recorder)),
 		RouteLookup:               lookup,
+		ListenerRuntime:           listenerRuntime,
 		Reload:                    reload,
 		Observability:             recorder,
 		ProtectedConfigAudit:      audit,
@@ -2550,6 +2995,49 @@ func startE2EControlPlane(
 		audit:  audit,
 		reload: reload,
 	}
+}
+
+// routeLookupListenerContextsFromConfig projects configured listeners into route lookup contexts.
+func routeLookupListenerContextsFromConfig(cfg config.Config) []runtimectl.RouteLookupListenerContext {
+	names := make([]string, 0, len(cfg.Director.Listeners))
+	for name := range cfg.Director.Listeners {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	contexts := make([]runtimectl.RouteLookupListenerContext, 0, len(names))
+	for _, name := range names {
+		listenerConfig := cfg.Director.Listeners[name]
+		contexts = append(contexts, runtimectl.RouteLookupListenerContext{
+			Name:        name,
+			Protocol:    listenerConfig.Protocol,
+			ServiceName: listenerConfig.ServiceName,
+			BackendPool: listenerConfig.BackendPool,
+		})
+	}
+
+	return contexts
+}
+
+// routeLookupDefaultPool returns the deterministic default pool for one narrow E2E config.
+func routeLookupDefaultPool(cfg config.Config) string {
+	if _, ok := cfg.Director.BackendPools[e2eBackendPool]; ok {
+		return e2eBackendPool
+	}
+	if _, ok := cfg.Director.BackendPools[e2eSieveBackendPool]; ok {
+		return e2eSieveBackendPool
+	}
+
+	names := make([]string, 0, len(cfg.Director.BackendPools))
+	for name := range cfg.Director.BackendPools {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	if len(names) == 0 {
+		return ""
+	}
+
+	return names[0]
 }
 
 type deniedProtectedConfigAuthorizer struct{}
@@ -2649,11 +3137,25 @@ func mustRuntimeSelector(t *testing.T, cfg config.Config, snapshots backend.Runt
 func lookupRoute(t *testing.T, baseURL string, userKey string, includeAffinity bool) generated.RouteLookupResponse {
 	t.Helper()
 
-	listenerName := e2eListenerName
+	return lookupRouteFor(t, baseURL, e2eProtocol, e2eListenerName, userKey, includeAffinity)
+}
+
+// lookupRouteFor posts one public route lookup request for an explicit protocol and listener.
+func lookupRouteFor(
+	t *testing.T,
+	baseURL string,
+	protocol string,
+	listener string,
+	userKey string,
+	includeAffinity bool,
+) generated.RouteLookupResponse {
+	t.Helper()
+
+	listenerName := listener
 	body := generated.LookupRouteJSONRequestBody{
 		IncludeAffinity: &includeAffinity,
 		Listener:        &listenerName,
-		Protocol:        e2eProtocol,
+		Protocol:        protocol,
 		UserKey:         &userKey,
 	}
 

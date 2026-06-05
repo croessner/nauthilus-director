@@ -4,16 +4,16 @@ This stack is a runnable integration playground for the production Director path
 
 ## Topology
 
-- HAProxy publishes SMTP, IMAP, IMAPS and LMTPS on host ports.
+- HAProxy publishes SMTP, IMAP, IMAPS, LMTPS, Sieve and Sieve-over-TLS on host ports.
 - SMTP is handled by HAProxy and Postfix. Postfix relays accepted mail back through HAProxy over LMTPS to the two Director instances.
-- IMAP, IMAPS and LMTPS traffic from HAProxy to the Directors uses the PROXY protocol.
+- IMAP, IMAPS, LMTPS, Sieve and Sieve-over-TLS traffic from HAProxy to the Directors uses the PROXY protocol.
 - The Directors own backend selection, health handling, affinity and metrics.
 - Nauthilus is intentionally lean in this stack: LDAP/cache identity, OpenLDAP-released `mailShard` routing facts and a small Lua environment hook only.
 - An internal HAProxy balances Director authority traffic across two Nauthilus instances.
 - The Directors authenticate through that internal HAProxy to the TLS-protected Nauthilus gRPC AuthService.
-- Three Dovecot 2.4 containers provide IMAPS and LMTPS backend shards. All three use OpenLDAP for passdb/userdb lookups.
-- `mailstore-c-imap` is intentionally wired with Director `master_user` backend auth; the other Dovecot IMAP shards use credential replay.
-- `mailstore-c` IMAP and LMTP are reached through internal HAProxy `accept-proxy` frontends, so that shard proves Director-to-backend outbound PROXY protocol while the other Dovecot shards keep the disabled path.
+- Three Dovecot 2.4 containers provide IMAPS, LMTPS and ManageSieve backend shards. All three use OpenLDAP for passdb/userdb lookups.
+- `mailstore-c-imap` is intentionally wired with Director `master_user` backend auth; the other Dovecot IMAP shards use credential replay. ManageSieve backends use Director `master_user` auth so script operations remain backend-owned without retaining frontend passwords.
+- `mailstore-c` IMAP, LMTP and ManageSieve are reached through internal HAProxy `accept-proxy` frontends, so that shard proves Director-to-backend outbound PROXY protocol while the other Dovecot shards keep the disabled path.
 - A FoundationDB-backed Stalwart pair provides an additional `stalwart` backend shard through demo IMAPS and LMTPS listeners.
 - The Stalwart instances share FoundationDB for data, blobs and search, and use the demo Valkey service for short-lived in-memory state and cluster coordination.
 - Stalwart is configured from the command line: `stalwart-configure` waits for both instances, applies `stalwart/bootstrap.ndjson` through `stalwart-cli`, and then enables the built-in user role for LDAP-backed accounts. No GUI is required or exposed on the host.
@@ -24,7 +24,7 @@ flowchart LR
     client["Mail client / smoke scripts"]
 
     subgraph ingress["Public ingress"]
-        haproxy["haproxy<br/>SMTP, IMAP, IMAPS, LMTPS<br/>mailstore-c accept-proxy"]
+        haproxy["haproxy<br/>SMTP, IMAP, IMAPS, LMTPS, Sieve, Sieve-over-TLS<br/>mailstore-c accept-proxy"]
         postfix["postfix<br/>SMTP relay"]
     end
 
@@ -61,8 +61,8 @@ flowchart LR
     client -->|"IMAP :8143 / IMAPS :8993"| haproxy
     haproxy -->|"SMTP"| postfix
     postfix -->|"LMTPS relay via haproxy :2465"| haproxy
-    haproxy -->|"PROXY protocol IMAP, IMAPS, LMTPS"| directorA
-    haproxy -->|"PROXY protocol IMAP, IMAPS, LMTPS"| directorB
+    haproxy -->|"PROXY protocol IMAP, IMAPS, LMTPS, Sieve, Sieve-over-TLS"| directorA
+    haproxy -->|"PROXY protocol IMAP, IMAPS, LMTPS, Sieve, Sieve-over-TLS"| directorB
 
     directorA -->|"AuthService gRPC TLS"| nauthilusProxy
     directorB -->|"AuthService gRPC TLS"| nauthilusProxy
@@ -76,12 +76,12 @@ flowchart LR
     nauthilusA -->|"cache"| valkey
     nauthilusB -->|"cache"| valkey
 
-    directorA -->|"IMAP / LMTP backend pools"| mailstoreA
-    directorA -->|"IMAP / LMTP backend pools"| mailstoreB
-    directorA -->|"IMAP / LMTP via outbound PROXY"| haproxy
-    directorB -->|"IMAP / LMTP backend pools"| mailstoreA
-    directorB -->|"IMAP / LMTP backend pools"| mailstoreB
-    directorB -->|"IMAP / LMTP via outbound PROXY"| haproxy
+    directorA -->|"IMAP / LMTP / ManageSieve backend pools"| mailstoreA
+    directorA -->|"IMAP / LMTP / ManageSieve backend pools"| mailstoreB
+    directorA -->|"IMAP / LMTP / ManageSieve via outbound PROXY"| haproxy
+    directorB -->|"IMAP / LMTP / ManageSieve backend pools"| mailstoreA
+    directorB -->|"IMAP / LMTP / ManageSieve backend pools"| mailstoreB
+    directorB -->|"IMAP / LMTP / ManageSieve via outbound PROXY"| haproxy
     haproxy -->|"accept-proxy backend path"| mailstoreC
     mailstoreA -->|"LDAP passdb / userdb"| openldap
     mailstoreB -->|"LDAP passdb / userdb"| openldap
@@ -140,9 +140,10 @@ Docker build cache unless the Stalwart build context or Dockerfile changes.
 
 The official Dovecot image ships with a static test passdb. This demo replaces
 that with `dovecot/auth.conf`, which binds Dovecot to OpenLDAP for user
-authentication and LMTP recipient lookup. `mailstore-c-imap` uses the Director
+authentication, LMTP recipient lookup and ManageSieve login. `mailstore-c-imap` uses the Director
 master user `nauthilus-director` with `DOVECOT_MASTER_PASSWORD`; `mailstore-a`
-and `mailstore-b` keep the credential-replay path.
+and `mailstore-b` keep the IMAP credential-replay path. ManageSieve backends
+use the same Dovecot master-user identity on all three shards.
 
 The Stalwart LMTPS listener is used only as an internal backend in this demo.
 Its bootstrap plan allows unauthenticated internal LMTP delivery on that
@@ -160,6 +161,8 @@ Useful host ports:
 | IMAP through HAProxy/Director | `8143` |
 | IMAPS through HAProxy/Director | `8993` |
 | LMTPS through HAProxy/Director | `8024` |
+| Sieve STARTTLS through HAProxy/Director | `4190` |
+| Sieve-over-TLS through HAProxy/Director | `8490` |
 | HAProxy stats | `8404` |
 | Director A control API | `9090` |
 | Director B control API | `9091` |
@@ -179,6 +182,7 @@ The demo also includes public-boundary affinity proofs:
 ```bash
 ./scripts/prove-affinity.sh
 ./scripts/prove-backend-proxy.sh
+./scripts/prove-managesieve.sh
 ./scripts/prove-user-backend-pin.sh
 ./scripts/prove-user-hold.sh
 ```
@@ -191,6 +195,11 @@ Director control API that all IMAP sessions stay on the same backend.
 repeats the same public IMAPS plus SMTP/LMTP proof through the demo HAProxy
 `accept-proxy` path. Without Director outbound PROXY protocol, that shard's
 IMAP and LMTP backend connections cannot complete.
+`prove-managesieve.sh` authenticates `alice@example.test` through the public
+Sieve STARTTLS and Sieve-over-TLS ports, then proves `LISTSCRIPTS`,
+`PUTSCRIPT`, `SETACTIVE` and `GETSCRIPT` through the real Dovecot
+ManageSieve backend while checking that route lookup does not expose script
+material.
 `prove-user-backend-pin.sh` sets a runtime backend pin for `dave@example.test`
 to `mailstore-a-imap`, repeats the same IMAPS plus SMTP/LMTP proof, and clears
 the pin afterwards. Set `DEMO_KEEP_BACKEND_PIN=1` to leave the runtime pin in

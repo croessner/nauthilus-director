@@ -32,6 +32,7 @@ import (
 	"github.com/croessner/nauthilus-director/internal/placement"
 	"github.com/croessner/nauthilus-director/internal/protocol/imap"
 	"github.com/croessner/nauthilus-director/internal/protocol/lmtp"
+	"github.com/croessner/nauthilus-director/internal/protocol/sieve"
 	"github.com/croessner/nauthilus-director/internal/proxy"
 	"github.com/croessner/nauthilus-director/internal/rest"
 	"github.com/croessner/nauthilus-director/internal/rest/adapters"
@@ -43,8 +44,9 @@ import (
 )
 
 const (
-	protocolIMAP = "imap"
-	protocolLMTP = "lmtp"
+	protocolIMAP  = "imap"
+	protocolLMTP  = "lmtp"
+	protocolSIEVE = "sieve"
 )
 
 // Options configures one production server process instance.
@@ -83,8 +85,9 @@ type reaperHandle struct {
 }
 
 type protocolHealthChecker struct {
-	imap backend.HealthChecker
-	lmtp backend.HealthChecker
+	imap  backend.HealthChecker
+	lmtp  backend.HealthChecker
+	sieve backend.HealthChecker
 }
 
 type backendCapabilityReader interface {
@@ -98,6 +101,8 @@ func (c protocolHealthChecker) CheckBackend(ctx context.Context, target backend.
 		return c.imap.CheckBackend(ctx, target, request)
 	case protocolLMTP:
 		return c.lmtp.CheckBackend(ctx, target, request)
+	case protocolSIEVE:
+		return c.sieve.CheckBackend(ctx, target, request)
 	default:
 		return backend.HealthCheckResult{ReasonClass: "protocol"}
 	}
@@ -265,6 +270,7 @@ func provideLocalSessionRegistry() *runtimectl.LocalSessionRegistry {
 // provideListenerManager creates public protocol listeners with production handlers.
 func provideListenerManager(
 	cfg config.Config,
+	options runtimeOptions,
 	resolver routing.RoutingResolver,
 	store *state.RedisSessionStore,
 	selector *backend.RuntimeSelector,
@@ -277,7 +283,17 @@ func provideListenerManager(
 		cfg,
 		listener.WithLocalSessionRegistry(localSessions),
 		listener.WithObservabilityRecorder(recorder),
-		listener.WithSessionHandlerFactory(sessionHandlerFactory(resolver, store, selector, selector, placementService, backendRetentionTTL(cfg), userHolds, recorder)),
+		listener.WithSessionHandlerFactory(sessionHandlerFactory(
+			resolver,
+			store,
+			selector,
+			selector,
+			placementService,
+			backendRetentionTTL(cfg),
+			userHolds,
+			recorder,
+			options.Version,
+		)),
 	)
 }
 
@@ -534,6 +550,7 @@ func sessionHandlerFactory(
 	retentionTTL time.Duration,
 	placementGate runtimectl.PlacementGate,
 	recorder observability.Recorder,
+	processVersion string,
 ) listener.SessionHandlerFactory {
 	return func(options listener.SessionOptions) listener.SessionHandler {
 		switch strings.ToLower(strings.TrimSpace(options.Config.Protocol)) {
@@ -541,6 +558,8 @@ func sessionHandlerFactory(
 			return imapSessionHandler(options, resolver, store, placementService, retentionTTL, placementGate, recorder)
 		case protocolLMTP:
 			return lmtpSessionHandler(options, resolver, store, selector, capabilities, placementService, retentionTTL, placementGate)
+		case protocolSIEVE:
+			return sieveSessionHandler(options, resolver, placementService, retentionTTL, placementGate, processVersion)
 		default:
 			return unsupportedProtocolHandler{protocol: options.Config.Protocol}
 		}
@@ -675,6 +694,64 @@ func lmtpSessionHandler(
 			SatisfiesRequired: peerAuth.MTLS.SatisfiesRequired,
 			IdentitySource:    peerAuth.MTLS.IdentitySource,
 		},
+	})
+}
+
+// sieveSessionHandler builds the ManageSieve pre-auth and placement boundary.
+func sieveSessionHandler(
+	options listener.SessionOptions,
+	resolver routing.RoutingResolver,
+	placementService placement.SessionPlacer,
+	retentionTTL time.Duration,
+	placementGate runtimectl.PlacementGate,
+	processVersion string,
+) listener.SessionHandler {
+	var (
+		authMechanisms []string
+		capabilities   = sieve.CapabilitiesConfig{
+			Implementation:  sieve.ImplementationCapability(processVersion),
+			ProtocolVersion: sieve.ProtocolVersionRFC5804,
+		}
+	)
+
+	if options.Config.Sieve != nil {
+		authMechanisms = options.Config.Sieve.AuthMechanisms
+		capabilities.ScriptExtensions = options.Config.Sieve.Capabilities.ScriptExtensions
+		capabilities.Language = options.Config.Sieve.Capabilities.Language
+	}
+
+	return sieve.NewHandler(sieve.SessionConfig{
+		ListenerName:           options.ListenerName,
+		AuthorityName:          options.Config.Authority,
+		AuthorityTransport:     options.AuthorityTransport,
+		ServiceName:            options.Config.ServiceName,
+		Network:                options.Config.Network,
+		BackendPool:            options.Config.BackendPool,
+		DirectorInstanceID:     options.DirectorInstanceID,
+		DefaultTenant:          options.DefaultTenant,
+		DefaultShard:           options.DefaultShard,
+		TLSMode:                options.Config.TLS.Mode,
+		AuthMechanisms:         authMechanisms,
+		Capabilities:           capabilities,
+		SessionLeaseTTL:        options.SessionLeaseTTL,
+		SessionIdleGrace:       options.SessionIdleGrace,
+		BackendRetentionTTL:    retentionTTL,
+		BackendConnectTimeout:  options.Timeouts.BackendConnect.Std(),
+		ProxyIdleTimeout:       options.Timeouts.ProxyIdle.Std(),
+		PreauthTimeout:         options.Timeouts.Preauth.Std(),
+		AuthTimeout:            options.Timeouts.Auth.Std(),
+		MaxPreauthLineBytes:    options.Security.MaxPreauthLineBytes,
+		MaxPreauthLiteralBytes: options.Security.MaxPreauthLiteralBytes,
+		MaxBearerTokenBytes:    options.BearerTokenMaxBytes,
+		FrontendTLSConfig:      options.FrontendTLSConfig,
+		Authenticator:          options.Authenticator,
+		RoutingResolver:        resolver,
+		PlacementService:       placementService,
+		PlacementGate:          placementGate,
+		BackendConnector:       sieve.NewTCPBackendConnector(nil),
+		ProxyRunner:            proxy.NewPipe(),
+		LocalSessions:          options.LocalSessions,
+		Observability:          options.Observability,
 	})
 }
 
@@ -894,8 +971,9 @@ func healthRunner(
 		registry,
 		store,
 		protocolHealthChecker{
-			imap: imap.NewHealthChecker(imap.NewTCPBackendConnector(nil)),
-			lmtp: lmtp.NewHealthChecker(lmtp.NewTCPBackendConnector(nil)),
+			imap:  imap.NewHealthChecker(imap.NewTCPBackendConnector(nil)),
+			lmtp:  lmtp.NewHealthChecker(lmtp.NewTCPBackendConnector(nil)),
+			sieve: sieve.NewHealthChecker(sieve.NewTCPBackendConnector(nil)),
 		},
 		backend.HealthRunnerConfig{
 			InstanceID: cfg.Runtime.InstanceName,

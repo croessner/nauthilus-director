@@ -28,6 +28,7 @@ import (
 const (
 	protocolIMAP                      = "imap"
 	protocolLMTP                      = "lmtp"
+	protocolSIEVE                     = "sieve"
 	selectorDefaultShard              = "default"
 	selectorRecipientHash             = "recipient_hash"
 	selectorRendezvousHash            = "rendezvous_hash"
@@ -245,7 +246,7 @@ func validateSelectionRequest(request SelectionRequest) error {
 func selectorSupportedForProtocol(selector string, protocol string) bool {
 	switch strings.TrimSpace(selector) {
 	case selectorRendezvousHash:
-		return protocol == protocolIMAP || protocol == protocolLMTP
+		return protocol == protocolIMAP || protocol == protocolLMTP || protocol == protocolSIEVE
 	case selectorRecipientHash:
 		return protocol == protocolLMTP
 	default:
@@ -256,7 +257,7 @@ func selectorSupportedForProtocol(selector string, protocol string) bool {
 // selectionProtocolSupported reports whether the selector knows the protocol.
 func selectionProtocolSupported(protocol string) bool {
 	switch protocol {
-	case protocolIMAP, protocolLMTP:
+	case protocolIMAP, protocolLMTP, protocolSIEVE:
 		return true
 	default:
 		return false

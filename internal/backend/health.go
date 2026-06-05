@@ -478,7 +478,7 @@ func (r *HealthRunner) checkBackend(ctx context.Context, candidate Backend) erro
 // healthSupportedProtocol reports whether a protocol has production health probes.
 func healthSupportedProtocol(protocol string) bool {
 	switch strings.ToLower(strings.TrimSpace(protocol)) {
-	case protocolIMAP, protocolLMTP:
+	case protocolIMAP, protocolLMTP, protocolSIEVE:
 		return true
 	default:
 		return false

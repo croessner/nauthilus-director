@@ -399,6 +399,70 @@ director:
           - SMTPUTF8
           - AUTH PLAIN LOGIN XOAUTH2 OAUTHBEARER
 
+    sieve:
+      protocol: sieve
+      service_name: sieve
+      network: tcp
+      address: "127.0.0.1:14190"
+      authority: default
+      backend_pool: sieve-default
+
+      proxy_protocol:
+        enabled: false
+        trusted_cidrs: []
+
+      tls:
+        mode: starttls
+        cert: /etc/nauthilus-director/sieve.crt
+        key: /etc/nauthilus-director/sieve.key
+        client_ca: ""
+        require_client_cert: false
+        min_tls_version: TLS1.2
+
+      sieve:
+        auth_mechanisms:
+          - plain
+          - xoauth2
+          - oauthbearer
+        capabilities:
+          # Operator-controlled capability facts are typed policy inputs. RFC
+          # 5804 IMPLEMENTATION and VERSION are internal protocol facts derived
+          # from the binary version and RFC compliance level.
+          script_extensions: []
+          language: en
+
+    sieves:
+      protocol: sieve
+      service_name: sieves
+      network: tcp
+      address: "127.0.0.1:14490"
+      authority: default
+      backend_pool: sieve-default
+
+      proxy_protocol:
+        enabled: false
+        trusted_cidrs: []
+
+      tls:
+        mode: implicit
+        cert: /etc/nauthilus-director/sieves.crt
+        key: /etc/nauthilus-director/sieves.key
+        client_ca: ""
+        require_client_cert: false
+        min_tls_version: TLS1.2
+
+      sieve:
+        auth_mechanisms:
+          - plain
+          - xoauth2
+          - oauthbearer
+        capabilities:
+          # The implicit TLS listener uses the same typed capability policy;
+          # runtime rendering can expose credential-bearing SASL only after TLS
+          # is already active on the frontend connection.
+          script_extensions: []
+          language: en
+
   routing:
     default_selector: rendezvous_hash
     default_shard: default
@@ -498,6 +562,13 @@ director:
       backends:
         - mailstore-a-lmtp
         - mailstore-b-lmtp
+
+    sieve-default:
+      protocol: sieve
+      selector: rendezvous_hash
+      backends:
+        - mailstore-a-sieve
+        - mailstore-b-sieve
 
   backends:
     mailstore-a-imap:
@@ -654,6 +725,86 @@ director:
         oauthbearer:
           token_file: /etc/nauthilus-director/lmtp-backend-token
           require_tls: true
+
+      health_check:
+        enabled: true
+        deep_check: true
+        username: healthcheck@example.org
+        password_file: /etc/nauthilus-director/mailstore-health-password
+
+    mailstore-a-sieve:
+      protocol: sieve
+      shard_tag: mailstore-a
+      backend_node: mailstore-a-node-1
+      address: "127.0.0.1:4190"
+      weight: 100
+      max_connections: 1000
+      maintenance: disabled
+
+      haproxy:
+        enabled: false
+
+      tls:
+        mode: starttls
+        ca_file: /etc/nauthilus-director/mailstore-ca.pem
+        server_name: mailstore-a.example.org
+        min_tls_version: TLS1.2
+        insecure_skip_verify: false
+
+      auth:
+        mode: master_user # master_user or credential_replay
+        master_user:
+          username: nauthilus-director
+          password_file: /etc/nauthilus-director/sieve-backend-master-password
+          user_format: "{user}*{master_user}"
+          mechanism: plain
+        credential_replay:
+          require_backend_tls: true
+          preserve_mechanism: true
+          allowed_mechanisms:
+            - plain
+            - xoauth2
+            - oauthbearer
+
+      health_check:
+        enabled: true
+        deep_check: true
+        username: healthcheck@example.org
+        password_file: /etc/nauthilus-director/mailstore-health-password
+
+    mailstore-b-sieve:
+      protocol: sieve
+      shard_tag: mailstore-b
+      backend_node: mailstore-b-node-1
+      address: "127.0.0.1:5190"
+      weight: 100
+      max_connections: 1000
+      maintenance: disabled
+
+      haproxy:
+        enabled: false
+
+      tls:
+        mode: starttls
+        ca_file: /etc/nauthilus-director/mailstore-ca.pem
+        server_name: mailstore-b.example.org
+        min_tls_version: TLS1.2
+        insecure_skip_verify: false
+
+      auth:
+        mode: master_user
+        master_user:
+          username: nauthilus-director
+          password_file: /etc/nauthilus-director/sieve-backend-master-password
+          user_format: "{user}*{master_user}"
+          mechanism: plain
+        credential_replay:
+          require_backend_tls: true
+          preserve_mechanism: true
+          allowed_mechanisms:
+            - plain
+            - xoauth2
+            - oauthbearer
 
       health_check:
         enabled: true

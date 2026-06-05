@@ -31,7 +31,9 @@ const (
 	placementAccountKey       = "alice@example.test"
 	placementBackendA         = "mailstore-a-imap"
 	placementBackendALMTP     = "mailstore-a-lmtp"
+	placementBackendASieve    = "mailstore-a-sieve"
 	placementBackendB         = "mailstore-b-imap"
+	placementBackendBSieve    = "mailstore-b-sieve"
 	placementBackendSameShard = "mailstore-a-other-imap"
 	placementNodeA            = "mailstore-a-node"
 	placementNodeB            = "mailstore-b-node"
@@ -40,6 +42,8 @@ const (
 	placementProtocol         = "imap"
 	placementShardA           = "mailstore-a"
 	placementShardB           = "mailstore-b"
+	placementSievePool        = "sieve-default"
+	placementSieveProtocol    = "sieve"
 	placementTenant           = "blue"
 )
 
@@ -221,6 +225,137 @@ func TestServiceReusesRetainedIMAPBindingForLMTPDelivery(t *testing.T) {
 
 	if got := lease.Binding().Source; got != BindingSourceRetainedBinding {
 		t.Fatalf("binding source = %q, want %q", got, BindingSourceRetainedBinding)
+	}
+}
+
+// TestServiceReusesActiveIMAPBindingForSieveSession verifies Sieve resolves bound IMAP nodes.
+func TestServiceReusesActiveIMAPBindingForSieveSession(t *testing.T) {
+	store := &placementStoreFixture{
+		affinity: state.AffinityRecord{
+			Key:                placementKey(),
+			ShardTag:           placementShardA,
+			BackendNode:        placementNodeA,
+			Status:             "found",
+			Present:            true,
+			BindingStatus:      state.BindingStatusActive,
+			ActiveSessionCount: 1,
+			ActiveHolderCount:  1,
+		},
+	}
+	selector := &placementSelectorFixture{registry: placementRegistryFixture()}
+	service := mustPlacementService(t, selector, store)
+
+	lease, err := service.PlaceSession(context.Background(), placementSieveRequest("sieve-from-imap", placementShardB))
+	if err != nil {
+		t.Fatalf("PlaceSession returned error: %v", err)
+	}
+
+	if selector.selectCalls != 0 || selector.nodeCalls != 1 {
+		t.Fatalf("selector calls select=%d node=%d, want node-only reuse", selector.selectCalls, selector.nodeCalls)
+	}
+
+	if lease.Backend().Backend.Identifier != placementBackendASieve {
+		t.Fatalf("selected backend = %q, want Sieve backend in active IMAP node", lease.Backend().Backend.Identifier)
+	}
+
+	if store.opened[0].Protocol != placementSieveProtocol || store.opened[0].BackendNode != placementNodeA {
+		t.Fatalf("opened Sieve session = %#v, want active IMAP backend node", store.opened[0])
+	}
+}
+
+// TestServiceReusesRetainedLMTPBindingForSieveSession verifies retained delivery nodes drive Sieve.
+func TestServiceReusesRetainedLMTPBindingForSieveSession(t *testing.T) {
+	store := &placementStoreFixture{
+		affinity: state.AffinityRecord{
+			Key:                placementKey(),
+			ShardTag:           placementShardA,
+			BackendNode:        placementNodeA,
+			Status:             "retained",
+			Present:            true,
+			BindingStatus:      state.BindingStatusRetained,
+			RetentionExpiresAt: time.Now().Add(time.Minute),
+		},
+	}
+	selector := &placementSelectorFixture{registry: placementRegistryFixture()}
+	service := mustPlacementService(t, selector, store)
+
+	lease, err := service.PlaceSession(context.Background(), placementSieveRequest("sieve-from-lmtp-retention", placementShardB))
+	if err != nil {
+		t.Fatalf("PlaceSession returned error: %v", err)
+	}
+
+	if selector.selectCalls != 0 || selector.nodeCalls != 1 {
+		t.Fatalf("selector calls select=%d node=%d, want retained node reuse", selector.selectCalls, selector.nodeCalls)
+	}
+
+	if lease.Backend().Backend.Identifier != placementBackendASieve {
+		t.Fatalf("selected backend = %q, want Sieve backend in retained LMTP node", lease.Backend().Backend.Identifier)
+	}
+
+	if got := lease.Binding().Source; got != BindingSourceRetainedBinding {
+		t.Fatalf("binding source = %q, want %q", got, BindingSourceRetainedBinding)
+	}
+}
+
+// TestServiceAppliesMatchingSieveBackendPin verifies Sieve pins stay protocol and pool scoped.
+func TestServiceAppliesMatchingSieveBackendPin(t *testing.T) {
+	store := &placementStoreFixture{
+		pin: state.UserBackendPinRecord{
+			Present:           true,
+			Key:               placementKey(),
+			BackendIdentifier: placementBackendBSieve,
+			Protocol:          placementSieveProtocol,
+			BackendPool:       placementSievePool,
+			ShardTag:          placementShardB,
+		},
+	}
+	selector := &placementSelectorFixture{registry: placementRegistryFixture()}
+	service := mustPlacementService(t, selector, store)
+
+	lease, err := service.PlaceSession(context.Background(), placementSieveRequest("sieve-pinned", placementShardB))
+	if err != nil {
+		t.Fatalf("PlaceSession returned error: %v", err)
+	}
+
+	if selector.lastSelect.OperatorBackendIdentifier != placementBackendBSieve {
+		t.Fatalf("operator backend = %q, want matching Sieve pin", selector.lastSelect.OperatorBackendIdentifier)
+	}
+
+	if lease.Backend().Backend.Identifier != placementBackendBSieve {
+		t.Fatalf("selected backend = %q, want pinned Sieve backend", lease.Backend().Backend.Identifier)
+	}
+
+	if got := lease.Binding().Source; got != BindingSourceOperatorBackendPin {
+		t.Fatalf("binding source = %q, want %q", got, BindingSourceOperatorBackendPin)
+	}
+}
+
+// TestServiceIgnoresCrossProtocolBackendPinForSieve verifies IMAP pins do not name Sieve targets.
+func TestServiceIgnoresCrossProtocolBackendPinForSieve(t *testing.T) {
+	store := &placementStoreFixture{
+		pin: state.UserBackendPinRecord{
+			Present:           true,
+			Key:               placementKey(),
+			BackendIdentifier: placementBackendA,
+			Protocol:          placementProtocol,
+			BackendPool:       placementPool,
+			ShardTag:          placementShardA,
+		},
+	}
+	selector := &placementSelectorFixture{registry: placementRegistryFixture()}
+	service := mustPlacementService(t, selector, store)
+
+	lease, err := service.PlaceSession(context.Background(), placementSieveRequest("sieve-cross-pin", placementShardA))
+	if err != nil {
+		t.Fatalf("PlaceSession returned error: %v", err)
+	}
+
+	if selector.lastSelect.OperatorBackendIdentifier != "" {
+		t.Fatalf("operator backend = %q, want cross-protocol pin ignored", selector.lastSelect.OperatorBackendIdentifier)
+	}
+
+	if lease.Backend().Backend.Identifier != placementBackendASieve {
+		t.Fatalf("selected backend = %q, want normal Sieve backend", lease.Backend().Backend.Identifier)
 	}
 }
 
@@ -424,6 +559,17 @@ func placementDeliveryRequest(sessionID string, shardTag string) DeliveryRequest
 	return request
 }
 
+// placementSieveRequest creates one complete ManageSieve session placement request fixture.
+func placementSieveRequest(sessionID string, shardTag string) Request {
+	request := placementRequest(sessionID, shardTag)
+	request.Protocol = placementSieveProtocol
+	request.BackendPool = placementSievePool
+	request.ListenerName = "sieve"
+	request.ServiceName = "sieve"
+
+	return request
+}
+
 // placementKey returns the stable user-affinity key used by unit tests.
 func placementKey() state.AffinityKey {
 	return state.AffinityKey{Tenant: placementTenant, AccountKey: placementAccountKey}
@@ -433,9 +579,11 @@ func placementKey() state.AffinityKey {
 func placementRegistryFixture() *placementRegistry {
 	return &placementRegistry{
 		backends: map[string]backend.Backend{
-			placementBackendA:     placementBackend(placementBackendA, placementNodeA, placementShardA),
-			placementBackendALMTP: placementBackendWithProtocol(placementBackendALMTP, placementNodeA, placementShardA, "lmtp", "lmtp-default"),
-			placementBackendB:     placementBackend(placementBackendB, placementNodeB, placementShardB),
+			placementBackendA:      placementBackend(placementBackendA, placementNodeA, placementShardA),
+			placementBackendALMTP:  placementBackendWithProtocol(placementBackendALMTP, placementNodeA, placementShardA, "lmtp", "lmtp-default"),
+			placementBackendASieve: placementBackendWithProtocol(placementBackendASieve, placementNodeA, placementShardA, placementSieveProtocol, placementSievePool),
+			placementBackendB:      placementBackend(placementBackendB, placementNodeB, placementShardB),
+			placementBackendBSieve: placementBackendWithProtocol(placementBackendBSieve, placementNodeB, placementShardB, placementSieveProtocol, placementSievePool),
 		},
 	}
 }
@@ -616,6 +764,15 @@ type placementSelectorFixture struct {
 func (s *placementSelectorFixture) Select(_ context.Context, request backend.SelectionRequest) (backend.SelectionResult, error) {
 	s.selectCalls++
 	s.lastSelect = request
+
+	if request.OperatorBackendIdentifier != "" {
+		selected, err := s.registry.Lookup(context.Background(), request.OperatorBackendIdentifier)
+		if err != nil {
+			return backend.SelectionResult{}, err
+		}
+
+		return placementSelectionResult(selected, backend.SelectionReasonOperatorBackendPin), nil
+	}
 
 	backends, err := s.registry.BackendsForShard(context.Background(), backend.RegistryRequest{
 		Protocol:    request.Protocol,

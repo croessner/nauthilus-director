@@ -271,17 +271,24 @@ func validateDirector(director DirectorConfig, authorities map[string]AuthorityC
 
 	for name, listener := range director.Listeners {
 		path := "director.listeners." + name
-		if _, ok := authorities[listener.Authority]; !ok {
+		authority, authorityOK := authorities[listener.Authority]
+		if !authorityOK {
 			addProblem(problems, path+".authority references unknown authority "+listener.Authority)
 		}
-		if _, ok := director.BackendPools[listener.BackendPool]; !ok {
+
+		pool, poolOK := director.BackendPools[listener.BackendPool]
+		if !poolOK {
 			addProblem(problems, path+".backend_pool references unknown pool "+listener.BackendPool)
+		} else if !strings.EqualFold(strings.TrimSpace(listener.Protocol), strings.TrimSpace(pool.Protocol)) {
+			addProblem(problems, path+".backend_pool references pool with different protocol "+listener.BackendPool)
 		}
+
 		switch listener.Protocol {
 		case protocolIMAP:
 		case protocolLMTP:
+		case protocolSIEVE:
 		default:
-			addProblem(problems, path+".protocol must be imap or lmtp")
+			addProblem(problems, path+".protocol must be imap, lmtp, or sieve")
 		}
 
 		if listener.Protocol == protocolIMAP && listener.IMAP == nil {
@@ -296,8 +303,24 @@ func validateDirector(director DirectorConfig, authorities map[string]AuthorityC
 		if listener.Protocol == protocolLMTP && listener.LMTP != nil {
 			validateLMTPListener(path+".lmtp", listener, authorities, problems)
 		}
+		if listener.Protocol == protocolSIEVE && listener.Sieve == nil {
+			addProblem(problems, path+".sieve is required for sieve listeners")
+		}
+		if listener.Protocol == protocolSIEVE {
+			if listener.IMAP != nil {
+				addProblem(problems, path+".imap must not be set for sieve listeners")
+			}
+			if listener.LMTP != nil {
+				addProblem(problems, path+".lmtp must not be set for sieve listeners")
+			}
+			if listener.Sieve != nil {
+				validateSieveListener(path+".sieve", listener, authority, authorityOK, problems)
+			}
+		}
 		if strings.TrimSpace(listener.TLS.Mode) == "" {
 			addProblem(problems, path+".tls.mode is required")
+		} else if !validListenerTLSMode(listener.TLS.Mode) {
+			addProblem(problems, path+".tls.mode must be starttls or implicit")
 		}
 		if listener.ProxyProtocol.Enabled {
 			if len(listener.ProxyProtocol.TrustedCIDRs) == 0 {
@@ -413,17 +436,21 @@ func validateBackendPool(path string, pool BackendPoolConfig, problems *[]string
 		if strings.ToLower(strings.TrimSpace(pool.Selector)) != "recipient_hash" {
 			addProblem(problems, path+".selector for LMTP pools must be recipient_hash")
 		}
+	case protocolSIEVE:
+		if strings.ToLower(strings.TrimSpace(pool.Selector)) != "rendezvous_hash" {
+			addProblem(problems, path+".selector for Sieve pools must be rendezvous_hash")
+		}
 	default:
-		addProblem(problems, path+".protocol must be imap or lmtp")
+		addProblem(problems, path+".protocol must be imap, lmtp, or sieve")
 	}
 }
 
 // validateBackendProtocol rejects backend protocols without production support.
 func validateBackendProtocol(path string, protocol string, problems *[]string) {
 	switch strings.ToLower(strings.TrimSpace(protocol)) {
-	case protocolIMAP, protocolLMTP:
+	case protocolIMAP, protocolLMTP, protocolSIEVE:
 	default:
-		addProblem(problems, path+".protocol must be imap or lmtp")
+		addProblem(problems, path+".protocol must be imap, lmtp, or sieve")
 	}
 }
 
@@ -601,6 +628,121 @@ func validLMTPMTLSIdentitySource(source string) bool {
 	}
 }
 
+// validateSieveListener rejects unsafe ManageSieve pre-auth and capability policy.
+func validateSieveListener(path string, listener ListenerConfig, authority AuthorityConfig, authorityKnown bool, problems *[]string) {
+	sieve := listener.Sieve
+	if sieve == nil {
+		addProblem(problems, path+" is required for sieve listeners")
+
+		return
+	}
+
+	if len(sieve.AuthMechanisms) == 0 {
+		addProblem(problems, path+".auth_mechanisms is required")
+	}
+
+	if len(sieve.AuthMechanisms) > 0 && !listenerTLSProtectsCredentialAuth(listener.TLS.Mode) {
+		addProblem(problems, path+".auth_mechanisms requires frontend TLS mode starttls or implicit")
+	}
+
+	for _, mechanism := range sieve.AuthMechanisms {
+		if !validSieveAuthMechanism(mechanism) {
+			addProblem(problems, path+".auth_mechanisms contains unsupported mechanism "+mechanism)
+
+			continue
+		}
+
+		if authorityKnown && !sieveMechanismSupportedByAuthority(mechanism, authority) {
+			addProblem(problems, path+".auth_mechanisms contains mechanism not supported by authority "+mechanism)
+		}
+	}
+
+	validateSieveCapabilities(path+".capabilities", sieve.Capabilities, problems)
+}
+
+// validateSieveCapabilities keeps ManageSieve facts typed rather than transcript-shaped.
+func validateSieveCapabilities(path string, capabilities SieveCapabilitiesConfig, problems *[]string) {
+	for _, extension := range capabilities.ScriptExtensions {
+		if !validSieveCapabilityToken(extension) {
+			addProblem(problems, path+".script_extensions contains malformed extension "+extension)
+		}
+	}
+
+	if !validSieveCapabilityToken(capabilities.Language) {
+		addProblem(problems, path+".language must be a non-empty safe language tag")
+	}
+}
+
+// validListenerTLSMode reports whether the shared listener lifecycle can enforce this TLS mode.
+func validListenerTLSMode(mode string) bool {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "starttls", "implicit":
+		return true
+	default:
+		return false
+	}
+}
+
+// listenerTLSProtectsCredentialAuth reports whether credential-bearing SASL can be gated by TLS.
+func listenerTLSProtectsCredentialAuth(mode string) bool {
+	return validListenerTLSMode(mode)
+}
+
+// validSieveAuthMechanism reports whether ManageSieve frontend auth can accept this mechanism shape.
+func validSieveAuthMechanism(mechanism string) bool {
+	switch strings.ToUpper(strings.TrimSpace(mechanism)) {
+	case "PLAIN", "XOAUTH2", "OAUTHBEARER":
+		return true
+	default:
+		return false
+	}
+}
+
+// sieveMechanismSupportedByAuthority checks the selected authority mechanism class.
+func sieveMechanismSupportedByAuthority(mechanism string, authority AuthorityConfig) bool {
+	mechanism = strings.ToLower(strings.TrimSpace(mechanism))
+	switch mechanism {
+	case "plain":
+		return authority.Mechanisms.Password.Enabled && containsFold(authority.Mechanisms.Password.Names, mechanism)
+	case "xoauth2", "oauthbearer":
+		return authority.Mechanisms.Bearer.Enabled && containsFold(authority.Mechanisms.Bearer.Names, mechanism)
+	default:
+		return false
+	}
+}
+
+// validSieveCapabilityToken accepts extension and language tokens without wire syntax.
+func validSieveCapabilityToken(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return false
+	}
+
+	for _, char := range value {
+		switch {
+		case char >= 'a' && char <= 'z':
+		case char >= 'A' && char <= 'Z':
+		case char >= '0' && char <= '9':
+		case char == '-' || char == '_' || char == '.':
+		default:
+			return false
+		}
+	}
+
+	return true
+}
+
+// containsFold reports whether a string list contains a case-insensitive match.
+func containsFold(values []string, needle string) bool {
+	for _, value := range values {
+		if strings.EqualFold(strings.TrimSpace(value), strings.TrimSpace(needle)) {
+			return true
+		}
+	}
+
+	return false
+}
+
 // validateBackendAddress keeps protocol backend transports TCP-only.
 func validateBackendAddress(path string, address string, problems *[]string) {
 	address = strings.TrimSpace(address)
@@ -626,11 +768,11 @@ func validateBackendAddress(path string, address string, problems *[]string) {
 func validateBackendTLS(path string, address string, tlsConfig BackendTLSConfig, problems *[]string) {
 	mode := strings.ToLower(strings.TrimSpace(tlsConfig.Mode))
 	switch mode {
-	case "disabled", "plaintext":
+	case "disabled", "none", "plaintext":
 		return
 	case "starttls", "implicit":
 	default:
-		addProblem(problems, path+".mode must be disabled, plaintext, starttls, or implicit")
+		addProblem(problems, path+".mode must be disabled, none, plaintext, starttls, or implicit")
 
 		return
 	}
@@ -678,12 +820,21 @@ func validateBackendAuth(path string, backend BackendConfig, problems *[]string)
 			return
 		}
 	}
+	if protocol == protocolSIEVE {
+		switch mode {
+		case backendAuthModeMasterUser, backendAuthModeCredentialReplay:
+		default:
+			addProblem(problems, path+".mode for Sieve backends must be master_user or credential_replay")
+
+			return
+		}
+	}
 
 	switch mode {
 	case backendAuthModeMasterUser:
 		validateMasterUserAuth(path+".master_user", backend.Auth.MasterUser, problems)
 	case backendAuthModeCredentialReplay:
-		validateCredentialReplayAuth(path+".credential_replay", backend.Auth.CredentialReplay, problems)
+		validateCredentialReplayAuth(path+".credential_replay", backend, problems)
 	case backendAuthModeSASL:
 		validateSASLBackendAuth(path+".sasl", backend, problems)
 	case backendAuthModeOAuthBearer:
@@ -755,13 +906,24 @@ func validateMasterUserAuth(path string, masterUser BackendMasterUserConfig, pro
 }
 
 // validateCredentialReplayAuth checks replay allowlists before runtime can use credentials.
-func validateCredentialReplayAuth(path string, replay BackendCredentialReplayConfig, problems *[]string) {
+func validateCredentialReplayAuth(path string, backend BackendConfig, problems *[]string) {
+	replay := backend.Auth.CredentialReplay
 	if len(replay.AllowedMechanisms) == 0 {
 		addProblem(problems, path+".allowed_mechanisms is required in credential_replay mode")
 	}
 	for _, mechanism := range replay.AllowedMechanisms {
 		if !validBackendReplayMechanism(mechanism) {
 			addProblem(problems, path+".allowed_mechanisms contains unsupported mechanism "+mechanism)
+		}
+	}
+
+	if strings.EqualFold(strings.TrimSpace(backend.Protocol), protocolSIEVE) {
+		if !replay.RequireBackendTLS {
+			addProblem(problems, path+".require_backend_tls must be true for sieve credential_replay")
+		}
+
+		if !backendTLSCanVerify(backend.TLS) {
+			addProblem(problems, path+" requires verified backend TLS")
 		}
 	}
 }

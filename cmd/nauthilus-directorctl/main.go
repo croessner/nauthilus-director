@@ -3043,8 +3043,8 @@ func parseRouteAttributes(values []string) (*map[string][]string, error) {
 		if !ok || key == "" {
 			return nil, fmt.Errorf("route lookup attributes must use k=v syntax")
 		}
-		if credentialBearingName(key) {
-			return nil, fmt.Errorf("route lookup does not accept credential-bearing attributes")
+		if forbiddenRouteLookupAttributeName(key) {
+			return nil, fmt.Errorf("route lookup does not accept credential- or script-bearing attributes")
 		}
 		attributes[key] = append(attributes[key], value)
 	}
@@ -3052,10 +3052,10 @@ func parseRouteAttributes(values []string) (*map[string][]string, error) {
 	return &attributes, nil
 }
 
-// credentialBearingName reports whether a route attribute name could carry secrets.
-func credentialBearingName(name string) bool {
+// forbiddenRouteLookupAttributeName reports whether a route attribute name could carry forbidden material.
+func forbiddenRouteLookupAttributeName(name string) bool {
 	lower := strings.ToLower(name)
-	for _, marker := range []string{"password", "passwd", "secret", "token", "bearer", "credential", "sasl", "oauth"} {
+	for _, marker := range []string{"password", "passwd", "secret", "token", "bearer", "credential", "sasl", "oauth", "script"} {
 		if strings.Contains(lower, marker) {
 			return true
 		}

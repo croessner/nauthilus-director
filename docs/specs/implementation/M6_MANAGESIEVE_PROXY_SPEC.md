@@ -1,6 +1,9 @@
 # M6 ManageSieve Proxy Specification
 
-Status: implementation-ready M6 specification
+Status: completed. The ManageSieve proxy implementation, deterministic
+fake-service E2E coverage, real Dovecot ManageSieve interoperability,
+demo-stack operator proof and final review pass are in place. `make guardrails`
+and `make e2e-interop` passed on 2026-06-05.
 
 This document defines the ManageSieve milestone for `nauthilus-director`. M6
 adds a production-ready ManageSieve proxy entrypoint within the explicit scope
@@ -300,6 +303,7 @@ internal/app/
 internal/config/
 internal/nauthilus/
 internal/routing/
+internal/placement/
 internal/backend/
 internal/state/
 internal/runtime/
@@ -330,8 +334,16 @@ Boundary rules:
   not select director backends.
 - `internal/routing` owns logical user-to-shard facts only. It must not open
   Redis sessions, select backends or log raw usernames.
+- `internal/placement` owns cross-protocol backend-node placement, active and
+  retained binding reuse, backend-pin evaluation, holder open/rollback and
+  capacity attachment for user-stateful sessions. ManageSieve must consume the
+  narrow `placement.SessionPlacer` API instead of composing Redis state,
+  backend selectors and backend pins inside `internal/protocol/sieve`.
 - `internal/backend` owns ManageSieve-capable registry and selector behavior,
-  effective backend state, health policy and backend runtime constraints.
+  effective backend state, health policy, backend runtime constraints and the
+  shared outbound backend transport preface. ManageSieve backend connectors
+  must use the existing `backend.ConnectRequest` and shared transport reason
+  classes rather than defining protocol-local transport metadata.
 - `internal/state` owns Redis-backed active affinity, session leases, backend
   runtime counts and user runtime state.
 - `internal/runtime` exposes side-effect-free diagnostics and runtime controls
@@ -346,7 +358,12 @@ Boundary rules:
 
 Do not add package-level mutable global state. Use cohesive types and narrow
 interfaces so unit tests can exercise parser, auth, placement and backend
-handoff behavior without starting the full application.
+handoff behavior without starting the full application. Where IMAP and LMTP
+already share a production boundary, M6 must extend that boundary for
+`protocol=sieve` instead of creating a ManageSieve-specific copy. This applies
+to listener dispatch, auth context construction, routing resolver input,
+placement, backend-node selection, outbound backend PROXY handling, route
+lookup, session runtime state and transparent proxy lifecycle.
 
 ## M6.1 Config, Validation and Protocol Listener Dispatch
 
@@ -407,6 +424,9 @@ docs/man/nauthilus-director.yaml.5
 
 - Reuse the shared listener config fields. Do not create a parallel
   ManageSieve listener model.
+- Extend the existing listener manager and application `SessionHandlerFactory`
+  dispatch for `protocol=sieve`. Do not add a second listener manager, accept
+  loop, TCP/TLS setup path or PROXY-protocol trust boundary for ManageSieve.
 - The default `sieve` listener should use STARTTLS mode. The default `sieves`
   listener should use implicit TLS mode if enabled in defaults.
 - Capability config should express stable facts, not raw wire lines. Rendering
@@ -428,6 +448,9 @@ docs/man/nauthilus-director.yaml.5
 - Config validation rejects `credential_replay` without verified backend TLS.
 - Generated config references include all stable M6 paths and protected
   metadata for credential-bearing paths.
+- Listener manager tests prove `imap`, `lmtp` and `sieve` are selected through
+  the same supported-protocol path and that unsupported protocol values still
+  fail closed before sockets bind.
 
 ### Required Integration or E2E Tests
 
@@ -530,6 +553,11 @@ internal/protocol/sieve/*_test.go
 - Do not use human-readable response text as program semantics. Tests should
   assert bounded response code and result classes.
 - The SASL service name for auth context is `sieve`.
+- If SASL envelope parsing, secret wrappers or Nauthilus auth-context mapping
+  overlaps with IMAP or LMTP, extract the shared behavior into a narrow
+  protocol-neutral package or helper boundary. `internal/protocol/sieve` must
+  not import IMAP or LMTP internals and must not copy their auth pipeline when a
+  shared abstraction already exists or can be introduced cleanly.
 - A failed `AUTHENTICATE` may allow another auth attempt within pre-auth
   attempt limits. A successful `AUTHENTICATE` transitions to backend placement
   and then proxy mode; re-authentication is backend-owned only after proxy mode.
@@ -629,6 +657,7 @@ backend-node affinity, backend pins and runtime-aware selection.
 
 ```text
 internal/protocol/sieve/placement.go
+internal/placement/
 internal/runtime/users.go
 internal/state/
 internal/backend/
@@ -643,15 +672,27 @@ test/e2e/
   protocol-specific hold implementation.
 - The placement gate request must use `Protocol: "sieve"` plus the listener and
   service names from the frontend session context.
+- After the hold gate releases, call `placement.SessionPlacer.PlaceSession`
+  with a `placement.SessionRequest` carrying `Protocol: "sieve"`, the
+  listener/service names, backend pool, normalized affinity key, lease TTL,
+  idle grace, backend-retention TTL and director instance ID. The protocol
+  package must not directly call `state.OpenSession`, `state.LookupAffinity`,
+  `state.GetUserBackendPin`, `backend.Select`, `backend.SelectInBackendNode`,
+  `state.ReserveBackendCapacity` or Redis Lua scripts for normal placement.
 - ManageSieve session records should use the same normalized affinity key model
   as IMAP. Raw usernames must not be Redis key material.
 - If active or retained affinity already exists for the user, it chooses the
   backend node. The ManageSieve selector then resolves that backend node to a
-  protocol-specific `sieve` backend entry.
+  protocol-specific `sieve` backend entry through the shared placement service
+  and runtime-aware backend-node selector.
 - If a backend pin is present for another protocol or backend pool, report the
   mismatch in route lookup but ignore it for live placement.
 - If a matching backend pin names an unusable backend, fail closed. Do not
   silently select another backend.
+- Placement rollback is owned by the placement lease lifecycle. The
+  ManageSieve protocol code may close the returned lease on later backend
+  connect/auth/proxy setup failure, but it must not try to repair affinity or
+  backend reservation state itself.
 
 ### Required Unit Tests
 
@@ -664,6 +705,8 @@ test/e2e/
 - Existing LMTP delivery-scoped active or retained affinity controls ManageSieve
   selected backend node.
 - ManageSieve opens and heartbeats a visible user session after placement.
+- ManageSieve placement calls the shared `placement.SessionPlacer` once per
+  authenticated session and passes `Protocol: "sieve"` in the request.
 - Backend pins apply only for matching `protocol=sieve` and backend pool.
 - Cross-protocol backend pins do not name the concrete ManageSieve backend.
 - Matching backend pins bypass only `weight_zero` and fail closed for all other
@@ -695,6 +738,9 @@ test/e2e/
 
 - Verify frontend auth success cannot be returned before hold and backend
   readiness checks complete.
+- Verify `internal/protocol/sieve` does not reimplement placement by directly
+  composing Redis affinity, backend-pin reads, backend selection or backend
+  capacity reservations.
 - Verify raw usernames are not Redis keys or metric labels.
 - Verify backend-pin handling does not cross protocol or backend-pool scopes.
 - Verify failures clean up session and backend capacity state.
@@ -708,11 +754,19 @@ transport and authenticate or establish trust before frontend auth success.
 
 ### In Scope
 
-- Implement ManageSieve backend connect over TCP.
+- Implement ManageSieve backend connect over TCP through the same backend
+  connection request boundary used by IMAP and LMTP.
 - Support backend TLS modes:
   - `none`
   - `starttls`
   - `implicit`
+- Use `backend.ConnectRequest` for session and health connections, including
+  selected backend, timeout, connect purpose, observability and, for real
+  sessions, the effective frontend source/destination tuple needed for
+  backend-side PROXY protocol.
+- Emit outbound backend PROXY protocol through the shared `internal/backend`
+  transport helper before any ManageSieve backend greeting, STARTTLS or auth
+  bytes when the selected backend enables it.
 - Verify backend certificates by default when TLS is enabled.
 - Read backend greeting and capabilities without logging script extension lists
   as unbounded text.
@@ -729,6 +783,8 @@ transport and authenticate or establish trust before frontend auth success.
   response classes.
 - Implement ManageSieve backend deep health checks: connect, TLS/STARTTLS,
   greeting, `CAPABILITY`, configured health auth, optional `NOOP`, `LOGOUT`.
+- Integrate ManageSieve backend health by extending the existing health-runner
+  protocol checker dispatch. Do not add a separate ManageSieve health worker.
 - Keep health checks away from script-management commands.
 
 ### Out of Scope
@@ -746,6 +802,7 @@ internal/protocol/sieve/backend.go
 internal/protocol/sieve/backend_auth.go
 internal/protocol/sieve/health.go
 internal/backend/
+internal/backend/proxy_transport.go
 internal/config/
 internal/protocol/sieve/*_test.go
 ```
@@ -754,6 +811,10 @@ internal/protocol/sieve/*_test.go
 
 - Backend auth behavior should reuse IMAP user-stateful auth concepts where the
   protocol allows it, but keep ManageSieve wire syntax in `internal/protocol/sieve`.
+- Backend connection code may follow the IMAP and LMTP connector shape, but the
+  shared pieces must stay shared: request shape, outbound PROXY preface,
+  bounded transport reason classes, TLS verification policy and health purpose
+  handling.
 - Backend `credential_replay` extends the lifetime of user secrets and must
   remain opt-in.
 - Backend auth failure after Nauthilus success is a backend-readiness failure to
@@ -775,6 +836,10 @@ internal/protocol/sieve/*_test.go
 - `credential_replay` requires allowed mechanisms and verified TLS when
   configured.
 - Backend auth failure maps to safe temporary frontend failure text.
+- Session backend connect writes an outbound PROXY preface when configured and
+  uses the effective trusted frontend tuple as source/destination metadata.
+- Health backend connect uses `ConnectPurposeHealth`, does not require a
+  frontend tuple and reports the shared bounded transport reason classes.
 - Backend health checks stop before script-management commands.
 - Backend health does not log health username, password, script names or raw
   backend status text.
@@ -798,6 +863,8 @@ internal/protocol/sieve/*_test.go
 ### Review Checklist
 
 - Verify backend auth code does not share IMAP parser internals by accident.
+- Verify backend connect does not define a second outbound PROXY protocol
+  implementation or protocol-local transport reason vocabulary.
 - Verify credential replay cannot run over unverified plaintext by default.
 - Verify backend health cannot create, read, modify or delete scripts.
 
@@ -1141,6 +1208,31 @@ binding_expired
 - Verify script contents are not logged even in test failure paths.
 - Verify backend identifiers and backend nodes remain forbidden as metric labels.
 
+### Implementation Evidence (2026-06-05)
+
+- `internal/protocol/sieve/observability.go` records ManageSieve session,
+  capability, STARTTLS, AUTHENTICATE, Nauthilus auth, routing, user-hold,
+  affinity, backend select, backend connect/auth, session close and proxy
+  observations through the shared recorder.
+- `internal/protocol/sieve/session.go`, `auth.go`, `placement.go` and
+  `proxy.go` start the Sieve pre-auth span and reuse the existing session,
+  Nauthilus auth, routing, backend select, backend connect and proxy pipe trace
+  boundaries.
+- `internal/observability/events.go` and `prometheus.go` register
+  `sieve.pre_auth` on the existing bounded pre-auth metric family instead of
+  adding a protocol-specific metric model.
+- `internal/protocol/sieve/observability_test.go`,
+  `internal/observability/observability_test.go` and
+  `internal/observability/prometheus_test.go` verify the metric label
+  allowlist, bounded Sieve reason classes, Sieve pre-auth span naming and
+  redaction of raw usernames, script data, SASL blobs, bearer tokens, client
+  addresses and session IDs.
+- Sieve proxy and backend tests avoid printing post-auth command bodies, script
+  data, credentials, backend auth payloads or raw placement/auth context in
+  failure output.
+- Public `/metrics`, log and trace proof through real ManageSieve sockets
+  remains in M6.8, alongside the fake-service and real-backend interop lanes.
+
 ## M6.8 E2E, Interoperability, Documentation and Guardrails
 
 ### Purpose
@@ -1281,63 +1373,71 @@ Demo-stack proof should:
 
 M6 is complete only when all items below are true:
 
-- [ ] `sieve` and `sieves` listeners start from typed config through the
+- [x] `sieve` and `sieves` listeners start from typed config through the
       production server binary.
-- [ ] Listener dispatch supports IMAP, LMTP and ManageSieve without duplicating
+- [x] Listener dispatch supports IMAP, LMTP and ManageSieve without duplicating
       transport lifecycle behavior.
-- [ ] ManageSieve capability advertisement matches implemented behavior and RFC
+- [x] The application handler factory, listener manager, health-runner
+      protocol dispatch and route-lookup listener contexts are extended for
+      `protocol=sieve` instead of adding parallel ManageSieve lifecycle code.
+- [x] ManageSieve capability advertisement matches implemented behavior and RFC
       5804 framing.
-- [ ] `SIEVE`, `IMPLEMENTATION` and `VERSION` capabilities are present, and
+- [x] `SIEVE`, `IMPLEMENTATION` and `VERSION` capabilities are present, and
       pre-auth script extension advertisement is configured as a common
       backend-pool capability set.
-- [ ] STARTTLS and implicit TLS behavior are implemented and tested.
-- [ ] Credential-bearing SASL mechanisms require frontend TLS before
+- [x] STARTTLS and implicit TLS behavior are implemented and tested.
+- [x] Credential-bearing SASL mechanisms require frontend TLS before
       Nauthilus is called.
-- [ ] `AUTHENTICATE PLAIN`, `XOAUTH2` and `OAUTHBEARER` are authenticated
+- [x] `AUTHENTICATE PLAIN`, `XOAUTH2` and `OAUTHBEARER` are authenticated
       through Nauthilus when configured.
-- [ ] The Nauthilus auth request uses `protocol: sieve` and does not send a
+- [x] The Nauthilus auth request uses `protocol: sieve` and does not send a
       forbidden `service` body field.
-- [ ] Frontend auth success is returned only after Nauthilus auth, routing,
+- [x] Frontend auth success is returned only after Nauthilus auth, routing,
       hold gate, backend selection, backend connect and backend auth/trust all
       succeed.
-- [ ] ManageSieve checks user placement holds after authoritative auth and
+- [x] ManageSieve checks user placement holds after authoritative auth and
       routing facts, before backend selection or auth success.
-- [ ] Hold timeout returns a generic temporary failure and never falls back to
+- [x] Hold timeout returns a generic temporary failure and never falls back to
       the old backend.
-- [ ] ManageSieve placement consumes health, maintenance, runtime out, drain,
+- [x] ManageSieve placement consumes health, maintenance, runtime out, drain,
       weight, max-connection and backend-pin state.
-- [ ] Backend pins apply only when protocol, backend pool, selected shard and
+- [x] ManageSieve placement uses the shared `placement.SessionPlacer` /
+      `PlaceSession` boundary and does not directly compose Redis affinity,
+      backend-pin reads, backend selectors or backend reservations.
+- [x] Backend pins apply only when protocol, backend pool, selected shard and
       backend node match the ManageSieve placement request.
-- [ ] An IMAP, LMTP or later POP3 backend pin never names the concrete
+- [x] An IMAP, LMTP or later POP3 backend pin never names the concrete
       ManageSieve backend.
-- [ ] Existing IMAP active or retained affinity influences ManageSieve
+- [x] Existing IMAP active or retained affinity influences ManageSieve
       placement for the same account and backend node.
-- [ ] Existing LMTP delivery-scoped active or retained affinity influences
+- [x] Existing LMTP delivery-scoped active or retained affinity influences
       ManageSieve placement for the same account and backend node.
-- [ ] Active or retained ManageSieve sessions influence later user-stateful
+- [x] Active or retained ManageSieve sessions influence later user-stateful
       placement for the same account and backend node.
-- [ ] Backend ManageSieve connect, TLS, capability discovery and configured
+- [x] Backend ManageSieve connect, TLS, capability discovery and configured
       backend auth are implemented.
-- [ ] Backend deep health proves connect, TLS, greeting, `CAPABILITY`,
+- [x] ManageSieve backend session and health connects use `backend.ConnectRequest`
+      and the shared outbound backend PROXY transport/reason classes.
+- [x] Backend deep health proves connect, TLS, greeting, `CAPABILITY`,
       configured backend auth, optional `NOOP` and `LOGOUT` without script
       commands.
-- [ ] Post-auth ManageSieve traffic is transparent and opaque to the director.
-- [ ] Script names, script contents and post-auth command bodies are not logged,
+- [x] Post-auth ManageSieve traffic is transparent and opaque to the director.
+- [x] Script names, script contents and post-auth command bodies are not logged,
       traced, metric-labeled, stored or used for routing.
-- [ ] Route lookup supports `protocol: sieve` without credential auth, Redis
+- [x] Route lookup supports `protocol: sieve` without credential auth, Redis
       mutation, backend connect or script inspection.
-- [ ] ManageSieve metrics use only approved low-cardinality labels.
-- [ ] `make e2e` proves ManageSieve through public sockets, the production
+- [x] ManageSieve metrics use only approved low-cardinality labels.
+- [x] `make e2e` proves ManageSieve through public sockets, the production
       binary and cross-protocol active-affinity invariants.
-- [ ] `make e2e-interop` proves real Dovecot ManageSieve access through the
+- [x] `make e2e-interop` proves real Dovecot ManageSieve access through the
       director on a Docker-capable environment while preserving existing IMAP
       and LMTP lanes.
-- [ ] `contrib/demo-stack` carries M6 topology/config/proof updates and proves
+- [x] `contrib/demo-stack` carries M6 topology/config/proof updates and proves
       the final operator-facing ManageSieve path on a Docker/Compose-capable
       environment.
-- [ ] Config docs, generated references, OpenAPI artifacts and manpages are
+- [x] Config docs, generated references, OpenAPI artifacts and manpages are
       updated when behavior changes.
-- [ ] `make guardrails` is the final local gate before any commit or pull
+- [x] `make guardrails` is the final local gate before any commit or pull
       request that contains M6 implementation work.
 
 ## Required M6 Review Pass
@@ -1364,9 +1464,10 @@ Before closing M6, perform this review:
 14. Compare implementation and docs against this specification and the source
     documents.
 15. Fix drift, false capability advertisement, IMAP-only selector assumptions,
-    LMTP-only delivery-hold assumptions, active-affinity misuse, unsafe script
-    logging, buffered proxy handoff mistakes and unsupported config
-    documentation.
+    LMTP-only delivery-hold assumptions, protocol-local copies of shared
+    placement, outbound transport, runtime or route-lookup behavior,
+    active-affinity misuse, unsafe script logging, buffered proxy handoff
+    mistakes and unsupported config documentation.
 16. Run `make check-openapi` after any OpenAPI schema or generated-code change.
 17. Run `make check-docs` after any typed config, config metadata or generated
     docs change.

@@ -54,7 +54,7 @@ func (a ControlAuthenticator) shouldInspectRouteLookup(r *http.Request) bool {
 	return r.Method == http.MethodPost && r.URL.Path == "/api/v1/route/lookup"
 }
 
-// inspectRouteLookupBody rejects credential-bearing route diagnostics early.
+// inspectRouteLookupBody rejects credential- or script-bearing route diagnostics early.
 func (a ControlAuthenticator) inspectRouteLookupBody(w http.ResponseWriter, r *http.Request) bool {
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxRouteLookupInspectionBytes+1))
 	if err != nil {
@@ -69,8 +69,8 @@ func (a ControlAuthenticator) inspectRouteLookupBody(w http.ResponseWriter, r *h
 		return false
 	}
 
-	if containsCredentialKey(body) {
-		writeProblem(w, http.StatusBadRequest, "credential_input_rejected", "route lookup does not accept authentication material", "LookupRoute")
+	if containsForbiddenRouteLookupKey(body) {
+		writeProblem(w, http.StatusBadRequest, "credential_input_rejected", "route lookup does not accept authentication or script material", "LookupRoute")
 		return false
 	}
 
@@ -80,27 +80,27 @@ func (a ControlAuthenticator) inspectRouteLookupBody(w http.ResponseWriter, r *h
 	return true
 }
 
-// containsCredentialKey detects secret-like JSON object keys without reading values.
-func containsCredentialKey(body []byte) bool {
+// containsForbiddenRouteLookupKey detects forbidden JSON object keys without reading values.
+func containsForbiddenRouteLookupKey(body []byte) bool {
 	var value any
 	if err := JSON.Unmarshal(body, &value); err != nil {
 		return false
 	}
 
-	return containsCredentialKeyValue(value)
+	return containsForbiddenRouteLookupKeyValue(value)
 }
 
-// containsCredentialKeyValue walks decoded JSON looking only at object keys.
-func containsCredentialKeyValue(value any) bool {
+// containsForbiddenRouteLookupKeyValue walks decoded JSON looking only at object keys.
+func containsForbiddenRouteLookupKeyValue(value any) bool {
 	switch typed := value.(type) {
 	case map[string]any:
 		for key, nested := range typed {
-			if isCredentialKey(key) || containsCredentialKeyValue(nested) {
+			if isForbiddenRouteLookupKey(key) || containsForbiddenRouteLookupKeyValue(nested) {
 				return true
 			}
 		}
 	case []any:
-		if slices.ContainsFunc(typed, containsCredentialKeyValue) {
+		if slices.ContainsFunc(typed, containsForbiddenRouteLookupKeyValue) {
 			return true
 		}
 	}
@@ -108,8 +108,8 @@ func containsCredentialKeyValue(value any) bool {
 	return false
 }
 
-// isCredentialKey reports whether a JSON key appears to carry credentials.
-func isCredentialKey(key string) bool {
+// isForbiddenRouteLookupKey reports whether a JSON key appears to carry credentials or scripts.
+func isForbiddenRouteLookupKey(key string) bool {
 	fragments := [...]string{
 		"auth",
 		"bearer",
@@ -117,6 +117,7 @@ func isCredentialKey(key string) bool {
 		"password",
 		"passwd",
 		"sasl",
+		"script",
 		"secret",
 		"token",
 	}

@@ -72,6 +72,7 @@ auth:
         - protocol:
             - imap
             - lmtp
+            - sieve
           cache_name: ldap
           base_dn: "ou=people,dc=demo,dc=local"
           filter:

@@ -17,6 +17,7 @@ go_cmd="${GO:-go}"
 docker_cmd="${DOCKER:-docker}"
 dovecot_image="${DOVECOT_IMAGE:-dovecot/dovecot:2.4.3-dev}"
 interop_password="${NAUTHILUS_DIRECTOR_INTEROP_PASSWORD:-e2e-secret-password}"
+interop_master_password="${NAUTHILUS_DIRECTOR_INTEROP_MASTER_PASSWORD:-$interop_password}"
 tmpdir="$(mktemp -d)"
 
 trap 'rm -rf "$tmpdir"' EXIT HUP INT TERM
@@ -24,6 +25,11 @@ trap 'rm -rf "$tmpdir"' EXIT HUP INT TERM
 close_imap_probe() {
 	{ exec 3>&-; } 2>/dev/null || true
 	{ exec 3<&-; } 2>/dev/null || true
+}
+
+close_sieve_probe() {
+	{ exec 4>&-; } 2>/dev/null || true
+	{ exec 4<&-; } 2>/dev/null || true
 }
 
 imap_login_ready() {
@@ -83,6 +89,38 @@ imap_login_ready() {
 	return 1
 }
 
+sieve_tcp_ready() {
+	local host="$1"
+	local port="$2"
+
+	exec 4<>"/dev/tcp/${host}/${port}" || return 1
+	close_sieve_probe
+	return 0
+}
+
+dovecot_master_config="$tmpdir/99-nauthilus-director-master.conf"
+cat >"$dovecot_master_config" <<'DOVECOT_MASTER_CONF'
+import_environment {
+  USER_PASSWORD = %{env:USER_PASSWORD | default('e2e-secret-password')}
+  DOVECOT_MASTER_PASSWORD = %{env:DOVECOT_MASTER_PASSWORD | default('e2e-secret-password')}
+}
+
+auth_master_user_separator = *
+
+passdb master {
+  driver = static
+  username_filter = nauthilus-director
+  static_password = $ENV:DOVECOT_MASTER_PASSWORD
+  master = yes
+  result_success = continue
+}
+
+passdb users {
+  driver = static
+  static_password = $ENV:USER_PASSWORD
+}
+DOVECOT_MASTER_CONF
+
 printf 'nauthilus-director e2e-interop: using Dovecot image %s\n' "$dovecot_image"
 
 if ! command -v "$docker_cmd" >/dev/null 2>&1; then
@@ -126,7 +164,10 @@ start_dovecot() {
 			--hostname "nauthilus-director-e2e-dovecot-${name//_/-}" \
 			--publish '127.0.0.1::31143' \
 			--publish '127.0.0.1::31024' \
+			--publish '127.0.0.1::34190' \
 			--env "USER_PASSWORD=${interop_password}" \
+			--env "DOVECOT_MASTER_PASSWORD=${interop_master_password}" \
+			--volume "${dovecot_master_config}:/etc/dovecot/conf.d/99-nauthilus-director-master.conf:ro" \
 			"$dovecot_image" 2>/dev/null
 	)" || return 1
 
@@ -172,6 +213,8 @@ wait_mapped_dovecot() {
 
 declare -A mapped_by_name=()
 declare -A mapped_lmtp_by_name=()
+declare -A mapped_sieve_by_name=()
+sieve_interop_available="yes"
 for name in "${container_names[@]}"; do
 	mapped_by_name["$name"]="$(wait_mapped_dovecot "${container_by_name[$name]}")" || {
 		printf 'FAIL e2e-interop: Dovecot container %s did not become IMAP-login ready on port 31143\n' "$name" >&2
@@ -188,7 +231,25 @@ for name in "${container_names[@]}"; do
 		printf 'FAIL e2e-interop: Dovecot container %s did not map LMTP port 31024\n' "$name" >&2
 		exit 1
 	fi
+
+	for _ in {1..80}; do
+		mapped_sieve_by_name["$name"]="$("$docker_cmd" port "${container_by_name[$name]}" 34190/tcp 2>/dev/null | head -n 1 || true)"
+		if [[ -n "${mapped_sieve_by_name[$name]}" ]]; then
+			host="${mapped_sieve_by_name[$name]%:*}"
+			port="${mapped_sieve_by_name[$name]##*:}"
+			if sieve_tcp_ready "$host" "$port"; then
+				break
+			fi
+		fi
+		mapped_sieve_by_name["$name"]=""
+		sleep 0.25
+	done
 done
+
+if [[ -z "${mapped_sieve_by_name[default_a]}" || -z "${mapped_sieve_by_name[default_b]}" ]]; then
+	sieve_interop_available="no"
+	printf 'SKIP e2e-interop ManageSieve scenario: Dovecot image %s did not expose ready ManageSieve port 34190 for both default backends; IMAP and LMTP interop lanes continue\n' "$dovecot_image"
+fi
 
 printf 'nauthilus-director e2e-interop: Dovecot IMAP backends mapped as default=(%s,%s), test_shard1=(%s,%s), test_shard2=(%s,%s)\n' \
 	"${mapped_by_name[default_a]}" \
@@ -200,6 +261,11 @@ printf 'nauthilus-director e2e-interop: Dovecot IMAP backends mapped as default=
 printf 'nauthilus-director e2e-interop: Dovecot LMTP backends mapped as default=(%s,%s)\n' \
 	"${mapped_lmtp_by_name[default_a]}" \
 	"${mapped_lmtp_by_name[default_b]}"
+if [[ "$sieve_interop_available" == "yes" ]]; then
+	printf 'nauthilus-director e2e-interop: Dovecot ManageSieve backends mapped as default=(%s,%s)\n' \
+		"${mapped_sieve_by_name[default_a]}" \
+		"${mapped_sieve_by_name[default_b]}"
+fi
 
 if ! "$docker_cmd" exec "${container_by_name[default_a]}" doveadm who >/dev/null 2>&1; then
 	printf 'nauthilus-director e2e-interop: doveadm who is unavailable; backend identity proof will use Director state only\n'
@@ -212,6 +278,9 @@ NAUTHILUS_DIRECTOR_INTEROP_BACKEND_ADDR="${mapped_by_name[default_a]}" \
 	NAUTHILUS_DIRECTOR_INTEROP_DEFAULT_B_ADDR="${mapped_by_name[default_b]}" \
 	NAUTHILUS_DIRECTOR_INTEROP_DEFAULT_A_LMTP_ADDR="${mapped_lmtp_by_name[default_a]}" \
 	NAUTHILUS_DIRECTOR_INTEROP_DEFAULT_B_LMTP_ADDR="${mapped_lmtp_by_name[default_b]}" \
+	NAUTHILUS_DIRECTOR_INTEROP_DEFAULT_A_SIEVE_ADDR="${mapped_sieve_by_name[default_a]:-}" \
+	NAUTHILUS_DIRECTOR_INTEROP_DEFAULT_B_SIEVE_ADDR="${mapped_sieve_by_name[default_b]:-}" \
+	NAUTHILUS_DIRECTOR_INTEROP_MASTER_PASSWORD="$interop_master_password" \
 	NAUTHILUS_DIRECTOR_INTEROP_SHARD1_A_ADDR="${mapped_by_name[shard1_a]}" \
 	NAUTHILUS_DIRECTOR_INTEROP_SHARD1_B_ADDR="${mapped_by_name[shard1_b]}" \
 	NAUTHILUS_DIRECTOR_INTEROP_SHARD2_A_ADDR="${mapped_by_name[shard2_a]}" \
@@ -224,6 +293,6 @@ NAUTHILUS_DIRECTOR_INTEROP_BACKEND_ADDR="${mapped_by_name[default_a]}" \
 	NAUTHILUS_DIRECTOR_INTEROP_SHARD2_A_CONTAINER="${container_by_name[shard2_a]}" \
 	NAUTHILUS_DIRECTOR_INTEROP_SHARD2_B_CONTAINER="${container_by_name[shard2_b]}" \
 	NAUTHILUS_DIRECTOR_E2E_SERVER_BINARY="$tmpdir/nauthilus-director" \
-	"$go_cmd" test -mod=vendor -tags=interop -count=1 -run 'TestDovecot(CredentialReplayInterop|ClusterRuntimeInterop|LMTPInterop)' ./test/e2e
+	"$go_cmd" test -mod=vendor -tags=interop -count=1 -run 'TestDovecot(CredentialReplayInterop|ClusterRuntimeInterop|LMTPInterop|ManageSieveInterop)' ./test/e2e
 
-printf 'ok e2e-interop: real server binary, six Dovecot IMAP backends, Dovecot LMTP backend, swaks-to-Postfix submitter, curl IMAP delivery proof, health ownership, cluster affinity and runtime control passed\n'
+printf 'ok e2e-interop: real server binary, six Dovecot IMAP backends, Dovecot LMTP backend, Dovecot ManageSieve backend when available, swaks-to-Postfix submitter, curl IMAP delivery proof, health ownership, cluster affinity and runtime control passed\n'

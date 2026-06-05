@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -138,6 +139,28 @@ func TestRouteLookupResolverUsesConfiguredAuthAttributeNames(t *testing.T) {
 
 	if result.Tenant != expectedTenant || result.ShardTag != expectedShardTag || result.AccountKey != expectedAccountKey {
 		t.Fatalf("routing result = %#v, want configured tenant/shard attributes and account_field-derived account", result)
+	}
+}
+
+// TestRouteLookupShardTagsIncludeSieveBackends verifies diagnostics do not depend on IMAP-only shards.
+func TestRouteLookupShardTagsIncludeSieveBackends(t *testing.T) {
+	const sieveOnlyShard = "sieve-only-shard"
+
+	cfg := config.DefaultConfig()
+	sieveBackend := cfg.Director.Backends["mailstore-a-sieve"]
+	sieveBackend.BackendNode = "sieve-only-node"
+	sieveBackend.ShardTag = sieveOnlyShard
+	cfg.Director.Backends["mailstore-a-sieve"] = sieveBackend
+	cfg = cfg.Normalize()
+
+	registry, err := backend.NewStaticRegistry(cfg.Director)
+	if err != nil {
+		t.Fatalf("NewStaticRegistry returned error: %v", err)
+	}
+
+	shards := routeLookupShardTags(cfg, registry)
+	if !slices.Contains(shards, sieveOnlyShard) {
+		t.Fatalf("route lookup shards = %#v, want %s", shards, sieveOnlyShard)
 	}
 }
 

@@ -360,6 +360,8 @@ services:
       - "${IMAP_PORT:-8143}:143"
       - "${IMAPS_PORT:-8993}:993"
       - "${LMTPS_PORT:-8024}:2465"
+      - "${SIEVE_PORT:-4190}:4190"
+      - "${SIEVES_PORT:-8490}:4490"
       - "${HAPROXY_STATS_PORT:-8404}:8404"
     volumes:
       - ./haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro

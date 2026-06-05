@@ -422,6 +422,10 @@ func NormalizeReasonClass(value string) string {
 		return normalized
 	}
 
+	if IsSecretFieldName(normalized) || IsHighCardinalityFieldName(normalized) {
+		return reasonClassOther
+	}
+
 	return reasonClassOther
 }
 
@@ -470,7 +474,7 @@ func normalizeReasonToken(value string) string {
 		return reasonClassOther
 	}
 
-	if normalized == "" || IsSecretFieldName(normalized) || IsHighCardinalityFieldName(normalized) {
+	if normalized == "" {
 		return reasonClassOther
 	}
 

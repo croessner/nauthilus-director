@@ -52,6 +52,14 @@ func (d DirectorConfig) Normalize() DirectorConfig {
 				listener.LMTP = &lmtp
 			}
 
+			if listener.Sieve != nil {
+				sieve := *listener.Sieve
+				sieve.AuthMechanisms = normalizeLowerList(sieve.AuthMechanisms)
+				sieve.Capabilities.ScriptExtensions = normalizeLowerList(sieve.Capabilities.ScriptExtensions)
+				sieve.Capabilities.Language = strings.ToLower(strings.TrimSpace(sieve.Capabilities.Language))
+				listener.Sieve = &sieve
+			}
+
 			listeners[name] = listener
 		}
 

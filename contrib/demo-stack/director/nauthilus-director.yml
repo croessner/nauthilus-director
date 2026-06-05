@@ -32,10 +32,10 @@
 # - replace: replace the value at the dot-path.
 # - remove: remove a matching list item or named map key.
 #
-# In this demo the built-in defaults include a plain LMTP listener named
-# "lmtp". The stack intentionally publishes only TLS-wrapped LMTPS through
-# HAProxy/Postfix, so the inherited cleartext LMTP listener is removed here.
-# The remaining LMTPS listener is defined explicitly below.
+# In this demo the built-in defaults include a plain LMTP listener. The stack
+# intentionally publishes IMAP, IMAPS, Sieve, Sieve-over-TLS and TLS-wrapped
+# LMTPS through HAProxy/Postfix, so inherited listeners outside that topology
+# are removed here.
 patch:
   - op: remove
     path: director.listeners
@@ -247,9 +247,10 @@ auth:
 # Director protocol surface
 # -------------------------
 #
-# The Director exposes IMAP, IMAPS and LMTPS listeners to HAProxy. HAProxy adds
-# PROXY protocol headers so the Director sees the original frontend source
-# address instead of only the HAProxy container address.
+# The Director exposes IMAP, IMAPS, Sieve, Sieve-over-TLS and LMTPS listeners
+# to HAProxy. HAProxy adds PROXY protocol headers so the Director sees the
+# original frontend source address instead of only the HAProxy container
+# address.
 director:
   security:
     # Ambiguous authentication, routing or backend state must fail closed.
@@ -367,6 +368,70 @@ director:
           - SMTPUTF8
           - CHUNKING
 
+    sieve:
+      # Cleartext ManageSieve with STARTTLS support, published by HAProxy on
+      # host port 4190. Script management remains backend-owned; the Director
+      # authenticates, places and then proxies opaque post-auth bytes.
+      protocol: sieve
+      service_name: sieve
+      network: tcp
+      address: "0.0.0.0:14190"
+      authority: default
+      backend_pool: sieve-default
+
+      proxy_protocol:
+        enabled: true
+        trusted_cidrs:
+          - 172.30.0.0/24
+
+      tls:
+        mode: starttls
+        cert: /run/nauthilus-director/tls/server.crt
+        key: /run/nauthilus-director/tls/server.key
+        client_ca: ""
+        require_client_cert: false
+        min_tls_version: TLS1.2
+
+      sieve:
+        auth_mechanisms:
+          - plain
+        capabilities:
+          script_extensions:
+            - fileinto
+            - reject
+          language: en
+
+    sieves:
+      # Implicit-TLS ManageSieve, published by HAProxy on host port 8490.
+      protocol: sieve
+      service_name: sieves
+      network: tcp
+      address: "0.0.0.0:14490"
+      authority: default
+      backend_pool: sieve-default
+
+      proxy_protocol:
+        enabled: true
+        trusted_cidrs:
+          - 172.30.0.0/24
+
+      tls:
+        mode: implicit
+        cert: /run/nauthilus-director/tls/server.crt
+        key: /run/nauthilus-director/tls/server.key
+        client_ca: ""
+        require_client_cert: false
+        min_tls_version: TLS1.2
+
+      sieve:
+        auth_mechanisms:
+          - plain
+        capabilities:
+          script_extensions:
+            - fileinto
+            - reject
+          language: en
+
 
   # Routing policy
   # --------------
@@ -416,6 +481,14 @@ director:
         - mailstore-c-lmtp
         - stalwart-a-lmtp
         - stalwart-b-lmtp
+
+    sieve-default:
+      protocol: sieve
+      selector: rendezvous_hash
+      backends:
+        - mailstore-a-sieve
+        - mailstore-b-sieve
+        - mailstore-c-sieve
 
 
   # Backend definitions
@@ -735,6 +808,108 @@ director:
         oauthbearer:
           token_file: ""
           require_tls: false
+
+      health_check:
+        enabled: true
+        deep_check: true
+        username: healthcheck@example.test
+        password_file: demo-secret
+
+    mailstore-a-sieve:
+      protocol: sieve
+      shard_tag: mailstore-a
+      backend_node: mailstore-a-node
+      address: "mailstore-a:34190"
+      weight: 100
+      max_connections: 1000
+      maintenance: disabled
+
+      tls:
+        mode: starttls
+        ca_file: ""
+        cert: ""
+        key: ""
+        server_name: ""
+        min_tls_version: TLS1.2
+        insecure_skip_verify: true
+
+      auth:
+        # ManageSieve uses Dovecot master-user auth in the demo so script
+        # operations can be proven without extending frontend credential
+        # lifetime beyond the Director-to-Nauthilus auth call.
+        mode: master_user
+        master_user:
+          username: nauthilus-director
+          password_file: "${DOVECOT_MASTER_PASSWORD}"
+          user_format: "{user}*{master_user}"
+          mechanism: plain
+
+      health_check:
+        enabled: true
+        deep_check: true
+        username: healthcheck@example.test
+        password_file: demo-secret
+
+    mailstore-b-sieve:
+      protocol: sieve
+      shard_tag: mailstore-b
+      backend_node: mailstore-b-node
+      address: "mailstore-b:34190"
+      weight: 100
+      max_connections: 1000
+      maintenance: disabled
+
+      tls:
+        mode: starttls
+        ca_file: ""
+        cert: ""
+        key: ""
+        server_name: ""
+        min_tls_version: TLS1.2
+        insecure_skip_verify: true
+
+      auth:
+        mode: master_user
+        master_user:
+          username: nauthilus-director
+          password_file: "${DOVECOT_MASTER_PASSWORD}"
+          user_format: "{user}*{master_user}"
+          mechanism: plain
+
+      health_check:
+        enabled: true
+        deep_check: true
+        username: healthcheck@example.test
+        password_file: demo-secret
+
+    mailstore-c-sieve:
+      protocol: sieve
+      shard_tag: mailstore-c
+      backend_node: mailstore-c-node
+      address: "haproxy:14190"
+      weight: 100
+      max_connections: 1000
+      maintenance: disabled
+
+      haproxy:
+        enabled: true
+
+      tls:
+        mode: starttls
+        ca_file: ""
+        cert: ""
+        key: ""
+        server_name: ""
+        min_tls_version: TLS1.2
+        insecure_skip_verify: true
+
+      auth:
+        mode: master_user
+        master_user:
+          username: nauthilus-director
+          password_file: "${DOVECOT_MASTER_PASSWORD}"
+          user_format: "{user}*{master_user}"
+          mechanism: plain
 
       health_check:
         enabled: true

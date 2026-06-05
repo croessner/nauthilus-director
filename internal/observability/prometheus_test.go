@@ -324,6 +324,7 @@ func representativeMetricEvents(t *testing.T) []Event {
 		newMetricEvent(t, EventSessionStart, nil, protocolLabels("start", reasonClassOK)),
 		newMetricEvent(t, EventSessionEnd, nil, protocolLabels(reasonClassOK, reasonClassOK)),
 		newMetricEvent(t, EventIMAPPreAuth, nil, protocolLabels("accepted", reasonClassOK)),
+		newMetricEvent(t, EventSievePreAuth, nil, protocolLabels("accepted", reasonClassOK)),
 		measuredEvent(t, EventNauthilusAuth, nil, authLabels(reasonClassOK, reasonClassOK), 0.002),
 		measuredEvent(t, EventRoutingResolve, nil, backendLabels(reasonClassOK, reasonClassOK), 0.001),
 		newMetricEvent(t, EventAffinityOpen, nil, backendLabels(reasonClassOK, reasonClassOK)),

@@ -32,6 +32,7 @@ const (
 	runtimeReaderCursorInvalid = "not-a-valid-cursor"
 	runtimeReaderSessionA      = "session-a"
 	runtimeReaderSessionB      = "session-b"
+	runtimeReaderProtocolSieve = "sieve"
 	runtimeReaderStateCursorB  = "state-cursor-b"
 	runtimeReaderUserA         = "user-a"
 	runtimeReaderUserB         = "user-b"
@@ -67,6 +68,21 @@ func TestRedisRuntimeReaderListSessionsUsesPagedStore(t *testing.T) {
 
 	if result.NextCursor == "" || strings.Contains(result.NextCursor, "state-cursor-b") {
 		t.Fatalf("next cursor = %q, want opaque public cursor", result.NextCursor)
+	}
+}
+
+// TestRedisRuntimeReaderListSessionsAcceptsSieveProtocol verifies ManageSieve filters share session reads.
+func TestRedisRuntimeReaderListSessionsAcceptsSieveProtocol(t *testing.T) {
+	store := &pagedRuntimeReadStore{limits: state.RuntimeReadPageLimits{Default: 2, Max: 3}}
+	reader := NewRedisRuntimeReader(store)
+
+	_, err := reader.ListSessions(context.Background(), SessionListRequest{Protocol: "SIEVE"})
+	if err != nil {
+		t.Fatalf("ListSessions returned error: %v", err)
+	}
+
+	if store.sessionPageRequest.Protocol != runtimeReaderProtocolSieve {
+		t.Fatalf("protocol = %q, want sieve", store.sessionPageRequest.Protocol)
 	}
 }
 

@@ -14,7 +14,7 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-//nolint:funlen,goconst,wsl_v5 // Tests keep config fixtures local for readability.
+//nolint:funlen,goconst,gocyclo,wsl_v5 // Tests keep config fixtures local for readability.
 package config
 
 import (
@@ -723,7 +723,7 @@ func TestListenerValidationRejectsUnsupportedProtocol(t *testing.T) {
 	entry.Protocol = "pop3"
 	cfg.Director.Listeners["lmtp"] = entry
 
-	expectValidationError(t, cfg, "director.listeners.lmtp.protocol must be imap or lmtp")
+	expectValidationError(t, cfg, "director.listeners.lmtp.protocol must be imap, lmtp, or sieve")
 }
 
 // TestLMTPCapabilitiesNormalizeStableWireForms protects deterministic LHLO inputs.
@@ -846,6 +846,214 @@ func TestConfigDumpRedactsLMTPProtectedValuesByDefault(t *testing.T) {
 	} {
 		if strings.Contains(text, secret) {
 			t.Fatalf("default dump leaked protected LMTP value %q:\n%s", secret, text)
+		}
+	}
+}
+
+// TestSieveDefaultsValidate verifies M6.1 listener and backend examples are typed.
+func TestSieveDefaultsValidate(t *testing.T) {
+	cfg := DefaultConfig()
+
+	for name, wantTLSMode := range map[string]string{"sieve": "starttls", "sieves": "implicit"} {
+		listener := cfg.Director.Listeners[name]
+		if listener.Protocol != protocolSIEVE || listener.ServiceName != name || listener.BackendPool != "sieve-default" {
+			t.Fatalf("listener %s = %#v, want sieve protocol and sieve-default pool", name, listener)
+		}
+		if listener.TLS.Mode != wantTLSMode {
+			t.Fatalf("listener %s TLS mode = %q, want %q", name, listener.TLS.Mode, wantTLSMode)
+		}
+		if listener.Sieve == nil {
+			t.Fatalf("listener %s missing sieve sub-config", name)
+		}
+	}
+
+	pool := cfg.Director.BackendPools["sieve-default"]
+	if pool.Protocol != protocolSIEVE || pool.Selector != "rendezvous_hash" || !slices.Equal(pool.Backends, []string{"mailstore-a-sieve", "mailstore-b-sieve"}) {
+		t.Fatalf("sieve-default pool = %#v", pool)
+	}
+
+	for backendName, wantNode := range map[string]string{"mailstore-a-sieve": "mailstore-a-node-1", "mailstore-b-sieve": "mailstore-b-node-1"} {
+		backend := cfg.Director.Backends[backendName]
+		if backend.Protocol != protocolSIEVE || backend.BackendNode != wantNode || backend.Auth.Mode != backendAuthModeMasterUser {
+			t.Fatalf("sieve backend %s = %#v", backendName, backend)
+		}
+	}
+
+	if err := NewLoader().Validate(cfg); err != nil {
+		t.Fatalf("Validate rejected Sieve defaults: %v", err)
+	}
+}
+
+// TestSieveValidationRejectsMissingProtocolConfig keeps ManageSieve listener config explicit.
+func TestSieveValidationRejectsMissingProtocolConfig(t *testing.T) {
+	cfg := DefaultConfig()
+	entry := cfg.Director.Listeners["sieve"]
+	entry.Sieve = nil
+	cfg.Director.Listeners["sieve"] = entry
+
+	expectValidationError(t, cfg, "director.listeners.sieve.sieve is required")
+}
+
+// TestSieveValidationRejectsCrossProtocolPool keeps listener and pool protocols aligned.
+func TestSieveValidationRejectsCrossProtocolPool(t *testing.T) {
+	cfg := DefaultConfig()
+	entry := cfg.Director.Listeners["sieve"]
+	entry.BackendPool = "imap-default"
+	cfg.Director.Listeners["sieve"] = entry
+
+	expectValidationError(t, cfg, "director.listeners.sieve.backend_pool references pool with different protocol imap-default")
+}
+
+// TestSieveValidationRejectsUnsupportedAuthMechanisms checks frontend SASL vocabulary and authority policy.
+func TestSieveValidationRejectsUnsupportedAuthMechanisms(t *testing.T) {
+	t.Run("unsupported mechanism", func(t *testing.T) {
+		cfg := DefaultConfig()
+		entry := cfg.Director.Listeners["sieve"]
+		entry.Sieve.AuthMechanisms = append(entry.Sieve.AuthMechanisms, "scram-sha-256")
+		cfg.Director.Listeners["sieve"] = entry
+
+		expectValidationError(t, cfg, "auth_mechanisms contains unsupported mechanism scram-sha-256")
+	})
+
+	t.Run("authority disabled class", func(t *testing.T) {
+		cfg := DefaultConfig()
+		authority := cfg.Auth.Authorities["default"]
+		authority.Mechanisms.Bearer.Enabled = false
+		cfg.Auth.Authorities["default"] = authority
+
+		expectValidationError(t, cfg, "auth_mechanisms contains mechanism not supported by authority xoauth2")
+	})
+}
+
+// TestSieveValidationRejectsUnsafeFrontendAuthTLS prevents credential SASL without TLS gating.
+func TestSieveValidationRejectsUnsafeFrontendAuthTLS(t *testing.T) {
+	cfg := DefaultConfig()
+	entry := cfg.Director.Listeners["sieve"]
+	entry.TLS.Mode = "plaintext"
+	cfg.Director.Listeners["sieve"] = entry
+
+	expectValidationError(t, cfg, "auth_mechanisms requires frontend TLS mode starttls or implicit")
+}
+
+// TestSieveValidationRejectsMalformedCapabilities keeps config from becoming wire text.
+func TestSieveValidationRejectsMalformedCapabilities(t *testing.T) {
+	for name, mutate := range map[string]func(*SieveCapabilitiesConfig){
+		"extension": func(capabilities *SieveCapabilitiesConfig) {
+			capabilities.ScriptExtensions = append(capabilities.ScriptExtensions, "file into")
+		},
+		"language": func(capabilities *SieveCapabilitiesConfig) {
+			capabilities.Language = "en us"
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			entry := cfg.Director.Listeners["sieve"]
+			mutate(&entry.Sieve.Capabilities)
+			cfg.Director.Listeners["sieve"] = entry
+
+			expectValidationError(t, cfg, "director.listeners.sieve.sieve.capabilities")
+		})
+	}
+}
+
+// TestSieveConfigRejectsInternalCapabilityFacts keeps RFC implementation facts out of operator config.
+func TestSieveConfigRejectsInternalCapabilityFacts(t *testing.T) {
+	for _, field := range []string{"implementation", "version"} {
+		t.Run(field, func(t *testing.T) {
+			path := writeConfigFile(t, t.TempDir(), "sieve-internal-"+field+".yaml", `director:
+  listeners:
+    sieve:
+      sieve:
+        capabilities:
+          `+field+`: custom
+`)
+
+			_, err := NewLoader().LoadFile(path)
+			if err == nil {
+				t.Fatalf("LoadFile accepted internal Sieve capability field %q", field)
+			}
+			if !strings.Contains(err.Error(), field) {
+				t.Fatalf("error = %q, want internal field name %q", err.Error(), field)
+			}
+		})
+	}
+}
+
+// TestSieveCredentialReplayRequiresVerifiedBackendTLS keeps replay policy fail-closed.
+func TestSieveCredentialReplayRequiresVerifiedBackendTLS(t *testing.T) {
+	cfg := DefaultConfig()
+	backend := cfg.Director.Backends["mailstore-a-sieve"]
+	backend.Auth.Mode = backendAuthModeCredentialReplay
+	backend.TLS.Mode = "plaintext"
+	backend.TLS.ServerName = ""
+	cfg.Director.Backends["mailstore-a-sieve"] = backend
+
+	expectValidationError(t, cfg, "director.backends.mailstore-a-sieve.auth.credential_replay requires verified backend TLS")
+}
+
+// TestConfigDumpRedactsSieveProtectedValuesByDefault preserves M6 protected metadata.
+func TestConfigDumpRedactsSieveProtectedValuesByDefault(t *testing.T) {
+	dump, err := NewLoader().DumpDefaults(DumpOptions{Format: "yaml"})
+	if err != nil {
+		t.Fatalf("DumpDefaults: %v", err)
+	}
+
+	text := string(dump)
+	for _, secret := range []string{
+		"/etc/nauthilus-director/sieve.key",
+		"/etc/nauthilus-director/sieves.key",
+		"/etc/nauthilus-director/sieve-backend-master-password",
+	} {
+		if strings.Contains(text, secret) {
+			t.Fatalf("default dump leaked protected Sieve value %q:\n%s", secret, text)
+		}
+	}
+}
+
+// TestGeneratedConfigReferencesIncludeSievePaths verifies generated M6 docs and metadata.
+func TestGeneratedConfigReferencesIncludeSievePaths(t *testing.T) {
+	defaults := readTextFile(t, filepath.Join("..", "..", "docs", "reference", "config-defaults.yaml"))
+	paths := readTextFile(t, filepath.Join("..", "..", "docs", "reference", "config-paths.md"))
+
+	for _, want := range []string{
+		"sieve-default:",
+		"mailstore-a-sieve:",
+		"auth_mechanisms:",
+		"script_extensions: []",
+		"language: en",
+	} {
+		if !strings.Contains(defaults, want) {
+			t.Fatalf("generated defaults missing %q", want)
+		}
+	}
+	for _, forbidden := range []string{
+		"implementation: nauthilus-director",
+		"version: \"0.1\"",
+	} {
+		if strings.Contains(defaults, forbidden) {
+			t.Fatalf("generated defaults expose internal Sieve capability %q", forbidden)
+		}
+	}
+
+	for _, want := range []string{
+		"`director.listeners.sieve.sieve.auth_mechanisms`",
+		"`director.listeners.sieves.sieve.capabilities.language`",
+		"`director.backend_pools.sieve-default.protocol`",
+		"`director.backends.mailstore-a-sieve.auth.master_user.password_file` | string | `<redacted>` | stable | yes",
+		"`director.backends.mailstore-a-sieve.tls.key` | string | `` | stable | yes",
+	} {
+		if !strings.Contains(paths, want) {
+			t.Fatalf("generated paths missing %q", want)
+		}
+	}
+	for _, forbidden := range []string{
+		"`director.listeners.sieve.sieve.capabilities.implementation`",
+		"`director.listeners.sieve.sieve.capabilities.version`",
+		"`director.listeners.sieves.sieve.capabilities.implementation`",
+		"`director.listeners.sieves.sieve.capabilities.version`",
+	} {
+		if strings.Contains(paths, forbidden) {
+			t.Fatalf("generated paths expose internal Sieve capability %q", forbidden)
 		}
 	}
 }

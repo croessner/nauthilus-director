@@ -354,8 +354,8 @@ high-cardinality user material.
   attach to the accepted session or REST request where applicable.
 - Add span attributes only from the bounded telemetry policy.
 - Add span status and error classification without recording raw error text.
-- Record backend identifiers in traces only when needed for operator diagnosis;
-  never use backend identifiers as metric labels.
+- Record backend identifiers and backend nodes in traces only when needed for
+  operator diagnosis; never use them as metric labels.
 - Add trace ID and span ID to structured logs when an active span context
   exists.
 
@@ -532,6 +532,7 @@ request_id
 client_ip
 remote_addr
 backend_identifier
+backend_node
 token
 password
 sasl_blob
@@ -540,8 +541,8 @@ raw_error
 
 - Backend health and maintenance metrics must aggregate by bounded dimensions
   such as protocol, backend pool, shard tag, maintenance mode, result and reason
-  class. Raw backend identifiers belong in REST diagnostics, logs and traces,
-  not in metrics.
+  class. Raw backend identifiers and backend nodes belong in REST diagnostics,
+  logs and traces, not in metrics.
 - REST metrics must use route templates or operation names, not raw paths with
   embedded user/session/backend values.
 - Redis metrics must use operation classes such as `open`, `heartbeat`,
@@ -557,7 +558,7 @@ raw_error
 - Metrics disabled prevents business metrics from being served.
 - Runtime collectors are registered only when configured.
 - REST route labels use generated route templates or stable operation names.
-- Backend health metrics do not include backend identifiers.
+- Backend health metrics do not include backend identifiers or backend nodes.
 - Redis metrics do not include Redis keys.
 - Repeated runtime construction in tests does not panic on duplicate
   registrations.
@@ -569,7 +570,8 @@ raw_error
   backend selection and proxy metrics change.
 - Perform a REST runtime operation and verify REST/runtime metrics change.
 - Verify the metrics body does not contain usernames, passwords, bearer tokens,
-  SASL blobs, session IDs, raw client IPs or raw backend identifiers.
+  SASL blobs, session IDs, raw client IPs, raw backend identifiers or backend
+  nodes.
 
 ### Acceptance Criteria
 
@@ -618,9 +620,9 @@ default and clearly separating log-field policy from metric-label policy.
   - route template
   - status class
   - trace ID and span ID when tracing context exists
-- Allow backend identifiers in logs for operator diagnostics when they are
-  necessary to understand backend health, drain, runtime override or connect
-  failures.
+- Allow backend identifiers and backend nodes in logs for operator diagnostics
+  when they are necessary to understand backend health, drain, runtime override
+  or connect failures.
 - Keep raw usernames, recipients, client IPs, session IDs, passwords, tokens,
   SASL blobs, private keys and protected config values out of logs by default.
 - Keep Fx lifecycle logging routed through the same recorder and redaction
@@ -1054,9 +1056,10 @@ code.
 4. Decision: log, trace and metric policies are related but distinct.
 
    Prometheus labels remain low-cardinality only. Logs and traces may carry
-   trace/span IDs and backend identifiers for operator diagnosis, but they still
-   must not contain credentials, SASL blobs, bearer tokens, protected config
-   values, raw usernames, recipients or raw client IPs by default.
+   trace/span IDs, backend identifiers and backend nodes for operator
+   diagnosis, but they still must not contain credentials, SASL blobs, bearer
+   tokens, protected config values, raw usernames, recipients or raw client IPs
+   by default.
 
 5. Decision: pprof and block profile endpoints remain out of M4.
 

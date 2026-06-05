@@ -1,7 +1,7 @@
 .\" Copyright (C) 2026 Christian Rößner
 .\"
 .\" SPDX-License-Identifier: AGPL-3.0-only
-.TH NAUTHILUS-DIRECTOR 1 "2026-06-02" "nauthilus-director" "User Commands"
+.TH NAUTHILUS-DIRECTOR 1 "2026-06-05" "nauthilus-director" "User Commands"
 .SH NAME
 nauthilus-director \- run and inspect the Nauthilus Director server process
 .SH SYNOPSIS
@@ -39,8 +39,11 @@ nauthilus-director \- run and inspect the Nauthilus Director server process
 .B nauthilus-director
 is the server binary for the Director process.
 Without a subcommand it starts the production server process, including the
-configured IMAP, LMTP and LMTPS listeners and the in-process control API when
-enabled.
+configured IMAP, LMTP, LMTPS, ManageSieve
+.B sieve
+and implicit-TLS ManageSieve
+.B sieves
+listeners and the in-process control API when enabled.
 The explicit
 .B serve
 subcommand is an alias for the same server startup path.
@@ -93,6 +96,12 @@ for outbound backend PROXY protocol; they do not expose a replacement
 .B proxy_protocol
 backend tree or a
 backend PROXY protocol version field.
+The default dump also includes safe ManageSieve listener and backend examples
+using the canonical
+.B sieve
+protocol value rather than a second
+.B managesieve
+runtime protocol.
 .TP
 .B config dump -n|--non-default
 Print non-default effective configuration after loading the selected config
