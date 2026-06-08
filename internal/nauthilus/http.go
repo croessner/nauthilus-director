@@ -42,6 +42,7 @@ type HTTPClientConfig struct {
 	BasicAuthPassword Secret
 	TokenSource       callerTokenSource
 	Client            *http.Client
+	AuthorityContext  AuthorityContext
 }
 
 // HTTPClient maps director auth requests to Nauthilus JSON requests.
@@ -52,6 +53,7 @@ type HTTPClient struct {
 	basicAuthPassword Secret
 	tokenSource       callerTokenSource
 	client            *http.Client
+	authorityContext  AuthorityContext
 }
 
 type httpAuthRequest struct {
@@ -121,11 +123,16 @@ func NewHTTPClient(config HTTPClientConfig) (*HTTPClient, error) {
 		basicAuthPassword: config.BasicAuthPassword,
 		tokenSource:       config.TokenSource,
 		client:            client,
+		authorityContext:  config.AuthorityContext.Normalize(),
 	}, nil
 }
 
 // NewHTTPClientFromAuthority builds an HTTP client from typed config.
-func NewHTTPClientFromAuthority(authority config.AuthorityConfig, client *http.Client) (*HTTPClient, error) {
+func NewHTTPClientFromAuthority(
+	authority config.AuthorityConfig,
+	client *http.Client,
+	authorityContext AuthorityContext,
+) (*HTTPClient, error) {
 	if client == nil {
 		client = http.DefaultClient
 	}
@@ -142,6 +149,7 @@ func NewHTTPClientFromAuthority(authority config.AuthorityConfig, client *http.C
 		BasicAuthPassword: NewSecret(authority.HTTP.BasicAuth.PasswordFile.Value()),
 		TokenSource:       tokenSource,
 		Client:            client,
+		AuthorityContext:  authorityContext,
 	})
 }
 
@@ -274,12 +282,25 @@ func (c *HTTPClient) postJSON(
 		request.SetBasicAuth(c.basicAuthUsername, c.basicAuthPassword.Value())
 	}
 
+	c.applyAuthorityContextHeaders(request.Header)
+
 	response, err := c.client.Do(request)
 	if err != nil {
 		return nil, 0, transportError(operation, err)
 	}
 
 	return response, response.StatusCode, nil
+}
+
+// applyAuthorityContextHeaders adds listener context without overriding transport-owned headers.
+func (c *HTTPClient) applyAuthorityContextHeaders(headers http.Header) {
+	for _, pair := range c.authorityContext.httpHeaderPairs() {
+		if _, exists := headers[http.CanonicalHeaderKey(pair.name)]; exists {
+			continue
+		}
+
+		headers.Set(pair.name, pair.value)
+	}
 }
 
 // httpCallerTokenSource creates the optional OIDC caller-token source for HTTP authority calls.

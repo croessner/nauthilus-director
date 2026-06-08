@@ -16,7 +16,11 @@
 
 package config
 
-import "strings"
+import (
+	"net/http"
+	"sort"
+	"strings"
+)
 
 const (
 	fallbackDefaultShard            = "default"
@@ -42,6 +46,7 @@ func (d DirectorConfig) Normalize() DirectorConfig {
 		for name, listener := range d.Listeners {
 			listener.Protocol = strings.ToLower(strings.TrimSpace(listener.Protocol))
 			listener.TLS.Mode = strings.ToLower(strings.TrimSpace(listener.TLS.Mode))
+			listener.AuthorityContext = listener.AuthorityContext.Normalize()
 
 			if listener.LMTP != nil {
 				lmtp := *listener.LMTP
@@ -92,6 +97,55 @@ func (d DirectorConfig) Normalize() DirectorConfig {
 	d.Backends = backends
 
 	return d
+}
+
+// Normalize trims listener authority context names and values into stable transport forms.
+func (a AuthorityContextConfig) Normalize() AuthorityContextConfig {
+	return AuthorityContextConfig{
+		HTTPHeaders:  normalizeHTTPAuthorityContext(a.HTTPHeaders),
+		GRPCMetadata: normalizeGRPCAuthorityContext(a.GRPCMetadata),
+	}
+}
+
+// normalizeHTTPAuthorityContext trims values and canonicalizes HTTP header names.
+func normalizeHTTPAuthorityContext(headers map[string]AuthorityContextValue) map[string]AuthorityContextValue {
+	if headers == nil {
+		return map[string]AuthorityContextValue{}
+	}
+
+	normalized := make(map[string]AuthorityContextValue, len(headers))
+	for _, name := range sortedAuthorityContextNames(headers) {
+		canonical := http.CanonicalHeaderKey(strings.TrimSpace(name))
+		normalized[canonical] = AuthorityContextValue(strings.TrimSpace(string(headers[name])))
+	}
+
+	return normalized
+}
+
+// normalizeGRPCAuthorityContext trims metadata keys and values without changing key case.
+func normalizeGRPCAuthorityContext(metadata map[string]AuthorityContextValue) map[string]AuthorityContextValue {
+	if metadata == nil {
+		return map[string]AuthorityContextValue{}
+	}
+
+	normalized := make(map[string]AuthorityContextValue, len(metadata))
+	for _, name := range sortedAuthorityContextNames(metadata) {
+		normalized[strings.TrimSpace(name)] = AuthorityContextValue(strings.TrimSpace(string(metadata[name])))
+	}
+
+	return normalized
+}
+
+// sortedAuthorityContextNames returns deterministic map iteration order for config snapshots.
+func sortedAuthorityContextNames(values map[string]AuthorityContextValue) []string {
+	names := make([]string, 0, len(values))
+	for name := range values {
+		names = append(names, name)
+	}
+
+	sort.Strings(names)
+
+	return names
 }
 
 // Normalize returns routing auth-attribute names with stable defaults applied.

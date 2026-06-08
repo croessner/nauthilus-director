@@ -286,6 +286,17 @@ director:
       authority: default
       backend_pool: imap-default
 
+      # Optional static listener authority context adds deployment facts to
+      # outbound Nauthilus authority requests. Nauthilus consumes these values
+      # only through explicit auth.policy.request_headers and
+      # auth.policy.request_metadata allowlists. They are not routing hints,
+      # backend selectors, user identity, dynamic claims or secrets.
+      authority_context:
+        http_headers:
+          X-Deployment-Realm: public-mail
+        grpc_metadata:
+          x-deployment-realm: public-mail
+
       proxy_protocol:
         enabled: false
         trusted_cidrs: []

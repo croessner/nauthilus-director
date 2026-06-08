@@ -23,6 +23,12 @@ paths:
   director.listeners.**:
     stability: stable
     description: Public protocol listener, TLS, proxy protocol, authority, and backend-pool binding.
+  director.listeners.*.authority_context.http_headers:
+    stability: stable
+    description: Static non-secret HTTP authority context facts consumed by Nauthilus only through explicit auth.policy.request_headers allowlists.
+  director.listeners.*.authority_context.grpc_metadata:
+    stability: stable
+    description: Static non-secret gRPC authority context facts consumed by Nauthilus only through explicit auth.policy.request_metadata allowlists.
   director.routing.**:
     stability: stable
     description: Director-owned routing selector, shard default, hash-key, and failover behavior.

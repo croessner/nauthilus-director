@@ -38,14 +38,15 @@ const authorizationMetadataKey = "authorization"
 
 // networkGRPCAuthService adapts the generated protobuf client to the local authority seam.
 type networkGRPCAuthService struct {
-	client        authv1.AuthServiceClient
-	authorization string
-	tokenSource   callerTokenSource
+	client           authv1.AuthServiceClient
+	authorization    string
+	tokenSource      callerTokenSource
+	authorityContext AuthorityContext
 }
 
 // NewGRPCClientFromAuthority creates a gRPC authority client from typed config.
-func NewGRPCClientFromAuthority(authority config.AuthorityConfig) (*GRPCClient, error) {
-	service, err := newNetworkGRPCAuthService(authority)
+func NewGRPCClientFromAuthority(authority config.AuthorityConfig, authorityContext AuthorityContext) (*GRPCClient, error) {
+	service, err := newNetworkGRPCAuthService(authority, authorityContext)
 	if err != nil {
 		return nil, err
 	}
@@ -54,13 +55,17 @@ func NewGRPCClientFromAuthority(authority config.AuthorityConfig) (*GRPCClient, 
 }
 
 // newNetworkGRPCAuthService creates the generated client adapter with production dial options.
-func newNetworkGRPCAuthService(authority config.AuthorityConfig) (*networkGRPCAuthService, error) {
-	return newNetworkGRPCAuthServiceWithDialOptions(authority, nil)
+func newNetworkGRPCAuthService(
+	authority config.AuthorityConfig,
+	authorityContext AuthorityContext,
+) (*networkGRPCAuthService, error) {
+	return newNetworkGRPCAuthServiceWithDialOptions(authority, authorityContext, nil)
 }
 
 // newNetworkGRPCAuthServiceWithDialOptions creates the adapter with optional test dial options.
 func newNetworkGRPCAuthServiceWithDialOptions(
 	authority config.AuthorityConfig,
+	authorityContext AuthorityContext,
 	extraDialOptions []grpc.DialOption,
 ) (*networkGRPCAuthService, error) {
 	address := strings.TrimSpace(authority.GRPC.Address)
@@ -94,9 +99,10 @@ func newNetworkGRPCAuthServiceWithDialOptions(
 	}
 
 	return &networkGRPCAuthService{
-		client:        authv1.NewAuthServiceClient(connection),
-		authorization: authorization,
-		tokenSource:   tokenSource,
+		client:           authv1.NewAuthServiceClient(connection),
+		authorization:    authorization,
+		tokenSource:      tokenSource,
+		authorityContext: authorityContext.Normalize(),
 	}, nil
 }
 
@@ -153,20 +159,25 @@ func (s *networkGRPCAuthService) ListAccounts(
 
 // authorizedContext adds configured caller authentication metadata to one RPC context.
 func (s *networkGRPCAuthService) authorizedContext(ctx context.Context) (context.Context, error) {
+	callCtx := ctx
+	if pairs := s.authorityContext.grpcMetadataAppendPairs(); len(pairs) > 0 {
+		callCtx = metadata.AppendToOutgoingContext(callCtx, pairs...)
+	}
+
 	if s.tokenSource != nil {
 		token, err := s.tokenSource.BearerToken(ctx)
 		if err != nil {
 			return ctx, err
 		}
 
-		return metadata.AppendToOutgoingContext(ctx, authorizationMetadataKey, "Bearer "+token), nil
+		return metadata.AppendToOutgoingContext(callCtx, authorizationMetadataKey, "Bearer "+token), nil
 	}
 
 	if s.authorization == "" {
-		return ctx, nil
+		return callCtx, nil
 	}
 
-	return metadata.AppendToOutgoingContext(ctx, authorizationMetadataKey, s.authorization), nil
+	return metadata.AppendToOutgoingContext(callCtx, authorizationMetadataKey, s.authorization), nil
 }
 
 // grpcTransportCredentials builds the authority transport security policy.

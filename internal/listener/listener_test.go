@@ -55,6 +55,12 @@ const (
 	testPOP3SListener    = "pop3s"
 	testLoopbackAny      = "127.0.0.1:0"
 	trustedLocalhostCIDR = "127.0.0.1/32"
+
+	testContextHTTPHeader = "X-Company-Domain"
+	testContextGRPCKey    = "x-company-domain"
+	testContextValue      = "companyde"
+	testIMAPContextValue  = "imap-company"
+	testIMAPSContextValue = "imaps-company"
 )
 
 // TestManagerSelectsSupportedProtocolListeners verifies startup plans include every supported protocol.
@@ -145,7 +151,10 @@ func TestManagerSelectsConfiguredListenerAuthorityTransport(t *testing.T) {
 
 	_, err := NewManagerWithConfig(
 		cfg,
-		WithNauthilusClientFactory(func(authority config.AuthorityConfig) (nauthilus.Authenticator, error) {
+		WithNauthilusClientFactory(func(
+			authority config.AuthorityConfig,
+			_ nauthilus.ClientOptions,
+		) (nauthilus.Authenticator, error) {
 			captured <- authority
 
 			return noopAuthenticator{}, nil
@@ -180,6 +189,114 @@ func TestManagerSelectsConfiguredListenerAuthorityTransport(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for session options")
+	}
+}
+
+// TestManagerPassesListenerAuthorityContextToClientFactory verifies listener-scoped context propagation.
+func TestManagerPassesListenerAuthorityContextToClientFactory(t *testing.T) {
+	cfg := singleListenerConfig(t, testIMAPListener, tlsModeStartTLS)
+	entry := cfg.Director.Listeners[testIMAPListener]
+	entry.AuthorityContext = config.AuthorityContextConfig{
+		HTTPHeaders: map[string]config.AuthorityContextValue{
+			testContextHTTPHeader: testContextValue,
+		},
+		GRPCMetadata: map[string]config.AuthorityContextValue{
+			testContextGRPCKey: testContextValue,
+		},
+	}
+	cfg.Director.Listeners[testIMAPListener] = entry
+
+	captured := make(chan nauthilus.ClientOptions, 1)
+
+	_, err := NewManagerWithConfig(
+		cfg,
+		WithNauthilusClientFactory(func(
+			_ config.AuthorityConfig,
+			options nauthilus.ClientOptions,
+		) (nauthilus.Authenticator, error) {
+			captured <- options
+
+			return noopAuthenticator{}, nil
+		}),
+	)
+	if err != nil {
+		t.Fatalf("NewManagerWithConfig returned error: %v", err)
+	}
+
+	select {
+	case options := <-captured:
+		if got := options.AuthorityContext.HTTPHeaders[testContextHTTPHeader]; got != testContextValue {
+			t.Fatal("http context header did not match expected listener value")
+		}
+
+		if got := options.AuthorityContext.GRPCMetadata[testContextGRPCKey]; got != testContextValue {
+			t.Fatal("grpc context metadata did not match expected listener value")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for authority client options")
+	}
+}
+
+// TestManagerKeepsAuthorityContextListenerScopedForSharedAuthority verifies one authority can serve different listener facts.
+func TestManagerKeepsAuthorityContextListenerScopedForSharedAuthority(t *testing.T) {
+	cfg := singleListenerConfig(t, testIMAPListener, tlsModeStartTLS)
+	imapEntry := cfg.Director.Listeners[testIMAPListener]
+	imapEntry.AuthorityContext = config.AuthorityContextConfig{
+		HTTPHeaders: map[string]config.AuthorityContextValue{
+			testContextHTTPHeader: testIMAPContextValue,
+		},
+		GRPCMetadata: map[string]config.AuthorityContextValue{
+			testContextGRPCKey: testIMAPContextValue,
+		},
+	}
+
+	imapsEntry := config.DefaultConfig().Director.Listeners[testIMAPSListener]
+	imapsEntry.Address = testLoopbackAny
+	imapsEntry = withTestListenerCertificate(t, imapsEntry)
+	imapsEntry.ProxyProtocol.Enabled = false
+	imapsEntry.ProxyProtocol.TrustedCIDRs = nil
+	imapsEntry.Authority = imapEntry.Authority
+	imapsEntry.AuthorityContext = config.AuthorityContextConfig{
+		HTTPHeaders: map[string]config.AuthorityContextValue{
+			testContextHTTPHeader: testIMAPSContextValue,
+		},
+		GRPCMetadata: map[string]config.AuthorityContextValue{
+			testContextGRPCKey: testIMAPSContextValue,
+		},
+	}
+
+	cfg.Director.Listeners = map[string]config.ListenerConfig{
+		testIMAPListener:  imapEntry,
+		testIMAPSListener: imapsEntry,
+	}
+
+	var captured []nauthilus.AuthorityContext
+
+	_, err := NewManagerWithConfig(
+		cfg,
+		WithNauthilusClientFactory(func(
+			_ config.AuthorityConfig,
+			options nauthilus.ClientOptions,
+		) (nauthilus.Authenticator, error) {
+			captured = append(captured, options.AuthorityContext)
+
+			return noopAuthenticator{}, nil
+		}),
+	)
+	if err != nil {
+		t.Fatalf("NewManagerWithConfig returned error: %v", err)
+	}
+
+	if len(captured) != 2 {
+		t.Fatalf("captured contexts = %d, want 2", len(captured))
+	}
+
+	if got := captured[0].HTTPHeaders[testContextHTTPHeader]; got != testIMAPContextValue {
+		t.Fatal("imap listener context did not match expected value")
+	}
+
+	if got := captured[1].HTTPHeaders[testContextHTTPHeader]; got != testIMAPSContextValue {
+		t.Fatal("imaps listener context did not match expected value")
 	}
 }
 

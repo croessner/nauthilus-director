@@ -89,7 +89,10 @@ type SessionHandler interface {
 type SessionHandlerFactory func(options SessionOptions) SessionHandler
 
 // NauthilusClientFactory builds the selected authority client for one listener.
-type NauthilusClientFactory func(authority config.AuthorityConfig) (nauthilus.Authenticator, error)
+type NauthilusClientFactory func(
+	authority config.AuthorityConfig,
+	options nauthilus.ClientOptions,
+) (nauthilus.Authenticator, error)
 
 // SessionOptions contains the typed listener values passed into a protocol handler.
 type SessionOptions struct {
@@ -572,8 +575,11 @@ func defaultSessionHandlerFactory(options SessionOptions) SessionHandler {
 }
 
 // defaultNauthilusClientFactory creates the configured Nauthilus authority transport.
-func defaultNauthilusClientFactory(authority config.AuthorityConfig) (nauthilus.Authenticator, error) {
-	return nauthilus.NewClient(authority, nauthilus.ClientOptions{})
+func defaultNauthilusClientFactory(
+	authority config.AuthorityConfig,
+	options nauthilus.ClientOptions,
+) (nauthilus.Authenticator, error) {
+	return nauthilus.NewClient(authority, options)
 }
 
 // sortedSupportedListenerNames selects supported protocol listeners deterministically.

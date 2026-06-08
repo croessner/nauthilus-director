@@ -104,6 +104,10 @@ const (
 	e2eOIDCScopeLookup  = "nauthilus:lookup_identity"
 	e2eOIDCScopeList    = "nauthilus:list_accounts"
 	e2eOIDCDiscovery    = "/.well-known/openid-configuration"
+	e2eContextHeader    = "X-Company-Domain"
+	e2eContextHTTPValue = "e2e-http-authority-context"
+	e2eContextMetadata  = "x-company-domain"
+	e2eContextGRPCValue = "e2e-grpc-authority-context"
 	fakeBackendReady    = "* OK fake IMAP backend ready\r\n"
 	fakeProxyPrefix     = "PROXY "
 	fakeProxyReadLimit  = 256
@@ -120,10 +124,12 @@ func TestFakeHTTPAuthorityPublicIMAPFlow(t *testing.T) {
 		"mailShard": {e2eShardTag},
 	})
 	fakeBackend := startFakeIMAPBackend(t, fakeBackendOptions{})
-	authenticator := newHTTPAuthenticator(t, authority.URL())
 
 	director := startDirector(t, directorOptions{
-		Authenticator:  authenticator,
+		AuthorityContextHTTPHeaders: map[string]string{
+			e2eContextHeader: e2eContextHTTPValue,
+		},
+		AuthorityURL:   authority.URL(),
 		BackendAuth:    masterUserBackendAuth(),
 		BackendAddress: fakeBackend.Address(),
 		Recorder:       recorder,
@@ -146,9 +152,11 @@ func TestFakeHTTPAuthorityPublicIMAPFlow(t *testing.T) {
 	expectLine(t, reader, "A003 OK backend noop\r\n")
 
 	authority.ExpectRequest(t, "imap", "login", "e2e-client")
+	authority.ExpectContextHeader(t, e2eContextHeader, e2eContextHTTPValue)
 	fakeBackend.ExpectProxyLine(t, "A003 NOOP")
 	_ = client.Close()
 	recorder.AssertSafe(t)
+	recorder.AssertOmits(t, e2eContextHTTPValue)
 	recorder.ExpectEvents(t,
 		observability.EventSessionStart,
 		observability.EventNauthilusAuth,
@@ -1211,8 +1219,11 @@ func TestRuntimeControlPublicBoundaries(t *testing.T) {
 	backendB := startFakeIMAPBackend(t, fakeBackendOptions{})
 	backendC := startFakeIMAPBackend(t, fakeBackendOptions{})
 	options := directorOptions{
-		Authenticator: newHTTPAuthenticator(t, authority.URL()),
-		BackendAuth:   masterUserBackendAuth(),
+		AuthorityContextHTTPHeaders: map[string]string{
+			e2eContextHeader: e2eContextHTTPValue,
+		},
+		AuthorityURL: authority.URL(),
+		BackendAuth:  masterUserBackendAuth(),
 		BackendAddresses: map[string]string{
 			e2eBackendAID:      backendA.Address(),
 			e2eBackendBID:      backendB.Address(),
@@ -1254,6 +1265,9 @@ func TestRuntimeControlPublicBoundaries(t *testing.T) {
 	if initial.SelectedBackend != e2eBackendAID && initial.SelectedBackend != e2eBackendBID {
 		t.Fatalf("initial selected backend = %q, want same-shard backend", initial.SelectedBackend)
 	}
+	if authority.RequestCount() != 0 {
+		t.Fatal("initial route lookup called the fake Nauthilus authority")
+	}
 	selectedID := initial.SelectedBackend
 	otherID := e2eBackendAID
 	if selectedID == e2eBackendAID {
@@ -1277,6 +1291,20 @@ func TestRuntimeControlPublicBoundaries(t *testing.T) {
 	if diagnostic.Affinity == nil || !diagnostic.Affinity.Present {
 		t.Fatalf("route lookup did not report read-only affinity: %#v", diagnostic.Affinity)
 	}
+	authority.ExpectContextHeader(t, e2eContextHeader, e2eContextHTTPValue)
+	rawRoute := lookupRouteRaw(t, control.URL(), e2eProtocol, e2eListenerName, e2eAccount, true)
+	assertOutputOmitsAuthorityContext(t, rawRoute, e2eContextHTTPValue)
+	routeOutput := runDirectorctl(
+		t,
+		ctl,
+		control.URL(),
+		"route", "lookup",
+		"--protocol", e2eProtocol,
+		"--user", e2eAccount,
+		"--listener", e2eListenerName,
+		"--include-affinity",
+	)
+	assertOutputOmitsAuthorityContext(t, routeOutput, e2eContextHTTPValue)
 
 	secondClient, secondReader := loginIMAP(t, director.Address(), e2eAccount)
 	defer func() { _ = secondClient.Close() }()
@@ -1402,28 +1430,31 @@ func TestRuntimeControlPublicBoundaries(t *testing.T) {
 		observability.EventReload,
 	)
 	recorder.AssertSafe(t)
+	recorder.AssertOmits(t, e2eContextHTTPValue)
 }
 
 type directorOptions struct {
-	Authenticator      nauthilus.Authenticator
-	BackendAuth        backend.AuthConfig
-	BackendAddress     string
-	BackendAddresses   map[string]string
-	BackendMaxSessions map[string]int
-	BackendSelector    backend.Selector
-	BackendShards      map[string]string
-	BackendTLS         config.BackendTLSConfig
-	FrontendTLSConfig  *tls.Config
-	ListenerCertPath   string
-	ListenerKeyPath    string
-	LocalSessions      *runtimectl.LocalSessionRegistry
-	ProxyIdleTimeout   time.Duration
-	Recorder           observability.Recorder
-	SessionLeaseTTL    time.Duration
-	SessionStore       state.SessionStore
-	TLSMode            string
-	UsePlacementStubs  bool
-	UseProxyRunnerStub bool
+	Authenticator               nauthilus.Authenticator
+	AuthorityContextHTTPHeaders map[string]string
+	AuthorityURL                string
+	BackendAuth                 backend.AuthConfig
+	BackendAddress              string
+	BackendAddresses            map[string]string
+	BackendMaxSessions          map[string]int
+	BackendSelector             backend.Selector
+	BackendShards               map[string]string
+	BackendTLS                  config.BackendTLSConfig
+	FrontendTLSConfig           *tls.Config
+	ListenerCertPath            string
+	ListenerKeyPath             string
+	LocalSessions               *runtimectl.LocalSessionRegistry
+	ProxyIdleTimeout            time.Duration
+	Recorder                    observability.Recorder
+	SessionLeaseTTL             time.Duration
+	SessionStore                state.SessionStore
+	TLSMode                     string
+	UsePlacementStubs           bool
+	UseProxyRunnerStub          bool
 }
 
 type directorInstance struct {
@@ -2248,6 +2279,39 @@ func quotedYAMLStrings(values []string) string {
 	return strings.Join(quoted, ", ")
 }
 
+// listenerAuthorityContextYAML renders optional listener authority context maps.
+func listenerAuthorityContextYAML(httpHeaders map[string]string, grpcMetadata map[string]string) string {
+	if len(httpHeaders) == 0 && len(grpcMetadata) == 0 {
+		return ""
+	}
+
+	var builder strings.Builder
+	builder.WriteString("      authority_context:\n")
+	appendAuthorityContextMapYAML(&builder, "http_headers", httpHeaders)
+	appendAuthorityContextMapYAML(&builder, "grpc_metadata", grpcMetadata)
+
+	return builder.String()
+}
+
+// appendAuthorityContextMapYAML renders one listener context map in stable order.
+func appendAuthorityContextMapYAML(builder *strings.Builder, name string, values map[string]string) {
+	if len(values) == 0 {
+		fmt.Fprintf(builder, "        %s: {}\n", name)
+
+		return
+	}
+
+	fmt.Fprintf(builder, "        %s:\n", name)
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		fmt.Fprintf(builder, "          %s: %q\n", key, values[key])
+	}
+}
+
 // startDirector starts the production listener/session stack on public sockets.
 func startDirector(t *testing.T, options directorOptions) directorInstance {
 	t.Helper()
@@ -2288,11 +2352,7 @@ func startDirector(t *testing.T, options directorOptions) directorInstance {
 		proxyIdleTimeout = time.Second
 	}
 
-	manager, err := listener.NewManagerWithConfig(
-		cfg,
-		listener.WithNauthilusClientFactory(func(config.AuthorityConfig) (nauthilus.Authenticator, error) {
-			return options.Authenticator, nil
-		}),
+	managerOptions := []listener.ManagerOption{
 		listener.WithObservabilityRecorder(options.Recorder),
 		listener.WithSessionHandlerFactory(func(listenerOptions listener.SessionOptions) listener.SessionHandler {
 			sessionConfig := imap.SessionConfig{
@@ -2333,7 +2393,19 @@ func startDirector(t *testing.T, options directorOptions) directorInstance {
 
 			return imap.NewHandler(sessionConfig)
 		}),
-	)
+	}
+	if options.Authenticator != nil {
+		managerOptions = append([]listener.ManagerOption{
+			listener.WithNauthilusClientFactory(func(
+				config.AuthorityConfig,
+				nauthilus.ClientOptions,
+			) (nauthilus.Authenticator, error) {
+				return options.Authenticator, nil
+			}),
+		}, managerOptions...)
+	}
+
+	manager, err := listener.NewManagerWithConfig(cfg, managerOptions...)
 	if err != nil {
 		t.Fatalf("NewManagerWithConfig: %v", err)
 	}
@@ -2358,7 +2430,10 @@ func startSieveDirector(t *testing.T, cfg config.Config, recorder observability.
 
 	manager, err := listener.NewManagerWithConfig(
 		cfg,
-		listener.WithNauthilusClientFactory(func(config.AuthorityConfig) (nauthilus.Authenticator, error) {
+		listener.WithNauthilusClientFactory(func(
+			config.AuthorityConfig,
+			nauthilus.ClientOptions,
+		) (nauthilus.Authenticator, error) {
 			return unavailableAuthenticator{}, nil
 		}),
 		listener.WithObservabilityRecorder(recorder),
@@ -2449,7 +2524,16 @@ func e2eConfig(options directorOptions) config.Config {
 	listenerConfig.TLS.Key = config.Secret(options.ListenerKeyPath)
 	listenerConfig.IMAP.Capabilities = []string{"IMAP4rev1", "ID", "SASL-IR", "STARTTLS", "AUTH=PLAIN", "AUTH=XOAUTH2", "AUTH=OAUTHBEARER"}
 	listenerConfig.IMAP.AuthMechanisms = []string{"plain", "xoauth2", "oauthbearer"}
+	listenerConfig.AuthorityContext.HTTPHeaders = authorityContextConfigValues(options.AuthorityContextHTTPHeaders)
 	cfg.Director.Listeners = map[string]config.ListenerConfig{e2eListenerName: listenerConfig}
+	if strings.TrimSpace(options.AuthorityURL) != "" {
+		authority := cfg.Auth.Authorities["default"]
+		authority.Transport = "http"
+		authority.OIDC.Enabled = false
+		authority.OIDC.ClientCredentials.Enabled = false
+		authority.HTTP.Endpoint = options.AuthorityURL
+		cfg.Auth.Authorities["default"] = authority
+	}
 
 	cfg.Director.BackendPools = map[string]config.BackendPoolConfig{
 		e2eBackendPool: {
@@ -2487,6 +2571,20 @@ func e2eConfig(options directorOptions) config.Config {
 	}
 
 	return cfg
+}
+
+// authorityContextConfigValues maps test strings into typed listener context values.
+func authorityContextConfigValues(values map[string]string) map[string]config.AuthorityContextValue {
+	if len(values) == 0 {
+		return map[string]config.AuthorityContextValue{}
+	}
+
+	configured := make(map[string]config.AuthorityContextValue, len(values))
+	for name, value := range values {
+		configured[name] = config.AuthorityContextValue(value)
+	}
+
+	return configured
 }
 
 // e2eSieveConfig builds a narrow typed config for public STARTTLS and implicit ManageSieve listeners.
@@ -3461,6 +3559,29 @@ func lookupRouteFor(
 	return response
 }
 
+// lookupRouteRaw returns the public route lookup body for output leak checks.
+func lookupRouteRaw(
+	t *testing.T,
+	baseURL string,
+	protocol string,
+	listener string,
+	userKey string,
+	includeAffinity bool,
+) string {
+	t.Helper()
+
+	listenerName := listener
+	body := generated.LookupRouteJSONRequestBody{
+		IncludeAffinity: &includeAffinity,
+		Listener:        &listenerName,
+		Protocol:        protocol,
+		UserKey:         &userKey,
+	}
+	data := requestJSONData(t, http.MethodPost, baseURL+"/api/v1/route/lookup", body, http.StatusOK)
+
+	return string(data)
+}
+
 // assertRouteLookupUserHoldActive verifies read-only hold diagnostics.
 func assertRouteLookupUserHoldActive(t *testing.T, response generated.RouteLookupResponse) {
 	t.Helper()
@@ -3657,6 +3778,18 @@ func deleteAccepted(t *testing.T, target string, body any) {
 func requestJSON(t *testing.T, method string, target string, body any, wantStatus int, out any) {
 	t.Helper()
 
+	data := requestJSONData(t, method, target, body, wantStatus)
+	if out != nil && len(data) > 0 {
+		if err := json.Unmarshal(data, out); err != nil {
+			t.Fatalf("decode response body %s: %v", data, err)
+		}
+	}
+}
+
+// requestJSONData sends a JSON request and returns the public response body.
+func requestJSONData(t *testing.T, method string, target string, body any, wantStatus int) []byte {
+	t.Helper()
+
 	var reader io.Reader
 	if body != nil {
 		payload, err := json.Marshal(body)
@@ -3690,11 +3823,7 @@ func requestJSON(t *testing.T, method string, target string, body any, wantStatu
 		t.Fatalf("%s %s status = %d, want %d, body=%s", method, target, response.StatusCode, wantStatus, data)
 	}
 
-	if out != nil && len(data) > 0 {
-		if err := json.Unmarshal(data, out); err != nil {
-			t.Fatalf("decode response body %s: %v", data, err)
-		}
-	}
+	return data
 }
 
 // requestStatus sends JSON and returns only the HTTP status for negative assertions.
@@ -4046,6 +4175,17 @@ func assertOutputOmits(t *testing.T, output string, forbidden ...string) {
 	}
 }
 
+// assertOutputOmitsAuthorityContext checks context sentinels without echoing them on failure.
+func assertOutputOmitsAuthorityContext(t *testing.T, output string, forbidden ...string) {
+	t.Helper()
+
+	for _, value := range forbidden {
+		if strings.TrimSpace(value) != "" && strings.Contains(output, value) {
+			t.Fatal("output contained a forbidden authority context value")
+		}
+	}
+}
+
 // waitForSessionIDs waits until the control reader sees the requested count.
 func waitForSessionIDs(t *testing.T, store *trackingSessionStore, count int) []string {
 	t.Helper()
@@ -4142,14 +4282,15 @@ func readProxyProtocolPreface(conn net.Conn) (string, bool) {
 }
 
 type fakeHTTPAuthority struct {
-	server       *http.Server
-	listener     net.Listener
-	attributes   map[string][]string
-	identities   map[string]map[string][]string
-	oidc         *fakeOIDCAuthority
-	requests     []map[string]any
-	authSchemes  []string
-	requestsLock sync.Mutex
+	server         *http.Server
+	listener       net.Listener
+	attributes     map[string][]string
+	identities     map[string]map[string][]string
+	oidc           *fakeOIDCAuthority
+	requests       []map[string]any
+	contextHeaders []map[string]string
+	authSchemes    []string
+	requestsLock   sync.Mutex
 }
 
 type fakeOIDCAuthority struct {
@@ -4290,13 +4431,35 @@ func (f *fakeHTTPAuthority) ExpectRequest(t *testing.T, protocol string, method 
 	}
 	request := f.requests[0]
 	if request["protocol"] != protocol || request["method"] != method || !matchesOptionalString(request["client_id"], clientID) {
-		t.Fatalf("fake authority request = %#v", request)
+		t.Fatal("fake authority request did not match the expected protocol context")
 	}
 	for _, forbidden := range []string{"backend_identifier", "listener", "session_id", "routing_hint"} {
 		if _, ok := request[forbidden]; ok {
-			t.Fatalf("fake authority received forbidden field %q: %#v", forbidden, request)
+			t.Fatalf("fake authority received forbidden field %q", forbidden)
 		}
 	}
+}
+
+// ExpectContextHeader verifies one selected safe listener context header reached the authority.
+func (f *fakeHTTPAuthority) ExpectContextHeader(t *testing.T, name string, want string) {
+	t.Helper()
+
+	canonical := http.CanonicalHeaderKey(name)
+	for range 50 {
+		f.requestsLock.Lock()
+		for _, headers := range f.contextHeaders {
+			if headers[canonical] == want {
+				f.requestsLock.Unlock()
+
+				return
+			}
+		}
+		f.requestsLock.Unlock()
+
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	t.Fatalf("fake authority did not receive expected context header %q", canonical)
 }
 
 // ExpectOIDCCallerAuth verifies the caller obtained and used a Bearer token instead of Basic auth.
@@ -4384,6 +4547,7 @@ func (f *fakeHTTPAuthority) handle(writer http.ResponseWriter, request *http.Req
 
 	f.requestsLock.Lock()
 	f.requests = append(f.requests, body)
+	f.contextHeaders = append(f.contextHeaders, safeHTTPAuthorityContextHeaders(request))
 	f.requestsLock.Unlock()
 
 	writer.Header().Set("Content-Type", "application/json")
@@ -4392,6 +4556,19 @@ func (f *fakeHTTPAuthority) handle(writer http.ResponseWriter, request *http.Req
 		"account_field": "account",
 		"attributes":    f.attributesForRequest(body),
 	})
+}
+
+// safeHTTPAuthorityContextHeaders snapshots known non-credential listener context headers only.
+func safeHTTPAuthorityContextHeaders(request *http.Request) map[string]string {
+	headers := map[string]string{}
+	for _, name := range []string{e2eContextHeader} {
+		value := request.Header.Get(name)
+		if value != "" {
+			headers[http.CanonicalHeaderKey(name)] = value
+		}
+	}
+
+	return headers
 }
 
 // authorizeBackchannel enforces fake Nauthilus OIDC bearer auth when enabled.
@@ -5137,6 +5314,35 @@ func (r *capturedRecorder) AssertSafe(t *testing.T) {
 			}
 		}
 	}
+}
+
+// AssertOmits checks captured log and metric fields without echoing forbidden values.
+func (r *capturedRecorder) AssertOmits(t *testing.T, forbidden ...string) {
+	t.Helper()
+
+	for _, event := range r.snapshot() {
+		for key, value := range event.LogFields {
+			if containsForbiddenText(value, forbidden) {
+				t.Fatalf("event %s log field %s contained forbidden authority context", event.Name, key)
+			}
+		}
+		for key, value := range event.MetricLabels {
+			if containsForbiddenText(value, forbidden) {
+				t.Fatalf("event %s metric label %s contained forbidden authority context", event.Name, key)
+			}
+		}
+	}
+}
+
+// containsForbiddenText reports whether text contains any non-empty forbidden sentinel.
+func containsForbiddenText(text string, forbidden []string) bool {
+	for _, value := range forbidden {
+		if strings.TrimSpace(value) != "" && strings.Contains(text, value) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // ExpectEvents checks that required event names were observed at least once.

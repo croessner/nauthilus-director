@@ -226,12 +226,9 @@ func mutateAuthorityTransportForReload(next *config.Config) {
 
 // mutateExistingListenerSocketForReload changes an already-open listener socket.
 func mutateExistingListenerSocketForReload(next *config.Config) {
-	for name, listener := range next.Director.Listeners {
-		listener.Address = "127.0.0.1:10143"
-		next.Director.Listeners[name] = listener
-
-		break
-	}
+	listener := next.Director.Listeners["imap"]
+	listener.Address = "127.0.0.1:11143"
+	next.Director.Listeners["imap"] = listener
 }
 
 // TestSafeReloadObservationIncludesActorAuditFields verifies reload attempts are attributable.

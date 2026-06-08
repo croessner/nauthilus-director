@@ -252,6 +252,37 @@ bearer tokens.
 Operational setup and migration guidance for Nauthilus OIDC caller auth lives
 in
 .BR docs/operations/oidc-nauthilus.md .
+.SH LISTENER AUTHORITY CONTEXT
+Protocol listeners may define
+.B director.listeners.<name>.authority_context.http_headers
+and
+.B director.listeners.<name>.authority_context.grpc_metadata
+as static, listener-owned deployment facts for the selected Nauthilus
+authority.
+HTTP context entries are added to outbound Nauthilus HTTP authority requests as
+headers. gRPC context entries are added as outgoing metadata for
+authentication, identity lookup and account-listing calls.
+.PP
+These values are not routing hints, backend selectors, tenant routing input,
+user identity, dynamic claims or secrets. They must not contain credentials,
+tokens, session identifiers or private deployment data.
+Nauthilus consumes them only when its own policy configuration explicitly
+allowlists the names through
+.B auth.policy.request_headers
+or
+.BR auth.policy.request_metadata .
+.PP
+Director validates names and values during config loading. Empty values,
+credential headers such as
+.B Authorization
+or
+.BR Cookie ,
+transport-owned headers such as
+.B Content-Type
+and gRPC-reserved
+.B grpc-*
+metadata names fail closed. HTTP header names are canonicalized; gRPC metadata
+keys must already be lowercase ASCII metadata keys.
 .SH BACKEND OUTBOUND PROXY PROTOCOL
 Backend entries may enable backend-side HAProxy PROXY protocol with
 .B director.backends.<name>.haproxy.enabled: true.

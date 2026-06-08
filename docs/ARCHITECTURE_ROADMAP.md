@@ -1391,6 +1391,15 @@ are complete. Detailed closeout commands and evidence are recorded in
 Status: completed. The production hardening milestone is closed with concrete
 evidence in `docs/specs/implementation/M8_PRODUCTION_HARDENING_SPEC.md`.
 
+The M8 listener authority context follow-up is complete. Listeners can attach
+static, non-secret deployment facts to the selected Nauthilus authority through
+HTTP headers or gRPC metadata, while Nauthilus consumes those facts only through
+explicit `auth.policy.request_headers` and `auth.policy.request_metadata`
+allowlists. The feature does not add routing authority, backend selection,
+runtime REST or CLI mutation surfaces, or Nauthilus DTO/protobuf fields. Detailed
+completion evidence lives in
+`docs/specs/implementation/M8_LISTENER_AUTHORITY_CONTEXT_FOLLOWUP.md`.
+
 - hardened production Docker image and Docker smoke proof
 - restrictive systemd unit and reload path through `nauthilus-directorctl reload`
 - safe reload semantics shared by REST, CLI and systemd

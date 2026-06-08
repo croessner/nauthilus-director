@@ -417,12 +417,13 @@ func defaultDirector() DirectorConfig {
 // defaultIMAPListener builds a default IMAP-family listener for one service.
 func defaultIMAPListener(serviceName string, address string, tlsMode string, cert string, key string) ListenerConfig {
 	return ListenerConfig{
-		Protocol:    "imap",
-		ServiceName: serviceName,
-		Network:     "tcp",
-		Address:     address,
-		Authority:   "default",
-		BackendPool: "imap-default",
+		Protocol:         "imap",
+		ServiceName:      serviceName,
+		Network:          "tcp",
+		Address:          address,
+		Authority:        "default",
+		BackendPool:      "imap-default",
+		AuthorityContext: defaultAuthorityContext(),
 		ProxyProtocol: ProxyProtocolConfig{
 			TrustedCIDRs: []string{},
 		},
@@ -437,6 +438,14 @@ func defaultIMAPListener(serviceName string, address string, tlsMode string, cer
 			AuthMechanisms:      []string{"plain", "xoauth2", "oauthbearer"},
 			RequireIDBeforeAuth: false,
 		},
+	}
+}
+
+// defaultAuthorityContext returns empty listener-owned authority context maps.
+func defaultAuthorityContext() AuthorityContextConfig {
+	return AuthorityContextConfig{
+		HTTPHeaders:  map[string]AuthorityContextValue{},
+		GRPCMetadata: map[string]AuthorityContextValue{},
 	}
 }
 
@@ -458,12 +467,13 @@ func defaultLMTPListener(serviceName string, address string, tlsMode string, cer
 	}
 
 	return ListenerConfig{
-		Protocol:    "lmtp",
-		ServiceName: serviceName,
-		Network:     "tcp",
-		Address:     address,
-		Authority:   "default",
-		BackendPool: "lmtp-default",
+		Protocol:         "lmtp",
+		ServiceName:      serviceName,
+		Network:          "tcp",
+		Address:          address,
+		Authority:        "default",
+		BackendPool:      "lmtp-default",
+		AuthorityContext: defaultAuthorityContext(),
 		ProxyProtocol: ProxyProtocolConfig{
 			TrustedCIDRs: []string{},
 		},
@@ -491,12 +501,13 @@ func defaultLMTPListener(serviceName string, address string, tlsMode string, cer
 // defaultSieveListener builds conservative ManageSieve listener defaults.
 func defaultSieveListener(serviceName string, address string, tlsMode string, cert string, key string) ListenerConfig {
 	return ListenerConfig{
-		Protocol:    "sieve",
-		ServiceName: serviceName,
-		Network:     "tcp",
-		Address:     address,
-		Authority:   "default",
-		BackendPool: "sieve-default",
+		Protocol:         "sieve",
+		ServiceName:      serviceName,
+		Network:          "tcp",
+		Address:          address,
+		Authority:        "default",
+		BackendPool:      "sieve-default",
+		AuthorityContext: defaultAuthorityContext(),
 		ProxyProtocol: ProxyProtocolConfig{
 			TrustedCIDRs: []string{},
 		},
@@ -519,12 +530,13 @@ func defaultSieveListener(serviceName string, address string, tlsMode string, ce
 // defaultPOP3Listener builds conservative POP3 listener defaults.
 func defaultPOP3Listener(serviceName string, address string, tlsMode string, cert string, key string) ListenerConfig {
 	return ListenerConfig{
-		Protocol:    "pop3",
-		ServiceName: serviceName,
-		Network:     "tcp",
-		Address:     address,
-		Authority:   "default",
-		BackendPool: "pop3-default",
+		Protocol:         "pop3",
+		ServiceName:      serviceName,
+		Network:          "tcp",
+		Address:          address,
+		Authority:        "default",
+		BackendPool:      "pop3-default",
+		AuthorityContext: defaultAuthorityContext(),
 		ProxyProtocol: ProxyProtocolConfig{
 			TrustedCIDRs: []string{},
 		},

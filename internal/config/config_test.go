@@ -75,6 +75,303 @@ func TestTargetConfigDecodesAndValidates(t *testing.T) {
 	}
 }
 
+// TestListenerAuthorityContextDefaultsEmpty verifies listener context is opt-in only.
+func TestListenerAuthorityContextDefaultsEmpty(t *testing.T) {
+	cfg := DefaultConfig().Normalize()
+
+	for name, listener := range cfg.Director.Listeners {
+		if listener.AuthorityContext.HTTPHeaders == nil {
+			t.Fatalf("director.listeners.%s.authority_context.http_headers is nil, want empty map", name)
+		}
+		if listener.AuthorityContext.GRPCMetadata == nil {
+			t.Fatalf("director.listeners.%s.authority_context.grpc_metadata is nil, want empty map", name)
+		}
+		if len(listener.AuthorityContext.HTTPHeaders) != 0 {
+			t.Fatalf("director.listeners.%s.authority_context.http_headers = %v, want empty", name, listener.AuthorityContext.HTTPHeaders)
+		}
+		if len(listener.AuthorityContext.GRPCMetadata) != 0 {
+			t.Fatalf("director.listeners.%s.authority_context.grpc_metadata = %v, want empty", name, listener.AuthorityContext.GRPCMetadata)
+		}
+	}
+}
+
+// TestListenerAuthorityContextNormalizesAcceptedNamesAndValues verifies stable safe names.
+func TestListenerAuthorityContextNormalizesAcceptedNamesAndValues(t *testing.T) {
+	cfg := DefaultConfig()
+	listener := cfg.Director.Listeners["imap"]
+	listener.AuthorityContext = AuthorityContextConfig{
+		HTTPHeaders: map[string]AuthorityContextValue{
+			" x-company-domain ": " companyde ",
+		},
+		GRPCMetadata: map[string]AuthorityContextValue{
+			" x-company-domain ": " companyde ",
+		},
+	}
+	cfg.Director.Listeners["imap"] = listener
+
+	normalized := cfg.Normalize()
+	gotListener := normalized.Director.Listeners["imap"]
+	if got := string(gotListener.AuthorityContext.HTTPHeaders["X-Company-Domain"]); got != "companyde" {
+		t.Fatal("HTTP authority context did not normalize to expected value")
+	}
+	if _, ok := gotListener.AuthorityContext.HTTPHeaders["x-company-domain"]; ok {
+		t.Fatal("HTTP authority context kept non-canonical header name")
+	}
+	if got := string(gotListener.AuthorityContext.GRPCMetadata["x-company-domain"]); got != "companyde" {
+		t.Fatal("gRPC authority context did not normalize to expected value")
+	}
+
+	if err := NewLoader().Validate(normalized); err != nil {
+		t.Fatalf("Validate rejected safe authority context: %v", err)
+	}
+}
+
+// TestListenerAuthorityContextRejectsInvalidNamesAndValues keeps startup fail-closed.
+func TestListenerAuthorityContextRejectsInvalidNamesAndValues(t *testing.T) {
+	tests := map[string]struct {
+		mutate func(*ListenerConfig)
+		want   string
+	}{
+		"empty HTTP name": {
+			mutate: func(listener *ListenerConfig) {
+				listener.AuthorityContext.HTTPHeaders = map[string]AuthorityContextValue{" ": "companyde"}
+			},
+			want: "director.listeners.imap.authority_context.http_headers contains an empty header name",
+		},
+		"empty HTTP value": {
+			mutate: func(listener *ListenerConfig) {
+				listener.AuthorityContext.HTTPHeaders = map[string]AuthorityContextValue{"X-Company-Domain": " "}
+			},
+			want: "director.listeners.imap.authority_context.http_headers contains an empty value",
+		},
+		"invalid HTTP name": {
+			mutate: func(listener *ListenerConfig) {
+				listener.AuthorityContext.HTTPHeaders = map[string]AuthorityContextValue{"X Company Domain": "companyde"}
+			},
+			want: "director.listeners.imap.authority_context.http_headers contains an invalid header name",
+		},
+		"empty gRPC key": {
+			mutate: func(listener *ListenerConfig) {
+				listener.AuthorityContext.GRPCMetadata = map[string]AuthorityContextValue{" ": "companyde"}
+			},
+			want: "director.listeners.imap.authority_context.grpc_metadata contains an empty metadata key",
+		},
+		"empty gRPC value": {
+			mutate: func(listener *ListenerConfig) {
+				listener.AuthorityContext.GRPCMetadata = map[string]AuthorityContextValue{"x-company-domain": ""}
+			},
+			want: "director.listeners.imap.authority_context.grpc_metadata contains an empty value",
+		},
+		"uppercase gRPC key": {
+			mutate: func(listener *ListenerConfig) {
+				listener.AuthorityContext.GRPCMetadata = map[string]AuthorityContextValue{"X-Company-Domain": "companyde"}
+			},
+			want: "director.listeners.imap.authority_context.grpc_metadata contains a metadata key that must be lowercase ASCII",
+		},
+		"invalid gRPC key": {
+			mutate: func(listener *ListenerConfig) {
+				listener.AuthorityContext.GRPCMetadata = map[string]AuthorityContextValue{"x-company:domain": "companyde"}
+			},
+			want: "director.listeners.imap.authority_context.grpc_metadata contains an invalid metadata key",
+		},
+	}
+
+	for name, testCase := range tests {
+		t.Run(name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			listener := cfg.Director.Listeners["imap"]
+			testCase.mutate(&listener)
+			cfg.Director.Listeners["imap"] = listener
+
+			expectValidationError(t, cfg, testCase.want)
+		})
+	}
+}
+
+// TestListenerAuthorityContextRejectsReservedNames protects caller-auth and transport ownership.
+func TestListenerAuthorityContextRejectsReservedNames(t *testing.T) {
+	for _, name := range []string{
+		"authorization",
+		"proxy-authorization",
+		"cookie",
+		"set-cookie",
+		"content-type",
+		"accept",
+		"host",
+		"te",
+		"grpc-company",
+	} {
+		t.Run("http_"+name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			listener := cfg.Director.Listeners["imap"]
+			listener.AuthorityContext.HTTPHeaders = map[string]AuthorityContextValue{name: "companyde"}
+			cfg.Director.Listeners["imap"] = listener
+
+			expectValidationError(t, cfg, "director.listeners.imap.authority_context.http_headers contains a reserved header name")
+		})
+
+		t.Run("grpc_"+name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			listener := cfg.Director.Listeners["imap"]
+			listener.AuthorityContext.GRPCMetadata = map[string]AuthorityContextValue{name: "companyde"}
+			cfg.Director.Listeners["imap"] = listener
+
+			expectValidationError(t, cfg, "director.listeners.imap.authority_context.grpc_metadata contains a reserved metadata key")
+		})
+	}
+}
+
+// TestListenerAuthorityContextValidationErrorsDoNotLeakValues keeps diagnostics secret-safe.
+func TestListenerAuthorityContextValidationErrorsDoNotLeakValues(t *testing.T) {
+	cfg := DefaultConfig()
+	listener := cfg.Director.Listeners["imap"]
+	listener.AuthorityContext.HTTPHeaders = map[string]AuthorityContextValue{
+		"Authorization": "context-secret-do-not-leak",
+	}
+	cfg.Director.Listeners["imap"] = listener
+
+	err := NewLoader().Validate(cfg)
+	if err == nil {
+		t.Fatal("Validate accepted reserved authority context header")
+	}
+	if strings.Contains(err.Error(), "context-secret-do-not-leak") {
+		t.Fatal("validation error leaked configured authority context value")
+	}
+}
+
+// TestListenerAuthorityContextRejectsNonStringValues keeps the feature scalar-string-only.
+func TestListenerAuthorityContextRejectsNonStringValues(t *testing.T) {
+	path := writeConfigFile(t, t.TempDir(), "context-non-string.yaml", `director:
+  listeners:
+    imap:
+      authority_context:
+        http_headers:
+          X-Company-Domain: 7
+`)
+
+	_, err := NewLoader().LoadFile(path)
+	if err == nil {
+		t.Fatal("LoadFile accepted a non-string authority context value")
+	}
+	if !strings.Contains(err.Error(), "authority context values must be strings") {
+		t.Fatalf("error = %q, want scalar string rejection", err.Error())
+	}
+}
+
+// TestListenerAuthorityContextExpandsValuesOnly verifies map keys stay literal.
+func TestListenerAuthorityContextExpandsValuesOnly(t *testing.T) {
+	t.Setenv("DIRECTOR_CONTEXT_KEY", "X-Expanded-Key")
+	t.Setenv("DIRECTOR_CONTEXT_VALUE", "companyde")
+
+	path := writeConfigFile(t, t.TempDir(), "context-value-env.yaml", `director:
+  listeners:
+    imap:
+      authority_context:
+        http_headers:
+          X-Company-Domain: "${DIRECTOR_CONTEXT_VALUE}"
+`)
+	snapshot, err := NewLoader().LoadFile(path)
+	if err != nil {
+		t.Fatalf("LoadFile rejected value placeholder: %v", err)
+	}
+	if got := string(snapshot.Config.Director.Listeners["imap"].AuthorityContext.HTTPHeaders["X-Company-Domain"]); got != "companyde" {
+		t.Fatal("expanded authority context value did not match expected value")
+	}
+
+	badKeyPath := writeConfigFile(t, t.TempDir(), "context-key-env.yaml", `director:
+  listeners:
+    imap:
+      authority_context:
+        http_headers:
+          "${DIRECTOR_CONTEXT_KEY}": companyde
+`)
+	_, err = NewLoader().LoadFile(badKeyPath)
+	if err == nil {
+		t.Fatal("LoadFile expanded an authority context map key")
+	}
+	if !strings.Contains(err.Error(), "director.listeners.imap.authority_context.http_headers") {
+		t.Fatalf("error = %q, want authority context path", err.Error())
+	}
+}
+
+// TestListenerAuthorityContextOptionalForExistingConfigs keeps omitted context compatible.
+func TestListenerAuthorityContextOptionalForExistingConfigs(t *testing.T) {
+	path := writeConfigFile(t, t.TempDir(), "without-context.yaml", `runtime:
+  instance_name: no-authority-context-test
+`)
+
+	snapshot, err := NewLoader().LoadFile(path)
+	if err != nil {
+		t.Fatalf("LoadFile rejected config without authority_context: %v", err)
+	}
+
+	listener := snapshot.Config.Director.Listeners["imap"]
+	if len(listener.AuthorityContext.HTTPHeaders) != 0 || len(listener.AuthorityContext.GRPCMetadata) != 0 {
+		t.Fatalf("authority_context = %#v, want empty maps", listener.AuthorityContext)
+	}
+}
+
+// TestGeneratedConfigReferencesIncludeAuthorityContextPaths keeps listener context docs current.
+func TestGeneratedConfigReferencesIncludeAuthorityContextPaths(t *testing.T) {
+	defaults := readTextFile(t, filepath.Join("..", "..", "docs", "reference", "config-defaults.yaml"))
+	paths := readTextFile(t, filepath.Join("..", "..", "docs", "reference", "config-paths.md"))
+	target := readTextFile(t, filepath.Join("..", "..", "docs", "config", "nauthilus-director.target.yml"))
+	manpage := readTextFile(t, filepath.Join("..", "..", "docs", "man", "nauthilus-director.yaml.5"))
+
+	for _, want := range []string{
+		"authority_context:",
+		"grpc_metadata: {}",
+		"http_headers: {}",
+	} {
+		if !strings.Contains(defaults, want) {
+			t.Fatalf("generated defaults missing %q", want)
+		}
+	}
+
+	for _, want := range []string{
+		"`director.listeners.imap.authority_context.http_headers` | object | `{}` | stable | no",
+		"`director.listeners.imap.authority_context.grpc_metadata` | object | `{}` | stable | no",
+		"auth.policy.request_headers",
+		"auth.policy.request_metadata",
+	} {
+		if !strings.Contains(paths, want) {
+			t.Fatalf("generated paths missing %q", want)
+		}
+	}
+
+	for _, want := range []string{
+		"authority_context:",
+		"X-Deployment-Realm: public-mail",
+		"x-deployment-realm: public-mail",
+		"only through explicit auth.policy.request_headers",
+	} {
+		if !strings.Contains(target, want) {
+			t.Fatalf("target config missing safe authority context guidance %q", want)
+		}
+	}
+
+	for _, want := range []string{
+		"LISTENER AUTHORITY CONTEXT",
+		"auth.policy.request_headers",
+		"auth.policy.request_metadata",
+		"not routing hints, backend selectors, tenant routing input",
+	} {
+		if !strings.Contains(manpage, want) {
+			t.Fatalf("yaml manpage missing authority context guidance %q", want)
+		}
+	}
+}
+
+// TestListenerAuthorityValidationRejectsUnknownAuthority keeps existing reference behavior.
+func TestListenerAuthorityValidationRejectsUnknownAuthority(t *testing.T) {
+	cfg := DefaultConfig()
+	listener := cfg.Director.Listeners["imap"]
+	listener.Authority = "missing"
+	cfg.Director.Listeners["imap"] = listener
+
+	expectValidationError(t, cfg, "director.listeners.imap.authority references unknown authority missing")
+}
+
 // TestDemoStackConfigDecodesAndValidates keeps the public demo aligned with typed config.
 func TestDemoStackConfigDecodesAndValidates(t *testing.T) {
 	t.Setenv("DIRECTOR_INSTANCE_NAME", "demo-director-test")

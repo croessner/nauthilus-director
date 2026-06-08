@@ -54,6 +54,9 @@ func TestServerBinaryPublicPOP3GRPCAuthorityFlow(t *testing.T) {
 	fakePOP3 := pop3backend.Start(t, pop3backend.Options{Messages: pop3SentinelMessages()})
 	pop3Address := loopbackAddress(t)
 	configPath := writePOP3GRPCProcessConfig(t, pop3GRPCProcessConfigOptions{
+		AuthorityContextGRPCMetadata: map[string]string{
+			e2eContextMetadata: e2eContextGRPCValue,
+		},
 		RedisAddress: redisFixture.addr,
 		GRPCAddress:  authority.Address(),
 		POP3Address:  pop3Address,
@@ -70,6 +73,7 @@ func TestServerBinaryPublicPOP3GRPCAuthorityFlow(t *testing.T) {
 	passwordClient.ExpectStatusPrefix("+OK")
 	passwordClient.Close()
 	authority.ExpectRequest(t, e2ePOP3Protocol, "userpass")
+	authority.ExpectMetadata(t, e2eContextMetadata, e2eContextGRPCValue)
 	assertPOP3Observation(t, fakePOP3.ExpectObservation(t), "userpass", false)
 
 	bearerClient := dialPOP3StartedTLS(t, pop3Address)
@@ -79,15 +83,18 @@ func TestServerBinaryPublicPOP3GRPCAuthorityFlow(t *testing.T) {
 	bearerClient.ExpectStatusPrefix("+OK")
 	bearerClient.Close()
 	authority.ExpectRequest(t, e2ePOP3Protocol, "xoauth2")
+	authority.ExpectMetadata(t, e2eContextMetadata, e2eContextGRPCValue)
 	assertPOP3Observation(t, fakePOP3.ExpectObservation(t), "userpass", false)
 	assertOutputOmits(t, process.output.String(), e2ePassword, e2eToken)
+	assertOutputOmitsAuthorityContext(t, process.output.String(), e2eContextGRPCValue)
 }
 
 type pop3GRPCProcessConfigOptions struct {
-	RedisAddress string
-	GRPCAddress  string
-	POP3Address  string
-	POP3Backend  string
+	AuthorityContextGRPCMetadata map[string]string
+	RedisAddress                 string
+	GRPCAddress                  string
+	POP3Address                  string
+	POP3Backend                  string
 }
 
 // writePOP3GRPCProcessConfig writes a minimal POP3 config using a generated gRPC authority.
@@ -169,6 +176,7 @@ director:
       address: %q
       authority: default
       backend_pool: pop3-default
+%s
       tls:
         mode: starttls
         cert: %q
@@ -211,6 +219,7 @@ director:
 		e2ePOP3GRPCCallerSecret,
 		e2eShardTag,
 		options.POP3Address,
+		listenerAuthorityContextYAML(nil, options.AuthorityContextGRPCMetadata),
 		certPath,
 		keyPath,
 		e2eShardTag,
@@ -230,12 +239,13 @@ director:
 type fakePOP3GRPCAuthority struct {
 	authv1.UnimplementedAuthServiceServer
 
-	listener   net.Listener
-	server     *grpc.Server
-	identities map[string]map[string][]string
-	mu         sync.Mutex
-	requests   []*authv1.AuthRequest
-	authz      []string
+	listener          net.Listener
+	server            *grpc.Server
+	identities        map[string]map[string][]string
+	mu                sync.Mutex
+	requests          []*authv1.AuthRequest
+	contextMetadata   []map[string]string
+	callerAuthPresent []bool
 }
 
 // startFakePOP3GRPCAuthority starts a generated AuthService fixture on loopback.
@@ -274,7 +284,8 @@ func (a *fakePOP3GRPCAuthority) Address() string {
 func (a *fakePOP3GRPCAuthority) Authenticate(ctx context.Context, request *authv1.AuthRequest) (*authv1.AuthResponse, error) {
 	a.mu.Lock()
 	a.requests = append(a.requests, request)
-	a.authz = append(a.authz, firstMetadataValue(ctx, "authorization"))
+	a.contextMetadata = append(a.contextMetadata, safeGRPCAuthorityContextMetadata(ctx))
+	a.callerAuthPresent = append(a.callerAuthPresent, metadataValuePresent(ctx, "authorization"))
 	a.mu.Unlock()
 
 	attributes := a.attributesForUsername(request.GetUsername())
@@ -295,13 +306,13 @@ func (a *fakePOP3GRPCAuthority) ExpectRequest(t *testing.T, protocol string, met
 	for range 50 {
 		a.mu.Lock()
 		for index, request := range a.requests {
-			authz := ""
-			if index < len(a.authz) {
-				authz = a.authz[index]
+			hasCallerAuth := false
+			if index < len(a.callerAuthPresent) {
+				hasCallerAuth = a.callerAuthPresent[index]
 			}
 			if strings.EqualFold(request.GetProtocol(), protocol) && strings.EqualFold(request.GetMethod(), method) {
 				a.mu.Unlock()
-				if authz == "" {
+				if !hasCallerAuth {
 					t.Fatal("gRPC authority request lacked caller authorization metadata")
 				}
 
@@ -315,6 +326,27 @@ func (a *fakePOP3GRPCAuthority) ExpectRequest(t *testing.T, protocol string, met
 	t.Fatalf("fake POP3 gRPC authority did not receive protocol=%s method=%s request", protocol, method)
 
 	return nil
+}
+
+// ExpectMetadata waits until a selected safe gRPC metadata key reaches the authority.
+func (a *fakePOP3GRPCAuthority) ExpectMetadata(t *testing.T, key string, want string) {
+	t.Helper()
+
+	for range 50 {
+		a.mu.Lock()
+		for _, snapshot := range a.contextMetadata {
+			if snapshot[key] == want {
+				a.mu.Unlock()
+
+				return
+			}
+		}
+		a.mu.Unlock()
+
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	t.Fatalf("fake POP3 gRPC authority did not receive expected metadata key %q", key)
 }
 
 // attributesForUsername returns deterministic account attributes for a gRPC auth request.
@@ -335,12 +367,22 @@ func (a *fakePOP3GRPCAuthority) attributesForUsername(username string) map[strin
 	}
 }
 
-// firstMetadataValue returns the first gRPC metadata value for key.
-func firstMetadataValue(ctx context.Context, key string) string {
-	values := metadata.ValueFromIncomingContext(ctx, key)
-	if len(values) == 0 {
-		return ""
+// safeGRPCAuthorityContextMetadata snapshots known non-credential listener context metadata only.
+func safeGRPCAuthorityContextMetadata(ctx context.Context) map[string]string {
+	values := map[string]string{}
+	for _, key := range []string{e2eContextMetadata} {
+		metadataValues := metadata.ValueFromIncomingContext(ctx, key)
+		if len(metadataValues) > 0 {
+			values[key] = metadataValues[0]
+		}
 	}
 
-	return values[0]
+	return values
+}
+
+// metadataValuePresent reports whether a gRPC metadata key has any value.
+func metadataValuePresent(ctx context.Context, key string) bool {
+	values := metadata.ValueFromIncomingContext(ctx, key)
+
+	return len(values) > 0
 }

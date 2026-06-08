@@ -276,6 +276,12 @@ func flattenDefaults(value any) map[string]any {
 func flattenValue(out map[string]any, path []string, value any) {
 	switch typed := value.(type) {
 	case map[string]any:
+		if len(typed) == 0 {
+			out[strings.Join(path, ".")] = typed
+
+			return
+		}
+
 		for key, child := range typed {
 			flattenValue(out, append(path, key), child)
 		}
@@ -401,6 +407,8 @@ func valueType(value any) string {
 		return "integer"
 	case float32, float64:
 		return "number"
+	case map[string]any:
+		return "object"
 	case []any:
 		return "array"
 	case string:
@@ -413,6 +421,10 @@ func valueType(value any) string {
 // defaultValue renders one default value as a stable single-line string.
 func defaultValue(value any) string {
 	switch typed := value.(type) {
+	case map[string]any:
+		if len(typed) == 0 {
+			return "{}"
+		}
 	case []any:
 		data, err := json.Marshal(typed)
 		if err == nil {

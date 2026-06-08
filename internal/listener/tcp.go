@@ -96,7 +96,9 @@ func newManagedListener(
 		security: security,
 	}
 
-	authenticator, err := options.authClientFactory(authority)
+	authenticator, err := options.authClientFactory(authority, nauthilus.ClientOptions{
+		AuthorityContext: nauthilus.AuthorityContextFromConfig(entry.AuthorityContext),
+	})
 	if err != nil {
 		return nil, fmt.Errorf("listener %s: %w", name, err)
 	}

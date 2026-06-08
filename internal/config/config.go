@@ -341,19 +341,29 @@ type DirectorSecurityConfig struct {
 }
 
 type ListenerConfig struct {
-	Protocol      string               `mapstructure:"protocol" yaml:"protocol" validate:"required"`
-	ServiceName   string               `mapstructure:"service_name" yaml:"service_name" validate:"required"`
-	Network       string               `mapstructure:"network" yaml:"network" validate:"required"`
-	Address       string               `mapstructure:"address" yaml:"address" validate:"required"`
-	Authority     string               `mapstructure:"authority" yaml:"authority" validate:"required"`
-	BackendPool   string               `mapstructure:"backend_pool" yaml:"backend_pool" validate:"required"`
-	ProxyProtocol ProxyProtocolConfig  `mapstructure:"proxy_protocol" yaml:"proxy_protocol" validate:"required"`
-	TLS           ListenerTLSConfig    `mapstructure:"tls" yaml:"tls" validate:"required"`
-	IMAP          *IMAPListenerConfig  `mapstructure:"imap" yaml:"imap,omitempty"`
-	LMTP          *LMTPListenerConfig  `mapstructure:"lmtp" yaml:"lmtp,omitempty"`
-	Sieve         *SieveListenerConfig `mapstructure:"sieve" yaml:"sieve,omitempty"`
-	POP3          *POP3ListenerConfig  `mapstructure:"pop3" yaml:"pop3,omitempty"`
+	Protocol         string                 `mapstructure:"protocol" yaml:"protocol" validate:"required"`
+	ServiceName      string                 `mapstructure:"service_name" yaml:"service_name" validate:"required"`
+	Network          string                 `mapstructure:"network" yaml:"network" validate:"required"`
+	Address          string                 `mapstructure:"address" yaml:"address" validate:"required"`
+	Authority        string                 `mapstructure:"authority" yaml:"authority" validate:"required"`
+	AuthorityContext AuthorityContextConfig `mapstructure:"authority_context" yaml:"authority_context" validate:"required"`
+	BackendPool      string                 `mapstructure:"backend_pool" yaml:"backend_pool" validate:"required"`
+	ProxyProtocol    ProxyProtocolConfig    `mapstructure:"proxy_protocol" yaml:"proxy_protocol" validate:"required"`
+	TLS              ListenerTLSConfig      `mapstructure:"tls" yaml:"tls" validate:"required"`
+	IMAP             *IMAPListenerConfig    `mapstructure:"imap" yaml:"imap,omitempty"`
+	LMTP             *LMTPListenerConfig    `mapstructure:"lmtp" yaml:"lmtp,omitempty"`
+	Sieve            *SieveListenerConfig   `mapstructure:"sieve" yaml:"sieve,omitempty"`
+	POP3             *POP3ListenerConfig    `mapstructure:"pop3" yaml:"pop3,omitempty"`
 }
+
+// AuthorityContextConfig contains static listener facts sent to the selected authority.
+type AuthorityContextConfig struct {
+	HTTPHeaders  map[string]AuthorityContextValue `mapstructure:"http_headers" yaml:"http_headers"`
+	GRPCMetadata map[string]AuthorityContextValue `mapstructure:"grpc_metadata" yaml:"grpc_metadata"`
+}
+
+// AuthorityContextValue marks listener context map values that must decode from YAML strings.
+type AuthorityContextValue string
 
 type ProxyProtocolConfig struct {
 	Enabled      bool     `mapstructure:"enabled" yaml:"enabled"`

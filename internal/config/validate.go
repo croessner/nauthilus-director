@@ -39,6 +39,18 @@ const (
 	oidcAssertionAlgEdDSA = "EdDSA"
 )
 
+const (
+	authorityContextNameAuthorization      = "authorization"
+	authorityContextNameProxyAuthorization = "proxy-authorization"
+	authorityContextNameCookie             = "cookie"
+	authorityContextNameSetCookie          = "set-cookie"
+	authorityContextNameContentType        = "content-type"
+	authorityContextNameAccept             = "accept"
+	authorityContextNameHost               = "host"
+	authorityContextNameTE                 = "te"
+	authorityContextGRPCPrefix             = "grpc-"
+)
+
 // Validate checks decoded typed config with validator/v10 and domain rules.
 func (l *Loader) Validate(config Config) error {
 	if l == nil {
@@ -468,6 +480,7 @@ func validateDirector(director DirectorConfig, authorities map[string]AuthorityC
 		if !authorityOK {
 			addProblem(problems, path+".authority references unknown authority "+listener.Authority)
 		}
+		validateAuthorityContext(path+".authority_context", listener.AuthorityContext, problems)
 
 		pool, poolOK := director.BackendPools[listener.BackendPool]
 		if !poolOK {
@@ -584,6 +597,159 @@ func validateDirector(director DirectorConfig, authorities map[string]AuthorityC
 	requirePositiveDuration("director.health.timeout", director.Health.Timeout, problems)
 	requirePositiveDuration("director.maintenance.drain_timeout", director.Maintenance.DrainTimeout, problems)
 	requirePositiveDuration("director.maintenance.hard_kill_grace", director.Maintenance.HardKillGrace, problems)
+}
+
+// validateAuthorityContext rejects listener authority context that could override transport state.
+func validateAuthorityContext(path string, context AuthorityContextConfig, problems *[]string) {
+	validateAuthorityHTTPHeaders(path+".http_headers", context.HTTPHeaders, problems)
+	validateAuthorityGRPCMetadata(path+".grpc_metadata", context.GRPCMetadata, problems)
+}
+
+// validateAuthorityHTTPHeaders checks safe static HTTP header names and non-empty values.
+func validateAuthorityHTTPHeaders(path string, headers map[string]AuthorityContextValue, problems *[]string) {
+	for name, value := range headers {
+		trimmedName := strings.TrimSpace(name)
+		if trimmedName == "" {
+			addProblem(problems, path+" contains an empty header name")
+
+			continue
+		}
+
+		if !validHTTPHeaderName(trimmedName) {
+			addProblem(problems, path+" contains an invalid header name")
+
+			continue
+		}
+
+		if reservedAuthorityContextName(trimmedName) {
+			addProblem(problems, path+" contains a reserved header name")
+
+			continue
+		}
+
+		if strings.TrimSpace(string(value)) == "" {
+			addProblem(problems, path+" contains an empty value")
+		}
+	}
+}
+
+// validateAuthorityGRPCMetadata checks safe static gRPC metadata keys and non-empty values.
+func validateAuthorityGRPCMetadata(path string, metadata map[string]AuthorityContextValue, problems *[]string) {
+	for name, value := range metadata {
+		trimmedName := strings.TrimSpace(name)
+		if trimmedName == "" {
+			addProblem(problems, path+" contains an empty metadata key")
+
+			continue
+		}
+
+		if !lowercaseASCII(trimmedName) {
+			addProblem(problems, path+" contains a metadata key that must be lowercase ASCII")
+
+			continue
+		}
+
+		if !validGRPCMetadataKey(trimmedName) {
+			addProblem(problems, path+" contains an invalid metadata key")
+
+			continue
+		}
+
+		if reservedAuthorityContextName(trimmedName) {
+			addProblem(problems, path+" contains a reserved metadata key")
+
+			continue
+		}
+
+		if strings.TrimSpace(string(value)) == "" {
+			addProblem(problems, path+" contains an empty value")
+		}
+	}
+}
+
+// reservedAuthorityContextName reports names owned by credentials, sessions or transports.
+func reservedAuthorityContextName(name string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(name))
+	if strings.HasPrefix(normalized, authorityContextGRPCPrefix) {
+		return true
+	}
+
+	switch normalized {
+	case authorityContextNameAuthorization,
+		authorityContextNameProxyAuthorization,
+		authorityContextNameCookie,
+		authorityContextNameSetCookie,
+		authorityContextNameContentType,
+		authorityContextNameAccept,
+		authorityContextNameHost,
+		authorityContextNameTE:
+		return true
+	default:
+		return false
+	}
+}
+
+// validHTTPHeaderName reports whether name is an RFC token-shaped HTTP field name.
+func validHTTPHeaderName(name string) bool {
+	if name == "" {
+		return false
+	}
+
+	for index := range len(name) {
+		if !validHTTPTokenByte(name[index]) {
+			return false
+		}
+	}
+
+	return true
+}
+
+// validHTTPTokenByte reports whether value is allowed in an HTTP token.
+func validHTTPTokenByte(value byte) bool {
+	switch {
+	case value >= 'a' && value <= 'z':
+	case value >= 'A' && value <= 'Z':
+	case value >= '0' && value <= '9':
+	case value == '!' || value == '#' || value == '$' || value == '%' || value == '&' ||
+		value == '\'' || value == '*' || value == '+' || value == '-' || value == '.' ||
+		value == '^' || value == '_' || value == '`' || value == '|' || value == '~':
+	default:
+		return false
+	}
+
+	return true
+}
+
+// lowercaseASCII reports whether key contains no uppercase or non-ASCII bytes.
+func lowercaseASCII(key string) bool {
+	for index := range len(key) {
+		value := key[index]
+		if value > 0x7f || (value >= 'A' && value <= 'Z') {
+			return false
+		}
+	}
+
+	return true
+}
+
+// validGRPCMetadataKey reports whether key follows grpc-go metadata key grammar.
+func validGRPCMetadataKey(key string) bool {
+	if key == "" {
+		return false
+	}
+
+	for index := range len(key) {
+		value := key[index]
+		switch {
+		case value >= 'a' && value <= 'z':
+		case value >= '0' && value <= '9':
+		case value == '-' || value == '_' || value == '.':
+		default:
+			return false
+		}
+	}
+
+	return true
 }
 
 // validateBackendRetention enforces explicit opt-out for zero retained binding TTL.

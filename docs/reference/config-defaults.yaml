@@ -498,6 +498,9 @@ director:
         imap:
             address: 127.0.0.1:10143
             authority: default
+            authority_context:
+                grpc_metadata: {}
+                http_headers: {}
             backend_pool: imap-default
             imap:
                 auth_mechanisms:
@@ -529,6 +532,9 @@ director:
         imaps:
             address: 127.0.0.1:10993
             authority: default
+            authority_context:
+                grpc_metadata: {}
+                http_headers: {}
             backend_pool: imap-default
             imap:
                 auth_mechanisms:
@@ -559,6 +565,9 @@ director:
         lmtp:
             address: 127.0.0.1:10024
             authority: default
+            authority_context:
+                grpc_metadata: {}
+                http_headers: {}
             backend_pool: lmtp-default
             lmtp:
                 capabilities:
@@ -592,6 +601,9 @@ director:
         lmtps:
             address: 127.0.0.1:11024
             authority: default
+            authority_context:
+                grpc_metadata: {}
+                http_headers: {}
             backend_pool: lmtp-default
             lmtp:
                 capabilities:
@@ -624,6 +636,9 @@ director:
         pop3:
             address: 127.0.0.1:10110
             authority: default
+            authority_context:
+                grpc_metadata: {}
+                http_headers: {}
             backend_pool: pop3-default
             network: tcp
             pop3:
@@ -650,6 +665,9 @@ director:
         pop3s:
             address: 127.0.0.1:10995
             authority: default
+            authority_context:
+                grpc_metadata: {}
+                http_headers: {}
             backend_pool: pop3-default
             network: tcp
             pop3:
@@ -675,6 +693,9 @@ director:
         sieve:
             address: 127.0.0.1:14190
             authority: default
+            authority_context:
+                grpc_metadata: {}
+                http_headers: {}
             backend_pool: sieve-default
             network: tcp
             protocol: sieve
@@ -700,6 +721,9 @@ director:
         sieves:
             address: 127.0.0.1:14490
             authority: default
+            authority_context:
+                grpc_metadata: {}
+                http_headers: {}
             backend_pool: sieve-default
             network: tcp
             protocol: sieve

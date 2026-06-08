@@ -99,7 +99,7 @@ func (l *Loader) decodeConfig(settings map[string]any) (Config, error) {
 	var config Config
 	metadata := &mapstructure.Metadata{}
 	decoder, err := mapstructure.NewDecoder(&mapstructure.DecoderConfig{
-		DecodeHook:       mapstructure.ComposeDecodeHookFunc(durationDecodeHook, secretDecodeHook),
+		DecodeHook:       mapstructure.ComposeDecodeHookFunc(durationDecodeHook, secretDecodeHook, authorityContextValueDecodeHook),
 		ErrorUnused:      true,
 		Metadata:         metadata,
 		Result:           &config,
@@ -119,6 +119,24 @@ func (l *Loader) decodeConfig(settings map[string]any) (Config, error) {
 	}
 
 	return config, nil
+}
+
+// authorityContextValueDecodeHook rejects non-string listener context values before weak decoding.
+func authorityContextValueDecodeHook(_ reflect.Type, to reflect.Type, value any) (any, error) {
+	if to != reflect.TypeFor[AuthorityContextValue]() {
+		return value, nil
+	}
+
+	if typed, ok := value.(AuthorityContextValue); ok {
+		return typed, nil
+	}
+
+	typed, ok := value.(string)
+	if !ok {
+		return nil, fmt.Errorf("authority context values must be strings")
+	}
+
+	return AuthorityContextValue(typed), nil
 }
 
 // durationDecodeHook accepts Go duration strings while keeping the typed wrapper.

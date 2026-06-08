@@ -19,6 +19,7 @@ package nauthilus
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -149,11 +150,103 @@ func TestHTTPListAccountsUsesAuthorityBoundary(t *testing.T) {
 	}
 }
 
+// TestHTTPAuthorityContextHeadersSentForAllOperations verifies listener context reaches every HTTP operation.
+func TestHTTPAuthorityContextHeadersSentForAllOperations(t *testing.T) {
+	seen := map[string]bool{}
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if got := request.Header.Get("X-Company-Domain"); got != "companyde" {
+			t.Fatal("listener context header did not match expected value")
+		}
+
+		mode := request.URL.Query().Get(queryMode)
+		switch mode {
+		case "":
+			seen["authenticate"] = true
+			_, _ = writer.Write([]byte(`{"ok":true,"account_field":"uid","attributes":{"uid":["alice"]}}`))
+		case "no-auth":
+			seen["lookup"] = true
+			_, _ = writer.Write([]byte(`{"ok":true,"account_field":"uid","attributes":{"uid":["alice"]}}`))
+		case "list-accounts":
+			seen["list"] = true
+			_, _ = writer.Write([]byte(`["alice@example.test"]`))
+		default:
+			t.Fatalf("unexpected mode = %q", mode)
+		}
+	}))
+	defer server.Close()
+
+	client := newTestHTTPClientWithAuthorityContext(t, server.URL+"/api/v1/auth/json", AuthorityContext{
+		HTTPHeaders: map[string]string{
+			"X-Company-Domain": "companyde",
+		},
+	})
+
+	if _, err := client.Authenticate(context.Background(), testAuthRequest()); err != nil {
+		t.Fatalf("Authenticate returned error: %v", err)
+	}
+	if _, err := client.LookupIdentity(context.Background(), IdentityLookupRequest{Context: testAuthRequest().Context}); err != nil {
+		t.Fatalf("LookupIdentity returned error: %v", err)
+	}
+	if _, err := client.ListAccounts(context.Background(), ListAccountsRequest{Context: testAuthRequest().Context}); err != nil {
+		t.Fatalf("ListAccounts returned error: %v", err)
+	}
+
+	for _, operation := range []string{"authenticate", "lookup", "list"} {
+		if !seen[operation] {
+			t.Fatalf("%s request did not reach fake authority", operation)
+		}
+	}
+}
+
+// TestHTTPAuthorityContextDoesNotOverrideTransportHeaders verifies caller auth and content negotiation win.
+func TestHTTPAuthorityContextDoesNotOverrideTransportHeaders(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		wantAuthorization := "Basic " + base64.StdEncoding.EncodeToString([]byte("director:api-secret"))
+		if got := request.Header.Get("Authorization"); got != wantAuthorization {
+			t.Fatal("authorization header did not preserve configured basic caller auth")
+		}
+		if got := request.Header.Get("Content-Type"); got != defaultHTTPContentType {
+			t.Fatalf("content-type = %q, want %q", got, defaultHTTPContentType)
+		}
+		if got := request.Header.Get("Accept"); got != defaultHTTPContentType {
+			t.Fatalf("accept = %q, want %q", got, defaultHTTPContentType)
+		}
+		if got := request.Header.Get("X-Company-Domain"); got != "companyde" {
+			t.Fatal("listener context header did not match expected value")
+		}
+
+		_, _ = writer.Write([]byte(`{"ok":true,"account_field":"uid","attributes":{"uid":["alice"]}}`))
+	}))
+	defer server.Close()
+
+	client, err := NewHTTPClient(HTTPClientConfig{
+		Endpoint:          server.URL + "/api/v1/auth/json",
+		ContentType:       defaultHTTPContentType,
+		BasicAuthUsername: "director",
+		BasicAuthPassword: NewSecret("api-secret"),
+		AuthorityContext: AuthorityContext{
+			HTTPHeaders: map[string]string{
+				"Accept":           "text/plain",
+				"Authorization":    "Bearer context-token",
+				"Content-Type":     "text/plain",
+				"X-Company-Domain": "companyde",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewHTTPClient: %v", err)
+	}
+
+	if _, err := client.Authenticate(context.Background(), testAuthRequest()); err != nil {
+		t.Fatalf("Authenticate returned error: %v", err)
+	}
+}
+
 // TestHTTPAuthorityOIDCCallerAuthSendsBearerOnly verifies OIDC caller auth replaces Basic auth.
 func TestHTTPAuthorityOIDCCallerAuthSendsBearerOnly(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if got := request.Header.Get("Authorization"); got != "Bearer oidc-caller-token" {
-			t.Fatalf("authorization = %q, want OIDC bearer", got)
+			t.Fatal("authorization header did not preserve OIDC caller auth")
 		}
 		if _, _, ok := request.BasicAuth(); ok {
 			t.Fatal("OIDC caller auth also sent HTTP Basic credentials")
@@ -268,6 +361,22 @@ func newTestHTTPClient(t *testing.T, endpoint string, httpClient *http.Client) *
 		Endpoint:    endpoint,
 		ContentType: defaultHTTPContentType,
 		Client:      httpClient,
+	})
+	if err != nil {
+		t.Fatalf("NewHTTPClient: %v", err)
+	}
+
+	return client
+}
+
+// newTestHTTPClientWithAuthorityContext creates a test client with static context headers.
+func newTestHTTPClientWithAuthorityContext(t *testing.T, endpoint string, authorityContext AuthorityContext) *HTTPClient {
+	t.Helper()
+
+	client, err := NewHTTPClient(HTTPClientConfig{
+		Endpoint:         endpoint,
+		ContentType:      defaultHTTPContentType,
+		AuthorityContext: authorityContext,
 	})
 	if err != nil {
 		t.Fatalf("NewHTTPClient: %v", err)
