@@ -1,0 +1,31 @@
+---
+name: Development Docker Build
+
+"on":
+  push:
+    branches:
+      - features
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    uses: ./.github/workflows/docker-build-push.yaml
+    with:
+      source_ref: ${{ github.sha }}
+      fetch_depth: 0
+      dockerfile_path: packaging/docker/Dockerfile
+      tags: |
+        ghcr.io/${{ github.repository_owner }}/nauthilus-director:dev
+        ghcr.io/${{ github.repository_owner }}/nauthilus-director:features
+      annotations: >-
+        index,manifest:org.opencontainers.image.description=Production
+        Nauthilus Director mail protocol proxy and operator CLI
+      labels: |
+        org.opencontainers.image.description=Production Nauthilus Director mail protocol proxy and operator CLI
+        org.opencontainers.image.revision=${{ github.sha }}
+        org.opencontainers.image.source=https://github.com/${{ github.repository }}
+        org.opencontainers.image.version=dev
+        io.nauthilus.director.build.reason=features-push

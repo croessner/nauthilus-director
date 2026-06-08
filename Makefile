@@ -26,6 +26,7 @@ INSTALL_DATA ?= $(INSTALL) -m 0644
 GOLANGCI_LINT ?= golangci-lint
 GOLANGCI_NEW_FROM_REV ?= HEAD
 GO ?= go
+GOVULNCHECK ?= govulncheck
 POC_DIR := poc
 E2E_SCRIPT ?= ./test/e2e/run.sh
 E2E_INTEROP_SCRIPT ?= ./test/e2e/interop/run.sh
@@ -286,6 +287,23 @@ copyright-check:
 
 guardrails: docs-check check-packaging copyright-check check-openapi fix vet lint test race e2e build-check
 
+govulncheck:
+	@command -v $(GOVULNCHECK) >/dev/null 2>&1 || { echo "$(GOVULNCHECK) not found. Install it with: go install golang.org/x/vuln/cmd/govulncheck@latest"; exit 1; }
+	@if [ -z "$(MODULE_DIRS)" ]; then \
+		echo "No production Go module found yet; skipping govulncheck"; \
+	else \
+		set -e; \
+		for dir in $(MODULE_DIRS); do \
+			echo "==> govulncheck $$dir"; \
+			(cd "$$dir" && $(GOVULNCHECK) ./...); \
+		done; \
+	fi
+
+release-guardrails: guardrails govulncheck
+
+install-hooks:
+	bash ./scripts/install-hooks.sh
+
 scale-smoke:
 	@if [ -z "$(SCALE_REDIS_ADDR)$(SCALE_REDIS_CLUSTER_ADDRS)" ]; then \
 		echo "Set SCALE_REDIS_ADDR or SCALE_REDIS_CLUSTER_ADDRS for an explicit non-production Redis target"; \
@@ -338,4 +356,4 @@ poc-race:
 version:
 	@echo $(VERSION)
 
-.PHONY: all build install install-bin install-man uninstall uninstall-bin uninstall-man build-check clean fix vet lint-config lint test race e2e e2e-interop docs-check check-packaging systemd-verify docker-build docker-smoke generate-openapi check-openapi generate-docs check-docs copyright-check guardrails scale-smoke scale-stress poc-test poc-race version
+.PHONY: all build install install-bin install-man uninstall uninstall-bin uninstall-man build-check clean fix vet lint-config lint test race e2e e2e-interop docs-check check-packaging systemd-verify docker-build docker-smoke generate-openapi check-openapi generate-docs check-docs copyright-check guardrails govulncheck release-guardrails install-hooks scale-smoke scale-stress poc-test poc-race version

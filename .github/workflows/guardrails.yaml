@@ -1,0 +1,59 @@
+name: Guardrails
+
+on:
+  push:
+    branches:
+      - main
+      - features
+      - release/**
+  pull_request:
+    branches:
+      - main
+      - features
+      - release/**
+
+permissions:
+  contents: read
+  pull-requests: read
+
+env:
+  GOEXPERIMENT: runtimesecret
+  GOLANGCI_LINT_VERSION: v2.12.1
+
+jobs:
+  quality-gates:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version: 1.26.x
+
+      - name: Enable Go modules and vendored dependencies
+        run: |
+          go env -w GO111MODULE=on
+          go env -w GOFLAGS=-mod=vendor
+
+      - name: Install golangci-lint
+        run: |
+          curl -sSfL "https://raw.githubusercontent.com/golangci/golangci-lint/${GOLANGCI_LINT_VERSION}/install.sh" \
+            | sh -s -- -b "$(go env GOPATH)/bin" "${GOLANGCI_LINT_VERSION}"
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Set lint comparison base
+        if: github.event_name == 'pull_request'
+        run: |
+          git fetch --no-tags --depth=1 origin "${GITHUB_BASE_REF}"
+          echo "GOLANGCI_NEW_FROM_REV=origin/${GITHUB_BASE_REF}" >> "$GITHUB_ENV"
+
+      - name: Run guardrails
+        run: make guardrails
+
+      - name: Ensure guardrails did not mutate tracked files
+        run: git diff --exit-code

@@ -119,6 +119,14 @@ These rules are mandatory for coding changes in this repository.
 - MUST: Provide `--version` on both the server binary and
   `nauthilus-directorctl`.
 - MUST: Run `make guardrails` before committing or opening a pull request.
+- MUST: Run `make govulncheck` before publishing `main` or `v*` version tags,
+  either directly through `make release-guardrails` or through the pre-push hook
+  installed by `make install-hooks`.
+- MUST: Treat `govulncheck` findings as blockers for `main` and version tags
+  unless a documented maintainer exception is made.
+- MUST: Publish release-sensitive refs from a clean checkout whose `HEAD`
+  matches the pushed `main` or version-tag commit, so vulnerability analysis
+  covers the exact content being published.
 - MUST: Keep `.golangci.yml` aligned with the repository guardrail policy and
   run `golangci-lint` through `make lint` or `make guardrails`.
 - MUST: Keep lint checks strict enough to report unused variables, constants,
@@ -175,6 +183,9 @@ These rules are mandatory for coding changes in this repository.
 
 - [ ] Dependency changes were followed by `go mod tidy` and `go mod vendor`.
 - [ ] `make guardrails` passes locally.
+- [ ] `make release-guardrails` passes before publishing `main` or a `v*`
+      version tag, or the installed pre-push hook ran the same vulnerability
+      gate.
 - [ ] `golangci-lint` findings are fixed or intentionally documented.
 - [ ] New or changed code has focused test coverage where appropriate.
 - [ ] Externally visible behavior has E2E coverage through public protocols,

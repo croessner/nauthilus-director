@@ -1,5 +1,7 @@
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPLv3-blue.svg)](LICENSE)
 [![Go Version](https://img.shields.io/badge/Go-1.26-00ADD8?logo=go)](https://go.dev/)
+[![Guardrails](https://github.com/croessner/nauthilus-director/actions/workflows/guardrails.yaml/badge.svg)](https://github.com/croessner/nauthilus-director/actions/workflows/guardrails.yaml)
+[![Govulncheck](https://github.com/croessner/nauthilus-director/actions/workflows/govulncheck-main.yaml/badge.svg)](https://github.com/croessner/nauthilus-director/actions/workflows/govulncheck-main.yaml)
 
 # nauthilus-director
 
@@ -164,6 +166,21 @@ make guardrails
 checks, OpenAPI stale-output checks, Go fix/vet/lint, unit tests, race tests,
 deterministic E2E tests and a build check.
 
+Run Go vulnerability analysis before release-sensitive publication:
+
+```bash
+make govulncheck
+make release-guardrails
+```
+
+`make release-guardrails` runs the normal guardrail lane and `govulncheck`.
+Install the repository pre-push hook to run `govulncheck` automatically before
+pushing `main` or `v*` version tags:
+
+```bash
+make install-hooks
+```
+
 Generated artifacts are guarded by dedicated targets:
 
 ```bash
@@ -326,6 +343,8 @@ Common development rules:
   `make check-openapi`.
 - Keep generated config references reproducible through `make docs-check`.
 - Keep local planning, scratch and prompt artifacts under ignored `temp/`.
+- Treat `govulncheck` findings as blockers for `main` and version-tag
+  publication unless a documented maintainer exception is made.
 
 The repository uses structured commit messages with prefixes such as `Add`,
 `Fix`, `Docs`, `Build`, `Security` and `Refactor`; see

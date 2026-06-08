@@ -1,0 +1,238 @@
+name: Release Build
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+env:
+  APP_NAME: 'nauthilus-director'
+  GOEXPERIMENT: runtimesecret
+  SYFT_VERSION: 'v1.16.0'
+
+jobs:
+  build-artifact:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      attestations: write
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        goos: [linux]
+        goarch: [amd64, arm64]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Validate release metadata
+        run: ./scripts/release-semver-metadata.sh "${GITHUB_REF_NAME}" >/dev/null
+
+      - name: Set up Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version: 1.26.x
+
+      - name: Build release binaries
+        run: |
+          version="${GITHUB_REF_NAME}"
+          revision="${GITHUB_SHA:0:12}"
+          ldflags="-s -w -X main.version=${version}-${revision}"
+
+          mkdir -p build
+          GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
+            go build -mod=vendor -trimpath -ldflags="${ldflags}" \
+            -o build/nauthilus-director ./cmd/nauthilus-director
+          GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
+            go build -mod=vendor -trimpath -ldflags="${ldflags}" \
+            -o build/nauthilus-directorctl ./cmd/nauthilus-directorctl
+
+      - name: Create artifact
+        run: |
+          assets="${{ env.APP_NAME }}-${{ matrix.goos }}-${{ matrix.goarch }}"
+          mkdir -p "dist/${assets}/bin" \
+            "dist/${assets}/docs/man" \
+            "dist/${assets}/docs/config" \
+            "dist/${assets}/docs/reference" \
+            "dist/${assets}/packaging/systemd"
+
+          cp build/nauthilus-director build/nauthilus-directorctl "dist/${assets}/bin/"
+          cp LICENSE README.md POLICY.md "dist/${assets}/"
+          cp docs/man/nauthilus-director.1 docs/man/nauthilus-directorctl.1 docs/man/nauthilus-director.yaml.5 "dist/${assets}/docs/man/"
+          cp docs/config/nauthilus-director.target.yml "dist/${assets}/docs/config/"
+          cp docs/reference/config-defaults.yaml docs/reference/config-paths.md "dist/${assets}/docs/reference/"
+          cp packaging/systemd/nauthilus-director.service packaging/systemd/nauthilus-director.env.example "dist/${assets}/packaging/systemd/"
+
+          (
+            cd dist
+            tar czf "${assets}.tar.gz" "${assets}"
+            ls -lah ./*.tar.gz
+          )
+        shell: bash
+
+      - name: Generate SBOM
+        run: |
+          assets="${{ env.APP_NAME }}-${{ matrix.goos }}-${{ matrix.goarch }}"
+          ./scripts/sbom.sh \
+            --source-dir "dist/${assets}" \
+            --output-dir "dist/${assets}" \
+            --output-prefix "${assets}" \
+            --skip-docker \
+            --syft-version "${{ env.SYFT_VERSION }}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: artifact-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: |
+            dist/*.tar.gz
+            dist/*/*.spdx.json
+
+      - name: Attest release artifact
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/*/*.spdx.json
+
+  create-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    needs:
+      - build-artifact
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Resolve release metadata
+        id: release_metadata
+        run: ./scripts/release-semver-metadata.sh "${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Create release with generated notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PRERELEASE: ${{ steps.release_metadata.outputs.prerelease }}
+        run: |
+          if gh release view "${{ github.ref_name }}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "Release ${{ github.ref_name }} already exists."
+            exit 0
+          fi
+
+          last_release_tag="$(gh release view --repo "${{ github.repository }}" --json tagName --jq '.tagName' 2>/dev/null || true)"
+          if [[ -n "${last_release_tag}" ]]; then
+            ahead_by="$(gh api "repos/${{ github.repository }}/compare/${last_release_tag}...${{ github.ref_name }}" --jq '.ahead_by')"
+            if [[ "${ahead_by}" -eq 0 ]]; then
+              echo "No new commits since ${last_release_tag}; aborting release creation."
+              exit 1
+            fi
+          fi
+
+          notes_file="$(mktemp)"
+          trap 'rm -f "${notes_file}"' EXIT
+
+          {
+            echo "## Commit Summary"
+            echo
+          } > "${notes_file}"
+
+          append_section() {
+            local section_title="$1"
+            local grep_pattern="$2"
+            local log_output
+
+            if [[ -n "${last_release_tag}" ]]; then
+              log_output="$(git log "${last_release_tag}..${{ github.ref_name }}" --pretty=format:'- %s (%h)' --no-merges --regexp-ignore-case --grep="^${grep_pattern}" || true)"
+            else
+              log_output="$(git log "${{ github.ref_name }}" --pretty=format:'- %s (%h)' --no-merges --regexp-ignore-case --grep="^${grep_pattern}" || true)"
+            fi
+
+            if [[ -n "${log_output}" ]]; then
+              {
+                echo "### ${section_title}"
+                echo "${log_output}"
+                echo
+              } >> "${notes_file}"
+            fi
+          }
+
+          append_section "Added" "Add:"
+          append_section "Changed" "Change:"
+          append_section "Fixed" "Fix:"
+          append_section "Removed" "Remove:"
+          append_section "Refactored" "Refactor:"
+          append_section "Tests" "Test:"
+          append_section "Documentation" "Docs:"
+          append_section "Build And CI" "(Build|Ci):"
+          append_section "Security" "Security:"
+          append_section "Dependencies" "Vendor:"
+          append_section "Chores" "Chore:"
+
+          if ! grep -q '^### ' "${notes_file}"; then
+            if [[ -n "${last_release_tag}" ]]; then
+              fallback_log_output="$(git log "${last_release_tag}..${{ github.ref_name }}" --pretty=format:'- %s (%h)' --no-merges -n 20 || true)"
+            else
+              fallback_log_output="$(git log "${{ github.ref_name }}" --pretty=format:'- %s (%h)' --no-merges -n 20 || true)"
+            fi
+
+            {
+              echo "### Other Commits"
+              echo "${fallback_log_output}"
+              echo
+            } >> "${notes_file}"
+          fi
+
+          release_args=(
+            "${GITHUB_REF_NAME}"
+            --repo "${{ github.repository }}"
+            --verify-tag
+            --notes-file "${notes_file}"
+            --generate-notes
+          )
+
+          if [[ "${PRERELEASE}" == "true" ]]; then
+            release_args+=(--prerelease)
+          else
+            release_args+=(--latest)
+          fi
+
+          gh release create "${release_args[@]}"
+
+  upload-release:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+    needs:
+      - create-release
+    strategy:
+      fail-fast: false
+      matrix:
+        goos: [linux]
+        goarch: [amd64, arm64]
+
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+        with:
+          name: artifact-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist
+
+      - name: Upload asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          assets="${{ env.APP_NAME }}-${{ matrix.goos }}-${{ matrix.goarch }}"
+          gh release upload "${{ github.ref_name }}" \
+            --repo "${{ github.repository }}" \
+            --clobber \
+            "dist/${assets}.tar.gz" \
+            "dist/${assets}/${assets}-source.spdx.json"
