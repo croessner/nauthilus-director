@@ -8,7 +8,7 @@ require (
 	github.com/go-viper/mapstructure/v2 v2.4.0
 	github.com/json-iterator/go v1.1.12
 	github.com/oapi-codegen/oapi-codegen/v2 v2.7.0
-	github.com/oapi-codegen/runtime v1.4.0
+	github.com/oapi-codegen/runtime v1.4.1
 	github.com/pires/go-proxyproto v0.12.0
 	github.com/prometheus/client_golang v1.23.2
 	github.com/prometheus/client_model v0.6.2
