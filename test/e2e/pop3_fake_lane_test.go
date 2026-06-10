@@ -36,40 +36,42 @@ import (
 )
 
 const (
-	e2ePOP3BackendAID      = "mailstore-a-pop3"
-	e2ePOP3BackendBID      = "mailstore-b-pop3"
-	e2ePOP3BackendPool     = "pop3-default"
-	e2ePOP3Listener        = "pop3"
-	e2ePOP3SListener       = "pop3s"
-	e2ePOP3Protocol        = "pop3"
-	e2ePOP3Service         = "pop3"
-	e2ePOP3SService        = "pop3s"
-	e2ePOP3Account         = "pop3-alice@example.test"
-	e2ePOP3BearerAccount   = "pop3-bearer@example.test"
-	e2ePOP3CrossAccount    = "pop3-cross@example.test"
-	e2ePOP3HoldAccount     = "pop3-hold@example.test"
-	e2ePOP3PinnedAccount   = "pop3-pinned@example.test"
-	e2ePOP3RuntimeAccount  = "pop3-runtime@example.test"
-	e2ePOP3RetainedAccount = "pop3-retained@example.test"
-	e2ePOP3ShardBAccount   = "pop3-b@example.test"
-	e2ePOP3SieveAccount    = "pop3-sieve@example.test"
-	e2ePOP3MaintenanceUser = "pop3-maintenance@example.test"
-	e2ePOP3UIDLSentinel    = "UIDL-M7-OPAQUE-SENTINEL"
-	e2ePOP3SubjectSentinel = "Subject: POP3 M7 sentinel"
-	e2ePOP3BodySentinel    = "opaque message body for M7"
-	e2ePOP3MessageSentinel = e2ePOP3SubjectSentinel + "\r\n\r\n" + e2ePOP3BodySentinel
-	pop3CommandAuth        = "AUTH"
-	pop3CommandCapa        = "CAPA"
-	pop3CommandDele        = "DELE"
-	pop3CommandList        = "LIST"
-	pop3CommandPass        = "PASS"
-	pop3CommandQuit        = "QUIT"
-	pop3CommandRetr        = "RETR"
-	pop3CommandRset        = "RSET"
-	pop3CommandStat        = "STAT"
-	pop3CommandSTLS        = "STLS"
-	pop3CommandUIDL        = "UIDL"
-	pop3CommandUser        = "USER"
+	e2ePOP3BackendAID       = "mailstore-a-pop3"
+	e2ePOP3BackendBID       = "mailstore-b-pop3"
+	e2ePOP3BackendPool      = "pop3-default"
+	e2ePOP3Listener         = "pop3"
+	e2ePOP3SListener        = "pop3s"
+	e2ePOP3Protocol         = "pop3"
+	e2ePOP3Service          = "pop3"
+	e2ePOP3SService         = "pop3s"
+	e2ePOP3Account          = "pop3-alice@example.test"
+	e2ePOP3BearerAccount    = "pop3-bearer@example.test"
+	e2ePOP3CrossAccount     = "pop3-cross@example.test"
+	e2ePOP3HoldAccount      = "pop3-hold@example.test"
+	e2ePOP3PinnedAccount    = "pop3-pinned@example.test"
+	e2ePOP3RuntimeAccount   = "pop3-runtime@example.test"
+	e2ePOP3RetainedAccount  = "pop3-retained@example.test"
+	e2ePOP3ShardBAccount    = "pop3-b@example.test"
+	e2ePOP3SieveAccount     = "pop3-sieve@example.test"
+	e2ePOP3MaintenanceUser  = "pop3-maintenance@example.test"
+	e2ePOP3UIDLSentinel     = "UIDL-M7-OPAQUE-SENTINEL"
+	e2ePOP3SubjectSentinel  = "Subject: POP3 M7 sentinel"
+	e2ePOP3BodySentinel     = "opaque message body for M7"
+	e2ePOP3MessageSentinel  = e2ePOP3SubjectSentinel + "\r\n\r\n" + e2ePOP3BodySentinel
+	e2ePOP3XOAuth2Token     = "e2e-pop3-xoauth2-token-sentinel"
+	e2ePOP3OAuthBearerToken = "e2e-pop3-oauthbearer-token-sentinel"
+	pop3CommandAuth         = "AUTH"
+	pop3CommandCapa         = "CAPA"
+	pop3CommandDele         = "DELE"
+	pop3CommandList         = "LIST"
+	pop3CommandPass         = "PASS"
+	pop3CommandQuit         = "QUIT"
+	pop3CommandRetr         = "RETR"
+	pop3CommandRset         = "RSET"
+	pop3CommandStat         = "STAT"
+	pop3CommandSTLS         = "STLS"
+	pop3CommandUIDL         = "UIDL"
+	pop3CommandUser         = "USER"
 )
 
 // TestServerBinaryPublicPOP3ProductionFlow proves POP3 through public process boundaries.
@@ -77,9 +79,25 @@ func TestServerBinaryPublicPOP3ProductionFlow(t *testing.T) {
 	binary := e2eServerBinary(t)
 	ctl := buildDirectorctl(t)
 	redisFixture := startValkeySessionStore(t)
-	authority := startMappedFakeHTTPAuthority(t, pop3AuthorityIdentities(), nil)
-	fakePOP3A := pop3backend.Start(t, pop3backend.Options{Messages: pop3SentinelMessages()})
-	fakePOP3B := pop3backend.Start(t, pop3backend.Options{Messages: pop3SentinelMessages()})
+	authority := startMappedFakeOIDCHTTPAuthority(t, pop3AuthorityIdentities(), nil, fakeOIDCAuthorityOptions{
+		SASLBearerTokens: map[string]fakeSASLBearerToken{
+			e2ePOP3XOAuth2Token:     activeFakeSASLBearerToken(e2ePOP3ShardBAccount, e2eShardTagB),
+			e2ePOP3OAuthBearerToken: activeFakeSASLBearerToken(e2ePOP3BearerAccount, e2eShardTagB),
+		},
+		SkipBackchannelAuth: true,
+	})
+	backendCertPath, _, backendCertificate := writeTestCertificate(t)
+	pop3BackendTLS := &tls.Config{Certificates: []tls.Certificate{backendCertificate}, MinVersion: tls.VersionTLS12}
+	fakePOP3A := pop3backend.Start(t, pop3backend.Options{
+		Messages:  pop3SentinelMessages(),
+		TLSConfig: pop3BackendTLS,
+		TLSMode:   "starttls",
+	})
+	fakePOP3B := pop3backend.Start(t, pop3backend.Options{
+		Messages:  pop3SentinelMessages(),
+		TLSConfig: pop3BackendTLS,
+		TLSMode:   "starttls",
+	})
 	fakeIMAPA := startFakeIMAPBackend(t, fakeBackendOptions{})
 	fakeIMAPB := startFakeIMAPBackend(t, fakeBackendOptions{})
 	fakeLMTPA := lmtpbackend.Start(t, lmtpbackend.Options{})
@@ -93,14 +111,17 @@ func TestServerBinaryPublicPOP3ProductionFlow(t *testing.T) {
 	sieveAddress := loopbackAddress(t)
 	controlAddress := loopbackAddress(t)
 	configPath := writePOP3ProductionProcessConfig(t, pop3ProductionProcessConfigOptions{
-		RedisAddress:   redisFixture.addr,
-		AuthorityURL:   authority.URL(),
-		POP3Address:    pop3Address,
-		POP3SAddress:   pop3sAddress,
-		IMAPAddress:    imapAddress,
-		LMTPAddress:    lmtpAddress,
-		SieveAddress:   sieveAddress,
-		ControlAddress: controlAddress,
+		RedisAddress:         redisFixture.addr,
+		AuthorityURL:         authority.URL(),
+		AuthorityBearer:      processAuthorityBearerForFake(authority),
+		POP3Address:          pop3Address,
+		POP3SAddress:         pop3sAddress,
+		IMAPAddress:          imapAddress,
+		LMTPAddress:          lmtpAddress,
+		SieveAddress:         sieveAddress,
+		ControlAddress:       controlAddress,
+		POP3BackendTLSMode:   "starttls",
+		POP3BackendTLSCAFile: backendCertPath,
 		POP3Backends: map[string]string{
 			e2ePOP3BackendAID: fakePOP3A.Address(),
 			e2ePOP3BackendBID: fakePOP3B.Address(),
@@ -183,7 +204,17 @@ func exercisePOP3StartTLSAuthProxyAndRouteLookup(
 		"--include-affinity",
 	)
 	assertCLIOutputFields(t, routeOutput, "selected_backend="+e2ePOP3BackendAID, "source=initial_placement")
-	assertOutputOmits(t, routeOutput, e2ePOP3UIDLSentinel, e2ePOP3SubjectSentinel, e2ePOP3BodySentinel, e2ePassword, e2eToken)
+	assertOutputOmits(
+		t,
+		routeOutput,
+		e2ePOP3UIDLSentinel,
+		e2ePOP3SubjectSentinel,
+		e2ePOP3BodySentinel,
+		e2ePassword,
+		e2eToken,
+		e2ePOP3XOAuth2Token,
+		e2ePOP3OAuthBearerToken,
+	)
 
 	client.WriteLine(pop3CommandUser + " " + e2ePOP3Account)
 	client.ExpectStatusPrefix("+OK")
@@ -207,24 +238,26 @@ func exercisePOP3ImplicitBearerAuth(t *testing.T, address string, authority *fak
 	xoauth2 := dialPOP3TLS(t, address)
 	defer xoauth2.Close()
 	xoauth2.ExpectStatusPrefix("+OK")
-	xoauth2.WriteLine(pop3CommandAuth + " XOAUTH2 " + pop3XOAUTH2Payload(e2ePOP3ShardBAccount, e2eToken))
+	beforeAuth := authority.SASLBearerIntrospectionCount()
+	xoauth2.WriteLine(pop3CommandAuth + " XOAUTH2 " + pop3XOAUTH2Payload(e2ePOP3ShardBAccount, e2ePOP3XOAuth2Token))
 	xoauth2.ExpectStatusPrefix("+OK")
 	xoauth2.WriteLine(pop3CommandQuit)
 	xoauth2.ExpectStatusPrefix("+OK")
 	xoauth2.Close()
-	expectAuthorityRequestAtLeast(t, authority, e2ePOP3Protocol, "xoauth2", e2ePOP3ShardBAccount)
-	assertPOP3Observation(t, fakePOP3B.ExpectObservation(t), "userpass", false)
+	authority.ExpectSASLBearerIntrospection(t, beforeAuth, 1)
+	assertPOP3Observation(t, fakePOP3B.ExpectObservation(t), "xoauth2", false)
 
 	oauthbearer := dialPOP3TLS(t, address)
 	defer oauthbearer.Close()
 	oauthbearer.ExpectStatusPrefix("+OK")
-	oauthbearer.WriteLine(pop3CommandAuth + " OAUTHBEARER " + pop3OAuthBearerPayload(e2ePOP3BearerAccount, e2eToken))
+	beforeAuth = authority.SASLBearerIntrospectionCount()
+	oauthbearer.WriteLine(pop3CommandAuth + " OAUTHBEARER " + pop3OAuthBearerPayload(e2ePOP3BearerAccount, e2ePOP3OAuthBearerToken))
 	oauthbearer.ExpectStatusPrefix("+OK")
 	oauthbearer.WriteLine(pop3CommandQuit)
 	oauthbearer.ExpectStatusPrefix("+OK")
 	oauthbearer.Close()
-	expectAuthorityRequestAtLeast(t, authority, e2ePOP3Protocol, "oauthbearer", e2ePOP3BearerAccount)
-	assertPOP3Observation(t, fakePOP3B.ExpectObservation(t), "userpass", false)
+	authority.ExpectSASLBearerIntrospection(t, beforeAuth, 1)
+	assertPOP3Observation(t, fakePOP3B.ExpectObservation(t), "oauthbearer", false)
 }
 
 // exerciseIMAPSieveAndLMTPAffinityInfluencePOP3 proves existing state selects the POP3 backend node.
@@ -419,6 +452,7 @@ func exercisePOP3RuntimeControls(
 type pop3ProductionProcessConfigOptions struct {
 	RedisAddress         string
 	AuthorityURL         string
+	AuthorityBearer      processAuthorityBearerOptions
 	POP3Address          string
 	POP3SAddress         string
 	IMAPAddress          string
@@ -426,6 +460,8 @@ type pop3ProductionProcessConfigOptions struct {
 	SieveAddress         string
 	ControlAddress       string
 	POP3Backends         map[string]string
+	POP3BackendTLSMode   string
+	POP3BackendTLSCAFile string
 	IMAPBackends         map[string]string
 	LMTPBackends         map[string]string
 	SieveBackends        map[string]string
@@ -553,7 +589,7 @@ director:
         key: %q
         min_tls_version: TLS1.2
       sieve:
-        auth_mechanisms: [plain, xoauth2, oauthbearer]
+        auth_mechanisms: [plain]
         capabilities:
           script_extensions: [fileinto, reject]
           language: en
@@ -609,7 +645,7 @@ director:
 		processControlAuthYAML(t),
 		e2eProcessKeyPrefix,
 		options.RedisAddress,
-		processAuthorityOIDCYAML(),
+		processAuthorityYAML(t, processAuthorityOIDCOptions{}, options.AuthorityBearer),
 		options.AuthorityURL,
 		options.UserHoldMaxWait.String(),
 		options.UserHoldPollInterval.String(),
@@ -643,6 +679,11 @@ director:
 
 // pop3ProductionBackendsYAML renders matching backend-node entries across protocols.
 func pop3ProductionBackendsYAML(options pop3ProductionProcessConfigOptions) string {
+	pop3BackendTLSMode := strings.TrimSpace(options.POP3BackendTLSMode)
+	if pop3BackendTLSMode == "" {
+		pop3BackendTLSMode = "plaintext"
+	}
+
 	return fmt.Sprintf(`    mailstore-a-imap:
       protocol: imap
       shard_tag: %q
@@ -762,8 +803,13 @@ func pop3ProductionBackendsYAML(options pop3ProductionProcessConfigOptions) stri
       max_connections: 100
       maintenance: disabled
       tls:
-        mode: plaintext
+        mode: %q
+        ca_file: %q
+        cert: ""
+        key: ""
+        server_name: "127.0.0.1"
         min_tls_version: TLS1.2
+        insecure_skip_verify: false
       auth:
         mode: master_user
         master_user:
@@ -771,6 +817,10 @@ func pop3ProductionBackendsYAML(options pop3ProductionProcessConfigOptions) stri
           password_file: %q
           user_format: "{user}*{master_user}"
           mechanism: plain
+        credential_replay:
+          require_backend_tls: true
+          preserve_mechanism: true
+          allowed_mechanisms: [userpass, xoauth2, oauthbearer]
       health_check:
         enabled: false
     mailstore-b-pop3:
@@ -782,8 +832,13 @@ func pop3ProductionBackendsYAML(options pop3ProductionProcessConfigOptions) stri
       max_connections: 100
       maintenance: disabled
       tls:
-        mode: plaintext
+        mode: %q
+        ca_file: %q
+        cert: ""
+        key: ""
+        server_name: "127.0.0.1"
         min_tls_version: TLS1.2
+        insecure_skip_verify: false
       auth:
         mode: master_user
         master_user:
@@ -791,6 +846,10 @@ func pop3ProductionBackendsYAML(options pop3ProductionProcessConfigOptions) stri
           password_file: %q
           user_format: "{user}*{master_user}"
           mechanism: plain
+        credential_replay:
+          require_backend_tls: true
+          preserve_mechanism: true
+          allowed_mechanisms: [userpass, xoauth2, oauthbearer]
       health_check:
         enabled: false
 `, e2eShardTag,
@@ -811,9 +870,13 @@ func pop3ProductionBackendsYAML(options pop3ProductionProcessConfigOptions) stri
 		e2ePassword,
 		e2eShardTag,
 		options.POP3Backends[e2ePOP3BackendAID],
+		pop3BackendTLSMode,
+		options.POP3BackendTLSCAFile,
 		e2ePassword,
 		e2eShardTagB,
 		options.POP3Backends[e2ePOP3BackendBID],
+		pop3BackendTLSMode,
+		options.POP3BackendTLSCAFile,
 		e2ePassword,
 	)
 }
@@ -1059,7 +1122,17 @@ func assertPOP3Observation(t *testing.T, observation pop3backend.Observation, me
 		t.Fatalf("POP3 observation = %#v, missing redacted mailbox sentinel match", observation)
 	}
 	dump := fmt.Sprintf("%#v", observation)
-	assertOutputOmits(t, dump, e2ePOP3UIDLSentinel, e2ePOP3SubjectSentinel, e2ePOP3BodySentinel, e2ePassword, e2eToken)
+	assertOutputOmits(
+		t,
+		dump,
+		e2ePOP3UIDLSentinel,
+		e2ePOP3SubjectSentinel,
+		e2ePOP3BodySentinel,
+		e2ePassword,
+		e2eToken,
+		e2ePOP3XOAuth2Token,
+		e2ePOP3OAuthBearerToken,
+	)
 }
 
 // expectAuthorityRequestAtLeast verifies one matching auth request exists among several.
@@ -1142,6 +1215,8 @@ func assertPOP3ProcessOutputSafe(t *testing.T, output string) {
 		e2ePOP3RuntimeAccount,
 		e2ePOP3BearerAccount,
 		e2ePOP3ShardBAccount,
+		e2ePOP3XOAuth2Token,
+		e2ePOP3OAuthBearerToken,
 	} {
 		if strings.Contains(output, forbidden) {
 			t.Fatalf("process output leaked POP3 value %q: %s", forbidden, output)

@@ -64,10 +64,6 @@ func (s *Session) authenticateWithAuthority(
 	ctx context.Context,
 	credentials *frontendCredentials,
 ) (nauthilus.AuthResult, error) {
-	if s.authenticator == nil {
-		return nauthilus.AuthResult{Decision: nauthilus.DecisionTemporaryFailure}, errors.New("imap: authenticator unavailable")
-	}
-
 	if credentials == nil {
 		return nauthilus.AuthResult{Decision: nauthilus.DecisionTemporaryFailure}, errors.New("imap: credentials unavailable")
 	}
@@ -76,6 +72,25 @@ func (s *Session) authenticateWithAuthority(
 	defer cancel()
 
 	method := credentials.Mechanism().Normalized()
+	if credentials.Kind() == credentialKindBearer {
+		if s.bearerIntrospector == nil {
+			return nauthilus.AuthResult{Decision: nauthilus.DecisionTemporaryFailure}, errors.New("imap: bearer introspector unavailable")
+		}
+
+		request := credentials.BearerIntrospectionRequest(
+			s.NauthilusRequestContext(method),
+			protocolIMAP,
+			s.context.ListenerName,
+			s.context.AuthorityName,
+		)
+
+		return s.bearerIntrospector.Introspect(authCtx, request)
+	}
+
+	if s.authenticator == nil {
+		return nauthilus.AuthResult{Decision: nauthilus.DecisionTemporaryFailure}, errors.New("imap: authenticator unavailable")
+	}
+
 	request := credentials.NauthilusAuthRequest(s.NauthilusRequestContext(method))
 
 	return s.authenticator.Authenticate(authCtx, request)

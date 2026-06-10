@@ -32,10 +32,17 @@ const (
 	observationMechanismPlain   = "plain"
 	observationPassword         = "secret-password"
 	observationProtocolIMAP     = "imap"
+	observationClaimTenant      = "tenant"
+	observationCustomClaimName  = "custom_claim"
+	observationMechanismBearer  = "OAUTHBEARER"
+	observationTenantBlue       = "blue"
 	observationSecret           = "secret-observation-body"
 	observationServiceIMAP      = "imap"
 	observationServiceSubmit    = "imap-submission"
 	observationUsername         = "alice@example.test"
+	observationBearerAccount    = "account-observation-sentinel"
+	observationBearerClaim      = "claim-observation-sentinel"
+	observationBearerToken      = "bearer-token-observation-sentinel"
 )
 
 // TestObservedAuthenticatorClassifiesAuthorityOutcomes verifies bounded auth reasons.
@@ -134,6 +141,68 @@ func TestObservedAuthenticatorRecordsAuthorityContext(t *testing.T) {
 	}
 }
 
+// TestObservedBearerIntrospectorOmitsSecretAndClaimValues verifies bounded bearer telemetry.
+func TestObservedBearerIntrospectorOmitsSecretAndClaimValues(t *testing.T) {
+	recorder := &recordingAuthObservation{}
+	client := ObserveBearerIntrospector(fakeBearerIntrospector{
+		result: resultWithDecision(DecisionAuthenticated, observationBearerAccount, "session-observation-sentinel", "", map[string][]string{
+			observationClaimTenant:     {observationTenantBlue},
+			observationCustomClaimName: {observationBearerClaim},
+		}),
+	}, ObservationConfig{
+		AuthorityName: observationAuthorityPrimary,
+		BackendPool:   observationBackendPool,
+		ListenerName:  observationProtocolIMAP,
+		Recorder:      recorder,
+		ServiceName:   observationServiceIMAP,
+		Transport:     transportHTTP,
+	})
+
+	_, err := client.Introspect(context.Background(), BearerIntrospectionRequest{
+		Context: RequestContext{
+			ClientIP:          observationClientIP,
+			ExternalSessionID: observationSecret,
+			Protocol:          observationProtocolIMAP,
+			Method:            observationMechanismBearer,
+		},
+		Mechanism:             observationMechanismBearer,
+		AuthorizationIdentity: observationBearerAccount,
+		BearerToken:           NewSecret(observationBearerToken),
+	})
+	if err != nil {
+		t.Fatalf("Introspect returned error: %v", err)
+	}
+
+	event := requireAuthObservation(t, recorder)
+	if got := event.MetricLabels[authObservationFieldTransport]; got != authObservationTransportBearer {
+		t.Fatalf("transport label = %q, want %q", got, authObservationTransportBearer)
+	}
+
+	if got := event.MetricLabels[authObservationFieldMechanism]; got != "oauthbearer" {
+		t.Fatalf("mechanism label = %q, want oauthbearer", got)
+	}
+
+	if err := event.MetricLabels.Validate(); err != nil {
+		t.Fatalf("metric labels failed policy: %v", err)
+	}
+
+	for _, forbidden := range []string{
+		observationBearerAccount,
+		observationBearerClaim,
+		observationBearerToken,
+		observationSecret,
+		observationCustomClaimName,
+	} {
+		assertAuthEventOmitsValue(t, event, forbidden)
+	}
+
+	for _, label := range observability.ForbiddenMetricLabels() {
+		if _, ok := event.MetricLabels[label]; ok {
+			t.Fatalf("metric labels included forbidden %q: %#v", label, event.MetricLabels)
+		}
+	}
+}
+
 type fakeAuthenticator struct {
 	result AuthResult
 	err    error
@@ -142,6 +211,16 @@ type fakeAuthenticator struct {
 // Authenticate returns the configured auth result for observability tests.
 func (a fakeAuthenticator) Authenticate(context.Context, AuthRequest) (AuthResult, error) {
 	return a.result, a.err
+}
+
+type fakeBearerIntrospector struct {
+	result AuthResult
+	err    error
+}
+
+// Introspect returns the configured bearer result for observability tests.
+func (i fakeBearerIntrospector) Introspect(context.Context, BearerIntrospectionRequest) (AuthResult, error) {
+	return i.result, i.err
 }
 
 // runObservedAuth executes one observed authority call and returns its recorder.
@@ -218,6 +297,18 @@ func assertAuthEventSecretSafe(t *testing.T, event observability.Event) {
 			assertDoesNotContainSecret(t, key, observationPassword)
 			assertDoesNotContainSecret(t, value, observationPassword)
 			assertDoesNotContainSecret(t, value, observationSecret)
+		}
+	}
+}
+
+// assertAuthEventOmitsValue checks bearer observations for forbidden sentinel text.
+func assertAuthEventOmitsValue(t *testing.T, event observability.Event, value string) {
+	t.Helper()
+
+	for _, fields := range []map[string]string{event.LogFields, event.MetricLabels} {
+		for key, fieldValue := range fields {
+			assertDoesNotContainSecret(t, key, value)
+			assertDoesNotContainSecret(t, fieldValue, value)
 		}
 	}
 }

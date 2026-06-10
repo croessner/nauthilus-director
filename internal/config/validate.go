@@ -23,15 +23,20 @@ import (
 	"net"
 	"net/netip"
 	"strings"
+	"unicode"
 )
 
 const (
 	lmtpBDATImplemented = true
 
-	oidcClientSecretBasic   = "client_secret_basic"
-	oidcClientSecretPost    = "client_secret_post"
-	oidcPrivateKeyJWT       = "private_key_jwt"
-	oidcValidationNauthilus = "nauthilus"
+	bearerMechanismOAuthBearer             = "oauthbearer"
+	bearerMechanismXOAUTH2                 = "xoauth2"
+	bearerValidationNauthilusIntrospection = "nauthilus_introspection"
+	defaultBearerRequiredScope             = "email"
+	oidcClientSecretBasic                  = "client_secret_basic"
+	oidcClientSecretPost                   = "client_secret_post"
+	oidcPrivateKeyJWT                      = "private_key_jwt"
+	oidcValidationNauthilus                = "nauthilus"
 )
 
 const (
@@ -342,12 +347,146 @@ func validateAuthorities(authorities map[string]AuthorityConfig, problems *[]str
 		if authority.Mechanisms.Password.Enabled && len(authority.Mechanisms.Password.Names) == 0 {
 			addProblem(problems, path+".mechanisms.password.names is required when password mechanisms are enabled")
 		}
-		if authority.Mechanisms.Bearer.Enabled {
-			if len(authority.Mechanisms.Bearer.Names) == 0 {
-				addProblem(problems, path+".mechanisms.bearer.names is required when bearer mechanisms are enabled")
-			}
-			requirePositiveInt(path+".mechanisms.bearer.token_max_bytes", authority.Mechanisms.Bearer.TokenMaxBytes, problems)
+		validateBearerMechanism(path+".mechanisms.bearer", authority.Mechanisms.Bearer, problems)
+	}
+}
+
+// validateBearerMechanism checks the advertised SASL bearer policy and introspection boundary.
+func validateBearerMechanism(path string, bearer BearerMechanismConfig, problems *[]string) {
+	if !bearer.Enabled {
+		if bearer.Introspection.Enabled {
+			validateBearerIntrospection(path+".introspection", bearer.Introspection, problems)
 		}
+
+		return
+	}
+
+	if len(bearer.Names) == 0 {
+		addProblem(problems, path+".names is required when bearer mechanisms are enabled")
+	}
+	requirePositiveInt(path+".token_max_bytes", bearer.TokenMaxBytes, problems)
+
+	if !bearerMechanismsNeedIntrospection(bearer.Names) {
+		if bearer.Validation != "" && bearer.Validation != bearerValidationNauthilusIntrospection {
+			addProblem(problems, path+".validation must be "+bearerValidationNauthilusIntrospection)
+		}
+		if bearer.Introspection.Enabled {
+			validateBearerIntrospection(path+".introspection", bearer.Introspection, problems)
+		}
+
+		return
+	}
+
+	if bearer.Validation != bearerValidationNauthilusIntrospection {
+		addProblem(problems, path+".validation must be "+bearerValidationNauthilusIntrospection+" when bearer names include xoauth2 or oauthbearer")
+	}
+	if !bearer.Introspection.Enabled {
+		addProblem(problems, path+".introspection.enabled must be true when bearer names include xoauth2 or oauthbearer")
+
+		return
+	}
+
+	validateBearerIntrospection(path+".introspection", bearer.Introspection, problems)
+}
+
+// validateBearerIntrospection rejects incomplete mail SASL bearer introspection config.
+func validateBearerIntrospection(path string, introspection BearerIntrospectionConfig, problems *[]string) {
+	if !introspection.Enabled {
+		return
+	}
+
+	if strings.TrimSpace(introspection.Issuer) == "" && strings.TrimSpace(introspection.DiscoveryURL) == "" {
+		addProblem(problems, path+".issuer or "+path+".discovery_url is required when introspection is enabled")
+	}
+	if strings.TrimSpace(introspection.ClientID) == "" {
+		addProblem(problems, path+".client_id is required when introspection is enabled")
+	}
+	if strings.TrimSpace(introspection.RequiredScope) == "" {
+		addProblem(problems, path+".required_scope is required when introspection is enabled")
+	}
+	validateBearerAccountClaim(path+".account_claim", introspection.AccountClaim, problems)
+	validateBearerIntrospectionClientAuth(path, introspection, problems)
+
+	switch strings.TrimSpace(introspection.ClientAssertionAlg) {
+	case "", oidcAssertionAlgRS256, oidcAssertionAlgEdDSA:
+	default:
+		addProblem(problems, path+".client_assertion_alg must be RS256 or EdDSA")
+	}
+}
+
+// validateBearerIntrospectionClientAuth checks endpoint client-auth material.
+func validateBearerIntrospectionClientAuth(path string, introspection BearerIntrospectionConfig, problems *[]string) {
+	secretCount := enabledSecretCount(introspection.ClientSecret, introspection.ClientSecretFile)
+	if secretCount > 1 {
+		addProblem(problems, path+" must not configure both client_secret and client_secret_file")
+	}
+
+	switch normalizedOIDCConfigMethod(introspection.AuthMethod) {
+	case oidcClientSecretBasic, oidcClientSecretPost:
+		if secretCount != 1 {
+			addProblem(problems, path+" must configure exactly one of client_secret or client_secret_file for secret-based endpoint auth")
+		}
+		if !introspection.ClientPrivateKeyFile.IsZero() {
+			addProblem(problems, path+".client_private_key_file must be empty for secret-based endpoint auth")
+		}
+	case oidcPrivateKeyJWT:
+		if secretCount > 0 {
+			addProblem(problems, path+" must not configure client_secret or client_secret_file when auth_method is private_key_jwt")
+		}
+		if introspection.ClientPrivateKeyFile.IsZero() {
+			addProblem(problems, path+".client_private_key_file is required when auth_method is private_key_jwt")
+		}
+	case "":
+		addProblem(problems, path+".auth_method is required when introspection is enabled")
+	default:
+		addProblem(problems, path+".auth_method must be client_secret_basic, client_secret_post or private_key_jwt")
+	}
+}
+
+// validateBearerAccountClaim checks optional account-claim names without echoing values.
+func validateBearerAccountClaim(path string, accountClaim string, problems *[]string) {
+	accountClaim = strings.TrimSpace(accountClaim)
+	if accountClaim == "" {
+		return
+	}
+
+	if !printableClaimName(accountClaim) {
+		addProblem(problems, path+" must be a printable non-secret claim name")
+
+		return
+	}
+
+	if secretBearingClaimName(accountClaim) {
+		addProblem(problems, path+" must not name a secret-bearing claim")
+	}
+}
+
+// bearerMechanismsNeedIntrospection reports whether configured names carry end-user bearer tokens.
+func bearerMechanismsNeedIntrospection(names []string) bool {
+	return containsFold(names, bearerMechanismXOAUTH2) || containsFold(names, bearerMechanismOAuthBearer)
+}
+
+// printableClaimName reports whether a claim name avoids control and whitespace runes.
+func printableClaimName(value string) bool {
+	for _, char := range value {
+		if !unicode.IsPrint(char) || unicode.IsSpace(char) {
+			return false
+		}
+	}
+
+	return true
+}
+
+// secretBearingClaimName reports claim names that must never become account keys.
+func secretBearingClaimName(value string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	switch normalized {
+	case "access_token", "refresh_token", "id_token", "token", "client_secret", "password", "secret":
+		return true
+	default:
+		return strings.Contains(normalized, "token") ||
+			strings.Contains(normalized, "secret") ||
+			strings.Contains(normalized, "password")
 	}
 }
 
@@ -583,6 +722,7 @@ func validateDirector(director DirectorConfig, authorities map[string]AuthorityC
 		}
 	}
 
+	bearerReplayMechanisms := bearerReplayMechanismsByBackend(director)
 	for name, backend := range director.Backends {
 		path := "director.backends." + name
 		validateBackendProtocol(path, backend.Protocol, problems)
@@ -591,7 +731,7 @@ func validateDirector(director DirectorConfig, authorities map[string]AuthorityC
 		validateMaintenanceMode(path+".maintenance", backend.Maintenance, director.Maintenance.DefaultMode, problems)
 		validateBackendAddress(path+".address", backend.Address, problems)
 		validateBackendTLS(path+".tls", backend.Address, backend.TLS, problems)
-		validateBackendAuth(path+".auth", backend, problems)
+		validateBackendAuth(path+".auth", backend, bearerReplayMechanisms[name], problems)
 		if backend.HealthCheck.Enabled && backend.HealthCheck.PasswordFile.IsZero() {
 			addProblem(problems, path+".health_check.password_file is required when health check is enabled")
 		}
@@ -606,6 +746,92 @@ func validateDirector(director DirectorConfig, authorities map[string]AuthorityC
 	requirePositiveDuration("director.health.timeout", director.Health.Timeout, problems)
 	requirePositiveDuration("director.maintenance.drain_timeout", director.Maintenance.DrainTimeout, problems)
 	requirePositiveDuration("director.maintenance.hard_kill_grace", director.Maintenance.HardKillGrace, problems)
+}
+
+// bearerReplayMechanismsByBackend maps bearer-capable login pools to concrete backend entries.
+func bearerReplayMechanismsByBackend(director DirectorConfig) map[string]map[string]bool {
+	mechanismsByPool := make(map[string]map[string]bool)
+	for _, listener := range director.Listeners {
+		mechanisms := listenerBearerReplayMechanisms(listener)
+		if len(mechanisms) == 0 {
+			continue
+		}
+
+		poolMechanisms := mechanismsByPool[listener.BackendPool]
+		if poolMechanisms == nil {
+			poolMechanisms = make(map[string]bool)
+			mechanismsByPool[listener.BackendPool] = poolMechanisms
+		}
+		for mechanism := range mechanisms {
+			poolMechanisms[mechanism] = true
+		}
+	}
+
+	mechanismsByBackend := make(map[string]map[string]bool)
+	for poolName, mechanisms := range mechanismsByPool {
+		pool, ok := director.BackendPools[poolName]
+		if !ok {
+			continue
+		}
+
+		for _, backendName := range pool.Backends {
+			backendMechanisms := mechanismsByBackend[backendName]
+			if backendMechanisms == nil {
+				backendMechanisms = make(map[string]bool)
+				mechanismsByBackend[backendName] = backendMechanisms
+			}
+			for mechanism := range mechanisms {
+				backendMechanisms[mechanism] = true
+			}
+		}
+	}
+
+	return mechanismsByBackend
+}
+
+// listenerBearerReplayMechanisms returns bearer mechanisms that can reach user-stateful backend auth.
+func listenerBearerReplayMechanisms(listener ListenerConfig) map[string]bool {
+	switch strings.ToLower(strings.TrimSpace(listener.Protocol)) {
+	case protocolIMAP:
+		if listener.IMAP == nil {
+			return nil
+		}
+
+		return configuredBearerMechanisms(listener.IMAP.AuthMechanisms)
+	case protocolSIEVE:
+		if listener.Sieve == nil {
+			return nil
+		}
+
+		return configuredBearerMechanisms(listener.Sieve.AuthMechanisms)
+	case protocolPOP3:
+		if listener.POP3 == nil {
+			return nil
+		}
+
+		return configuredBearerMechanisms(listener.POP3.AuthMechanisms)
+	default:
+		return nil
+	}
+}
+
+// configuredBearerMechanisms filters a frontend mechanism list to supported bearer names.
+func configuredBearerMechanisms(values []string) map[string]bool {
+	mechanisms := make(map[string]bool)
+	for _, value := range values {
+		switch strings.ToLower(strings.TrimSpace(value)) {
+		case bearerMechanismXOAUTH2:
+			mechanisms[bearerMechanismXOAUTH2] = true
+		case bearerMechanismOAuthBearer:
+			mechanisms[bearerMechanismOAuthBearer] = true
+		}
+	}
+
+	if len(mechanisms) == 0 {
+		return nil
+	}
+
+	return mechanisms
 }
 
 // validateAuthorityContext rejects listener authority context that could override transport state.
@@ -1260,7 +1486,7 @@ func backendAddressHostIsIP(address string) bool {
 }
 
 // validateBackendAuth checks mode-specific backend authentication requirements.
-func validateBackendAuth(path string, backend BackendConfig, problems *[]string) {
+func validateBackendAuth(path string, backend BackendConfig, bearerReplayMechanisms map[string]bool, problems *[]string) {
 	mode := strings.ToLower(strings.TrimSpace(backend.Auth.Mode))
 	protocol := strings.ToLower(strings.TrimSpace(backend.Protocol))
 	if protocol == protocolIMAP {
@@ -1303,6 +1529,7 @@ func validateBackendAuth(path string, backend BackendConfig, problems *[]string)
 	switch mode {
 	case backendAuthModeMasterUser:
 		validateMasterUserAuth(path+".master_user", backend.Auth.MasterUser, problems)
+		validateMasterUserBearerReplayAuth(path+".credential_replay", backend, bearerReplayMechanisms, problems)
 	case backendAuthModeCredentialReplay:
 		validateCredentialReplayAuth(path+".credential_replay", backend, problems)
 	case backendAuthModeSASL:
@@ -1372,6 +1599,40 @@ func validateMasterUserAuth(path string, masterUser BackendMasterUserConfig, pro
 	}
 	if !validBackendPasswordMechanism(masterUser.Mechanism) {
 		addProblem(problems, path+".mechanism must be plain or login")
+	}
+}
+
+// validateMasterUserBearerReplayAuth checks the bearer replay sidecar used by hybrid master-user mode.
+func validateMasterUserBearerReplayAuth(path string, backend BackendConfig, requiredMechanisms map[string]bool, problems *[]string) {
+	if len(requiredMechanisms) == 0 {
+		return
+	}
+
+	replay := backend.Auth.CredentialReplay
+	allowed := make(map[string]bool, len(replay.AllowedMechanisms))
+	if len(replay.AllowedMechanisms) == 0 {
+		addProblem(problems, path+".allowed_mechanisms must include bearer mechanisms for master_user mode")
+	}
+	for _, mechanism := range replay.AllowedMechanisms {
+		normalized := strings.ToLower(strings.TrimSpace(mechanism))
+		if !validBackendReplayMechanism(normalized) {
+			addProblem(problems, path+".allowed_mechanisms contains unsupported mechanism "+mechanism)
+
+			continue
+		}
+
+		allowed[normalized] = true
+	}
+	for mechanism := range requiredMechanisms {
+		if !allowed[mechanism] {
+			addProblem(problems, path+".allowed_mechanisms must include "+mechanism+" for master_user bearer replay")
+		}
+	}
+	if !replay.RequireBackendTLS {
+		addProblem(problems, path+".require_backend_tls must be true for master_user bearer replay")
+	}
+	if !backendTLSCanVerify(backend.TLS) {
+		addProblem(problems, path+" requires verified backend TLS for master_user bearer replay")
 	}
 }
 

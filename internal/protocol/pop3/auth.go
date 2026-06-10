@@ -32,7 +32,10 @@ import (
 	"github.com/croessner/nauthilus-director/internal/protocol/tlscontext"
 )
 
-const credentialKindPassword = "password"
+const (
+	credentialKindPassword       = "password"
+	pop3BearerIntrospectionClass = "oidc_introspection"
+)
 
 // handleUser stores only provisional protocol input for the later PASS command.
 func (s *Session) handleUser(ctx context.Context, command preauthCommand) error {
@@ -173,6 +176,10 @@ func (s *Session) handleAuth(ctx context.Context, command preauthCommand) (comma
 
 // authenticateThroughNauthilus calls the configured authority and keeps frontend success delayed.
 func (s *Session) authenticateThroughNauthilus(ctx context.Context, credentials *frontendCredentials) (commandOutcome, error) {
+	if credentials.Kind() == saslcred.KindBearer {
+		return s.authenticateThroughBearerIntrospection(ctx, credentials)
+	}
+
 	if s.authenticator == nil {
 		s.recordNauthilusAuth(ctx, pop3ObservationResultFailure, pop3ReasonTemporaryFailure, credentials.Method(), 0)
 		s.recordAuthenticate(ctx, pop3ObservationResultFailure, pop3ReasonTemporaryFailure, credentials.Method())
@@ -189,7 +196,7 @@ func (s *Session) authenticateThroughNauthilus(ctx context.Context, credentials 
 
 	authCtx, authSpan := s.startObservationSpan(authCtx, observability.TraceBoundaryNauthilusAuth, pop3ObservationOperationAuthenticate, pop3ObservationResultStart, "", map[string]string{
 		pop3ObsFieldMechanism: credentials.Method(),
-		pop3ObsFieldTransport: strings.ToLower(strings.TrimSpace(s.authorityTransport)),
+		pop3ObsFieldTransport: s.authObservationTransport(credentials),
 	})
 
 	authStarted := time.Now()
@@ -231,6 +238,81 @@ func (s *Session) authenticateThroughNauthilus(ctx context.Context, credentials 
 	}
 
 	return s.transitionAuthenticatedSession(ctx, credentials, result)
+}
+
+// authenticateThroughBearerIntrospection calls the dedicated SASL bearer authority boundary.
+//
+//nolint:dupl // Bearer auth intentionally mirrors password result mapping across a separate boundary.
+func (s *Session) authenticateThroughBearerIntrospection(ctx context.Context, credentials *frontendCredentials) (commandOutcome, error) {
+	if s.bearerIntrospector == nil {
+		s.recordNauthilusAuth(ctx, pop3ObservationResultFailure, pop3ReasonTemporaryFailure, credentials.Method(), 0)
+		s.recordAuthenticate(ctx, pop3ObservationResultFailure, pop3ReasonTemporaryFailure, credentials.Method())
+
+		return commandOutcome{}, s.writeERR("Authentication service temporarily unavailable")
+	}
+
+	s.authAttempts++
+	authCtx, cancel := context.WithTimeout(ctx, s.authTimeout)
+	defer cancel()
+
+	authCtx, authSpan := s.startObservationSpan(authCtx, observability.TraceBoundaryNauthilusAuth, pop3ObservationOperationAuthenticate, pop3ObservationResultStart, "", map[string]string{
+		pop3ObsFieldMechanism: credentials.Method(),
+		pop3ObsFieldTransport: s.authObservationTransport(credentials),
+	})
+
+	authStarted := time.Now()
+	result, err := s.bearerIntrospector.Introspect(authCtx, credentials.BearerIntrospectionRequest(
+		s.NauthilusRequestContext(credentials.Method()),
+		ProtocolPOP3,
+		s.listenerName,
+		s.authorityName,
+	))
+	authDuration := time.Since(authStarted)
+	if err != nil {
+		s.recordNauthilusAuth(authCtx, pop3ObservationResultFailure, pop3ReasonTemporaryFailure, credentials.Method(), authDuration)
+		s.recordAuthenticate(ctx, pop3ObservationResultFailure, pop3ReasonTemporaryFailure, credentials.Method())
+		authSpan.End(pop3ObservationResultFailure, pop3ReasonTemporaryFailure)
+
+		return commandOutcome{}, s.writeERR("Authentication service temporarily unavailable")
+	}
+
+	if !result.Authenticated() {
+		switch result.Decision {
+		case nauthilus.DecisionTemporaryFailure:
+			s.recordNauthilusAuth(authCtx, pop3ObservationResultFailure, pop3ReasonTemporaryFailure, credentials.Method(), authDuration)
+			s.recordAuthenticate(ctx, pop3ObservationResultFailure, pop3ReasonTemporaryFailure, credentials.Method())
+			authSpan.End(pop3ObservationResultFailure, pop3ReasonTemporaryFailure)
+
+			return commandOutcome{}, s.writeERR("Authentication service temporarily unavailable")
+		default:
+			s.recordNauthilusAuth(authCtx, pop3ObservationResultRejected, pop3ReasonAuth, credentials.Method(), authDuration)
+			s.recordAuthenticate(ctx, pop3ObservationResultRejected, pop3ReasonAuth, credentials.Method())
+			authSpan.End(pop3ObservationResultRejected, pop3ReasonAuth)
+
+			return commandOutcome{}, s.writeERR(genericAuthFailedText)
+		}
+	}
+
+	s.recordNauthilusAuth(authCtx, pop3ObservationResultOK, pop3ReasonOK, credentials.Method(), authDuration)
+	authSpan.End(pop3ObservationResultOK, pop3ReasonOK)
+
+	if err := s.placeAuthenticatedSession(ctx, credentials, result); err != nil {
+		s.recordAuthenticate(ctx, pop3ObservationResultFailure, pop3ReasonClass(err), credentials.Method())
+		_ = s.closePlacedSession(context.Background())
+
+		return commandOutcome{}, s.writeBackendReadinessERR()
+	}
+
+	return s.transitionAuthenticatedSession(ctx, credentials, result)
+}
+
+// authObservationTransport returns the bounded auth transport class for this credential.
+func (s *Session) authObservationTransport(credentials *frontendCredentials) string {
+	if credentials != nil && credentials.Kind() == saslcred.KindBearer {
+		return pop3BearerIntrospectionClass
+	}
+
+	return strings.ToLower(strings.TrimSpace(s.authorityTransport))
 }
 
 // sessionBackendConnectRequest carries selected backend and effective frontend tuple.
@@ -388,10 +470,38 @@ func (c *frontendCredentials) NauthilusAuthRequest(requestContext nauthilus.Requ
 
 	requestContext.Username = c.username
 	requestContext.Method = c.method
+	if c.kind == saslcred.KindBearer {
+		return nauthilus.AuthRequest{Context: requestContext}
+	}
 
 	return nauthilus.AuthRequest{
 		Context:    requestContext,
 		Credential: nauthilus.NewSecret(c.secret.Value()),
+	}
+}
+
+// BearerIntrospectionRequest builds the dedicated SASL bearer validation request.
+func (c *frontendCredentials) BearerIntrospectionRequest(
+	requestContext nauthilus.RequestContext,
+	protocol string,
+	listenerName string,
+	authorityName string,
+) nauthilus.BearerIntrospectionRequest {
+	if c == nil {
+		return nauthilus.BearerIntrospectionRequest{Context: requestContext}
+	}
+
+	requestContext.Username = c.username
+	requestContext.Method = c.method
+
+	return nauthilus.BearerIntrospectionRequest{
+		Context:               requestContext,
+		Mechanism:             c.method,
+		Protocol:              protocol,
+		ListenerName:          listenerName,
+		AuthorityName:         authorityName,
+		AuthorizationIdentity: firstNonEmpty(c.authorizationID, c.username),
+		BearerToken:           nauthilus.NewSecret(c.secret.Value()),
 	}
 }
 
@@ -413,4 +523,15 @@ func (c *frontendCredentials) String() string {
 // GoString returns only credential-safe metadata for Go-syntax formatting.
 func (c *frontendCredentials) GoString() string {
 	return c.String()
+}
+
+// firstNonEmpty returns the first non-empty trimmed value.
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+
+	return ""
 }

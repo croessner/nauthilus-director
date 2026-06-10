@@ -58,6 +58,10 @@ func AuthenticateBackend(
 
 	switch strings.ToLower(strings.TrimSpace(target.Auth.Mode)) {
 	case backendAuthModeMasterUser:
+		if credentials.Kind() == saslcred.KindBearer {
+			return authenticateCredentialReplayBackend(connection, target.Auth.CredentialReplay, credentials)
+		}
+
 		return authenticateMasterUserBackend(connection, target.Auth.MasterUser, selectedUser)
 	case backendAuthModeCredentialReplay:
 		return authenticateCredentialReplayBackend(connection, target.Auth.CredentialReplay, credentials)

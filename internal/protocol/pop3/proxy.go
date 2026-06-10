@@ -29,6 +29,7 @@ import (
 	"github.com/croessner/nauthilus-director/internal/nauthilus"
 	"github.com/croessner/nauthilus-director/internal/observability"
 	"github.com/croessner/nauthilus-director/internal/placement"
+	"github.com/croessner/nauthilus-director/internal/protocol/saslcred"
 	"github.com/croessner/nauthilus-director/internal/proxy"
 	runtimectl "github.com/croessner/nauthilus-director/internal/runtime"
 	"github.com/croessner/nauthilus-director/internal/state"
@@ -293,6 +294,10 @@ func (l *placementLeaseLifecycle) Close(ctx context.Context) error {
 // backendAuthObservationMechanism returns the bounded backend auth mechanism class.
 func backendAuthObservationMechanism(mode string, credentials *frontendCredentials) string {
 	if strings.EqualFold(strings.TrimSpace(mode), backendAuthModeMasterUser) {
+		if credentials != nil && credentials.Kind() == saslcred.KindBearer {
+			return credentials.Method()
+		}
+
 		return authMethodUserPass
 	}
 

@@ -114,6 +114,19 @@ func newManagedListener(
 		Transport:     authority.Transport,
 	})
 
+	bearerIntrospector, err := bearerIntrospectorForListener(context.Background(), entry, authority, options)
+	if err != nil {
+		return nil, fmt.Errorf("listener %s: %w", name, err)
+	}
+
+	bearerIntrospector = nauthilus.ObserveBearerIntrospector(bearerIntrospector, nauthilus.ObservationConfig{
+		AuthorityName: entry.Authority,
+		BackendPool:   entry.BackendPool,
+		ListenerName:  name,
+		Recorder:      options.observability,
+		ServiceName:   entry.ServiceName,
+	})
+
 	return &managedListener{
 		name:   name,
 		config: configured,
@@ -125,6 +138,7 @@ func newManagedListener(
 			Security:            security,
 			Authenticator:       authenticator,
 			IdentityLookuper:    identityLookuper,
+			BearerIntrospector:  bearerIntrospector,
 			BearerTokenMaxBytes: authority.Mechanisms.Bearer.TokenMaxBytes,
 			DirectorInstanceID:  runtime.InstanceName,
 			DefaultTenant:       defaultTenant,

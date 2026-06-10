@@ -14,7 +14,7 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-//nolint:goconst,wsl_v5 // POP3 session tests repeat public wire values for readability.
+//nolint:dupl,goconst,wsl_v5 // POP3 session tests repeat public wire values for readability.
 package pop3
 
 import (
@@ -141,7 +141,10 @@ func TestPASSWithoutUSERFailsBeforeNauthilus(t *testing.T) {
 // TestPlaintextCredentialsFailBeforeNauthilus verifies credential-bearing methods require TLS first.
 func TestPlaintextCredentialsFailBeforeNauthilus(t *testing.T) {
 	authenticator := &recordingAuthenticator{}
-	harness := startPOP3Harness(t, testPOP3Config(TLSModeStartTLS, authenticator))
+	introspector := &recordingBearerIntrospector{}
+	config := testPOP3Config(TLSModeStartTLS, authenticator)
+	config.BearerIntrospector = introspector
+	harness := startPOP3Harness(t, config)
 	harness.expectOK(t)
 
 	harness.session.provisionalUser = "alice@example.test"
@@ -154,6 +157,9 @@ func TestPlaintextCredentialsFailBeforeNauthilus(t *testing.T) {
 	if calls := authenticator.CallCount(); calls != 0 {
 		t.Fatalf("auth calls = %d, want 0", calls)
 	}
+	if calls := introspector.CallCount(); calls != 0 {
+		t.Fatalf("introspection calls = %d, want 0", calls)
+	}
 }
 
 // TestUSERPASSParsesCredentialsAndDelaysSuccess verifies password auth reaches Nauthilus without POP3 success.
@@ -161,7 +167,10 @@ func TestUSERPASSParsesCredentialsAndDelaysSuccess(t *testing.T) {
 	authenticator := &recordingAuthenticator{
 		result: nauthilus.AuthResult{Decision: nauthilus.DecisionAuthenticated, Account: "alice@example.test"},
 	}
-	harness := startPOP3Harness(t, testPOP3Config(TLSModeImplicit, authenticator))
+	introspector := &recordingBearerIntrospector{}
+	config := testPOP3Config(TLSModeImplicit, authenticator)
+	config.BearerIntrospector = introspector
+	harness := startPOP3Harness(t, config)
 	harness.expectOK(t)
 
 	harness.write(t, "USER alice@example.test\r\n")
@@ -184,6 +193,9 @@ func TestUSERPASSParsesCredentialsAndDelaysSuccess(t *testing.T) {
 
 	if request.Credential.Value() != "correct-password" {
 		t.Fatal("password credential was not forwarded to Nauthilus")
+	}
+	if calls := introspector.CallCount(); calls != 0 {
+		t.Fatalf("introspection calls = %d, want 0", calls)
 	}
 
 	assertNoServiceField(t, request)
@@ -210,25 +222,39 @@ func TestOversizedUSERPASSInputFailsSafely(t *testing.T) {
 func TestAUTHBearerInitialAndContinuation(t *testing.T) {
 	t.Run("xoauth2 initial response", func(t *testing.T) {
 		authenticator := authenticatedRecorder()
-		harness := startPOP3Harness(t, testPOP3Config(TLSModeImplicit, authenticator))
+		introspector := &recordingBearerIntrospector{
+			result: nauthilus.AuthResult{Decision: nauthilus.DecisionAuthenticated, Account: "alice@example.test"},
+		}
+		config := testPOP3Config(TLSModeImplicit, authenticator)
+		config.BearerIntrospector = introspector
+		harness := startPOP3Harness(t, config)
 		harness.expectOK(t)
 
 		harness.write(t, "AUTH XOAUTH2 "+xoauth2Payload("alice@example.test", "xoauth-token")+"\r\n")
 		harness.expectERR(t)
 
-		request := authenticator.LastRequest(t)
+		if calls := authenticator.CallCount(); calls != 0 {
+			t.Fatalf("password auth calls = %d, want 0", calls)
+		}
+
+		request := introspector.LastRequest(t)
 		if request.Context.Method != "xoauth2" || request.Context.Username != "alice@example.test" {
 			t.Fatalf("auth context = method %q username %q, want XOAUTH2 identity", request.Context.Method, request.Context.Username)
 		}
 
-		if request.Credential.Value() != "xoauth-token" {
-			t.Fatal("XOAUTH2 bearer token was not forwarded to Nauthilus")
+		if request.BearerToken.Value() != "xoauth-token" {
+			t.Fatal("XOAUTH2 bearer token was not sent to introspection")
 		}
 	})
 
 	t.Run("oauthbearer continuation", func(t *testing.T) {
 		authenticator := authenticatedRecorder()
-		harness := startPOP3Harness(t, testPOP3Config(TLSModeImplicit, authenticator))
+		introspector := &recordingBearerIntrospector{
+			result: nauthilus.AuthResult{Decision: nauthilus.DecisionAuthenticated, Account: "alice@example.test"},
+		}
+		config := testPOP3Config(TLSModeImplicit, authenticator)
+		config.BearerIntrospector = introspector
+		harness := startPOP3Harness(t, config)
 		harness.expectOK(t)
 
 		harness.write(t, "AUTH OAUTHBEARER\r\n")
@@ -236,15 +262,43 @@ func TestAUTHBearerInitialAndContinuation(t *testing.T) {
 		harness.write(t, oauthBearerPayload("alice@example.test", "oauth-token")+"\r\n")
 		harness.expectERR(t)
 
-		request := authenticator.LastRequest(t)
+		if calls := authenticator.CallCount(); calls != 0 {
+			t.Fatalf("password auth calls = %d, want 0", calls)
+		}
+
+		request := introspector.LastRequest(t)
 		if request.Context.Method != "oauthbearer" || request.Context.Username != "alice@example.test" {
 			t.Fatalf("auth context = method %q username %q, want OAUTHBEARER identity", request.Context.Method, request.Context.Username)
 		}
 
-		if request.Credential.Value() != "oauth-token" {
-			t.Fatal("OAUTHBEARER token was not forwarded to Nauthilus")
+		if request.BearerToken.Value() != "oauth-token" {
+			t.Fatal("OAUTHBEARER token was not sent to introspection")
 		}
 	})
+}
+
+// TestAUTHBearerTemporaryFailureMapsToERR verifies introspection transport failures are temporary.
+func TestAUTHBearerTemporaryFailureMapsToERR(t *testing.T) {
+	config := testPOP3Config(TLSModeImplicit, &recordingAuthenticator{})
+	config.BearerIntrospector = &recordingBearerIntrospector{err: errors.New("temporary introspection failure")}
+	harness := startPOP3Harness(t, config)
+	harness.expectOK(t)
+
+	harness.write(t, "AUTH XOAUTH2 "+xoauth2Payload("alice@example.test", "xoauth-token")+"\r\n")
+	harness.expectLine(t, "-ERR Authentication service temporarily unavailable\r\n")
+}
+
+// TestAUTHBearerRejectionMapsToERR verifies inactive tokens reject authentication.
+func TestAUTHBearerRejectionMapsToERR(t *testing.T) {
+	config := testPOP3Config(TLSModeImplicit, &recordingAuthenticator{})
+	config.BearerIntrospector = &recordingBearerIntrospector{
+		result: nauthilus.AuthResult{Decision: nauthilus.DecisionRejected},
+	}
+	harness := startPOP3Harness(t, config)
+	harness.expectOK(t)
+
+	harness.write(t, "AUTH OAUTHBEARER "+oauthBearerPayload("alice@example.test", "oauth-token")+"\r\n")
+	harness.expectLine(t, "-ERR Authentication failed\r\n")
 }
 
 // TestAUTHMalformedOversizedAndUnsupportedInputsFailSafely verifies bad SASL never reaches Nauthilus.
@@ -587,6 +641,52 @@ func (a *recordingAuthenticator) LastRequest(t *testing.T) nauthilus.AuthRequest
 	}
 
 	return a.requests[len(a.requests)-1]
+}
+
+type recordingBearerIntrospector struct {
+	mu       sync.Mutex
+	requests []nauthilus.BearerIntrospectionRequest
+	result   nauthilus.AuthResult
+	err      error
+}
+
+// Introspect records one bearer request and returns the configured result.
+func (i *recordingBearerIntrospector) Introspect(_ context.Context, request nauthilus.BearerIntrospectionRequest) (nauthilus.AuthResult, error) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+
+	i.requests = append(i.requests, request)
+	if i.err != nil {
+		return nauthilus.AuthResult{Decision: nauthilus.DecisionTemporaryFailure}, i.err
+	}
+
+	if i.result.Decision == "" {
+		return nauthilus.AuthResult{Decision: nauthilus.DecisionRejected}, nil
+	}
+
+	return i.result, nil
+}
+
+// CallCount returns how often Introspect was invoked.
+func (i *recordingBearerIntrospector) CallCount() int {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+
+	return len(i.requests)
+}
+
+// LastRequest returns the most recent recorded introspection request.
+func (i *recordingBearerIntrospector) LastRequest(t *testing.T) nauthilus.BearerIntrospectionRequest {
+	t.Helper()
+
+	i.mu.Lock()
+	defer i.mu.Unlock()
+
+	if len(i.requests) == 0 {
+		t.Fatal("missing introspection request")
+	}
+
+	return i.requests[len(i.requests)-1]
 }
 
 // xoauth2Payload builds a test XOAUTH2 envelope.

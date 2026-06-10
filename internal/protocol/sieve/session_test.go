@@ -14,7 +14,7 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-//nolint:funlen,goconst,gocyclo,wsl_v5 // ManageSieve wire tests keep transcripts inline for review.
+//nolint:dupl,funlen,goconst,gocyclo,wsl_v5 // ManageSieve wire tests keep transcripts inline for review.
 package sieve
 
 import (
@@ -188,7 +188,10 @@ func TestStartTLSRejectsUnavailableAndPipelinedBytes(t *testing.T) {
 // TestCredentialAuthRequiresTLSBeforeNauthilus verifies plaintext credentials fail closed locally.
 func TestCredentialAuthRequiresTLSBeforeNauthilus(t *testing.T) {
 	authenticator := &recordingAuthenticator{}
-	harness := startSieveHarness(t, testSessionConfig(TLSModeStartTLS, authenticator))
+	introspector := &recordingBearerIntrospector{}
+	config := testSessionConfig(TLSModeStartTLS, authenticator)
+	config.BearerIntrospector = introspector
+	harness := startSieveHarness(t, config)
 	harness.expectGreeting(t,
 		testGreetingImplementation,
 		testGreetingVersion,
@@ -201,9 +204,14 @@ func TestCredentialAuthRequiresTLSBeforeNauthilus(t *testing.T) {
 
 	harness.write(t, "AUTHENTICATE \"PLAIN\" \""+plainPayload("alice@example.test", "plain-secret")+"\"\r\n")
 	harness.expectLine(t, "NO (ENCRYPT-NEEDED) \"TLS is required before authentication\"\r\n")
+	harness.write(t, "AUTHENTICATE \"XOAUTH2\" \""+xoauth2Payload("alice@example.test", "token-before-tls")+"\"\r\n")
+	harness.expectLine(t, "NO (ENCRYPT-NEEDED) \"TLS is required before authentication\"\r\n")
 
 	if got := authenticator.callCount(); got != 0 {
 		t.Fatalf("Nauthilus calls = %d, want 0 before TLS", got)
+	}
+	if got := introspector.callCount(); got != 0 {
+		t.Fatalf("introspection calls = %d, want 0 before TLS", got)
 	}
 }
 
@@ -214,6 +222,7 @@ func TestAuthenticateMechanismShapes(t *testing.T) {
 		method   string
 		username string
 		secret   string
+		bearer   bool
 	}{
 		{
 			command:  "AUTHENTICATE \"PLAIN\" \"" + plainPayload("plain-user@example.test", "plain-passphrase") + "\"\r\n",
@@ -226,12 +235,14 @@ func TestAuthenticateMechanismShapes(t *testing.T) {
 			method:   "xoauth2",
 			username: "xoauth2-user@example.test",
 			secret:   "xoauth2-token",
+			bearer:   true,
 		},
 		{
 			command:  "AUTHENTICATE \"OAUTHBEARER\" \"" + oauthBearerPayload("oauth-user@example.test", "oauth-token") + "\"\r\n",
 			method:   "oauthbearer",
 			username: "oauth-user@example.test",
 			secret:   "oauth-token",
+			bearer:   true,
 		},
 	}
 
@@ -240,8 +251,13 @@ func TestAuthenticateMechanismShapes(t *testing.T) {
 			authenticator := &recordingAuthenticator{
 				result: nauthilus.AuthResult{Decision: nauthilus.DecisionAuthenticated, Account: "alice@example.test"},
 			}
+			introspector := &recordingBearerIntrospector{
+				result: nauthilus.AuthResult{Decision: nauthilus.DecisionAuthenticated, Account: "alice@example.test"},
+			}
 			placer := &recordingSessionPlacer{}
-			harness := startSieveHarness(t, testPlacementSessionConfig(TLSModeImplicit, authenticator, nil, placer))
+			config := testPlacementSessionConfig(TLSModeImplicit, authenticator, nil, placer)
+			config.BearerIntrospector = introspector
+			harness := startSieveHarness(t, config)
 			harness.expectGreeting(t,
 				testGreetingImplementation,
 				testGreetingVersion,
@@ -255,13 +271,32 @@ func TestAuthenticateMechanismShapes(t *testing.T) {
 			harness.expectLine(t, "OK \"Authentication successful\"\r\n")
 			harness.expectDone(t)
 
-			request := authenticator.singleRequest(t)
-			if request.Context.Protocol != protocolSieve || request.Context.Method != testCase.method {
-				t.Fatalf("request context protocol/method mismatch: got %q/%q, want sieve/%s", request.Context.Protocol, request.Context.Method, testCase.method)
-			}
+			if testCase.bearer {
+				if authenticator.callCount() != 0 {
+					t.Fatalf("password auth calls = %d, want 0", authenticator.callCount())
+				}
 
-			if request.Context.Username != testCase.username || request.Credential.Value() != testCase.secret {
-				t.Fatal("request credential did not match parsed username and secret")
+				request := introspector.singleRequest(t)
+				if request.Context.Protocol != protocolSieve || request.Context.Method != testCase.method {
+					t.Fatalf("introspection context protocol/method mismatch: got %q/%q, want sieve/%s", request.Context.Protocol, request.Context.Method, testCase.method)
+				}
+
+				if request.Context.Username != testCase.username || request.BearerToken.Value() != testCase.secret {
+					t.Fatal("introspection credential did not match parsed username and secret")
+				}
+			} else {
+				if introspector.callCount() != 0 {
+					t.Fatalf("introspection calls = %d, want 0", introspector.callCount())
+				}
+
+				request := authenticator.singleRequest(t)
+				if request.Context.Protocol != protocolSieve || request.Context.Method != testCase.method {
+					t.Fatalf("request context protocol/method mismatch: got %q/%q, want sieve/%s", request.Context.Protocol, request.Context.Method, testCase.method)
+				}
+
+				if request.Context.Username != testCase.username || request.Credential.Value() != testCase.secret {
+					t.Fatal("request credential did not match parsed username and secret")
+				}
 			}
 
 			if got := placer.callCount(); got != 1 {
@@ -320,6 +355,44 @@ func TestAuthenticateContinuationCancellationAndLiteral(t *testing.T) {
 			t.Fatal("literal request did not match parsed PLAIN credentials")
 		}
 	})
+}
+
+// TestBearerIntrospectionTemporaryFailureMapsToTryLater verifies transport failures stay temporary.
+func TestBearerIntrospectionTemporaryFailureMapsToTryLater(t *testing.T) {
+	config := testSessionConfig(TLSModeImplicit, &recordingAuthenticator{})
+	config.BearerIntrospector = &recordingBearerIntrospector{err: errors.New("temporary introspection failure")}
+
+	harness := startSieveHarness(t, config)
+	harness.expectGreeting(t,
+		testGreetingImplementation,
+		testGreetingVersion,
+		testGreetingSieve,
+		testGreetingLanguage,
+		testGreetingSASLTLS,
+		testGreetingOK,
+	)
+	harness.write(t, "AUTHENTICATE \"XOAUTH2\" \""+xoauth2Payload("alice@example.test", "xoauth-token")+"\"\r\n")
+	harness.expectLine(t, "NO (TRYLATER) \"Authentication service temporarily unavailable\"\r\n")
+}
+
+// TestBearerIntrospectionRejectionMapsToAuthFailure verifies inactive tokens reject auth.
+func TestBearerIntrospectionRejectionMapsToAuthFailure(t *testing.T) {
+	config := testSessionConfig(TLSModeImplicit, &recordingAuthenticator{})
+	config.BearerIntrospector = &recordingBearerIntrospector{
+		result: nauthilus.AuthResult{Decision: nauthilus.DecisionRejected},
+	}
+
+	harness := startSieveHarness(t, config)
+	harness.expectGreeting(t,
+		testGreetingImplementation,
+		testGreetingVersion,
+		testGreetingSieve,
+		testGreetingLanguage,
+		testGreetingSASLTLS,
+		testGreetingOK,
+	)
+	harness.write(t, "AUTHENTICATE \"OAUTHBEARER\" \""+oauthBearerPayload("alice@example.test", "oauth-token")+"\"\r\n")
+	harness.expectLine(t, "NO (AUTHENTICATIONFAILED) \"Authentication failed\"\r\n")
 }
 
 // TestMalformedUnsupportedAndOversizedSASLInputIsSafe verifies bad SASL never leaks payload text.
@@ -1113,6 +1186,51 @@ func (a *recordingAuthenticator) singleRequest(t *testing.T) nauthilus.AuthReque
 	return a.requests[0]
 }
 
+type recordingBearerIntrospector struct {
+	mu       sync.Mutex
+	requests []nauthilus.BearerIntrospectionRequest
+	result   nauthilus.AuthResult
+	err      error
+}
+
+// Introspect records one bearer request and returns a deterministic success by default.
+func (i *recordingBearerIntrospector) Introspect(_ context.Context, request nauthilus.BearerIntrospectionRequest) (nauthilus.AuthResult, error) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+
+	i.requests = append(i.requests, request)
+	if i.err != nil {
+		return nauthilus.AuthResult{Decision: nauthilus.DecisionTemporaryFailure}, i.err
+	}
+	if i.result.Decision != "" {
+		return i.result, nil
+	}
+
+	return nauthilus.AuthResult{Decision: nauthilus.DecisionAuthenticated, Account: request.Context.Username}, nil
+}
+
+// callCount returns the number of recorded introspection requests.
+func (i *recordingBearerIntrospector) callCount() int {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+
+	return len(i.requests)
+}
+
+// singleRequest returns the only recorded introspection request.
+func (i *recordingBearerIntrospector) singleRequest(t *testing.T) nauthilus.BearerIntrospectionRequest {
+	t.Helper()
+
+	i.mu.Lock()
+	defer i.mu.Unlock()
+
+	if len(i.requests) != 1 {
+		t.Fatalf("recorded introspection requests = %d, want 1", len(i.requests))
+	}
+
+	return i.requests[0]
+}
+
 type recordingRoutingResolver struct {
 	mu       sync.Mutex
 	requests []routing.RoutingRequest
@@ -1264,6 +1382,11 @@ func newRecordingPlacementLease(request placement.SessionRequest) *recordingPlac
 						Password:   config.Secret("backend-master-secret"),
 						UserFormat: "{user}*{master_user}",
 						Mechanism:  mechanismPlain,
+					},
+					CredentialReplay: backend.CredentialReplayConfig{
+						RequireBackendTLS: true,
+						PreserveMechanism: true,
+						AllowedMechanisms: []string{mechanismPlain, mechanismXOAUTH2, mechanismOAuthBearer},
 					},
 				},
 			},

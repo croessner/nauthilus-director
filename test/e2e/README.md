@@ -29,6 +29,17 @@ The default lane is fake-service based and deterministic:
 - OIDC client-credentials caller auth for Director-to-Nauthilus requests,
   including an insufficient-scope negative proof that fails closed before
   backend placement
+- mail SASL `XOAUTH2` and `OAUTHBEARER` validation through the fake
+  Nauthilus OIDC discovery and introspection endpoint for IMAP, LMTP peer
+  auth, ManageSieve and POP3 public listeners
+- a mixed authority lane where POP3 password auth stays on the generated gRPC
+  AuthService while SASL bearer validation uses the HTTP OIDC introspection
+  endpoint
+- inactive tokens, missing required scopes, missing account claims and malformed
+  introspection responses failing closed without exposing bearer token
+  sentinels
+- backend bearer replay through explicit credential-replay policy, proving
+  bearer credentials are not converted into master-user password auth
 - listener runtime control proof through `nauthilus-directorctl listeners ...`,
   including process-local soft drain, resume, hard drain with explicit zero
   grace, and public frontend socket observations

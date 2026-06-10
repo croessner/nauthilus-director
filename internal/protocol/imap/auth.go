@@ -173,10 +173,38 @@ func (c *frontendCredentials) NauthilusAuthRequest(requestContext nauthilus.Requ
 
 	requestContext.Username = c.username
 	requestContext.Method = c.mechanism.Normalized()
+	if c.kind == credentialKindBearer {
+		return nauthilus.AuthRequest{Context: requestContext}
+	}
 
 	return nauthilus.AuthRequest{
 		Context:    requestContext,
 		Credential: nauthilus.NewSecret(c.secret.Value()),
+	}
+}
+
+// BearerIntrospectionRequest builds the dedicated mail SASL bearer validation request.
+func (c *frontendCredentials) BearerIntrospectionRequest(
+	requestContext nauthilus.RequestContext,
+	protocol string,
+	listenerName string,
+	authorityName string,
+) nauthilus.BearerIntrospectionRequest {
+	if c == nil {
+		return nauthilus.BearerIntrospectionRequest{Context: requestContext}
+	}
+
+	requestContext.Username = c.username
+	requestContext.Method = c.mechanism.Normalized()
+
+	return nauthilus.BearerIntrospectionRequest{
+		Context:               requestContext,
+		Mechanism:             c.mechanism.Normalized(),
+		Protocol:              protocol,
+		ListenerName:          listenerName,
+		AuthorityName:         authorityName,
+		AuthorizationIdentity: firstNonEmpty(c.authorizationID, c.username),
+		BearerToken:           nauthilus.NewSecret(c.secret.Value()),
 	}
 }
 
@@ -198,4 +226,15 @@ func (c *frontendCredentials) String() string {
 // GoString returns only credential-safe metadata for Go-syntax formatting.
 func (c *frontendCredentials) GoString() string {
 	return c.String()
+}
+
+// firstNonEmpty returns the first non-empty trimmed value.
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+
+	return ""
 }

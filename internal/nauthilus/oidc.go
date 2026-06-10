@@ -56,6 +56,9 @@ const (
 	oidcFormClientSecret            = "client_secret"
 	oidcFormContentType             = "application/x-www-form-urlencoded"
 	oidcIntrospectionTokenParam     = "token"
+	oidcClaimActive                 = "active"
+	oidcClaimAuthorizedParty        = "azp"
+	oidcClaimScope                  = "scope"
 	jwtClaimAudience                = "aud"
 	jwtClaimIssuer                  = "iss"
 	jwtClaimSubject                 = "sub"
@@ -102,6 +105,29 @@ type oidcTokenSourceOptions struct {
 	client *http.Client
 	now    func() time.Time
 	jitter func(time.Duration) time.Duration
+}
+
+type oidcDiscoveryOptions struct {
+	Issuer                                      string
+	DiscoveryURL                                string
+	TokenEndpointOverride                       string
+	TokenAuthMethod                             string
+	IntrospectionAuthMethod                     string
+	RequireTokenEndpoint                        bool
+	RequireIntrospectionEndpoint                bool
+	RequireClientCredentialsGrant               bool
+	RequireTokenAuthMethodAdvertisement         bool
+	RequireIntrospectionAuthMethodAdvertisement bool
+}
+
+type oidcEndpointClientAuth struct {
+	ClientID             string
+	ClientSecret         config.SecretString
+	ClientSecretFile     config.SecretString
+	ClientPrivateKeyFile config.SecretString
+	ClientKeyID          string
+	ClientAssertionAlg   string
+	Audience             string
 }
 
 type oidcMetadata struct {
@@ -378,7 +404,41 @@ func (s *oidcTokenSource) discoveryMetadataLocked(ctx context.Context) (oidcMeta
 		return *s.metadata, nil
 	}
 
-	discoveryURL, err := s.discoveryURL()
+	metadata, err := fetchOIDCDiscoveryMetadata(ctx, s.client, s.discoveryOptions())
+	if err != nil {
+		return oidcMetadata{}, err
+	}
+
+	s.metadata = &metadata
+
+	return metadata, nil
+}
+
+// discoveryOptions returns the caller-token discovery requirements.
+func (s *oidcTokenSource) discoveryOptions() oidcDiscoveryOptions {
+	introspectionMethod := s.introspectionAuthMethod()
+
+	return oidcDiscoveryOptions{
+		Issuer:                                      s.config.Issuer,
+		DiscoveryURL:                                s.config.DiscoveryURL,
+		TokenEndpointOverride:                       s.config.ClientCredentials.TokenEndpoint,
+		TokenAuthMethod:                             normalizedOIDCAuthMethod(s.config.ClientCredentials.TokenEndpointAuthMethod),
+		IntrospectionAuthMethod:                     introspectionMethod,
+		RequireTokenEndpoint:                        true,
+		RequireIntrospectionEndpoint:                true,
+		RequireClientCredentialsGrant:               true,
+		RequireTokenAuthMethodAdvertisement:         true,
+		RequireIntrospectionAuthMethodAdvertisement: introspectionMethod != "",
+	}
+}
+
+// fetchOIDCDiscoveryMetadata fetches and validates process-local OIDC metadata.
+func fetchOIDCDiscoveryMetadata(
+	ctx context.Context,
+	client *http.Client,
+	options oidcDiscoveryOptions,
+) (oidcMetadata, error) {
+	discoveryURL, err := resolveOIDCDiscoveryURL(options)
 	if err != nil {
 		return oidcMetadata{}, err
 	}
@@ -390,7 +450,7 @@ func (s *oidcTokenSource) discoveryMetadataLocked(ctx context.Context) (oidcMeta
 
 	request.Header.Set("Accept", defaultHTTPContentType)
 
-	response, err := s.client.Do(request)
+	response, err := client.Do(request)
 	if err != nil {
 		return oidcMetadata{}, transportError(operationConfigure, err)
 	}
@@ -409,23 +469,16 @@ func (s *oidcTokenSource) discoveryMetadataLocked(ctx context.Context) (oidcMeta
 		return oidcMetadata{}, malformedResponseError(operationConfigure, "invalid oidc discovery document", err)
 	}
 
-	metadata, err := s.validateDiscoveryDocument(document)
-	if err != nil {
-		return oidcMetadata{}, err
-	}
-
-	s.metadata = &metadata
-
-	return metadata, nil
+	return validateOIDCDiscoveryDocument(document, options)
 }
 
-// discoveryURL resolves the configured issuer or direct discovery URL.
-func (s *oidcTokenSource) discoveryURL() (string, error) {
-	if discoveryURL := strings.TrimSpace(s.config.DiscoveryURL); discoveryURL != "" {
+// resolveOIDCDiscoveryURL resolves the configured issuer or direct discovery URL.
+func resolveOIDCDiscoveryURL(options oidcDiscoveryOptions) (string, error) {
+	if discoveryURL := strings.TrimSpace(options.DiscoveryURL); discoveryURL != "" {
 		return discoveryURL, nil
 	}
 
-	issuer := strings.TrimRight(strings.TrimSpace(s.config.Issuer), "/")
+	issuer := strings.TrimRight(strings.TrimSpace(options.Issuer), "/")
 	if issuer == "" {
 		return "", configError("oidc issuer or discovery_url is required")
 	}
@@ -433,39 +486,42 @@ func (s *oidcTokenSource) discoveryURL() (string, error) {
 	return issuer + defaultOIDCDiscoveryPath, nil
 }
 
-// validateDiscoveryDocument checks Nauthilus OIDC metadata before token use.
-func (s *oidcTokenSource) validateDiscoveryDocument(document oidcDiscoveryDocument) (oidcMetadata, error) {
-	if err := s.validateDiscoveryIssuer(document); err != nil {
+// validateOIDCDiscoveryDocument checks Nauthilus metadata before endpoint use.
+func validateOIDCDiscoveryDocument(document oidcDiscoveryDocument, options oidcDiscoveryOptions) (oidcMetadata, error) {
+	if err := validateOIDCDiscoveryIssuer(document, options); err != nil {
 		return oidcMetadata{}, err
 	}
 
-	if err := s.validateDiscoveryCapabilities(document); err != nil {
+	if err := validateOIDCDiscoveryCapabilities(document, options); err != nil {
 		return oidcMetadata{}, err
 	}
 
-	tokenEndpoint, err := s.discoveryTokenEndpoint(document)
+	tokenEndpoint, err := oidcDiscoveryTokenEndpoint(document, options)
 	if err != nil {
 		return oidcMetadata{}, err
 	}
 
-	if err := validateOIDCEndpointURL(document.IntrospectionEndpoint, "oidc discovery introspection_endpoint"); err != nil {
-		return oidcMetadata{}, err
+	introspectionEndpoint := strings.TrimSpace(document.IntrospectionEndpoint)
+	if options.RequireIntrospectionEndpoint {
+		if err := validateOIDCEndpointURL(introspectionEndpoint, "oidc discovery introspection_endpoint"); err != nil {
+			return oidcMetadata{}, err
+		}
 	}
 
 	return oidcMetadata{
 		Issuer:                strings.TrimSpace(document.Issuer),
 		TokenEndpoint:         tokenEndpoint,
-		IntrospectionEndpoint: strings.TrimSpace(document.IntrospectionEndpoint),
+		IntrospectionEndpoint: introspectionEndpoint,
 	}, nil
 }
 
-// validateDiscoveryIssuer checks issuer presence and optional issuer pinning.
-func (s *oidcTokenSource) validateDiscoveryIssuer(document oidcDiscoveryDocument) error {
+// validateOIDCDiscoveryIssuer checks issuer presence and optional issuer pinning.
+func validateOIDCDiscoveryIssuer(document oidcDiscoveryDocument, options oidcDiscoveryOptions) error {
 	if strings.TrimSpace(document.Issuer) == "" {
 		return malformedResponseError(operationConfigure, "oidc discovery issuer is required", nil)
 	}
 
-	configuredIssuer := strings.TrimRight(strings.TrimSpace(s.config.Issuer), "/")
+	configuredIssuer := strings.TrimRight(strings.TrimSpace(options.Issuer), "/")
 	if configuredIssuer == "" {
 		return nil
 	}
@@ -477,38 +533,64 @@ func (s *oidcTokenSource) validateDiscoveryIssuer(document oidcDiscoveryDocument
 	return nil
 }
 
-// validateDiscoveryCapabilities checks Nauthilus-supported OIDC auth modes.
-func (s *oidcTokenSource) validateDiscoveryCapabilities(document oidcDiscoveryDocument) error {
-	if strings.TrimSpace(document.TokenEndpoint) == "" {
+// validateOIDCDiscoveryCapabilities checks advertised Nauthilus OIDC capabilities.
+func validateOIDCDiscoveryCapabilities(document oidcDiscoveryDocument, options oidcDiscoveryOptions) error {
+	if options.RequireTokenEndpoint && strings.TrimSpace(document.TokenEndpoint) == "" {
 		return malformedResponseError(operationConfigure, "oidc discovery token_endpoint is required", nil)
 	}
 
-	if strings.TrimSpace(document.IntrospectionEndpoint) == "" {
+	if options.RequireIntrospectionEndpoint && strings.TrimSpace(document.IntrospectionEndpoint) == "" {
 		return malformedResponseError(operationConfigure, "oidc discovery introspection_endpoint is required", nil)
 	}
 
-	if !containsFold(document.GrantTypesSupported, grantTypeClientCredentials) {
+	if options.RequireClientCredentialsGrant && !containsFold(document.GrantTypesSupported, grantTypeClientCredentials) {
 		return malformedResponseError(operationConfigure, "oidc discovery does not support client_credentials", nil)
 	}
 
-	method := normalizedOIDCAuthMethod(s.config.ClientCredentials.TokenEndpointAuthMethod)
-	if !containsFold(document.TokenEndpointAuthMethodsSupported, method) {
-		return malformedResponseError(operationConfigure, "oidc discovery does not support configured token auth method", nil)
+	if err := validateOIDCDiscoveryAuthMethod(
+		document.TokenEndpointAuthMethodsSupported,
+		options.TokenAuthMethod,
+		options.RequireTokenAuthMethodAdvertisement,
+		"configured token auth method",
+	); err != nil {
+		return err
 	}
 
-	introspectionMethod := s.introspectionAuthMethod()
-	if introspectionMethod != "" && !containsFold(document.IntrospectionEndpointAuthMethodsSupported, introspectionMethod) {
-		return malformedResponseError(operationConfigure, "oidc discovery does not support configured introspection auth method", nil)
+	return validateOIDCDiscoveryAuthMethod(
+		document.IntrospectionEndpointAuthMethodsSupported,
+		options.IntrospectionAuthMethod,
+		options.RequireIntrospectionAuthMethodAdvertisement,
+		"configured introspection auth method",
+	)
+}
+
+// validateOIDCDiscoveryAuthMethod checks a configured method against advertised support.
+func validateOIDCDiscoveryAuthMethod(supported []string, method string, requireAdvertisement bool, label string) error {
+	method = normalizedOIDCAuthMethod(method)
+	if method == "" {
+		return nil
+	}
+
+	if len(supported) == 0 && !requireAdvertisement {
+		return nil
+	}
+
+	if !containsFold(supported, method) {
+		return malformedResponseError(operationConfigure, "oidc discovery does not support "+label, nil)
 	}
 
 	return nil
 }
 
-// discoveryTokenEndpoint returns the validated token endpoint with explicit override support.
-func (s *oidcTokenSource) discoveryTokenEndpoint(document oidcDiscoveryDocument) (string, error) {
+// oidcDiscoveryTokenEndpoint returns the validated token endpoint when required.
+func oidcDiscoveryTokenEndpoint(document oidcDiscoveryDocument, options oidcDiscoveryOptions) (string, error) {
 	tokenEndpoint := strings.TrimSpace(document.TokenEndpoint)
-	if override := strings.TrimSpace(s.config.ClientCredentials.TokenEndpoint); override != "" {
+	if override := strings.TrimSpace(options.TokenEndpointOverride); override != "" {
 		tokenEndpoint = override
+	}
+
+	if !options.RequireTokenEndpoint && tokenEndpoint == "" {
+		return "", nil
 	}
 
 	if err := validateOIDCEndpointURL(tokenEndpoint, "oidc discovery token_endpoint"); err != nil {
@@ -525,6 +607,7 @@ func (s *oidcTokenSource) requestToken(ctx context.Context, tokenEndpoint string
 	form.Set("scope", strings.Join(s.config.ClientCredentials.Scopes, " "))
 
 	method := normalizedOIDCAuthMethod(s.config.ClientCredentials.TokenEndpointAuthMethod)
+	clientAuth := oidcEndpointAuthFromClientCredentials(s.config.ClientCredentials)
 
 	clientSecret, err := s.applyOIDCClientAuth(form, tokenEndpoint, method)
 	if err != nil {
@@ -536,9 +619,7 @@ func (s *oidcTokenSource) requestToken(ctx context.Context, tokenEndpoint string
 		return oidcTokenResponse{}, err
 	}
 
-	if method == oidcAuthMethodClientSecretBasic {
-		request.SetBasicAuth(strings.TrimSpace(s.config.ClientCredentials.ClientID), clientSecret)
-	}
+	applyOIDCRequestClientAuth(request, method, clientAuth, clientSecret)
 
 	response, err := s.client.Do(request)
 	if err != nil {
@@ -582,6 +663,8 @@ func (s *oidcTokenSource) introspect(ctx context.Context, token string) (OIDCInt
 		return OIDCIntrospectionResult{}, configError("oidc introspection_endpoint_auth_method is required")
 	}
 
+	clientAuth := oidcEndpointAuthFromClientCredentials(s.config.ClientCredentials)
+
 	clientSecret, err := s.applyOIDCClientAuth(form, metadata.IntrospectionEndpoint, method)
 	if err != nil {
 		return OIDCIntrospectionResult{}, err
@@ -592,9 +675,7 @@ func (s *oidcTokenSource) introspect(ctx context.Context, token string) (OIDCInt
 		return OIDCIntrospectionResult{}, err
 	}
 
-	if method == oidcAuthMethodClientSecretBasic {
-		request.SetBasicAuth(strings.TrimSpace(s.config.ClientCredentials.ClientID), clientSecret)
-	}
+	applyOIDCRequestClientAuth(request, method, clientAuth, clientSecret)
 
 	response, err := s.client.Do(request)
 	if err != nil {
@@ -620,32 +701,58 @@ func (s *oidcTokenSource) introspect(ctx context.Context, token string) (OIDCInt
 
 // applyOIDCClientAuth adds selected Nauthilus client authentication to a form.
 func (s *oidcTokenSource) applyOIDCClientAuth(form url.Values, endpoint string, method string) (string, error) {
+	return applyOIDCEndpointClientAuth(
+		form,
+		endpoint,
+		method,
+		oidcEndpointAuthFromClientCredentials(s.config.ClientCredentials),
+		s.now,
+	)
+}
+
+// applyOIDCEndpointClientAuth adds selected Nauthilus client authentication to a form.
+func applyOIDCEndpointClientAuth(
+	form url.Values,
+	endpoint string,
+	method string,
+	clientAuth oidcEndpointClientAuth,
+	now func() time.Time,
+) (string, error) {
 	switch method {
 	case oidcAuthMethodClientSecretBasic:
-		return s.clientSecret()
+		return clientAuth.clientSecret()
 	case oidcAuthMethodClientSecretPost:
-		clientSecret, err := s.clientSecret()
+		clientSecret, err := clientAuth.clientSecret()
 		if err != nil {
 			return "", err
 		}
 
-		form.Set(oidcFormClientID, strings.TrimSpace(s.config.ClientCredentials.ClientID))
+		form.Set(oidcFormClientID, strings.TrimSpace(clientAuth.ClientID))
 		form.Set(oidcFormClientSecret, clientSecret)
 
 		return clientSecret, nil
 	case oidcAuthMethodPrivateKeyJWT:
-		assertion, err := s.privateKeyJWT(endpoint)
+		assertion, err := clientAuth.privateKeyJWT(endpoint, now)
 		if err != nil {
 			return "", err
 		}
 
-		form.Set(oidcFormClientID, strings.TrimSpace(s.config.ClientCredentials.ClientID))
+		form.Set(oidcFormClientID, strings.TrimSpace(clientAuth.ClientID))
 		form.Set(oidcFormClientAssertionType, oidcAssertionTypeJWTBearer)
 		form.Set(oidcFormClientAssertion, assertion)
 
 		return "", nil
 	default:
 		return "", configError("oidc client authentication method is unsupported")
+	}
+}
+
+// applyOIDCRequestClientAuth clears stale Authorization before request client auth is applied.
+func applyOIDCRequestClientAuth(request *http.Request, method string, clientAuth oidcEndpointClientAuth, clientSecret string) {
+	request.Header.Del("Authorization")
+
+	if method == oidcAuthMethodClientSecretBasic {
+		request.SetBasicAuth(strings.TrimSpace(clientAuth.ClientID), clientSecret)
 	}
 }
 
@@ -675,23 +782,52 @@ func (s *oidcTokenSource) discoveryMetadataForUse(ctx context.Context) (oidcMeta
 	return s.discoveryMetadataLocked(ctx)
 }
 
-// privateKeyJWT builds an RFC 7523 client assertion for Nauthilus token requests.
-func (s *oidcTokenSource) privateKeyJWT(tokenEndpoint string) (string, error) {
+// oidcEndpointAuthFromClientCredentials adapts caller-auth config to endpoint auth material.
+func oidcEndpointAuthFromClientCredentials(credentials config.AuthorityOIDCClientCredentialsConfig) oidcEndpointClientAuth {
+	return oidcEndpointClientAuth{
+		ClientID:             credentials.ClientID,
+		ClientSecret:         credentials.ClientSecret,
+		ClientSecretFile:     credentials.ClientSecretFile,
+		ClientPrivateKeyFile: credentials.ClientPrivateKeyFile,
+		ClientKeyID:          credentials.ClientKeyID,
+		ClientAssertionAlg:   credentials.ClientAssertionAlg,
+		Audience:             credentials.Audience,
+	}
+}
+
+// oidcEndpointAuthFromBearerIntrospection adapts SASL bearer config to endpoint auth material.
+func oidcEndpointAuthFromBearerIntrospection(introspection config.BearerIntrospectionConfig) oidcEndpointClientAuth {
+	return oidcEndpointClientAuth{
+		ClientID:             introspection.ClientID,
+		ClientSecret:         introspection.ClientSecret,
+		ClientSecretFile:     introspection.ClientSecretFile,
+		ClientPrivateKeyFile: introspection.ClientPrivateKeyFile,
+		ClientKeyID:          introspection.ClientKeyID,
+		ClientAssertionAlg:   introspection.ClientAssertionAlg,
+	}
+}
+
+// privateKeyJWT builds an RFC 7523 client assertion for Nauthilus endpoint requests.
+func (a oidcEndpointClientAuth) privateKeyJWT(endpoint string, now func() time.Time) (string, error) {
 	header := map[string]any{
-		jwtHeaderAlgorithm: s.clientAssertionAlg(),
+		jwtHeaderAlgorithm: a.clientAssertionAlg(),
 		jwtHeaderType:      "JWT",
 	}
-	if keyID := strings.TrimSpace(s.config.ClientCredentials.ClientKeyID); keyID != "" {
+	if keyID := strings.TrimSpace(a.ClientKeyID); keyID != "" {
 		header[jwtHeaderKeyID] = keyID
 	}
 
-	now := s.now()
+	if now == nil {
+		now = time.Now
+	}
+
+	timestamp := now()
 	claims := map[string]any{
-		jwtClaimIssuer:   strings.TrimSpace(s.config.ClientCredentials.ClientID),
-		jwtClaimSubject:  strings.TrimSpace(s.config.ClientCredentials.ClientID),
-		jwtClaimAudience: s.clientAssertionAudience(tokenEndpoint),
-		"iat":            now.Unix(),
-		"exp":            now.Add(time.Minute).Unix(),
+		jwtClaimIssuer:   strings.TrimSpace(a.ClientID),
+		jwtClaimSubject:  strings.TrimSpace(a.ClientID),
+		jwtClaimAudience: a.clientAssertionAudience(endpoint),
+		"iat":            timestamp.Unix(),
+		"exp":            timestamp.Add(time.Minute).Unix(),
 	}
 
 	jti, err := randomJWTID()
@@ -713,7 +849,7 @@ func (s *oidcTokenSource) privateKeyJWT(tokenEndpoint string) (string, error) {
 
 	signingInput := encodedHeader + "." + encodedClaims
 
-	signature, err := s.signJWTAssertion([]byte(signingInput))
+	signature, err := a.signJWTAssertion([]byte(signingInput))
 	if err != nil {
 		return "", err
 	}
@@ -722,8 +858,8 @@ func (s *oidcTokenSource) privateKeyJWT(tokenEndpoint string) (string, error) {
 }
 
 // clientAssertionAlg returns the configured signing algorithm with Nauthilus' default.
-func (s *oidcTokenSource) clientAssertionAlg() string {
-	if alg := strings.TrimSpace(s.config.ClientCredentials.ClientAssertionAlg); alg != "" {
+func (a oidcEndpointClientAuth) clientAssertionAlg() string {
+	if alg := strings.TrimSpace(a.ClientAssertionAlg); alg != "" {
 		return alg
 	}
 
@@ -731,17 +867,17 @@ func (s *oidcTokenSource) clientAssertionAlg() string {
 }
 
 // clientAssertionAudience returns the audience Nauthilus verifies for private_key_jwt.
-func (s *oidcTokenSource) clientAssertionAudience(tokenEndpoint string) string {
-	if audience := strings.TrimSpace(s.config.ClientCredentials.Audience); audience != "" {
+func (a oidcEndpointClientAuth) clientAssertionAudience(endpoint string) string {
+	if audience := strings.TrimSpace(a.Audience); audience != "" {
 		return audience
 	}
 
-	return strings.TrimSpace(tokenEndpoint)
+	return strings.TrimSpace(endpoint)
 }
 
 // signJWTAssertion signs a prepared JWT signing input with the configured private key.
-func (s *oidcTokenSource) signJWTAssertion(signingInput []byte) ([]byte, error) {
-	raw, err := s.readClientPrivateKey()
+func (a oidcEndpointClientAuth) signJWTAssertion(signingInput []byte) ([]byte, error) {
+	raw, err := a.readClientPrivateKey()
 	if err != nil {
 		return nil, err
 	}
@@ -751,7 +887,7 @@ func (s *oidcTokenSource) signJWTAssertion(signingInput []byte) ([]byte, error) 
 		return nil, err
 	}
 
-	switch s.clientAssertionAlg() {
+	switch a.clientAssertionAlg() {
 	case oidcAssertionAlgRS256:
 		rsaKey, ok := key.(*rsa.PrivateKey)
 		if !ok {
@@ -774,8 +910,8 @@ func (s *oidcTokenSource) signJWTAssertion(signingInput []byte) ([]byte, error) 
 }
 
 // readClientPrivateKey reads mounted private-key material with a conservative size bound.
-func (s *oidcTokenSource) readClientPrivateKey() ([]byte, error) {
-	path := strings.TrimSpace(s.config.ClientCredentials.ClientPrivateKeyFile.Value())
+func (a oidcEndpointClientAuth) readClientPrivateKey() ([]byte, error) {
+	path := strings.TrimSpace(a.ClientPrivateKeyFile.Value())
 	if path == "" {
 		return nil, configError("oidc client_private_key_file is required")
 	}
@@ -801,10 +937,9 @@ func (s *oidcTokenSource) readClientPrivateKey() ([]byte, error) {
 }
 
 // clientSecret resolves inline protected secret material or a mounted secret file.
-func (s *oidcTokenSource) clientSecret() (string, error) {
-	credentials := s.config.ClientCredentials
-	if !credentials.ClientSecretFile.IsZero() {
-		content, err := os.ReadFile(credentials.ClientSecretFile.Value())
+func (a oidcEndpointClientAuth) clientSecret() (string, error) {
+	if !a.ClientSecretFile.IsZero() {
+		content, err := os.ReadFile(a.ClientSecretFile.Value())
 		if err != nil {
 			return "", configError("failed to read oidc client_secret_file")
 		}
@@ -817,7 +952,7 @@ func (s *oidcTokenSource) clientSecret() (string, error) {
 		return secret, nil
 	}
 
-	secret := credentials.ClientSecret.Value()
+	secret := a.ClientSecret.Value()
 	if secret == "" {
 		return "", configError("oidc client_secret is empty")
 	}
@@ -959,9 +1094,14 @@ func containsFold(values []string, value string) bool {
 
 // oidcIntrospectionFromClaims normalizes Nauthilus introspection response fields.
 func oidcIntrospectionFromClaims(claims map[string]any) (OIDCIntrospectionResult, error) {
-	active, ok := claims["active"].(bool)
+	return introspectionFromClaimsForOperation(claims, operationConfigure)
+}
+
+// introspectionFromClaimsForOperation normalizes shared RFC 7662 response fields.
+func introspectionFromClaimsForOperation(claims map[string]any, operation authOperation) (OIDCIntrospectionResult, error) {
+	active, ok := claims[oidcClaimActive].(bool)
 	if !ok {
-		return OIDCIntrospectionResult{}, malformedResponseError(operationConfigure, "oidc introspection active field is required", nil)
+		return OIDCIntrospectionResult{}, malformedResponseError(operation, "oidc introspection active field is required", nil)
 	}
 
 	if !active {
@@ -970,10 +1110,10 @@ func oidcIntrospectionFromClaims(claims map[string]any) (OIDCIntrospectionResult
 
 	return OIDCIntrospectionResult{
 		Active:   true,
-		Subject:  stringClaim(claims, "sub"),
-		ClientID: firstNonEmptyClaim(claims, "client_id", "azp"),
-		Audience: audienceClaim(claims["aud"]),
-		Scopes:   scopesClaim(claims["scope"]),
+		Subject:  stringClaim(claims, jwtClaimSubject),
+		ClientID: firstNonEmptyClaim(claims, oidcFormClientID, oidcClaimAuthorizedParty),
+		Audience: audienceClaim(claims[jwtClaimAudience]),
+		Scopes:   scopesClaim(claims[oidcClaimScope]),
 		Claims:   cloneClaims(claims),
 	}, nil
 }

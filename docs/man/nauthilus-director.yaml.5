@@ -219,6 +219,7 @@ or
 .B private_key_jwt
 for control-plane OIDC introspection, subject to the methods announced by the
 Nauthilus discovery document.
+This field is not used for mail SASL bearer-token introspection.
 .PP
 When HTTP authority transport is selected and
 .B oidc.client_credentials.enabled
@@ -244,10 +245,28 @@ These caller tokens are separate from mail-protocol
 .B XOAUTH2
 and
 .B OAUTHBEARER
-credentials. Mail bearer material is parsed only enough to extract the SASL
-identity and credential material, then forwarded to Nauthilus as auth input.
-Director does not locally validate, introspect, log or cache end-user mail
-bearer tokens.
+credentials. The static policy for mail SASL bearer validation lives under
+.BR auth.authorities.<name>.mechanisms.bearer.introspection ,
+not under
+.BR oidc.client_credentials .
+The
+.B validation
+value for bearer-capable mechanisms is
+.BR nauthilus_introspection .
+.PP
+The introspection subtree configures issuer or discovery URL, endpoint
+client-auth material, the required end-user token scope and an optional account
+claim. The default
+.B required_scope
+is
+.BR email .
+Inline client secrets, secret files and private-key file paths are protected
+config values. Supported endpoint auth methods are
+.BR client_secret_basic ,
+.B client_secret_post
+and
+.BR private_key_jwt .
+Director does not locally validate, log or cache end-user mail bearer tokens.
 .PP
 Operational setup and migration guidance for Nauthilus OIDC caller auth lives
 in

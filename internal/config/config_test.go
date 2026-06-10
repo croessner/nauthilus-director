@@ -1041,8 +1041,344 @@ func TestOIDCCallerAuthProtectedDefaults(t *testing.T) {
 	if strings.Contains(text, "/etc/nauthilus-director/nauthilus-oidc-client-secret") {
 		t.Fatalf("default dump leaked OIDC client secret file:\n%s", text)
 	}
+	if strings.Contains(text, "/etc/nauthilus-director/nauthilus-introspection-client-secret") {
+		t.Fatalf("default dump leaked bearer introspection client secret file:\n%s", text)
+	}
 	if !strings.Contains(text, "client_secret_file: <redacted>") {
 		t.Fatalf("default dump missing redacted OIDC client secret file:\n%s", text)
+	}
+}
+
+// TestBearerIntrospectionDefaultsUseDedicatedBoundary verifies the mail bearer split.
+func TestBearerIntrospectionDefaultsUseDedicatedBoundary(t *testing.T) {
+	cfg := DefaultConfig()
+	bearer := cfg.Auth.Authorities["default"].Mechanisms.Bearer
+
+	if bearer.Validation != bearerValidationNauthilusIntrospection {
+		t.Fatalf("bearer validation = %q, want %q", bearer.Validation, bearerValidationNauthilusIntrospection)
+	}
+	if bearer.Introspection.RequiredScope != defaultBearerRequiredScope {
+		t.Fatalf("required scope = %q, want %q", bearer.Introspection.RequiredScope, defaultBearerRequiredScope)
+	}
+	if !bearer.Introspection.ClientSecretFile.IsZero() && bearer.Introspection.ClientSecretFile.Value() == cfg.Auth.Authorities["default"].OIDC.ClientCredentials.ClientSecretFile.Value() {
+		t.Fatal("bearer introspection unexpectedly reuses caller-auth client secret file")
+	}
+
+	if err := NewLoader().Validate(cfg); err != nil {
+		t.Fatalf("Validate rejected bearer introspection defaults: %v", err)
+	}
+}
+
+// TestGeneratedConfigReferencesIncludeBearerIntrospectionPaths keeps docs on the split.
+func TestGeneratedConfigReferencesIncludeBearerIntrospectionPaths(t *testing.T) {
+	defaults := readTextFile(t, filepath.Join("..", "..", "docs", "reference", "config-defaults.yaml"))
+	paths := readTextFile(t, filepath.Join("..", "..", "docs", "reference", "config-paths.md"))
+	target := readTextFile(t, filepath.Join("..", "..", "docs", "config", "nauthilus-director.target.yml"))
+	manpage := readTextFile(t, filepath.Join("..", "..", "docs", "man", "nauthilus-director.yaml.5"))
+
+	for _, want := range []string{
+		"introspection:",
+		"validation: nauthilus_introspection",
+		"required_scope: email",
+	} {
+		if !strings.Contains(defaults, want) {
+			t.Fatalf("generated defaults missing %q", want)
+		}
+		if !strings.Contains(target, want) {
+			t.Fatalf("target config missing %q", want)
+		}
+	}
+
+	for _, want := range []string{
+		"`auth.authorities.default.mechanisms.bearer.introspection.required_scope`",
+		"`auth.authorities.default.mechanisms.bearer.introspection.client_secret_file` | string | `<redacted>` | stable | yes",
+		"Mail SASL bearer-token introspection policy",
+		"Director-to-Nauthilus caller-token request scopes only",
+		"Endpoint client-auth method used when control-plane OIDC validation introspects operator tokens",
+	} {
+		if !strings.Contains(paths, want) {
+			t.Fatalf("generated paths missing %q", want)
+		}
+	}
+
+	for _, forbidden := range []string{
+		"`auth.authorities.default.oidc.required_scopes`",
+		"auth.authorities.default.oidc.required_scopes",
+	} {
+		if strings.Contains(paths, forbidden) || strings.Contains(defaults, forbidden) || strings.Contains(target, forbidden) {
+			t.Fatalf("caller-auth config still contains old mail bearer policy %q", forbidden)
+		}
+	}
+
+	for _, want := range []string{
+		"Director-to-Nauthilus caller auth",
+		"validates incoming mail SASL end-user bearer tokens",
+		"required_scope applies to the introspected end-user token",
+		"not mail SASL bearer introspection",
+	} {
+		if !strings.Contains(target, want) {
+			t.Fatalf("target config missing split guidance %q", want)
+		}
+	}
+
+	for _, want := range []string{
+		"mechanisms.bearer.introspection",
+		"nauthilus_introspection",
+		"required_scope",
+	} {
+		if !strings.Contains(manpage, want) {
+			t.Fatalf("yaml manpage missing bearer introspection guidance %q", want)
+		}
+	}
+}
+
+// TestBearerIntrospectionValidationAcceptsCompleteConfig verifies explicit settings validate.
+func TestBearerIntrospectionValidationAcceptsCompleteConfig(t *testing.T) {
+	cfg := DefaultConfig()
+	authority := cfg.Auth.Authorities["default"]
+	authority.Mechanisms.Bearer.Validation = " NAUTHILUS_INTROSPECTION "
+	authority.Mechanisms.Bearer.Names = []string{" XOAUTH2 ", "oauthbearer"}
+	authority.Mechanisms.Bearer.Introspection = BearerIntrospectionConfig{
+		Enabled:          true,
+		DiscoveryURL:     " https://auth.example.test/.well-known/openid-configuration ",
+		ClientID:         " nauthilus-director-sasl ",
+		ClientSecretFile: Secret("/run/nauthilus-director/sasl-client-secret"),
+		AuthMethod:       " CLIENT_SECRET_POST ",
+		RequiredScope:    " email ",
+		AccountClaim:     " dovecot_account ",
+	}
+	cfg.Auth.Authorities["default"] = authority
+
+	normalized := cfg.Normalize()
+	bearer := normalized.Auth.Authorities["default"].Mechanisms.Bearer
+	if bearer.Validation != bearerValidationNauthilusIntrospection {
+		t.Fatalf("normalized validation = %q, want %q", bearer.Validation, bearerValidationNauthilusIntrospection)
+	}
+	if got := bearer.Introspection.AuthMethod; got != oidcClientSecretPost {
+		t.Fatalf("normalized auth_method = %q, want %q", got, oidcClientSecretPost)
+	}
+	if got := bearer.Introspection.RequiredScope; got != defaultBearerRequiredScope {
+		t.Fatalf("normalized required_scope = %q, want %q", got, defaultBearerRequiredScope)
+	}
+	if got := bearer.Introspection.AccountClaim; got != "dovecot_account" {
+		t.Fatalf("normalized account_claim = %q, want dovecot_account", got)
+	}
+
+	if err := NewLoader().Validate(normalized); err != nil {
+		t.Fatalf("Validate rejected complete bearer introspection config: %v", err)
+	}
+}
+
+// TestBearerIntrospectionValidationRequiresCompleteConfig keeps startup fail-closed.
+func TestBearerIntrospectionValidationRequiresCompleteConfig(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*BearerMechanismConfig)
+		want   string
+	}{
+		{
+			name: "old validation value",
+			mutate: func(bearer *BearerMechanismConfig) {
+				bearer.Validation = "nauthilus"
+			},
+			want: "auth.authorities.default.mechanisms.bearer.validation must be nauthilus_introspection",
+		},
+		{
+			name: "introspection disabled",
+			mutate: func(bearer *BearerMechanismConfig) {
+				bearer.Introspection.Enabled = false
+			},
+			want: "auth.authorities.default.mechanisms.bearer.introspection.enabled must be true",
+		},
+		{
+			name: "missing discovery",
+			mutate: func(bearer *BearerMechanismConfig) {
+				bearer.Introspection.Issuer = ""
+				bearer.Introspection.DiscoveryURL = ""
+			},
+			want: "auth.authorities.default.mechanisms.bearer.introspection.issuer or auth.authorities.default.mechanisms.bearer.introspection.discovery_url is required",
+		},
+		{
+			name: "missing client id",
+			mutate: func(bearer *BearerMechanismConfig) {
+				bearer.Introspection.ClientID = ""
+			},
+			want: "auth.authorities.default.mechanisms.bearer.introspection.client_id is required",
+		},
+		{
+			name: "empty required scope",
+			mutate: func(bearer *BearerMechanismConfig) {
+				bearer.Introspection.RequiredScope = " "
+			},
+			want: "auth.authorities.default.mechanisms.bearer.introspection.required_scope is required",
+		},
+		{
+			name: "unsupported auth method",
+			mutate: func(bearer *BearerMechanismConfig) {
+				bearer.Introspection.AuthMethod = "client_secret_jwt"
+			},
+			want: "auth.authorities.default.mechanisms.bearer.introspection.auth_method must be client_secret_basic, client_secret_post or private_key_jwt",
+		},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			authority := cfg.Auth.Authorities["default"]
+			testCase.mutate(&authority.Mechanisms.Bearer)
+			cfg.Auth.Authorities["default"] = authority
+
+			expectValidationError(t, cfg, testCase.want)
+		})
+	}
+}
+
+// TestBearerIntrospectionAccountClaimValidation keeps account-key policy secret-safe.
+func TestBearerIntrospectionAccountClaimValidation(t *testing.T) {
+	cfg := DefaultConfig()
+	authority := cfg.Auth.Authorities["default"]
+	authority.Mechanisms.Bearer.Introspection.AccountClaim = "dovecot_account"
+	cfg.Auth.Authorities["default"] = authority
+	if err := NewLoader().Validate(cfg); err != nil {
+		t.Fatalf("Validate rejected safe account claim: %v", err)
+	}
+
+	for _, claim := range []string{"access_token", "refresh_token", "id_token", "token", "bad\nclaim"} {
+		t.Run(claim, func(t *testing.T) {
+			cfg := DefaultConfig()
+			authority := cfg.Auth.Authorities["default"]
+			authority.Mechanisms.Bearer.Introspection.AccountClaim = claim
+			cfg.Auth.Authorities["default"] = authority
+
+			err := NewLoader().Validate(cfg)
+			if err == nil {
+				t.Fatal("Validate accepted unsafe account claim")
+			}
+			if strings.Contains(err.Error(), claim) {
+				t.Fatal("validation error leaked configured account claim")
+			}
+			if !strings.Contains(err.Error(), "auth.authorities.default.mechanisms.bearer.introspection.account_claim") {
+				t.Fatalf("error = %q, want account_claim path", err.Error())
+			}
+		})
+	}
+}
+
+// TestBearerIntrospectionSecretAuthMaterialValidation rejects ambiguous endpoint auth.
+func TestBearerIntrospectionSecretAuthMaterialValidation(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*BearerIntrospectionConfig)
+		want   string
+	}{
+		{
+			name: "missing secret material",
+			mutate: func(introspection *BearerIntrospectionConfig) {
+				introspection.ClientSecret = Secret("")
+				introspection.ClientSecretFile = Secret("")
+			},
+			want: "auth.authorities.default.mechanisms.bearer.introspection must configure exactly one of client_secret or client_secret_file",
+		},
+		{
+			name: "ambiguous secret material",
+			mutate: func(introspection *BearerIntrospectionConfig) {
+				introspection.ClientSecret = Secret("inline-secret-sentinel")
+				introspection.ClientSecretFile = Secret("/run/secret-sentinel")
+			},
+			want: "auth.authorities.default.mechanisms.bearer.introspection must not configure both client_secret and client_secret_file",
+		},
+		{
+			name: "private key jwt missing key file",
+			mutate: func(introspection *BearerIntrospectionConfig) {
+				introspection.AuthMethod = oidcPrivateKeyJWT
+				introspection.ClientSecret = Secret("")
+				introspection.ClientSecretFile = Secret("")
+			},
+			want: "auth.authorities.default.mechanisms.bearer.introspection.client_private_key_file is required when auth_method is private_key_jwt",
+		},
+		{
+			name: "unsupported assertion alg",
+			mutate: func(introspection *BearerIntrospectionConfig) {
+				introspection.ClientAssertionAlg = "ES256"
+			},
+			want: "auth.authorities.default.mechanisms.bearer.introspection.client_assertion_alg must be RS256 or EdDSA",
+		},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			authority := cfg.Auth.Authorities["default"]
+			testCase.mutate(&authority.Mechanisms.Bearer.Introspection)
+			cfg.Auth.Authorities["default"] = authority
+
+			expectValidationError(t, cfg, testCase.want)
+		})
+	}
+}
+
+// TestBearerIntrospectionPolicyIsIndependentFromCallerCredentials protects split semantics.
+func TestBearerIntrospectionPolicyIsIndependentFromCallerCredentials(t *testing.T) {
+	cfg := DefaultConfig()
+	authority := cfg.Auth.Authorities["default"]
+	authority.OIDC.ClientCredentials.Scopes = []string{"nauthilus:authenticate"}
+	authority.Mechanisms.Bearer.Introspection.RequiredScope = "mail.read"
+	cfg.Auth.Authorities["default"] = authority
+
+	if err := NewLoader().Validate(cfg); err != nil {
+		t.Fatalf("Validate rejected independent caller and introspection scopes: %v", err)
+	}
+	if got := cfg.Auth.Authorities["default"].OIDC.ClientCredentials.Scopes[0]; got != "nauthilus:authenticate" {
+		t.Fatalf("caller scope = %q, want nauthilus:authenticate", got)
+	}
+	if got := cfg.Auth.Authorities["default"].Mechanisms.Bearer.Introspection.RequiredScope; got != "mail.read" {
+		t.Fatalf("required_scope = %q, want mail.read", got)
+	}
+}
+
+// TestControlPlaneOIDCScopesRemainControlConfig verifies control scopes are not moved.
+func TestControlPlaneOIDCScopesRemainControlConfig(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Runtime.Servers.Control.Auth.OIDC.RequiredScopes = []string{"control:admin"}
+	cfg.Runtime.Servers.Control.Auth.OIDC.ProtectedScopes = []string{"control:protected"}
+
+	if err := NewLoader().Validate(cfg); err != nil {
+		t.Fatalf("Validate rejected control-plane OIDC scopes: %v", err)
+	}
+}
+
+// TestBearerIntrospectionValidationErrorsDoNotLeakSecrets verifies path-only diagnostics.
+func TestBearerIntrospectionValidationErrorsDoNotLeakSecrets(t *testing.T) {
+	cfg := DefaultConfig()
+	authority := cfg.Auth.Authorities["default"]
+	authority.Mechanisms.Bearer.Introspection.ClientSecret = Secret("inline-secret-sentinel")
+	authority.Mechanisms.Bearer.Introspection.ClientSecretFile = Secret("/run/secret-sentinel")
+	cfg.Auth.Authorities["default"] = authority
+
+	err := NewLoader().Validate(cfg)
+	if err == nil {
+		t.Fatal("Validate accepted ambiguous bearer introspection secrets")
+	}
+	for _, leaked := range []string{"inline-secret-sentinel", "/run/secret-sentinel"} {
+		if strings.Contains(err.Error(), leaked) {
+			t.Fatalf("validation error leaked %q", leaked)
+		}
+	}
+	if !strings.Contains(err.Error(), "auth.authorities.default.mechanisms.bearer.introspection") {
+		t.Fatalf("error = %q, want introspection path", err.Error())
+	}
+}
+
+// TestConfigWithoutBearerMechanismsRemainsValid keeps password-only deployments accepted.
+func TestConfigWithoutBearerMechanismsRemainsValid(t *testing.T) {
+	cfg := DefaultConfig()
+	authority := cfg.Auth.Authorities["default"]
+	authority.Mechanisms.Bearer = BearerMechanismConfig{}
+	cfg.Auth.Authorities["default"] = authority
+	removeBearerFrontendMechanisms(&cfg)
+
+	if err := NewLoader().Validate(cfg); err != nil {
+		t.Fatalf("Validate rejected config without bearer mechanisms: %v", err)
 	}
 }
 
@@ -1786,6 +2122,50 @@ func TestBackendValidationRejectsInvalidReplayMechanism(t *testing.T) {
 	}
 }
 
+// TestMasterUserBearerReplayPolicyValidation protects the hybrid master-user branch.
+func TestMasterUserBearerReplayPolicyValidation(t *testing.T) {
+	t.Run("requires original bearer mechanism", func(t *testing.T) {
+		cfg := DefaultConfig()
+		backend := cfg.Director.Backends["mailstore-a-imap"]
+		backend.Auth.CredentialReplay.AllowedMechanisms = []string{"oauthbearer"}
+		cfg.Director.Backends["mailstore-a-imap"] = backend
+
+		expectValidationError(t, cfg, "director.backends.mailstore-a-imap.auth.credential_replay.allowed_mechanisms must include xoauth2")
+	})
+
+	t.Run("requires tls policy", func(t *testing.T) {
+		cfg := DefaultConfig()
+		backend := cfg.Director.Backends["mailstore-a-sieve"]
+		backend.Auth.CredentialReplay.RequireBackendTLS = false
+		cfg.Director.Backends["mailstore-a-sieve"] = backend
+
+		expectValidationError(t, cfg, "director.backends.mailstore-a-sieve.auth.credential_replay.require_backend_tls must be true for master_user bearer replay")
+	})
+
+	t.Run("requires verified backend tls", func(t *testing.T) {
+		cfg := DefaultConfig()
+		backend := cfg.Director.Backends["mailstore-a-pop3"]
+		backend.TLS.Mode = "plaintext"
+		backend.TLS.ServerName = ""
+		cfg.Director.Backends["mailstore-a-pop3"] = backend
+
+		expectValidationError(t, cfg, "director.backends.mailstore-a-pop3.auth.credential_replay requires verified backend TLS for master_user bearer replay")
+	})
+
+	t.Run("password only listeners do not require sidecar replay", func(t *testing.T) {
+		cfg := DefaultConfig()
+		removeBearerFrontendMechanisms(&cfg)
+		backend := cfg.Director.Backends["mailstore-a-imap"]
+		backend.Auth.CredentialReplay.AllowedMechanisms = nil
+		backend.Auth.CredentialReplay.RequireBackendTLS = false
+		cfg.Director.Backends["mailstore-a-imap"] = backend
+
+		if err := NewLoader().Validate(cfg); err != nil {
+			t.Fatalf("Validate rejected password-only master-user backend: %v", err)
+		}
+	})
+}
+
 // TestIncludeCycleDetected prevents recursive include loops from hanging startup.
 func TestIncludeCycleDetected(t *testing.T) {
 	root := t.TempDir()
@@ -2025,4 +2405,83 @@ func expectValidationError(t *testing.T, cfg Config, want string) {
 // containsString keeps slice assertions compact without pulling in another dependency.
 func containsString(values []string, needle string) bool {
 	return slices.Contains(values, needle)
+}
+
+// removeBearerFrontendMechanisms removes bearer advertisements from default listeners.
+func removeBearerFrontendMechanisms(cfg *Config) {
+	for name, listener := range cfg.Director.Listeners {
+		if listener.IMAP != nil {
+			imap := *listener.IMAP
+			imap.AuthMechanisms = withoutBearerMechanisms(imap.AuthMechanisms)
+			imap.Capabilities = withoutIMAPBearerCapabilities(imap.Capabilities)
+			listener.IMAP = &imap
+		}
+		if listener.LMTP != nil {
+			lmtp := *listener.LMTP
+			lmtp.ClientAuth.Mechanisms = withoutBearerMechanisms(lmtp.ClientAuth.Mechanisms)
+			lmtp.Capabilities = withoutLMTPBearerCapabilities(lmtp.Capabilities)
+			listener.LMTP = &lmtp
+		}
+		if listener.Sieve != nil {
+			sieve := *listener.Sieve
+			sieve.AuthMechanisms = withoutBearerMechanisms(sieve.AuthMechanisms)
+			listener.Sieve = &sieve
+		}
+		if listener.POP3 != nil {
+			pop3 := *listener.POP3
+			pop3.AuthMechanisms = withoutBearerMechanisms(pop3.AuthMechanisms)
+			listener.POP3 = &pop3
+		}
+
+		cfg.Director.Listeners[name] = listener
+	}
+}
+
+// withoutBearerMechanisms drops XOAUTH2 and OAUTHBEARER from a mechanism list.
+func withoutBearerMechanisms(values []string) []string {
+	filtered := make([]string, 0, len(values))
+	for _, value := range values {
+		if strings.EqualFold(value, bearerMechanismXOAUTH2) || strings.EqualFold(value, bearerMechanismOAuthBearer) {
+			continue
+		}
+
+		filtered = append(filtered, value)
+	}
+
+	return filtered
+}
+
+// withoutIMAPBearerCapabilities drops AUTH capabilities for bearer mechanisms.
+func withoutIMAPBearerCapabilities(values []string) []string {
+	filtered := make([]string, 0, len(values))
+	for _, value := range values {
+		normalized := strings.ToUpper(strings.TrimSpace(value))
+		if normalized == "AUTH=XOAUTH2" || normalized == "AUTH=OAUTHBEARER" {
+			continue
+		}
+
+		filtered = append(filtered, value)
+	}
+
+	return filtered
+}
+
+// withoutLMTPBearerCapabilities drops bearer mechanisms from LMTP AUTH capability lines.
+func withoutLMTPBearerCapabilities(values []string) []string {
+	filtered := make([]string, 0, len(values))
+	for _, value := range values {
+		if !strings.HasPrefix(strings.ToUpper(strings.TrimSpace(value)), "AUTH ") {
+			filtered = append(filtered, value)
+
+			continue
+		}
+
+		fields := strings.Fields(value)
+		mechanisms := withoutBearerMechanisms(fields[1:])
+		if len(mechanisms) > 0 {
+			filtered = append(filtered, "AUTH "+strings.Join(mechanisms, " "))
+		}
+	}
+
+	return filtered
 }

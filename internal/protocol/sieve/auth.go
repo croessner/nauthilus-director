@@ -31,6 +31,8 @@ import (
 	"github.com/croessner/nauthilus-director/internal/protocol/tlscontext"
 )
 
+const sieveBearerIntrospectionTransport = "oidc_introspection"
+
 // handleAuthenticate extracts supported SASL credentials without retaining them on the session.
 func (s *Session) handleAuthenticate(ctx context.Context, command preauthCommand) (commandOutcome, error) {
 	if len(command.arguments) < 1 || len(command.arguments) > 2 {
@@ -105,6 +107,10 @@ func (s *Session) credentialAuthAllowed() bool {
 
 // authenticateThroughNauthilus calls the configured authority and keeps frontend success delayed.
 func (s *Session) authenticateThroughNauthilus(ctx context.Context, credentials *frontendCredentials) (commandOutcome, error) {
+	if credentials.Kind() == saslcred.KindBearer {
+		return s.authenticateThroughBearerIntrospection(ctx, credentials)
+	}
+
 	if s.authenticator == nil {
 		s.recordNauthilusAuth(ctx, sieveObservationResultFailure, sieveReasonTemporaryFailure, credentials.Mechanism().Normalized(), 0)
 
@@ -118,7 +124,7 @@ func (s *Session) authenticateThroughNauthilus(ctx context.Context, credentials 
 
 	authCtx, authSpan := s.startObservationSpan(authCtx, observability.TraceBoundaryNauthilusAuth, sieveObservationOperationAuthenticate, sieveObservationResultStart, "", map[string]string{
 		sieveObsFieldMechanism: credentials.Mechanism().Normalized(),
-		sieveObsFieldTransport: strings.ToLower(strings.TrimSpace(s.authorityTransport)),
+		sieveObsFieldTransport: s.authObservationTransport(credentials),
 	})
 
 	authStarted := time.Now()
@@ -154,6 +160,73 @@ func (s *Session) authenticateThroughNauthilus(ctx context.Context, credentials 
 	}
 
 	return s.transitionAuthenticatedSession(ctx, credentials)
+}
+
+// authenticateThroughBearerIntrospection calls the dedicated SASL bearer authority boundary.
+//
+//nolint:dupl // Bearer auth intentionally mirrors password result mapping across a separate boundary.
+func (s *Session) authenticateThroughBearerIntrospection(ctx context.Context, credentials *frontendCredentials) (commandOutcome, error) {
+	if s.bearerIntrospector == nil {
+		s.recordNauthilusAuth(ctx, sieveObservationResultFailure, sieveReasonTemporaryFailure, credentials.Mechanism().Normalized(), 0)
+
+		return commandOutcome{}, s.writeNo(codeTryLater, "Authentication service temporarily unavailable")
+	}
+
+	authCtx, cancel := context.WithTimeout(ctx, s.authTimeout)
+	defer cancel()
+
+	authCtx, authSpan := s.startObservationSpan(authCtx, observability.TraceBoundaryNauthilusAuth, sieveObservationOperationAuthenticate, sieveObservationResultStart, "", map[string]string{
+		sieveObsFieldMechanism: credentials.Mechanism().Normalized(),
+		sieveObsFieldTransport: s.authObservationTransport(credentials),
+	})
+
+	authStarted := time.Now()
+	result, err := s.bearerIntrospector.Introspect(authCtx, credentials.BearerIntrospectionRequest(
+		s.NauthilusRequestContext(credentials.Mechanism().Normalized()),
+		protocolSieve,
+		s.listenerName,
+		s.authorityName,
+	))
+	authDuration := time.Since(authStarted)
+	if err != nil {
+		s.recordNauthilusAuth(authCtx, sieveObservationResultFailure, sieveReasonTemporaryFailure, credentials.Mechanism().Normalized(), authDuration)
+		authSpan.End(sieveObservationResultFailure, sieveReasonTemporaryFailure)
+
+		return commandOutcome{}, s.writeNo(codeTryLater, "Authentication service temporarily unavailable")
+	}
+
+	if !result.Authenticated() {
+		switch result.Decision {
+		case nauthilus.DecisionTemporaryFailure:
+			s.recordNauthilusAuth(authCtx, sieveObservationResultFailure, sieveReasonTemporaryFailure, credentials.Mechanism().Normalized(), authDuration)
+			authSpan.End(sieveObservationResultFailure, sieveReasonTemporaryFailure)
+
+			return commandOutcome{}, s.writeNo(codeTryLater, "Authentication service temporarily unavailable")
+		default:
+			s.recordNauthilusAuth(authCtx, sieveObservationResultRejected, sieveReasonAuth, credentials.Mechanism().Normalized(), authDuration)
+			authSpan.End(sieveObservationResultRejected, sieveReasonAuth)
+
+			return commandOutcome{}, s.writeNo(codeAuthFailed, genericAuthFailedText)
+		}
+	}
+
+	s.recordNauthilusAuth(authCtx, sieveObservationResultOK, sieveReasonOK, credentials.Mechanism().Normalized(), authDuration)
+	authSpan.End(sieveObservationResultOK, sieveReasonOK)
+
+	if err := s.placeAuthenticatedSession(ctx, credentials, result); err != nil {
+		return commandOutcome{}, s.writeNo(codeTryLater, "Authentication service temporarily unavailable")
+	}
+
+	return s.transitionAuthenticatedSession(ctx, credentials)
+}
+
+// authObservationTransport returns the bounded auth transport class for this credential.
+func (s *Session) authObservationTransport(credentials *frontendCredentials) string {
+	if credentials != nil && credentials.Kind() == saslcred.KindBearer {
+		return sieveBearerIntrospectionTransport
+	}
+
+	return strings.ToLower(strings.TrimSpace(s.authorityTransport))
 }
 
 // sessionBackendConnectRequest carries selected backend and effective frontend tuple.
@@ -269,10 +342,38 @@ func (c *frontendCredentials) NauthilusAuthRequest(requestContext nauthilus.Requ
 
 	requestContext.Username = c.credentials.Username
 	requestContext.Method = c.credentials.Mechanism.Normalized()
+	if c.credentials.Kind == saslcred.KindBearer {
+		return nauthilus.AuthRequest{Context: requestContext}
+	}
 
 	return nauthilus.AuthRequest{
 		Context:    requestContext,
 		Credential: nauthilus.NewSecret(c.Secret().Value()),
+	}
+}
+
+// BearerIntrospectionRequest builds the dedicated SASL bearer validation request.
+func (c *frontendCredentials) BearerIntrospectionRequest(
+	requestContext nauthilus.RequestContext,
+	protocol string,
+	listenerName string,
+	authorityName string,
+) nauthilus.BearerIntrospectionRequest {
+	if c == nil || c.credentials == nil {
+		return nauthilus.BearerIntrospectionRequest{Context: requestContext}
+	}
+
+	requestContext.Username = c.credentials.Username
+	requestContext.Method = c.credentials.Mechanism.Normalized()
+
+	return nauthilus.BearerIntrospectionRequest{
+		Context:               requestContext,
+		Mechanism:             c.credentials.Mechanism.Normalized(),
+		Protocol:              protocol,
+		ListenerName:          listenerName,
+		AuthorityName:         authorityName,
+		AuthorizationIdentity: firstNonEmpty(c.credentials.AuthorizationID, c.credentials.Username),
+		BearerToken:           nauthilus.NewSecret(c.Secret().Value()),
 	}
 }
 
@@ -288,4 +389,15 @@ func (c *frontendCredentials) String() string {
 // GoString returns only credential-safe metadata for Go-syntax formatting.
 func (c *frontendCredentials) GoString() string {
 	return c.String()
+}
+
+// firstNonEmpty returns the first non-empty trimmed value.
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+
+	return ""
 }

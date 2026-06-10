@@ -26,6 +26,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
@@ -66,53 +67,63 @@ import (
 )
 
 const (
-	e2eAccount          = "alice@example.test"
-	e2eBackendAID       = "mailstore-a-imap"
-	e2eBackendBID       = "mailstore-b-imap"
-	e2eBackendCID       = "mailstore-c-imap"
-	e2eBackendPool      = "imap-default"
-	e2eListenerName     = "imap"
-	e2ePassword         = "e2e-secret-password"
-	e2eProtocol         = "imap"
-	e2eProcessKeyPrefix = "nauthilus-director-e2e-process"
-	e2eService          = "imap"
-	e2eSieveAccount     = "sieve-alice@example.test"
-	e2eSieveBackendAID  = "mailstore-a-sieve"
-	e2eSieveBackendBID  = "mailstore-b-sieve"
-	e2eSieveBackendPool = "sieve-default"
-	e2eSieveListener    = "sieve"
-	e2eSieveProtocol    = "sieve"
-	e2eSieveService     = "sieve"
-	e2eSievesListener   = "sieves"
-	e2eHoldAccountKey   = "hold-account-key-e2e"
-	e2eHoldLogin        = "hold-login@example.test"
-	e2eHoldOtherKey     = "hold-other-account-key-e2e"
-	e2eHoldOtherLogin   = "hold-other-login@example.test"
-	e2eHoldTimeoutKey   = "hold-timeout-account-key-e2e"
-	e2eHoldTimeoutLogin = "hold-timeout-login@example.test"
-	e2ePinnedAccountKey = "pin-account-key-e2e"
-	e2ePinnedLogin      = "pin-login@example.test"
-	e2eProxyAccountKey  = "proxy-account-key-e2e"
-	e2eProxyLogin       = "proxy-login@example.test"
-	e2eShardTagB        = "mailstore-b"
-	e2eShardTag         = "mailstore-a"
-	e2eTenant           = "default"
-	e2eToken            = "e2e-bearer-token"
-	e2eOIDCClientID     = "nauthilus-director-e2e"
-	e2eOIDCClientSecret = "nauthilus-director-e2e-secret"
-	e2eOIDCScopeAuth    = "nauthilus:authenticate"
-	e2eOIDCScopeLookup  = "nauthilus:lookup_identity"
-	e2eOIDCScopeList    = "nauthilus:list_accounts"
-	e2eOIDCDiscovery    = "/.well-known/openid-configuration"
-	e2eContextHeader    = "X-Company-Domain"
-	e2eContextHTTPValue = "e2e-http-authority-context"
-	e2eContextMetadata  = "x-company-domain"
-	e2eContextGRPCValue = "e2e-grpc-authority-context"
-	fakeBackendReady    = "* OK fake IMAP backend ready\r\n"
-	fakeProxyPrefix     = "PROXY "
-	fakeProxyReadLimit  = 256
-	fakeProxyTimeout    = 500 * time.Millisecond
-	serverBinaryEnv     = "NAUTHILUS_DIRECTOR_E2E_SERVER_BINARY"
+	e2eAccount                 = "alice@example.test"
+	e2eBackendAID              = "mailstore-a-imap"
+	e2eBackendBID              = "mailstore-b-imap"
+	e2eBackendCID              = "mailstore-c-imap"
+	e2eBackendPool             = "imap-default"
+	e2eListenerName            = "imap"
+	e2ePassword                = "e2e-secret-password"
+	e2eProtocol                = "imap"
+	e2eProcessKeyPrefix        = "nauthilus-director-e2e-process"
+	e2eService                 = "imap"
+	e2eSieveAccount            = "sieve-alice@example.test"
+	e2eSieveBackendAID         = "mailstore-a-sieve"
+	e2eSieveBackendBID         = "mailstore-b-sieve"
+	e2eSieveBackendPool        = "sieve-default"
+	e2eSieveListener           = "sieve"
+	e2eSieveProtocol           = "sieve"
+	e2eSieveService            = "sieve"
+	e2eSievesListener          = "sieves"
+	e2eHoldAccountKey          = "hold-account-key-e2e"
+	e2eHoldLogin               = "hold-login@example.test"
+	e2eHoldOtherKey            = "hold-other-account-key-e2e"
+	e2eHoldOtherLogin          = "hold-other-login@example.test"
+	e2eHoldTimeoutKey          = "hold-timeout-account-key-e2e"
+	e2eHoldTimeoutLogin        = "hold-timeout-login@example.test"
+	e2ePinnedAccountKey        = "pin-account-key-e2e"
+	e2ePinnedLogin             = "pin-login@example.test"
+	e2eProxyAccountKey         = "proxy-account-key-e2e"
+	e2eProxyLogin              = "proxy-login@example.test"
+	e2eShardTagB               = "mailstore-b"
+	e2eShardTag                = "mailstore-a"
+	e2eTenant                  = "default"
+	e2eToken                   = "e2e-bearer-token"
+	e2eOIDCClientID            = "nauthilus-director-e2e"
+	e2eOIDCClientSecret        = "nauthilus-director-e2e-secret"
+	e2eOIDCScopeAuth           = "nauthilus:authenticate"
+	e2eOIDCScopeLookup         = "nauthilus:lookup_identity"
+	e2eOIDCScopeList           = "nauthilus:list_accounts"
+	e2eOIDCDiscovery           = "/.well-known/openid-configuration"
+	e2eSASLClientID            = "nauthilus-director-e2e-sasl"
+	e2eSASLClientSecret        = "nauthilus-director-e2e-sasl-secret"
+	e2eSASLRequiredScope       = "email"
+	e2eIMAPXOAuth2Token        = "e2e-imap-xoauth2-token-sentinel"
+	e2eIMAPOAuthBearerToken    = "e2e-imap-oauthbearer-token-sentinel"
+	e2eSASLInactiveToken       = "e2e-sasl-inactive-token-sentinel"
+	e2eSASLMissingScopeToken   = "e2e-sasl-missing-scope-token-sentinel"
+	e2eSASLMissingAccountToken = "e2e-sasl-missing-account-token-sentinel"
+	e2eSASLMalformedToken      = "e2e-sasl-malformed-token-sentinel"
+	e2eSASLPolicyToken         = "e2e-sasl-policy-token-sentinel"
+	e2eContextHeader           = "X-Company-Domain"
+	e2eContextHTTPValue        = "e2e-http-authority-context"
+	e2eContextMetadata         = "x-company-domain"
+	e2eContextGRPCValue        = "e2e-grpc-authority-context"
+	fakeBackendReady           = "* OK fake IMAP backend ready\r\n"
+	fakeProxyPrefix            = "PROXY "
+	fakeProxyReadLimit         = 256
+	fakeProxyTimeout           = 500 * time.Millisecond
+	serverBinaryEnv            = "NAUTHILUS_DIRECTOR_E2E_SERVER_BINARY"
 )
 
 // TestFakeHTTPAuthorityPublicIMAPFlow proves the guardrail lane uses public sockets.
@@ -341,6 +352,228 @@ func TestServerBinaryOIDCAuthorityCallerAuthRejectsBadSecret(t *testing.T) {
 	}
 	authority.ExpectOIDCTokenAttemptWithoutBackchannel(t)
 	assertNoSecretText(t, process.output.String())
+}
+
+// TestServerBinarySASLBearerIntrospectionPublicIMAPFlow proves IMAP bearer auth uses OIDC introspection.
+func TestServerBinarySASLBearerIntrospectionPublicIMAPFlow(t *testing.T) {
+	binary := e2eServerBinary(t)
+	ctl := buildDirectorctl(t)
+	redisFixture := startValkeySessionStore(t)
+	authority := startFakeOIDCHTTPAuthority(t, nil, fakeOIDCAuthorityOptions{
+		SASLBearerTokens: map[string]fakeSASLBearerToken{
+			e2eIMAPXOAuth2Token:     activeFakeSASLBearerToken(e2eAccount, e2eShardTag),
+			e2eIMAPOAuthBearerToken: activeFakeSASLBearerToken(e2eProxyLogin, e2eShardTag),
+		},
+		SkipBackchannelAuth: true,
+	})
+	backendCertPath, _, backendCertificate := writeTestCertificate(t)
+	fakeBackend := startFakeIMAPBackend(t, fakeBackendOptions{
+		TLSConfig: &tls.Config{Certificates: []tls.Certificate{backendCertificate}, MinVersion: tls.VersionTLS12},
+		TLSMode:   imap.TLSModeStartTLS,
+	})
+	directorAddress := loopbackAddress(t)
+	controlAddress := loopbackAddress(t)
+	configPath := writeProcessConfig(t, processConfigOptions{
+		RedisAddress:    redisFixture.addr,
+		AuthorityURL:    authority.URL(),
+		AuthorityBearer: processAuthorityBearerForFake(authority),
+		DirectorAddress: directorAddress,
+		ControlAddress:  controlAddress,
+		ControlEnabled:  true,
+		BackendAddress:  fakeBackend.Address(),
+		BackendTLS: config.BackendTLSConfig{
+			Mode:          "starttls",
+			CAFile:        backendCertPath,
+			ServerName:    "127.0.0.1",
+			MinTLSVersion: "TLS1.2",
+		},
+		BackendAuth: masterUserBackendAuthWithBearerReplay([]string{"xoauth2", "oauthbearer"}),
+		IMAPCapabilities: []string{
+			"IMAP4rev1",
+			"ID",
+			"SASL-IR",
+			"STARTTLS",
+			"AUTH=PLAIN",
+			"AUTH=XOAUTH2",
+			"AUTH=OAUTHBEARER",
+		},
+		IMAPAuthMechanisms: []string{"plain", "xoauth2", "oauthbearer"},
+	})
+	process := startDirectorProcess(t, binary, configPath)
+	controlURL := "http://" + controlAddress
+
+	waitForDirectorGreeting(t, directorAddress, process)
+	waitForControlReady(t, controlURL, process)
+
+	beforeRouteLookup := authority.SASLBearerIntrospectionCount()
+	routeOutput := runDirectorctl(
+		t,
+		ctl,
+		controlURL,
+		"route", "lookup",
+		"--protocol", e2eProtocol,
+		"--user", e2eAccount,
+		"--listener", e2eListenerName,
+		"--include-affinity",
+	)
+	assertCLIOutputFields(t, routeOutput, "selected_backend="+e2eBackendAID, "routing_source=hash")
+	assertOutputOmits(t, routeOutput, e2eIMAPXOAuth2Token, e2eIMAPOAuthBearerToken)
+	if authority.SASLBearerIntrospectionCount() != beforeRouteLookup {
+		t.Fatal("route lookup called bearer introspection")
+	}
+
+	beforeAuth := authority.SASLBearerIntrospectionCount()
+	imapBearerAuth(t, directorAddress, "A001", "XOAUTH2", e2eAccount, e2eIMAPXOAuth2Token)
+	authority.ExpectSASLBearerIntrospection(t, beforeAuth, 1)
+	fakeBackend.ExpectProxyLineWithAuth(t, "A002 NOOP", "AUTHENTICATE XOAUTH2")
+
+	beforeAuth = authority.SASLBearerIntrospectionCount()
+	imapBearerAuth(t, directorAddress, "B001", "OAUTHBEARER", e2eProxyLogin, e2eIMAPOAuthBearerToken)
+	authority.ExpectSASLBearerIntrospection(t, beforeAuth, 1)
+	fakeBackend.ExpectProxyLineWithAuth(t, "B002 NOOP", "AUTHENTICATE OAUTHBEARER")
+
+	if authority.RequestCount() != 0 {
+		t.Fatalf("bearer IMAP auth used password backchannel requests = %d, want none", authority.RequestCount())
+	}
+	assertOutputOmits(t, process.output.String(), e2eIMAPXOAuth2Token, e2eIMAPOAuthBearerToken)
+}
+
+// TestServerBinarySASLBearerIntrospectionFailuresPublicIMAPFlow proves fail-closed OIDC outcomes.
+func TestServerBinarySASLBearerIntrospectionFailuresPublicIMAPFlow(t *testing.T) {
+	binary := e2eServerBinary(t)
+	redisFixture := startValkeySessionStore(t)
+	authority := startFakeOIDCHTTPAuthority(t, nil, fakeOIDCAuthorityOptions{
+		SASLBearerTokens: map[string]fakeSASLBearerToken{
+			e2eSASLInactiveToken:       inactiveFakeSASLBearerToken(e2eAccount),
+			e2eSASLMissingScopeToken:   missingScopeFakeSASLBearerToken(e2eAccount),
+			e2eSASLMissingAccountToken: missingAccountFakeSASLBearerToken(e2eAccount),
+			e2eSASLMalformedToken:      malformedFakeSASLBearerToken(),
+		},
+		SkipBackchannelAuth: true,
+	})
+	backendCertPath, _, backendCertificate := writeTestCertificate(t)
+	fakeBackend := startFakeIMAPBackend(t, fakeBackendOptions{
+		TLSConfig: &tls.Config{Certificates: []tls.Certificate{backendCertificate}, MinVersion: tls.VersionTLS12},
+		TLSMode:   imap.TLSModeStartTLS,
+	})
+	directorAddress := loopbackAddress(t)
+	configPath := writeProcessConfig(t, processConfigOptions{
+		RedisAddress:    redisFixture.addr,
+		AuthorityURL:    authority.URL(),
+		AuthorityBearer: processAuthorityBearerForFake(authority),
+		DirectorAddress: directorAddress,
+		BackendAddress:  fakeBackend.Address(),
+		BackendTLS: config.BackendTLSConfig{
+			Mode:          "starttls",
+			CAFile:        backendCertPath,
+			ServerName:    "127.0.0.1",
+			MinTLSVersion: "TLS1.2",
+		},
+		BackendAuth: masterUserBackendAuthWithBearerReplay([]string{"xoauth2", "oauthbearer"}),
+		IMAPCapabilities: []string{
+			"IMAP4rev1",
+			"ID",
+			"SASL-IR",
+			"STARTTLS",
+			"AUTH=XOAUTH2",
+			"AUTH=OAUTHBEARER",
+		},
+		IMAPAuthMechanisms: []string{"xoauth2", "oauthbearer"},
+	})
+	process := startDirectorProcess(t, binary, configPath)
+
+	waitForDirectorGreeting(t, directorAddress, process)
+
+	tests := []struct {
+		tag       string
+		mechanism string
+		token     string
+		want      string
+	}{
+		{
+			tag:       "I001",
+			mechanism: "XOAUTH2",
+			token:     e2eSASLInactiveToken,
+			want:      "I001 NO [AUTHENTICATIONFAILED] bearer token inactive\r\n",
+		},
+		{
+			tag:       "S001",
+			mechanism: "OAUTHBEARER",
+			token:     e2eSASLMissingScopeToken,
+			want:      "S001 NO [AUTHENTICATIONFAILED] required bearer scope missing\r\n",
+		},
+		{
+			tag:       "A001",
+			mechanism: "XOAUTH2",
+			token:     e2eSASLMissingAccountToken,
+			want:      "A001 NO [AUTHENTICATIONFAILED] bearer account claim missing\r\n",
+		},
+		{
+			tag:       "M001",
+			mechanism: "XOAUTH2",
+			token:     e2eSASLMalformedToken,
+			want:      "M001 NO [UNAVAILABLE] Authentication service temporarily unavailable\r\n",
+		},
+	}
+	for _, test := range tests {
+		beforeAuth := authority.SASLBearerIntrospectionCount()
+		imapBearerAuthFailure(t, directorAddress, test.tag, test.mechanism, e2eAccount, test.token, test.want)
+		authority.ExpectSASLBearerIntrospection(t, beforeAuth, 1)
+	}
+
+	if fakeBackend.ConnectionCount() != 0 {
+		t.Fatalf("backend connections = %d, want no backend after failed bearer introspection", fakeBackend.ConnectionCount())
+	}
+	assertOutputOmits(t, process.output.String(), e2eSASLInactiveToken, e2eSASLMissingScopeToken, e2eSASLMissingAccountToken, e2eSASLMalformedToken)
+}
+
+// TestServerBinarySASLBearerReplayPolicyPublicIMAPFlow proves bearer replay is policy-gated.
+func TestServerBinarySASLBearerReplayPolicyPublicIMAPFlow(t *testing.T) {
+	binary := e2eServerBinary(t)
+	redisFixture := startValkeySessionStore(t)
+	authority := startFakeOIDCHTTPAuthority(t, nil, fakeOIDCAuthorityOptions{
+		SASLBearerTokens: map[string]fakeSASLBearerToken{
+			e2eSASLPolicyToken: activeFakeSASLBearerToken(e2eAccount, e2eShardTag),
+		},
+		SkipBackchannelAuth: true,
+	})
+	fakeBackend := startFakeIMAPBackend(t, fakeBackendOptions{})
+	directorAddress := loopbackAddress(t)
+	backendAuth := credentialReplayBackendAuth(false)
+	backendAuth.CredentialReplay.AllowedMechanisms = []string{"plain"}
+	configPath := writeProcessConfig(t, processConfigOptions{
+		RedisAddress:    redisFixture.addr,
+		AuthorityURL:    authority.URL(),
+		AuthorityBearer: processAuthorityBearerForFake(authority),
+		DirectorAddress: directorAddress,
+		BackendAddress:  fakeBackend.Address(),
+		BackendTLS: config.BackendTLSConfig{
+			Mode:          "plaintext",
+			MinTLSVersion: "TLS1.2",
+		},
+		BackendAuth:        backendAuth,
+		IMAPCapabilities:   []string{"IMAP4rev1", "SASL-IR", "STARTTLS", "AUTH=XOAUTH2"},
+		IMAPAuthMechanisms: []string{"xoauth2"},
+	})
+	process := startDirectorProcess(t, binary, configPath)
+
+	waitForDirectorGreeting(t, directorAddress, process)
+
+	beforeAuth := authority.SASLBearerIntrospectionCount()
+	imapBearerAuthFailure(
+		t,
+		directorAddress,
+		"P001",
+		"XOAUTH2",
+		e2eAccount,
+		e2eSASLPolicyToken,
+		"P001 NO [UNAVAILABLE] Authentication service temporarily unavailable\r\n",
+	)
+	authority.ExpectSASLBearerIntrospection(t, beforeAuth, 1)
+	if authority.RequestCount() != 0 {
+		t.Fatalf("bearer replay fallback used password backchannel requests = %d, want none", authority.RequestCount())
+	}
+	assertOutputOmits(t, process.output.String(), e2eSASLPolicyToken)
 }
 
 // TestServerBinaryControlRESTCLIParity proves the real process exposes shared REST and CLI state.
@@ -1488,6 +1721,7 @@ type processConfigOptions struct {
 	RedisAddress           string
 	AuthorityURL           string
 	AuthorityOIDC          processAuthorityOIDCOptions
+	AuthorityBearer        processAuthorityBearerOptions
 	DirectorAddress        string
 	ControlAddress         string
 	ControlEnabled         bool
@@ -1497,6 +1731,8 @@ type processConfigOptions struct {
 	BackendHealthDeepCheck bool
 	BackendTLS             config.BackendTLSConfig
 	BackendAuth            backend.AuthConfig
+	IMAPAuthMechanisms     []string
+	IMAPCapabilities       []string
 	UserHoldMaxWait        time.Duration
 	UserHoldPollInterval   time.Duration
 }
@@ -1509,6 +1745,17 @@ type processAuthorityOIDCOptions struct {
 	ClientSecretFile        string
 	TokenEndpointAuthMethod string
 	Scopes                  []string
+}
+
+type processAuthorityBearerOptions struct {
+	Enabled          bool
+	Issuer           string
+	ClientID         string
+	ClientSecret     string
+	ClientSecretFile string
+	AuthMethod       string
+	RequiredScope    string
+	AccountClaim     string
 }
 
 type processBackendDefinition struct {
@@ -1640,6 +1887,14 @@ func writeProcessConfig(t *testing.T, options processConfigOptions) string {
 	if controlAddress == "" {
 		controlAddress = "127.0.0.1:0"
 	}
+	imapCapabilities := options.IMAPCapabilities
+	if len(imapCapabilities) == 0 {
+		imapCapabilities = []string{"IMAP4rev1", "ID", "SASL-IR", "STARTTLS", "AUTH=PLAIN"}
+	}
+	imapAuthMechanisms := options.IMAPAuthMechanisms
+	if len(imapAuthMechanisms) == 0 {
+		imapAuthMechanisms = []string{"plain"}
+	}
 	listenerCertPath, listenerKeyPath, _ := writeTestCertificate(t)
 
 	content := fmt.Sprintf(`patch:
@@ -1703,8 +1958,8 @@ director:
         cert: %q
         key: %q
       imap:
-        capabilities: [IMAP4rev1, ID, SASL-IR, STARTTLS, AUTH=PLAIN]
-        auth_mechanisms: [plain]
+        capabilities: [%s]
+        auth_mechanisms: [%s]
   backend_pools:
     imap-default:
       backends: [mailstore-a-imap]
@@ -1743,12 +1998,14 @@ director:
 		processControlAuthYAML(t),
 		e2eProcessKeyPrefix,
 		options.RedisAddress,
-		processAuthorityOIDCYAMLForOptions(t, options.AuthorityOIDC),
+		processAuthorityYAML(t, options.AuthorityOIDC, options.AuthorityBearer),
 		options.AuthorityURL,
 		processUserHoldConfigYAML(options),
 		options.DirectorAddress,
 		listenerCertPath,
 		listenerKeyPath,
+		quotedYAMLStrings(imapCapabilities),
+		quotedYAMLStrings(imapAuthMechanisms),
 		options.BackendAddress,
 		e2eShardTag,
 		options.BackendHAProxy,
@@ -2354,6 +2611,12 @@ func startDirector(t *testing.T, options directorOptions) directorInstance {
 
 	managerOptions := []listener.ManagerOption{
 		listener.WithObservabilityRecorder(options.Recorder),
+		listener.WithBearerIntrospectorFactory(func(
+			context.Context,
+			config.AuthorityConfig,
+		) (nauthilus.BearerIntrospector, error) {
+			return unavailableBearerIntrospector{}, nil
+		}),
 		listener.WithSessionHandlerFactory(func(listenerOptions listener.SessionOptions) listener.SessionHandler {
 			sessionConfig := imap.SessionConfig{
 				ListenerName:           listenerOptions.ListenerName,
@@ -2377,6 +2640,7 @@ func startDirector(t *testing.T, options directorOptions) directorInstance {
 				MaxPreauthLiteralBytes: 16,
 				FrontendTLSConfig:      options.FrontendTLSConfig,
 				Authenticator:          listenerOptions.Authenticator,
+				BearerIntrospector:     listenerOptions.BearerIntrospector,
 				RoutingResolver:        resolver,
 				SessionStore:           store,
 				PlacementService:       placementService,
@@ -2436,6 +2700,12 @@ func startSieveDirector(t *testing.T, cfg config.Config, recorder observability.
 		) (nauthilus.Authenticator, error) {
 			return unavailableAuthenticator{}, nil
 		}),
+		listener.WithBearerIntrospectorFactory(func(
+			context.Context,
+			config.AuthorityConfig,
+		) (nauthilus.BearerIntrospector, error) {
+			return unavailableBearerIntrospector{}, nil
+		}),
 		listener.WithObservabilityRecorder(recorder),
 		listener.WithSessionHandlerFactory(func(listenerOptions listener.SessionOptions) listener.SessionHandler {
 			if listenerOptions.Config.Sieve == nil {
@@ -2449,6 +2719,7 @@ func startSieveDirector(t *testing.T, cfg config.Config, recorder observability.
 				ServiceName:    listenerOptions.Config.ServiceName,
 				Network:        listenerOptions.Config.Network,
 				BackendPool:    listenerOptions.Config.BackendPool,
+				AuthorityName:  listenerOptions.Config.Authority,
 				TLSMode:        listenerOptions.Config.TLS.Mode,
 				AuthMechanisms: listenerOptions.Config.Sieve.AuthMechanisms,
 				Capabilities: sieve.CapabilitiesConfig{
@@ -2457,6 +2728,7 @@ func startSieveDirector(t *testing.T, cfg config.Config, recorder observability.
 					ScriptExtensions: capabilities.ScriptExtensions,
 					Language:         capabilities.Language,
 				},
+				BearerIntrospector: listenerOptions.BearerIntrospector,
 			})
 		}),
 	)
@@ -2703,6 +2975,18 @@ func masterUserBackendAuth() backend.AuthConfig {
 			Mechanism:  "plain",
 		},
 	}
+}
+
+// masterUserBackendAuthWithBearerReplay adds explicit bearer replay policy to master-user mode.
+func masterUserBackendAuthWithBearerReplay(allowed []string) backend.AuthConfig {
+	auth := masterUserBackendAuth()
+	auth.CredentialReplay = backend.CredentialReplayConfig{
+		RequireBackendTLS: true,
+		PreserveMechanism: true,
+		AllowedMechanisms: append([]string(nil), allowed...),
+	}
+
+	return auth
 }
 
 // credentialReplayBackendAuth returns an explicit test replay backend mode.
@@ -3308,6 +3592,74 @@ func processAuthorityOIDCYAML() string {
 `
 }
 
+// processAuthorityYAML renders mechanism and caller-auth config for process fixtures.
+func processAuthorityYAML(
+	t *testing.T,
+	oidc processAuthorityOIDCOptions,
+	bearer processAuthorityBearerOptions,
+) string {
+	t.Helper()
+
+	return processAuthorityBearerYAML(t, bearer) + processAuthorityOIDCYAMLForOptions(t, oidc)
+}
+
+// processAuthorityBearerYAML renders dedicated mail SASL bearer introspection config.
+func processAuthorityBearerYAML(t *testing.T, options processAuthorityBearerOptions) string {
+	t.Helper()
+
+	if !options.Enabled {
+		return ""
+	}
+
+	clientID := strings.TrimSpace(options.ClientID)
+	if clientID == "" {
+		clientID = e2eSASLClientID
+	}
+	clientSecretFile := strings.TrimSpace(options.ClientSecretFile)
+	if clientSecretFile == "" {
+		clientSecret := options.ClientSecret
+		if clientSecret == "" {
+			clientSecret = e2eSASLClientSecret
+		}
+		clientSecretFile = writeProcessSASLIntrospectionSecretFile(t, clientSecret)
+	}
+	authMethod := strings.TrimSpace(options.AuthMethod)
+	if authMethod == "" {
+		authMethod = "client_secret_basic"
+	}
+	requiredScope := strings.TrimSpace(options.RequiredScope)
+	if requiredScope == "" {
+		requiredScope = e2eSASLRequiredScope
+	}
+
+	return fmt.Sprintf(`      mechanisms:
+        bearer:
+          enabled: true
+          names: [xoauth2, oauthbearer]
+          validation: nauthilus_introspection
+          token_max_bytes: 16384
+          introspection:
+            enabled: true
+            issuer: %q
+            discovery_url: ""
+            client_id: %q
+            client_secret: ""
+            client_secret_file: %q
+            client_private_key_file: ""
+            client_key_id: ""
+            client_assertion_alg: ""
+            auth_method: %q
+            required_scope: %q
+            account_claim: %q
+`, strings.TrimRight(strings.TrimSpace(options.Issuer), "/"),
+		clientID,
+		clientSecretFile,
+		authMethod,
+		requiredScope,
+		strings.TrimSpace(options.AccountClaim),
+	)
+}
+
 // processAuthorityOIDCYAMLForOptions renders optional OIDC caller auth for real-process fixtures.
 func processAuthorityOIDCYAMLForOptions(t *testing.T, options processAuthorityOIDCOptions) string {
 	t.Helper()
@@ -3344,7 +3696,6 @@ func processAuthorityOIDCYAMLForOptions(t *testing.T, options processAuthorityOI
         issuer: %q
         discovery_url: ""
         audience_hint: ""
-        required_scopes: []
         client_credentials:
           enabled: true
           client_id: %q
@@ -3368,6 +3719,18 @@ func processAuthorityOIDCYAMLForOptions(t *testing.T, options processAuthorityOI
 	)
 }
 
+// writeProcessSASLIntrospectionSecretFile writes the SASL introspection client secret.
+func writeProcessSASLIntrospectionSecretFile(t *testing.T, clientSecret string) string {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "sasl-introspection-client-secret")
+	if err := os.WriteFile(path, []byte(clientSecret+"\n"), 0o600); err != nil {
+		t.Fatalf("write SASL introspection client secret: %v", err)
+	}
+
+	return path
+}
+
 // writeProcessOIDCSecretFile writes the authority client secret used by OIDC process fixtures.
 func writeProcessOIDCSecretFile(t *testing.T, clientSecret string) string {
 	t.Helper()
@@ -3388,6 +3751,18 @@ func processAuthorityOIDCForFake(authority *fakeHTTPAuthority, scopes []string) 
 		ClientID:     e2eOIDCClientID,
 		ClientSecret: e2eOIDCClientSecret,
 		Scopes:       scopes,
+	}
+}
+
+// processAuthorityBearerForFake returns SASL bearer introspection config for the fake issuer.
+func processAuthorityBearerForFake(authority *fakeHTTPAuthority) processAuthorityBearerOptions {
+	return processAuthorityBearerOptions{
+		Enabled:       true,
+		Issuer:        authority.Issuer(),
+		ClientID:      e2eSASLClientID,
+		ClientSecret:  e2eSASLClientSecret,
+		AuthMethod:    "client_secret_basic",
+		RequiredScope: e2eSASLRequiredScope,
 	}
 }
 
@@ -3986,6 +4361,67 @@ func loginProcessIMAP(t *testing.T, address string, account string) (net.Conn, *
 	return client, reader
 }
 
+// imapBearerAuth authenticates one process IMAP client with bearer SASL and proves proxy mode.
+func imapBearerAuth(t *testing.T, address string, tag string, mechanism string, username string, token string) {
+	t.Helper()
+
+	client := dialPlain(t, address)
+	defer func() { _ = client.Close() }()
+
+	reader := bufio.NewReader(client)
+	expectLine(t, reader, "* OK nauthilus-director IMAP session ready\r\n")
+	client, reader = upgradeIMAPStartTLS(t, client, reader)
+	writeLine(t, client, tag+" AUTHENTICATE "+mechanism+" "+imapBearerPayload(mechanism, username, token))
+	expectLine(t, reader, tag+" OK Authentication completed\r\n")
+	writeLine(t, client, strings.TrimSuffix(tag, "001")+"002 NOOP")
+	expectLine(t, reader, strings.TrimSuffix(tag, "001")+"002 OK backend noop\r\n")
+}
+
+// imapBearerAuthFailure authenticates until one bearer SASL response fails closed.
+func imapBearerAuthFailure(
+	t *testing.T,
+	address string,
+	tag string,
+	mechanism string,
+	username string,
+	token string,
+	want string,
+) {
+	t.Helper()
+
+	client := dialPlain(t, address)
+	defer func() { _ = client.Close() }()
+
+	reader := bufio.NewReader(client)
+	expectLine(t, reader, "* OK nauthilus-director IMAP session ready\r\n")
+	client, reader = upgradeIMAPStartTLS(t, client, reader)
+	writeLine(t, client, tag+" AUTHENTICATE "+mechanism+" "+imapBearerPayload(mechanism, username, token))
+	expectLine(t, reader, want)
+}
+
+// imapBearerPayload selects the correct initial response renderer for a mechanism.
+func imapBearerPayload(mechanism string, username string, token string) string {
+	if strings.EqualFold(mechanism, "OAUTHBEARER") {
+		return imapOAuthBearerPayload(username, token)
+	}
+
+	return imapXOAUTH2Payload(username, token)
+}
+
+// imapXOAUTH2Payload renders an IMAP AUTHENTICATE XOAUTH2 initial response.
+func imapXOAUTH2Payload(username string, token string) string {
+	payload := "user=" + username + "\x01auth=Bearer " + token + "\x01\x01"
+
+	return base64.StdEncoding.EncodeToString([]byte(payload))
+}
+
+// imapOAuthBearerPayload renders an IMAP AUTHENTICATE OAUTHBEARER initial response.
+func imapOAuthBearerPayload(username string, token string) string {
+	payload := "n,a=" + username + ",\x01auth=Bearer " + token + "\x01\x01"
+
+	return base64.StdEncoding.EncodeToString([]byte(payload))
+}
+
 // markIMAPStartTLS asks in-memory sessions to enter logical TLS without a socket handshake.
 func markIMAPStartTLS(t *testing.T, client net.Conn, reader *bufio.Reader) {
 	t.Helper()
@@ -4294,20 +4730,40 @@ type fakeHTTPAuthority struct {
 }
 
 type fakeOIDCAuthority struct {
-	clientID       string
-	clientSecret   string
-	requiredScopes []string
-	issuedTokens   map[string][]string
-	discoveryCalls int
-	tokenAttempts  int
-	tokenCalls     int
-	tokenCounter   int
+	clientID               string
+	clientSecret           string
+	introspectionClientID  string
+	introspectionSecret    string
+	requiredScopes         []string
+	issuedTokens           map[string][]string
+	saslTokens             map[string]fakeSASLBearerToken
+	skipBackchannelAuth    bool
+	discoveryCalls         int
+	tokenAttempts          int
+	tokenCalls             int
+	tokenCounter           int
+	introspectionCalls     int
+	saslIntrospectionCalls int
 }
 
 type fakeOIDCAuthorityOptions struct {
-	ClientID       string
-	ClientSecret   string
-	RequiredScopes []string
+	ClientID              string
+	ClientSecret          string
+	IntrospectionClientID string
+	IntrospectionSecret   string
+	RequiredScopes        []string
+	SASLBearerTokens      map[string]fakeSASLBearerToken
+	SkipBackchannelAuth   bool
+}
+
+type fakeSASLBearerToken struct {
+	Active    bool
+	Account   string
+	Tenant    string
+	Shard     string
+	Scopes    []string
+	SessionID string
+	Malformed bool
 }
 
 // startFakeHTTPAuthority starts a public HTTP auth socket.
@@ -4400,13 +4856,88 @@ func newFakeOIDCAuthority(options fakeOIDCAuthorityOptions) *fakeOIDCAuthority {
 	if len(requiredScopes) == 0 {
 		requiredScopes = []string{e2eOIDCScopeAuth}
 	}
+	introspectionClientID := strings.TrimSpace(options.IntrospectionClientID)
+	if introspectionClientID == "" {
+		introspectionClientID = e2eSASLClientID
+	}
+	introspectionSecret := options.IntrospectionSecret
+	if introspectionSecret == "" {
+		introspectionSecret = e2eSASLClientSecret
+	}
 
 	return &fakeOIDCAuthority{
-		clientID:       clientID,
-		clientSecret:   clientSecret,
-		requiredScopes: append([]string(nil), requiredScopes...),
-		issuedTokens:   map[string][]string{},
+		clientID:              clientID,
+		clientSecret:          clientSecret,
+		introspectionClientID: introspectionClientID,
+		introspectionSecret:   introspectionSecret,
+		requiredScopes:        append([]string(nil), requiredScopes...),
+		issuedTokens:          map[string][]string{},
+		saslTokens:            cloneFakeSASLBearerTokens(options.SASLBearerTokens),
+		skipBackchannelAuth:   options.SkipBackchannelAuth,
 	}
+}
+
+// cloneFakeSASLBearerTokens detaches token fixtures without exposing their keys.
+func cloneFakeSASLBearerTokens(tokens map[string]fakeSASLBearerToken) map[string]fakeSASLBearerToken {
+	if len(tokens) == 0 {
+		return map[string]fakeSASLBearerToken{}
+	}
+
+	cloned := make(map[string]fakeSASLBearerToken, len(tokens))
+	for token, fixture := range tokens {
+		fixture.Scopes = append([]string(nil), fixture.Scopes...)
+		cloned[token] = fixture
+	}
+
+	return cloned
+}
+
+// activeFakeSASLBearerToken returns a successful Nauthilus introspection fixture.
+func activeFakeSASLBearerToken(account string, shard string) fakeSASLBearerToken {
+	return fakeSASLBearerToken{
+		Active:    true,
+		Account:   account,
+		Tenant:    e2eTenant,
+		Shard:     shard,
+		Scopes:    []string{"openid", e2eSASLRequiredScope},
+		SessionID: "session-" + safeFixtureID(account),
+	}
+}
+
+// inactiveFakeSASLBearerToken returns an inactive token fixture.
+func inactiveFakeSASLBearerToken(account string) fakeSASLBearerToken {
+	fixture := activeFakeSASLBearerToken(account, e2eShardTag)
+	fixture.Active = false
+
+	return fixture
+}
+
+// missingScopeFakeSASLBearerToken returns an active token without the mail scope.
+func missingScopeFakeSASLBearerToken(account string) fakeSASLBearerToken {
+	fixture := activeFakeSASLBearerToken(account, e2eShardTag)
+	fixture.Scopes = []string{"openid", "profile"}
+
+	return fixture
+}
+
+// missingAccountFakeSASLBearerToken returns an active token without the account claim.
+func missingAccountFakeSASLBearerToken(account string) fakeSASLBearerToken {
+	fixture := activeFakeSASLBearerToken(account, e2eShardTag)
+	fixture.Account = ""
+
+	return fixture
+}
+
+// malformedFakeSASLBearerToken returns a malformed introspection fixture.
+func malformedFakeSASLBearerToken() fakeSASLBearerToken {
+	return fakeSASLBearerToken{Malformed: true}
+}
+
+// safeFixtureID converts account text into a bounded non-secret session suffix.
+func safeFixtureID(account string) string {
+	replacer := strings.NewReplacer("@", "-", ".", "-", "_", "-")
+
+	return replacer.Replace(account)
 }
 
 // URL returns the fake authority endpoint.
@@ -4515,6 +5046,51 @@ func (f *fakeHTTPAuthority) ExpectOIDCTokenAttemptWithoutBackchannel(t *testing.
 	}
 }
 
+// ExpectSASLBearerIntrospection verifies mail SASL bearer validation used OIDC.
+func (f *fakeHTTPAuthority) ExpectSASLBearerIntrospection(t *testing.T, before int, delta int) {
+	t.Helper()
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if got := f.SASLBearerIntrospectionCount(); got >= before+delta {
+			f.ExpectOIDCDiscovery(t)
+
+			return
+		}
+
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	t.Fatalf("SASL bearer introspection calls did not reach %d", before+delta)
+}
+
+// ExpectOIDCDiscovery verifies the fake discovery document was requested.
+func (f *fakeHTTPAuthority) ExpectOIDCDiscovery(t *testing.T) {
+	t.Helper()
+
+	f.requestsLock.Lock()
+	defer f.requestsLock.Unlock()
+
+	if f.oidc == nil {
+		t.Fatal("fake authority was not configured for OIDC")
+	}
+	if f.oidc.discoveryCalls == 0 {
+		t.Fatal("fake authority did not receive OIDC discovery")
+	}
+}
+
+// SASLBearerIntrospectionCount returns secret-safe mail SASL introspection count.
+func (f *fakeHTTPAuthority) SASLBearerIntrospectionCount() int {
+	f.requestsLock.Lock()
+	defer f.requestsLock.Unlock()
+
+	if f.oidc == nil {
+		return 0
+	}
+
+	return f.oidc.saslIntrospectionCalls
+}
+
 // matchesOptionalString treats an omitted optional JSON field as an empty string.
 func matchesOptionalString(value any, want string) bool {
 	if want == "" && value == nil {
@@ -4573,7 +5149,7 @@ func safeHTTPAuthorityContextHeaders(request *http.Request) map[string]string {
 
 // authorizeBackchannel enforces fake Nauthilus OIDC bearer auth when enabled.
 func (f *fakeHTTPAuthority) authorizeBackchannel(writer http.ResponseWriter, request *http.Request) bool {
-	if f.oidc == nil {
+	if f.oidc == nil || f.oidc.skipBackchannelAuth {
 		return true
 	}
 
@@ -4630,12 +5206,17 @@ func (f *fakeHTTPAuthority) handleOIDCDiscovery(writer http.ResponseWriter, requ
 		"subject_types_supported":                       []string{"public"},
 		"id_token_signing_alg_values_supported":         []string{"RS256"},
 		"code_challenge_methods_supported":              []string{"S256"},
-		"scopes_supported":                              []string{e2eOIDCScopeAuth, e2eOIDCScopeLookup, e2eOIDCScopeList},
-		"claims_supported":                              []string{"sub", "client_id", "scope"},
-		"backchannel_logout_supported":                  false,
-		"backchannel_logout_session_supported":          false,
-		"frontchannel_logout_supported":                 false,
-		"frontchannel_logout_session_supported":         false,
+		"scopes_supported": []string{
+			e2eOIDCScopeAuth,
+			e2eOIDCScopeLookup,
+			e2eOIDCScopeList,
+			e2eSASLRequiredScope,
+		},
+		"claims_supported":                      []string{"sub", "client_id", "scope", "account", "tenant", "mailShard", "session_id"},
+		"backchannel_logout_supported":          false,
+		"backchannel_logout_session_supported":  false,
+		"frontchannel_logout_supported":         false,
+		"frontchannel_logout_session_supported": false,
 	})
 }
 
@@ -4696,7 +5277,7 @@ func (f *fakeHTTPAuthority) handleOIDCToken(writer http.ResponseWriter, request 
 	})
 }
 
-// handleOIDCIntrospection marks known fake tokens active for control-auth tests.
+// handleOIDCIntrospection marks known fake tokens active for control and SASL tests.
 func (f *fakeHTTPAuthority) handleOIDCIntrospection(writer http.ResponseWriter, request *http.Request) {
 	if f.oidc == nil {
 		http.NotFound(writer, request)
@@ -4713,9 +5294,32 @@ func (f *fakeHTTPAuthority) handleOIDCIntrospection(writer http.ResponseWriter, 
 
 		return
 	}
+	clientID, clientSecret, ok := request.BasicAuth()
+	if !ok {
+		clientID = request.Form.Get("client_id")
+		clientSecret = request.Form.Get("client_secret")
+	}
+	if !f.oidcValidIntrospectionClient(clientID, clientSecret) {
+		http.Error(writer, "invalid client", http.StatusUnauthorized)
+
+		return
+	}
 
 	token := request.Form.Get("token")
+	if fixture, ok := f.oidcSASLBearerToken(token); ok {
+		f.requestsLock.Lock()
+		f.oidc.introspectionCalls++
+		f.oidc.saslIntrospectionCalls++
+		f.requestsLock.Unlock()
+		f.writeSASLBearerIntrospection(writer, fixture)
+
+		return
+	}
+
 	scopes, ok := f.oidcScopesForToken(token)
+	f.requestsLock.Lock()
+	f.oidc.introspectionCalls++
+	f.requestsLock.Unlock()
 	writer.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(writer).Encode(map[string]any{
 		"active":    ok,
@@ -4724,6 +5328,64 @@ func (f *fakeHTTPAuthority) handleOIDCIntrospection(writer http.ResponseWriter, 
 		"aud":       f.oidc.clientID,
 		"scope":     strings.Join(scopes, " "),
 	})
+}
+
+// oidcValidIntrospectionClient verifies endpoint client auth without logging secrets.
+func (f *fakeHTTPAuthority) oidcValidIntrospectionClient(clientID string, secret string) bool {
+	f.requestsLock.Lock()
+	defer f.requestsLock.Unlock()
+
+	if f.oidc == nil {
+		return false
+	}
+
+	return (clientID == f.oidc.clientID && secret == f.oidc.clientSecret) ||
+		(clientID == f.oidc.introspectionClientID && secret == f.oidc.introspectionSecret)
+}
+
+// oidcSASLBearerToken returns a mail SASL token fixture without exposing token text.
+func (f *fakeHTTPAuthority) oidcSASLBearerToken(token string) (fakeSASLBearerToken, bool) {
+	f.requestsLock.Lock()
+	defer f.requestsLock.Unlock()
+
+	if f.oidc == nil {
+		return fakeSASLBearerToken{}, false
+	}
+	fixture, ok := f.oidc.saslTokens[token]
+	fixture.Scopes = append([]string(nil), fixture.Scopes...)
+
+	return fixture, ok
+}
+
+// writeSASLBearerIntrospection writes the configured end-user token response.
+func (f *fakeHTTPAuthority) writeSASLBearerIntrospection(writer http.ResponseWriter, fixture fakeSASLBearerToken) {
+	writer.Header().Set("Content-Type", "application/json")
+	if fixture.Malformed {
+		_, _ = writer.Write([]byte(`{"active":"yes","access_token":"redacted-secret-sentinel"}`))
+
+		return
+	}
+
+	scopes := fixture.Scopes
+	if len(scopes) == 0 {
+		scopes = []string{e2eSASLRequiredScope}
+	}
+	response := map[string]any{
+		"active":  fixture.Active,
+		"scope":   strings.Join(scopes, " "),
+		"account": fixture.Account,
+		"tenant":  fixture.Tenant,
+	}
+	if fixture.Shard != "" {
+		response["mailShard"] = fixture.Shard
+	}
+	if fixture.SessionID != "" {
+		response["session_id"] = fixture.SessionID
+	}
+	if fixture.Account == "" {
+		delete(response, "account")
+	}
+	_ = json.NewEncoder(writer).Encode(response)
 }
 
 // oidcScopesForToken returns scopes for an issued fake token without exposing it in failures.
@@ -4929,6 +5591,23 @@ func (b *fakeIMAPBackend) ExpectProxyLine(t *testing.T, want string) {
 	case observation := <-b.observations:
 		if strings.TrimSpace(observation.proxyLine) != want {
 			t.Fatalf("backend proxy line = %q, want %q", observation.proxyLine, want)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for fake backend observation")
+	}
+}
+
+// ExpectProxyLineWithAuth verifies backend auth mechanism and proxy mode.
+func (b *fakeIMAPBackend) ExpectProxyLineWithAuth(t *testing.T, wantProxy string, wantAuth string) {
+	t.Helper()
+
+	select {
+	case observation := <-b.observations:
+		if strings.TrimSpace(observation.proxyLine) != wantProxy {
+			t.Fatalf("backend proxy line = %q, want %q", observation.proxyLine, wantProxy)
+		}
+		if !strings.Contains(strings.ToUpper(observation.authLine), strings.ToUpper(wantAuth)) {
+			t.Fatalf("backend auth mechanism did not match %q", wantAuth)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for fake backend observation")
@@ -5386,6 +6065,13 @@ type unavailableAuthenticator struct{}
 
 // Authenticate returns a temporary failure for TLS-only E2E sessions.
 func (unavailableAuthenticator) Authenticate(context.Context, nauthilus.AuthRequest) (nauthilus.AuthResult, error) {
+	return nauthilus.AuthResult{Decision: nauthilus.DecisionTemporaryFailure}, nil
+}
+
+type unavailableBearerIntrospector struct{}
+
+// Introspect returns a temporary failure for fake-lane bearer sessions.
+func (unavailableBearerIntrospector) Introspect(context.Context, nauthilus.BearerIntrospectionRequest) (nauthilus.AuthResult, error) {
 	return nauthilus.AuthResult{Decision: nauthilus.DecisionTemporaryFailure}, nil
 }
 

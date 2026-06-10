@@ -25,6 +25,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"io"
 	"math/big"
 	"net"
@@ -68,7 +69,7 @@ func TestManagerSelectsSupportedProtocolListeners(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg = withTestListenerCertificates(t, cfg)
 
-	manager, err := NewManagerWithConfig(cfg)
+	manager, err := newTestManagerWithConfig(cfg)
 	if err != nil {
 		t.Fatalf("NewManagerWithConfig returned error: %v", err)
 	}
@@ -97,7 +98,7 @@ func TestManagerRejectsUnsupportedProtocolBeforeBind(t *testing.T) {
 	entry.Protocol = "nntp"
 	cfg.Director.Listeners[testIMAPListener] = entry
 
-	_, err := NewManagerWithConfig(cfg)
+	_, err := newTestManagerWithConfig(cfg)
 	if err == nil {
 		t.Fatal("NewManagerWithConfig accepted an unsupported protocol")
 	}
@@ -116,7 +117,7 @@ func TestSessionOptionsIncludeAuthorityBearerTokenLimit(t *testing.T) {
 
 	captured := make(chan SessionOptions, 1)
 
-	_, err := NewManagerWithConfig(cfg, WithSessionHandlerFactory(func(options SessionOptions) SessionHandler {
+	_, err := newTestManagerWithConfig(cfg, WithSessionHandlerFactory(func(options SessionOptions) SessionHandler {
 		captured <- options
 
 		return newRecordingHandler()
@@ -135,6 +136,25 @@ func TestSessionOptionsIncludeAuthorityBearerTokenLimit(t *testing.T) {
 	}
 }
 
+// TestManagerRejectsBearerCapableListenerWithoutUsableIntrospector verifies startup fails before bind.
+func TestManagerRejectsBearerCapableListenerWithoutUsableIntrospector(t *testing.T) {
+	cfg := singleListenerConfig(t, testIMAPListener, tlsModeStartTLS)
+
+	_, err := NewManagerWithConfig(
+		cfg,
+		WithBearerIntrospectorFactory(func(context.Context, config.AuthorityConfig) (nauthilus.BearerIntrospector, error) {
+			return nil, errors.New("introspection unavailable")
+		}),
+	)
+	if err == nil {
+		t.Fatal("NewManagerWithConfig accepted bearer listener without introspector")
+	}
+
+	if !strings.Contains(err.Error(), "introspection unavailable") {
+		t.Fatalf("error = %q, want introspection failure", err.Error())
+	}
+}
+
 // TestManagerSelectsConfiguredListenerAuthorityTransport verifies listener authority selection.
 func TestManagerSelectsConfiguredListenerAuthorityTransport(t *testing.T) {
 	cfg := singleListenerConfig(t, testIMAPListener, tlsModeStartTLS)
@@ -149,7 +169,7 @@ func TestManagerSelectsConfiguredListenerAuthorityTransport(t *testing.T) {
 	captured := make(chan config.AuthorityConfig, 1)
 	optionsSeen := make(chan SessionOptions, 1)
 
-	_, err := NewManagerWithConfig(
+	_, err := newTestManagerWithConfig(
 		cfg,
 		WithNauthilusClientFactory(func(
 			authority config.AuthorityConfig,
@@ -208,7 +228,7 @@ func TestManagerPassesListenerAuthorityContextToClientFactory(t *testing.T) {
 
 	captured := make(chan nauthilus.ClientOptions, 1)
 
-	_, err := NewManagerWithConfig(
+	_, err := newTestManagerWithConfig(
 		cfg,
 		WithNauthilusClientFactory(func(
 			_ config.AuthorityConfig,
@@ -272,7 +292,7 @@ func TestManagerKeepsAuthorityContextListenerScopedForSharedAuthority(t *testing
 
 	var captured []nauthilus.AuthorityContext
 
-	_, err := NewManagerWithConfig(
+	_, err := newTestManagerWithConfig(
 		cfg,
 		WithNauthilusClientFactory(func(
 			_ config.AuthorityConfig,
@@ -390,7 +410,7 @@ func TestSupportedListenersStartThroughProtocolFactory(t *testing.T) {
 
 	protocols := make(chan string, 4)
 
-	manager, err := NewManagerWithConfig(
+	manager, err := newTestManagerWithConfig(
 		cfg,
 		WithSessionHandlerFactory(func(options SessionOptions) SessionHandler {
 			protocols <- options.Config.Protocol
@@ -460,7 +480,7 @@ func TestReloadAddsLMTPAndDrainsRemovedListener(t *testing.T) {
 		testLMTPListener: lmtpEntry,
 	}
 
-	manager, err := NewManagerWithConfig(current, WithSessionHandlerFactory(func(SessionOptions) SessionHandler {
+	manager, err := newTestManagerWithConfig(current, WithSessionHandlerFactory(func(SessionOptions) SessionHandler {
 		return newRecordingHandler()
 	}))
 	if err != nil {
@@ -851,7 +871,7 @@ func TestListenerObservabilityClassifiesLifecycleEvents(t *testing.T) {
 
 	recorder := &recordingListenerObservability{}
 
-	manager, err := NewManagerWithConfig(cfg, WithObservabilityRecorder(recorder))
+	manager, err := newTestManagerWithConfig(cfg, WithObservabilityRecorder(recorder))
 	if err != nil {
 		t.Fatalf("NewManagerWithConfig: %v", err)
 	}
@@ -956,7 +976,7 @@ func TestProxyProtocolRejectsEmptyTrustedCIDRs(t *testing.T) {
 	entry.ProxyProtocol.TrustedCIDRs = nil
 	cfg.Director.Listeners[testIMAPListener] = entry
 
-	if _, err := NewManagerWithConfig(cfg); err == nil {
+	if _, err := newTestManagerWithConfig(cfg); err == nil {
 		t.Fatal("NewManagerWithConfig accepted proxy_protocol without trusted CIDRs")
 	}
 
@@ -1101,6 +1121,20 @@ type recordingListenerObservability struct {
 
 type noopAuthenticator struct{}
 
+type noopBearerIntrospector struct{}
+
+// newTestManagerWithConfig installs a deterministic bearer introspector for listener tests.
+func newTestManagerWithConfig(cfg config.Config, opts ...ManagerOption) (*Manager, error) {
+	allOptions := append([]ManagerOption{WithBearerIntrospectorFactory(testBearerIntrospectorFactory)}, opts...)
+
+	return NewManagerWithConfig(cfg, allOptions...)
+}
+
+// testBearerIntrospectorFactory avoids external OIDC discovery in listener unit tests.
+func testBearerIntrospectorFactory(context.Context, config.AuthorityConfig) (nauthilus.BearerIntrospector, error) {
+	return noopBearerIntrospector{}, nil
+}
+
 // Record stores one listener event for assertions.
 func (r *recordingListenerObservability) Record(_ context.Context, event observability.Event) {
 	r.mu.Lock()
@@ -1159,6 +1193,11 @@ func (r *recordingListenerObservability) snapshot() []observability.Event {
 // Authenticate returns a temporary failure without contacting an authority.
 func (noopAuthenticator) Authenticate(context.Context, nauthilus.AuthRequest) (nauthilus.AuthResult, error) {
 	return nauthilus.AuthResult{Decision: nauthilus.DecisionTemporaryFailure}, nil
+}
+
+// Introspect returns a deterministic rejection without contacting OIDC discovery.
+func (noopBearerIntrospector) Introspect(context.Context, nauthilus.BearerIntrospectionRequest) (nauthilus.AuthResult, error) {
+	return nauthilus.AuthResult{Decision: nauthilus.DecisionRejected}, nil
 }
 
 // newRecordingHandler creates a buffered recorder for one listener test.
@@ -1333,7 +1372,7 @@ func proxyListenerConfig(t *testing.T, trustedCIDRs []string) config.Config {
 func startManager(t *testing.T, cfg config.Config, listenerName string, opts ...ManagerOption) (*Manager, string) {
 	t.Helper()
 
-	manager, err := NewManagerWithConfig(cfg, opts...)
+	manager, err := newTestManagerWithConfig(cfg, opts...)
 	if err != nil {
 		t.Fatalf("NewManagerWithConfig: %v", err)
 	}

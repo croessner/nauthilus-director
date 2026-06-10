@@ -785,7 +785,7 @@ func TestSessionProxyUnsafeFrontendAddressFailsBeforeBackendAuth(t *testing.T) {
 
 // TestReplaySecretsAreClearedBeforeProxyMode verifies credential replay does not enter long-lived state.
 func TestReplaySecretsAreClearedBeforeProxyMode(t *testing.T) {
-	credentials := plainCredentialsForBackendTest(t)
+	credentials := xoauth2CredentialsForBackendTest(t)
 	defer credentials.Clear()
 
 	client, server := net.Pipe()

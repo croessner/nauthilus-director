@@ -23,6 +23,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"net"
+	"net/http"
 	"reflect"
 	"sort"
 	"strings"
@@ -94,6 +95,12 @@ type NauthilusClientFactory func(
 	options nauthilus.ClientOptions,
 ) (nauthilus.Authenticator, error)
 
+// BearerIntrospectorFactory builds a listener authority's SASL bearer introspection boundary.
+type BearerIntrospectorFactory func(
+	ctx context.Context,
+	authority config.AuthorityConfig,
+) (nauthilus.BearerIntrospector, error)
+
 // SessionOptions contains the typed listener values passed into a protocol handler.
 type SessionOptions struct {
 	ListenerName        string
@@ -103,6 +110,7 @@ type SessionOptions struct {
 	Security            config.DirectorSecurityConfig
 	Authenticator       nauthilus.Authenticator
 	IdentityLookuper    nauthilus.IdentityLookuper
+	BearerIntrospector  nauthilus.BearerIntrospector
 	BearerTokenMaxBytes int
 	DirectorInstanceID  string
 	DefaultTenant       string
@@ -143,11 +151,12 @@ type Manager struct {
 }
 
 type managerOptions struct {
-	handlerFactory    SessionHandlerFactory
-	authClientFactory NauthilusClientFactory
-	listenConfig      net.ListenConfig
-	localSessions     *runtimectl.LocalSessionRegistry
-	observability     observability.Recorder
+	handlerFactory            SessionHandlerFactory
+	authClientFactory         NauthilusClientFactory
+	bearerIntrospectorFactory BearerIntrospectorFactory
+	listenConfig              net.ListenConfig
+	localSessions             *runtimectl.LocalSessionRegistry
+	observability             observability.Recorder
 }
 
 // Module wires the listener lifecycle into an Fx application.
@@ -176,9 +185,10 @@ func NewManagerWithConfig(cfg config.Config, opts ...ManagerOption) (*Manager, e
 	cfg = cfg.Normalize()
 
 	options := managerOptions{
-		handlerFactory:    defaultSessionHandlerFactory,
-		authClientFactory: defaultNauthilusClientFactory,
-		observability:     observability.NoopRecorder{},
+		handlerFactory:            defaultSessionHandlerFactory,
+		authClientFactory:         defaultNauthilusClientFactory,
+		bearerIntrospectorFactory: defaultBearerIntrospectorFactory,
+		observability:             observability.NoopRecorder{},
 	}
 	for _, opt := range opts {
 		opt(&options)
@@ -248,6 +258,15 @@ func WithNauthilusClientFactory(factory NauthilusClientFactory) ManagerOption {
 	return func(options *managerOptions) {
 		if factory != nil {
 			options.authClientFactory = factory
+		}
+	}
+}
+
+// WithBearerIntrospectorFactory replaces SASL bearer introspection construction for tests or app wiring.
+func WithBearerIntrospectorFactory(factory BearerIntrospectorFactory) ManagerOption {
+	return func(options *managerOptions) {
+		if factory != nil {
+			options.bearerIntrospectorFactory = factory
 		}
 	}
 }
@@ -580,6 +599,62 @@ func defaultNauthilusClientFactory(
 	options nauthilus.ClientOptions,
 ) (nauthilus.Authenticator, error) {
 	return nauthilus.NewClient(authority, options)
+}
+
+// defaultBearerIntrospectorFactory creates the configured SASL bearer introspection client.
+func defaultBearerIntrospectorFactory(ctx context.Context, authority config.AuthorityConfig) (nauthilus.BearerIntrospector, error) {
+	client := &http.Client{}
+	if timeout := authority.Timeout.Std(); timeout > 0 {
+		client.Timeout = timeout
+	}
+
+	return nauthilus.NewSASLBearerIntrospectorFromAuthority(ctx, authority, client)
+}
+
+// bearerIntrospectorForListener builds the introspector only for bearer-capable listener surfaces.
+func bearerIntrospectorForListener(
+	ctx context.Context,
+	entry config.ListenerConfig,
+	authority config.AuthorityConfig,
+	options managerOptions,
+) (nauthilus.BearerIntrospector, error) {
+	if !listenerNeedsBearerIntrospection(entry) {
+		return nil, nil
+	}
+
+	if options.bearerIntrospectorFactory == nil {
+		return nil, errors.New("sasl bearer introspector factory unavailable")
+	}
+
+	return options.bearerIntrospectorFactory(ctx, authority)
+}
+
+// listenerNeedsBearerIntrospection reports whether a listener can accept mail bearer SASL.
+func listenerNeedsBearerIntrospection(entry config.ListenerConfig) bool {
+	switch strings.ToLower(strings.TrimSpace(entry.Protocol)) {
+	case protocolIMAP:
+		return entry.IMAP != nil && mechanismsIncludeBearer(entry.IMAP.AuthMechanisms)
+	case protocolLMTP:
+		return entry.LMTP != nil && mechanismsIncludeBearer(entry.LMTP.ClientAuth.Mechanisms)
+	case protocolSIEVE:
+		return entry.Sieve != nil && mechanismsIncludeBearer(entry.Sieve.AuthMechanisms)
+	case protocolPOP3:
+		return entry.POP3 != nil && mechanismsIncludeBearer(entry.POP3.AuthMechanisms)
+	default:
+		return false
+	}
+}
+
+// mechanismsIncludeBearer reports whether any configured frontend mechanism carries bearer material.
+func mechanismsIncludeBearer(mechanisms []string) bool {
+	for _, mechanism := range mechanisms {
+		switch strings.ToLower(strings.TrimSpace(mechanism)) {
+		case "xoauth2", "oauthbearer":
+			return true
+		}
+	}
+
+	return false
 }
 
 // sortedSupportedListenerNames selects supported protocol listeners deterministically.

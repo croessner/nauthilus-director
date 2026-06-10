@@ -74,6 +74,7 @@ type SessionConfig struct {
 	RecipientLookupRequired bool
 	FrontendTLSConfig       *tls.Config
 	Authenticator           nauthilus.Authenticator
+	BearerIntrospector      nauthilus.BearerIntrospector
 	IdentityLookuper        nauthilus.IdentityLookuper
 	RoutingResolver         routing.RoutingResolver
 	SessionStore            state.SessionStore

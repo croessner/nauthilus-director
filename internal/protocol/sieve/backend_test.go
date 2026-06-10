@@ -270,6 +270,106 @@ func TestCredentialReplayPolicy(t *testing.T) {
 	}
 }
 
+// TestSieveMasterUserModeBranchesByCredentialKind verifies hybrid backend auth decisions.
+func TestSieveMasterUserModeBranchesByCredentialKind(t *testing.T) {
+	t.Run("password uses master user", func(t *testing.T) {
+		credentials := sievePlainCredentialsForBackendTest(t)
+		defer credentials.Clear()
+
+		command, err := backendAuthCommand(testSieveMasterUserBackend(), testVerifiedSieveBackendConnection(), credentials)
+		if err != nil {
+			t.Fatalf("backendAuthCommand returned error: %v", err)
+		}
+
+		payload := decodeSieveInitialResponse(t, command, mechanismPlain)
+		if payload != "\x00alice@example.test*director-master\x00master-secret" {
+			t.Fatalf("PLAIN payload mismatch: got %d bytes, want master-user payload", len(payload))
+		}
+		if strings.Contains(payload, testSieveFrontendPassword) {
+			t.Fatal("master-user branch replayed the frontend password")
+		}
+	})
+
+	t.Run("bearer uses credential replay", func(t *testing.T) {
+		credentials := sieveXOAUTH2CredentialsForBackendTest(t)
+		defer credentials.Clear()
+
+		command, err := backendAuthCommand(testSieveMasterUserBackend(), testVerifiedSieveBackendConnection(), credentials)
+		if err != nil {
+			t.Fatalf("backendAuthCommand returned error: %v", err)
+		}
+
+		payload := decodeSieveInitialResponse(t, command, mechanismXOAUTH2)
+		if payload != "user=alice@example.test\x01auth=Bearer "+testSieveFrontendPassword+"\x01\x01" {
+			t.Fatalf("XOAUTH2 payload mismatch: got %d bytes, want bearer replay payload", len(payload))
+		}
+		for _, forbidden := range []string{"director-master", "master-secret", "*director-master"} {
+			if strings.Contains(payload, forbidden) {
+				t.Fatalf("bearer replay payload used master-user material %q", forbidden)
+			}
+		}
+	})
+}
+
+// TestSieveMasterUserBearerReplayFailsClosedBeforeCommand verifies unsafe policy builds no command.
+func TestSieveMasterUserBearerReplayFailsClosedBeforeCommand(t *testing.T) {
+	testCases := map[string]struct {
+		target       backend.Backend
+		connection   *BackendConnection
+		wantContains string
+	}{
+		"missing allowlist": {
+			target: func() backend.Backend {
+				target := testSieveMasterUserBackend()
+				target.Auth.CredentialReplay.AllowedMechanisms = []string{mechanismOAuthBearer}
+
+				return target
+			}(),
+			connection:   testVerifiedSieveBackendConnection(),
+			wantContains: "bearer replay mechanism unavailable",
+		},
+		"missing capability": {
+			target: testSieveMasterUserBackend(),
+			connection: &BackendConnection{
+				capabilities: backend.NewCapabilitySet("SASL=PLAIN"),
+				tlsActive:    true,
+				tlsVerified:  true,
+			},
+			wantContains: "bearer replay mechanism unavailable",
+		},
+		"tls required": {
+			target: testSieveMasterUserBackend(),
+			connection: &BackendConnection{
+				capabilities: backend.NewCapabilitySet("SASL=PLAIN", "SASL=XOAUTH2"),
+				tlsActive:    true,
+				tlsVerified:  false,
+			},
+			wantContains: "credential replay requires verified backend TLS",
+		},
+	}
+
+	for name, testCase := range testCases {
+		t.Run(name, func(t *testing.T) {
+			credentials := sieveXOAUTH2CredentialsForBackendTest(t)
+			defer credentials.Clear()
+
+			command, err := backendAuthCommand(testCase.target, testCase.connection, credentials)
+			if !errors.Is(err, ErrBackendAuthPolicy) {
+				t.Fatalf("backendAuthCommand error = %v, want policy rejection", err)
+			}
+			if command != "" {
+				t.Fatalf("backendAuthCommand returned command before policy rejection: %q", command)
+			}
+			if !strings.Contains(err.Error(), testCase.wantContains) {
+				t.Fatalf("error = %q, want %q", err.Error(), testCase.wantContains)
+			}
+			if strings.Contains(err.Error(), testSieveFrontendPassword) || strings.Contains(err.Error(), "alice@example.test") {
+				t.Fatal("policy error leaked credential material")
+			}
+		})
+	}
+}
+
 // TestLightHealthWritesProxyBeforeGreeting verifies health uses the backend socket tuple.
 func TestLightHealthWritesProxyBeforeGreeting(t *testing.T) {
 	dialer := scriptedSieveBackendDialerWithAddrs(
@@ -491,6 +591,31 @@ func testSieveMasterUserConfig() backend.MasterUserConfig {
 	}
 }
 
+// testSieveMasterUserBackend returns a hybrid master-user backend fixture.
+func testSieveMasterUserBackend() backend.Backend {
+	target := testSieveBackendTarget(backendTLSStartTLS)
+	target.Auth = backend.AuthConfig{
+		Mode:       backendAuthModeMasterUser,
+		MasterUser: testSieveMasterUserConfig(),
+		CredentialReplay: backend.CredentialReplayConfig{
+			RequireBackendTLS: true,
+			PreserveMechanism: true,
+			AllowedMechanisms: []string{mechanismPlain, mechanismXOAUTH2, mechanismOAuthBearer},
+		},
+	}
+
+	return target
+}
+
+// testVerifiedSieveBackendConnection returns a prepared backend connection fixture.
+func testVerifiedSieveBackendConnection() *BackendConnection {
+	return &BackendConnection{
+		capabilities: backend.NewCapabilitySet("SASL=PLAIN", "SASL=XOAUTH2", "SASL=OAUTHBEARER"),
+		tlsActive:    true,
+		tlsVerified:  true,
+	}
+}
+
 // sievePlainCredentialsForBackendTest creates PLAIN credentials for backend auth tests.
 func sievePlainCredentialsForBackendTest(t *testing.T) *frontendCredentials {
 	t.Helper()
@@ -503,6 +628,23 @@ func sievePlainCredentialsForBackendTest(t *testing.T) *frontendCredentials {
 	credentials, err := parseSASLCredentials(mechanism, plainPayload("alice@example.test", testSieveFrontendPassword), 256, 64)
 	if err != nil {
 		t.Fatalf("parse PLAIN credentials: %v", err)
+	}
+
+	return credentials
+}
+
+// sieveXOAUTH2CredentialsForBackendTest creates bearer credentials for backend auth tests.
+func sieveXOAUTH2CredentialsForBackendTest(t *testing.T) *frontendCredentials {
+	t.Helper()
+
+	mechanism, err := saslcred.NewMechanism("XOAUTH2")
+	if err != nil {
+		t.Fatalf("new mechanism: %v", err)
+	}
+
+	credentials, err := parseSASLCredentials(mechanism, xoauth2Payload("alice@example.test", testSieveFrontendPassword), 256, 64)
+	if err != nil {
+		t.Fatalf("parse XOAUTH2 credentials: %v", err)
 	}
 
 	return credentials

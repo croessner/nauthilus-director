@@ -45,6 +45,8 @@ const (
 	e2eSieveSentinelName     = "sentinel-script-name"
 	e2eSieveShardBAccount    = "sieve-b@example.test"
 	e2eSieveMaintenanceProof = "sieve-maintenance@example.test"
+	e2eSieveXOAuth2Token     = "e2e-sieve-xoauth2-token-sentinel"
+	e2eSieveOAuthBearerToken = "e2e-sieve-oauthbearer-token-sentinel"
 	sieveCommandCapability   = "CAPABILITY"
 	sieveCommandListScripts  = "LISTSCRIPTS"
 	sieveCommandNoop         = "NOOP"
@@ -57,11 +59,24 @@ func TestServerBinaryPublicSieveProductionFlow(t *testing.T) {
 	binary := e2eServerBinary(t)
 	ctl := buildDirectorctl(t)
 	redisFixture := startValkeySessionStore(t)
-	authority := startMappedFakeHTTPAuthority(t, sieveAuthorityIdentities(), nil)
+	authority := startMappedFakeOIDCHTTPAuthority(t, sieveAuthorityIdentities(), nil, fakeOIDCAuthorityOptions{
+		SASLBearerTokens: map[string]fakeSASLBearerToken{
+			e2eSieveXOAuth2Token:     activeFakeSASLBearerToken(e2eSieveShardBAccount, e2eShardTagB),
+			e2eSieveOAuthBearerToken: activeFakeSASLBearerToken(e2eSieveBearerAccount, e2eShardTagB),
+		},
+		SkipBackchannelAuth: true,
+	})
+	backendCertPath, _, backendCertificate := writeTestCertificate(t)
+	sieveBackendTLS := &tls.Config{Certificates: []tls.Certificate{backendCertificate}, MinVersion: tls.VersionTLS12}
 	fakeSieveA := managesievebackend.Start(t, managesievebackend.Options{
 		ExpectedScripts: map[string]string{e2eSieveSentinelName: e2eSieveSentinelContent},
+		TLSConfig:       sieveBackendTLS,
+		TLSMode:         "starttls",
 	})
-	fakeSieveB := managesievebackend.Start(t, managesievebackend.Options{})
+	fakeSieveB := managesievebackend.Start(t, managesievebackend.Options{
+		TLSConfig: sieveBackendTLS,
+		TLSMode:   "starttls",
+	})
 	fakeIMAPA := startFakeIMAPBackend(t, fakeBackendOptions{})
 	fakeIMAPB := startFakeIMAPBackend(t, fakeBackendOptions{})
 	fakeLMTPA := lmtpbackend.Start(t, lmtpbackend.Options{})
@@ -72,13 +87,16 @@ func TestServerBinaryPublicSieveProductionFlow(t *testing.T) {
 	lmtpAddress := loopbackAddress(t)
 	controlAddress := loopbackAddress(t)
 	configPath := writeSieveProductionProcessConfig(t, sieveProductionProcessConfigOptions{
-		RedisAddress:   redisFixture.addr,
-		AuthorityURL:   authority.URL(),
-		SieveAddress:   sieveAddress,
-		SievesAddress:  sievesAddress,
-		IMAPAddress:    imapAddress,
-		LMTPAddress:    lmtpAddress,
-		ControlAddress: controlAddress,
+		RedisAddress:          redisFixture.addr,
+		AuthorityURL:          authority.URL(),
+		AuthorityBearer:       processAuthorityBearerForFake(authority),
+		SieveAddress:          sieveAddress,
+		SievesAddress:         sievesAddress,
+		IMAPAddress:           imapAddress,
+		LMTPAddress:           lmtpAddress,
+		ControlAddress:        controlAddress,
+		SieveBackendTLSMode:   "starttls",
+		SieveBackendTLSCAFile: backendCertPath,
 		SieveBackends: map[string]string{
 			e2eSieveBackendAID: fakeSieveA.Address(),
 			e2eSieveBackendBID: fakeSieveB.Address(),
@@ -152,7 +170,16 @@ func exerciseSieveStartTLSAuthProxyAndRouteLookup(
 		"--include-affinity",
 	)
 	assertCLIOutputFields(t, routeOutput, "selected_backend="+e2eSieveBackendAID, "source=initial_placement")
-	assertOutputOmits(t, routeOutput, e2eSieveSentinelName, e2eSieveSentinelContent, e2ePassword, e2eToken)
+	assertOutputOmits(
+		t,
+		routeOutput,
+		e2eSieveSentinelName,
+		e2eSieveSentinelContent,
+		e2ePassword,
+		e2eToken,
+		e2eSieveXOAuth2Token,
+		e2eSieveOAuthBearerToken,
+	)
 
 	client.WriteLine(`AUTHENTICATE "PLAIN" "` + sievePlainPayload(e2eSieveAccount, e2ePassword) + `"`)
 	client.ExpectStatusPrefix("OK")
@@ -185,20 +212,22 @@ func exerciseSieveImplicitBearerAuth(t *testing.T, address string, authority *fa
 	greeting := xoauth2.ReadResponse()
 	assertSieveNoCapability(t, greeting, "STARTTLS")
 	assertSieveSASLValue(t, greeting, "PLAIN XOAUTH2 OAUTHBEARER")
-	xoauth2.WriteLine(`AUTHENTICATE "XOAUTH2" "` + sieveXOAUTH2Payload(e2eSieveShardBAccount, e2eToken) + `"`)
+	beforeAuth := authority.SASLBearerIntrospectionCount()
+	xoauth2.WriteLine(`AUTHENTICATE "XOAUTH2" "` + sieveXOAUTH2Payload(e2eSieveShardBAccount, e2eSieveXOAuth2Token) + `"`)
 	xoauth2.ExpectStatusPrefix("OK")
 	xoauth2.Close()
-	expectAuthorityRequest(t, authority, e2eSieveProtocol, "xoauth2", e2eSieveShardBAccount)
-	assertSieveObservation(t, fakeSieveB.ExpectObservation(t), "plain", false)
+	authority.ExpectSASLBearerIntrospection(t, beforeAuth, 1)
+	assertSieveObservation(t, fakeSieveB.ExpectObservation(t), "xoauth2", false)
 
 	oauthbearer := dialSieveTLS(t, address)
 	defer oauthbearer.Close()
 	oauthbearer.ReadResponse()
-	oauthbearer.WriteLine(`AUTHENTICATE "OAUTHBEARER" "` + sieveOAuthBearerPayload(e2eSieveBearerAccount, e2eToken) + `"`)
+	beforeAuth = authority.SASLBearerIntrospectionCount()
+	oauthbearer.WriteLine(`AUTHENTICATE "OAUTHBEARER" "` + sieveOAuthBearerPayload(e2eSieveBearerAccount, e2eSieveOAuthBearerToken) + `"`)
 	oauthbearer.ExpectStatusPrefix("OK")
 	oauthbearer.Close()
-	expectAuthorityRequest(t, authority, e2eSieveProtocol, "oauthbearer", e2eSieveBearerAccount)
-	assertSieveObservation(t, fakeSieveB.ExpectObservation(t), "plain", false)
+	authority.ExpectSASLBearerIntrospection(t, beforeAuth, 1)
+	assertSieveObservation(t, fakeSieveB.ExpectObservation(t), "oauthbearer", false)
 }
 
 // exerciseIMAPAndLMTPAffinityInfluenceSieve proves existing state selects the Sieve backend node.
@@ -380,18 +409,21 @@ func exerciseSieveRuntimeControls(
 }
 
 type sieveProductionProcessConfigOptions struct {
-	RedisAddress         string
-	AuthorityURL         string
-	SieveAddress         string
-	SievesAddress        string
-	IMAPAddress          string
-	LMTPAddress          string
-	ControlAddress       string
-	SieveBackends        map[string]string
-	IMAPBackends         map[string]string
-	LMTPBackends         map[string]string
-	UserHoldMaxWait      time.Duration
-	UserHoldPollInterval time.Duration
+	RedisAddress          string
+	AuthorityURL          string
+	AuthorityBearer       processAuthorityBearerOptions
+	SieveAddress          string
+	SievesAddress         string
+	IMAPAddress           string
+	LMTPAddress           string
+	ControlAddress        string
+	SieveBackends         map[string]string
+	SieveBackendTLSMode   string
+	SieveBackendTLSCAFile string
+	IMAPBackends          map[string]string
+	LMTPBackends          map[string]string
+	UserHoldMaxWait       time.Duration
+	UserHoldPollInterval  time.Duration
 }
 
 // writeSieveProductionProcessConfig writes a production-style multiprotocol fixture.
@@ -576,7 +608,7 @@ director:
 		processControlAuthYAML(t),
 		e2eProcessKeyPrefix,
 		options.RedisAddress,
-		processAuthorityOIDCYAML(),
+		processAuthorityYAML(t, processAuthorityOIDCOptions{}, options.AuthorityBearer),
 		options.AuthorityURL,
 		userHold,
 		e2eShardTag,
@@ -606,6 +638,11 @@ director:
 
 // sieveProductionBackendsYAML renders matching backend-node entries across IMAP, LMTP and Sieve.
 func sieveProductionBackendsYAML(options sieveProductionProcessConfigOptions) string {
+	sieveBackendTLSMode := strings.TrimSpace(options.SieveBackendTLSMode)
+	if sieveBackendTLSMode == "" {
+		sieveBackendTLSMode = "plaintext"
+	}
+
 	return fmt.Sprintf(`    mailstore-a-imap:
       protocol: imap
       shard_tag: %q
@@ -685,8 +722,13 @@ func sieveProductionBackendsYAML(options sieveProductionProcessConfigOptions) st
       max_connections: 100
       maintenance: disabled
       tls:
-        mode: plaintext
+        mode: %q
+        ca_file: %q
+        cert: ""
+        key: ""
+        server_name: "127.0.0.1"
         min_tls_version: TLS1.2
+        insecure_skip_verify: false
       auth:
         mode: master_user
         master_user:
@@ -694,6 +736,10 @@ func sieveProductionBackendsYAML(options sieveProductionProcessConfigOptions) st
           password_file: backend-master-secret
           user_format: "{user}*{master_user}"
           mechanism: plain
+        credential_replay:
+          require_backend_tls: true
+          preserve_mechanism: true
+          allowed_mechanisms: [plain, xoauth2, oauthbearer]
       health_check:
         enabled: false
     mailstore-b-sieve:
@@ -705,8 +751,13 @@ func sieveProductionBackendsYAML(options sieveProductionProcessConfigOptions) st
       max_connections: 100
       maintenance: disabled
       tls:
-        mode: plaintext
+        mode: %q
+        ca_file: %q
+        cert: ""
+        key: ""
+        server_name: "127.0.0.1"
         min_tls_version: TLS1.2
+        insecure_skip_verify: false
       auth:
         mode: master_user
         master_user:
@@ -714,6 +765,10 @@ func sieveProductionBackendsYAML(options sieveProductionProcessConfigOptions) st
           password_file: backend-master-secret
           user_format: "{user}*{master_user}"
           mechanism: plain
+        credential_replay:
+          require_backend_tls: true
+          preserve_mechanism: true
+          allowed_mechanisms: [plain, xoauth2, oauthbearer]
       health_check:
         enabled: false
 `, e2eShardTag,
@@ -726,8 +781,12 @@ func sieveProductionBackendsYAML(options sieveProductionProcessConfigOptions) st
 		options.LMTPBackends[e2eLMTPBackendBID],
 		e2eShardTag,
 		options.SieveBackends[e2eSieveBackendAID],
+		sieveBackendTLSMode,
+		options.SieveBackendTLSCAFile,
 		e2eShardTagB,
 		options.SieveBackends[e2eSieveBackendBID],
+		sieveBackendTLSMode,
+		options.SieveBackendTLSCAFile,
 	)
 }
 
@@ -1027,6 +1086,8 @@ func assertSieveProcessOutputSafe(t *testing.T, output string) {
 		e2eSieveRuntimeAccount,
 		e2eSieveBearerAccount,
 		e2eSieveShardBAccount,
+		e2eSieveXOAuth2Token,
+		e2eSieveOAuthBearerToken,
 	} {
 		if strings.Contains(output, forbidden) {
 			t.Fatalf("process output leaked Sieve value %q: %s", forbidden, output)

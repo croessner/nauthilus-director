@@ -31,9 +31,67 @@ const (
 
 // Normalize returns a config snapshot with derived runtime defaults applied.
 func (c Config) Normalize() Config {
+	c.Auth = c.Auth.Normalize()
 	c.Director = c.Director.Normalize()
 
 	return c
+}
+
+// Normalize returns auth config with stable authority mechanism vocabulary.
+func (a AuthConfig) Normalize() AuthConfig {
+	if a.Authorities == nil {
+		return a
+	}
+
+	authorities := make(map[string]AuthorityConfig, len(a.Authorities))
+	for name, authority := range a.Authorities {
+		authority.Transport = strings.ToLower(strings.TrimSpace(authority.Transport))
+		authority.Mechanisms = authority.Mechanisms.Normalize()
+		authority.OIDC = authority.OIDC.Normalize()
+		authorities[name] = authority
+	}
+
+	a.Authorities = authorities
+
+	return a
+}
+
+// Normalize returns authority mechanisms with canonical mechanism names.
+func (a AuthorityMechanismsConfig) Normalize() AuthorityMechanismsConfig {
+	a.Password.Names = normalizeLowerList(a.Password.Names)
+	a.Bearer.Names = normalizeLowerList(a.Bearer.Names)
+	a.Bearer.Validation = strings.ToLower(strings.TrimSpace(a.Bearer.Validation))
+	a.Bearer.Introspection = a.Bearer.Introspection.Normalize()
+
+	return a
+}
+
+// Normalize returns SASL bearer introspection config with stable scalar values.
+func (b BearerIntrospectionConfig) Normalize() BearerIntrospectionConfig {
+	b.Issuer = strings.TrimSpace(b.Issuer)
+	b.DiscoveryURL = strings.TrimSpace(b.DiscoveryURL)
+	b.ClientID = strings.TrimSpace(b.ClientID)
+	b.ClientKeyID = strings.TrimSpace(b.ClientKeyID)
+	b.ClientAssertionAlg = strings.TrimSpace(b.ClientAssertionAlg)
+	b.AuthMethod = strings.ToLower(strings.TrimSpace(b.AuthMethod))
+	b.RequiredScope = strings.TrimSpace(b.RequiredScope)
+	b.AccountClaim = strings.TrimSpace(b.AccountClaim)
+
+	return b
+}
+
+// Normalize returns authority OIDC caller-auth config with stable method values.
+func (a AuthorityOIDCConfig) Normalize() AuthorityOIDCConfig {
+	a.AuthorityMode = strings.ToLower(strings.TrimSpace(a.AuthorityMode))
+	a.IssuerHint = strings.TrimSpace(a.IssuerHint)
+	a.Issuer = strings.TrimSpace(a.Issuer)
+	a.DiscoveryURL = strings.TrimSpace(a.DiscoveryURL)
+	a.AudienceHint = strings.TrimSpace(a.AudienceHint)
+	a.ClientCredentials.TokenEndpointAuthMethod = normalizedOIDCConfigMethod(a.ClientCredentials.TokenEndpointAuthMethod)
+	a.ClientCredentials.IntrospectionEndpointAuthMethod = normalizedOIDCConfigMethod(a.ClientCredentials.IntrospectionEndpointAuthMethod)
+	a.ClientCredentials.ClientAssertionAlg = strings.TrimSpace(a.ClientCredentials.ClientAssertionAlg)
+
+	return a
 }
 
 // Normalize returns director config with non-empty effective backend shard tags.

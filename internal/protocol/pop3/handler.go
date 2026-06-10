@@ -64,6 +64,7 @@ type SessionConfig struct {
 	MaxBearerTokenBytes    int
 	FrontendTLSConfig      *tls.Config
 	Authenticator          nauthilus.Authenticator
+	BearerIntrospector     nauthilus.BearerIntrospector
 	RoutingResolver        routing.RoutingResolver
 	PlacementService       placement.SessionPlacer
 	PlacementGate          runtimectl.PlacementGate

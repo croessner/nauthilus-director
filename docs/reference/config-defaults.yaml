@@ -33,11 +33,24 @@ auth:
             mechanisms:
                 bearer:
                     enabled: true
+                    introspection:
+                        account_claim: ""
+                        auth_method: client_secret_basic
+                        client_assertion_alg: ""
+                        client_id: nauthilus-director-sasl
+                        client_key_id: ""
+                        client_private_key_file: ""
+                        client_secret: ""
+                        client_secret_file: <redacted>
+                        discovery_url: ""
+                        enabled: true
+                        issuer: https://auth.example.org
+                        required_scope: email
                     names:
                         - xoauth2
                         - oauthbearer
                     token_max_bytes: 16384
-                    validation: nauthilus
+                    validation: nauthilus_introspection
                 password:
                     enabled: true
                     names:
@@ -67,8 +80,6 @@ auth:
                 enabled: true
                 issuer: https://auth.example.org
                 issuer_hint: https://auth.example.org
-                required_scopes:
-                    - email
             timeout: 5s
             transport: http
 director:

@@ -42,6 +42,8 @@ const (
 	metricLabelTLSMode         = "tls_mode"
 	metricLabelTransport       = "transport"
 
+	fieldAccount             = "account"
+	fieldAccountKey          = "account_key"
 	fieldAuthorization       = "authorization"
 	fieldAuthorizationHeader = "authorization_header"
 	fieldBackendIdentifier   = "backend_identifier"
@@ -52,9 +54,12 @@ const (
 	fieldClientIP            = "client_ip"
 	fieldCredential          = "credential"
 	fieldDATAContent         = "data_content"
+	fieldDovecotAccount      = "dovecot_account"
+	fieldEmail               = "email"
 	fieldEnvelopeSender      = "envelope_sender"
 	fieldError               = "error"
 	fieldMailFrom            = "mail_from"
+	fieldMailAccount         = "mail_account"
 	fieldMessageBody         = "message_body"
 	fieldMessageContent      = "message_content"
 	fieldMessageID           = "message_id"
@@ -67,6 +72,7 @@ const (
 	fieldPostAuthCommandBody = "post_auth_command_body"
 	fieldPrivateKey          = "private_key"
 	fieldProtected           = "protected"
+	fieldPreferredUsername   = "preferred_username"
 	fieldRawError            = "raw_error"
 	fieldRecipient           = "recipient"
 	fieldRemoteAddr          = "remote_addr"
@@ -80,6 +86,7 @@ const (
 	fieldSecret              = "secret"
 	fieldSessionID           = "session_id"
 	fieldSpanID              = "span_id"
+	fieldSub                 = "sub"
 	fieldSubject             = "subject"
 	fieldToken               = "token"
 	fieldTraceID             = "trace_id"
@@ -150,14 +157,20 @@ var allowedMetricLabels = map[string]struct{}{
 }
 
 var forbiddenMetricLabels = map[string]struct{}{
+	fieldAccount:             {},
+	fieldAccountKey:          {},
 	fieldBackendIdentifier:   {},
 	fieldBackendNode:         {},
 	fieldClientIP:            {},
+	fieldDovecotAccount:      {},
+	fieldEmail:               {},
+	fieldMailAccount:         {},
 	fieldMessageNumber:       {},
 	fieldMessageSize:         {},
 	fieldOperatorHoldReason:  {},
 	fieldPassword:            {},
 	fieldPostAuthCommandBody: {},
+	fieldPreferredUsername:   {},
 	fieldRawError:            {},
 	fieldRecipient:           {},
 	fieldRemoteAddr:          {},
@@ -168,6 +181,7 @@ var forbiddenMetricLabels = map[string]struct{}{
 	fieldScriptName:          {},
 	fieldSessionID:           {},
 	fieldSpanID:              {},
+	fieldSub:                 {},
 	fieldToken:               {},
 	fieldTraceID:             {},
 	fieldUIDL:                {},
@@ -176,15 +190,20 @@ var forbiddenMetricLabels = map[string]struct{}{
 }
 
 var collapsedLogFields = map[string]struct{}{
+	fieldAccount:             {},
+	fieldAccountKey:          {},
 	fieldAuthorization:       {},
 	fieldAuthorizationHeader: {},
 	fieldBDATContent:         {},
 	fieldBody:                {},
 	fieldClientIP:            {},
 	fieldDATAContent:         {},
+	fieldDovecotAccount:      {},
+	fieldEmail:               {},
 	fieldEnvelopeSender:      {},
 	fieldError:               {},
 	fieldMailFrom:            {},
+	fieldMailAccount:         {},
 	fieldMessageBody:         {},
 	fieldMessageContent:      {},
 	fieldMessageID:           {},
@@ -192,6 +211,7 @@ var collapsedLogFields = map[string]struct{}{
 	fieldMessageSize:         {},
 	fieldOperatorHoldReason:  {},
 	fieldPostAuthCommandBody: {},
+	fieldPreferredUsername:   {},
 	fieldRawError:            {},
 	fieldRecipient:           {},
 	fieldRemoteAddr:          {},
@@ -201,6 +221,7 @@ var collapsedLogFields = map[string]struct{}{
 	fieldScriptContent:       {},
 	fieldScriptName:          {},
 	fieldSessionID:           {},
+	fieldSub:                 {},
 	fieldSubject:             {},
 	fieldUIDL:                {},
 	fieldUserHash:            {},

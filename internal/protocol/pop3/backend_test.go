@@ -25,8 +25,10 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/base64"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"io"
 	"math/big"
 	"net"
@@ -245,11 +247,122 @@ func TestMasterUserAuthFormatsSelectedUser(t *testing.T) {
 		},
 	}
 
-	if err := AuthenticateBackend(connection, target, &frontendCredentials{}, "canonical@example.test"); err != nil {
+	credentials := newPasswordCredentials("frontend@example.test", testPOP3FrontendPassword)
+	defer credentials.Clear()
+
+	if err := AuthenticateBackend(connection, target, credentials, "canonical@example.test"); err != nil {
 		t.Fatalf("AuthenticateBackend returned error: %v", err)
 	}
 
 	waitPOP3BackendDone(t, done)
+}
+
+// TestMasterUserModeBearerUsesCredentialReplay verifies bearer sessions never become USER/PASS master logins.
+func TestMasterUserModeBearerUsesCredentialReplay(t *testing.T) {
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+
+	done := make(chan error, 1)
+	go func() {
+		defer close(done)
+		defer func() { _ = server.Close() }()
+
+		reader := bufio.NewReader(server)
+		rawLine, err := reader.ReadString('\n')
+		if err != nil {
+			done <- fmt.Errorf("read backend line: %w", err)
+
+			return
+		}
+		line := strings.TrimRight(rawLine, "\r\n")
+		if strings.HasPrefix(strings.ToUpper(line), "USER ") {
+			done <- fmt.Errorf("bearer backend auth used USER/PASS master-user command %q", line)
+
+			return
+		}
+		if !strings.HasPrefix(line, "AUTH XOAUTH2 ") {
+			done <- fmt.Errorf("backend auth line = %q, want AUTH XOAUTH2", line)
+
+			return
+		}
+
+		payloadBytes, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(line, "AUTH XOAUTH2 "))
+		if err != nil {
+			done <- fmt.Errorf("decode POP3 SASL payload: %w", err)
+
+			return
+		}
+		payload := string(payloadBytes)
+		if payload != "user=alice@example.test\x01auth=Bearer "+testPOP3FrontendPassword+"\x01\x01" {
+			done <- fmt.Errorf("XOAUTH2 payload mismatch: got %d bytes, want bearer replay payload", len(payload))
+
+			return
+		}
+		for _, forbidden := range []string{testPOP3BackendMasterUser, testPOP3BackendMasterPass, "*director-master"} {
+			if strings.Contains(payload, forbidden) {
+				done <- fmt.Errorf("bearer replay payload used master-user material %q", forbidden)
+
+				return
+			}
+		}
+
+		if _, err := io.WriteString(server, "+OK bearer accepted\r\n"); err != nil {
+			done <- fmt.Errorf("write backend line: %w", err)
+		}
+	}()
+
+	connection := newBackendConnection(client)
+	connection.capabilities = backend.NewCapabilitySet(capabilityUser, capabilitySASL+"=XOAUTH2")
+	connection.tlsActive = true
+	connection.tlsVerified = true
+
+	credentials := pop3XOAUTH2CredentialsForBackendTest(t)
+	defer credentials.Clear()
+
+	if err := AuthenticateBackend(connection, testPOP3MasterUserBackend(), credentials, "canonical@example.test"); err != nil {
+		t.Fatalf("AuthenticateBackend returned error: %v", err)
+	}
+
+	waitPOP3BackendResult(t, done)
+}
+
+// TestMasterUserBearerReplayFailsClosedBeforePOP3Commands verifies unsafe policy sends no bytes.
+func TestMasterUserBearerReplayFailsClosedBeforePOP3Commands(t *testing.T) {
+	testCases := map[string]struct {
+		target       backend.Backend
+		capabilities backend.CapabilitySet
+		tlsVerified  bool
+	}{
+		"missing allowlist": {
+			target: func() backend.Backend {
+				target := testPOP3MasterUserBackend()
+				target.Auth.CredentialReplay.AllowedMechanisms = []string{saslcred.MechanismOAuthBearer}
+
+				return target
+			}(),
+			capabilities: backend.NewCapabilitySet(capabilityUser, capabilitySASL+"=XOAUTH2"),
+			tlsVerified:  true,
+		},
+		"missing capability": {
+			target:       testPOP3MasterUserBackend(),
+			capabilities: backend.NewCapabilitySet(capabilityUser),
+			tlsVerified:  true,
+		},
+		"tls required": {
+			target:       testPOP3MasterUserBackend(),
+			capabilities: backend.NewCapabilitySet(capabilityUser, capabilitySASL+"=XOAUTH2"),
+			tlsVerified:  false,
+		},
+	}
+
+	for name, testCase := range testCases {
+		t.Run(name, func(t *testing.T) {
+			credentials := pop3XOAUTH2CredentialsForBackendTest(t)
+			defer credentials.Clear()
+
+			assertPOP3AuthenticateWritesNothing(t, testCase.target, testCase.capabilities, testCase.tlsVerified, credentials)
+		})
+	}
 }
 
 // TestCredentialReplayPolicy verifies allowlists and verified TLS enforcement.
@@ -567,6 +680,20 @@ func waitPOP3BackendDone(t *testing.T, done <-chan struct{}) {
 	}
 }
 
+// waitPOP3BackendResult waits for a scripted backend goroutine and reports its error.
+func waitPOP3BackendResult(t *testing.T, done <-chan error) {
+	t.Helper()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for scripted backend")
+	}
+}
+
 // testPOP3BackendConnectRequest creates a disabled-PROXY request with stable metadata.
 func testPOP3BackendConnectRequest(target backend.Backend) backend.ConnectRequest {
 	return backend.ConnectRequest{
@@ -609,6 +736,98 @@ func testPOP3BackendTargetWithCA(mode string, caFile string) backend.Backend {
 	target.TLS.CAFile = caFile
 
 	return target
+}
+
+// testPOP3MasterUserBackend returns a hybrid master-user backend fixture.
+func testPOP3MasterUserBackend() backend.Backend {
+	target := testPOP3BackendTarget(backendTLSStartTLS)
+	target.Auth = backend.AuthConfig{
+		Mode: backendAuthModeMasterUser,
+		MasterUser: backend.MasterUserConfig{
+			Username:   testPOP3BackendMasterUser,
+			Password:   config.Secret(testPOP3BackendMasterPass),
+			UserFormat: "{user}*{master_user}",
+			Mechanism:  "plain",
+		},
+		CredentialReplay: backend.CredentialReplayConfig{
+			RequireBackendTLS: true,
+			PreserveMechanism: true,
+			AllowedMechanisms: []string{authMethodUserPass, saslcred.MechanismXOAUTH2, saslcred.MechanismOAuthBearer},
+		},
+	}
+
+	return target
+}
+
+// pop3XOAUTH2CredentialsForBackendTest creates bearer credentials for backend auth tests.
+func pop3XOAUTH2CredentialsForBackendTest(t *testing.T) *frontendCredentials {
+	t.Helper()
+
+	mechanism, err := saslcred.NewMechanism(saslcred.MechanismXOAUTH2)
+	if err != nil {
+		t.Fatalf("new mechanism: %v", err)
+	}
+
+	credentials, err := parseSASLCredentials(mechanism, xoauth2Payload("alice@example.test", testPOP3FrontendPassword), 256, 128)
+	if err != nil {
+		t.Fatalf("parse XOAUTH2 credentials: %v", err)
+	}
+
+	return credentials
+}
+
+// assertPOP3AuthenticateWritesNothing proves policy rejection happens before backend auth bytes.
+func assertPOP3AuthenticateWritesNothing(
+	t *testing.T,
+	target backend.Backend,
+	capabilities backend.CapabilitySet,
+	tlsVerified bool,
+	credentials *frontendCredentials,
+) {
+	t.Helper()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	connection := newBackendConnection(client)
+	connection.capabilities = capabilities
+	connection.tlsActive = tlsVerified
+	connection.tlsVerified = tlsVerified
+
+	done := make(chan error, 1)
+	go func() {
+		done <- AuthenticateBackend(connection, target, credentials, "canonical@example.test")
+	}()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrBackendAuthPolicy) {
+			t.Fatalf("AuthenticateBackend error = %v, want policy rejection", err)
+		}
+	case <-time.After(100 * time.Millisecond):
+		if err := server.SetReadDeadline(time.Now().Add(25 * time.Millisecond)); err != nil {
+			t.Fatalf("set read deadline: %v", err)
+		}
+
+		buffer := make([]byte, 256)
+		n, _ := server.Read(buffer)
+		if n > 0 {
+			t.Fatalf("AuthenticateBackend wrote %q before policy rejection", string(buffer[:n]))
+		}
+
+		t.Fatal("AuthenticateBackend did not return policy rejection")
+	}
+
+	if err := server.SetReadDeadline(time.Now().Add(25 * time.Millisecond)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+
+	buffer := make([]byte, 1)
+	n, err := server.Read(buffer)
+	if err == nil || n > 0 {
+		t.Fatalf("AuthenticateBackend wrote %q before policy rejection", string(buffer[:n]))
+	}
 }
 
 // writePOP3BackendCapabilities writes a bounded CAPA response for tests.

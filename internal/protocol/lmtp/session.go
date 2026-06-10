@@ -54,11 +54,12 @@ type Session struct {
 	reader *bufio.Reader
 	writer *bufio.Writer
 
-	authenticator     nauthilus.Authenticator
-	identityLookuper  nauthilus.IdentityLookuper
-	messageSink       MessageSink
-	backendConnector  BackendConnector
-	frontendTLSConfig *tls.Config
+	authenticator      nauthilus.Authenticator
+	bearerIntrospector nauthilus.BearerIntrospector
+	identityLookuper   nauthilus.IdentityLookuper
+	messageSink        MessageSink
+	backendConnector   BackendConnector
+	frontendTLSConfig  *tls.Config
 
 	listenerName           string
 	authorityName          string
@@ -143,6 +144,7 @@ func NewSession(config SessionConfig, conn net.Conn) (*Session, error) {
 		reader:                     bufio.NewReaderSize(conn, maxLineBytes+1),
 		writer:                     bufio.NewWriter(conn),
 		authenticator:              config.Authenticator,
+		bearerIntrospector:         config.BearerIntrospector,
 		identityLookuper:           config.IdentityLookuper,
 		messageSink:                messageSink,
 		backendConnector:           config.BackendConnector,

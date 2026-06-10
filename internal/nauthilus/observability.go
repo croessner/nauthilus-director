@@ -47,6 +47,7 @@ const (
 	authObservationReasonDenied     = "denied"
 	authObservationReasonTemporary  = "temporary_failure"
 	authObservationReasonTimeout    = "timeout"
+	authObservationTransportBearer  = "oidc_introspection"
 	authObservationTransportUnknown = "unknown"
 )
 
@@ -72,8 +73,27 @@ func ObserveAuthenticator(next Authenticator, config ObservationConfig) Authenti
 	}
 }
 
+// ObserveBearerIntrospector wraps a SASL bearer introspector with secret-safe telemetry.
+func ObserveBearerIntrospector(next BearerIntrospector, config ObservationConfig) BearerIntrospector {
+	if next == nil {
+		return nil
+	}
+
+	config.Transport = authObservationTransportBearer
+
+	return &observedBearerIntrospector{
+		next:   next,
+		config: config.normalize(),
+	}
+}
+
 type observedAuthenticator struct {
 	next   Authenticator
+	config ObservationConfig
+}
+
+type observedBearerIntrospector struct {
+	next   BearerIntrospector
 	config ObservationConfig
 }
 
@@ -116,6 +136,46 @@ func (a *observedAuthenticator) Authenticate(ctx context.Context, request AuthRe
 	return result, err
 }
 
+// Introspect records one bounded bearer-introspection observation around the next client.
+func (i *observedBearerIntrospector) Introspect(ctx context.Context, request BearerIntrospectionRequest) (AuthResult, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	request = request.normalized()
+	recorder := observability.NormalizeRecorder(i.config.Recorder)
+	startFields := i.bearerObservationFields(request, authObservationResultOK, "")
+	ctx, span := observability.StartSpan(ctx, recorder, observability.TraceBoundaryNauthilusAuth, startFields)
+
+	started := time.Now()
+	result, err := i.next.Introspect(ctx, request)
+	duration := time.Since(started)
+
+	observationResult, reasonClass := authObservationOutcome(result, err)
+	fields := i.bearerObservationFields(request, observationResult, reasonClass)
+	labels := i.bearerObservationLabels(request, observationResult, reasonClass)
+
+	if authErr := authError(err); authErr != nil {
+		fields[authObservationFieldErrorKind] = string(authErr.Kind)
+		if authErr.StatusCode > 0 {
+			fields[authObservationFieldStatusCode] = strconv.Itoa(authErr.StatusCode)
+		}
+	}
+
+	event, eventErr := observability.NewEvent(observability.EventNauthilusAuth, observability.TraceBoundaryNauthilusAuth, fields, labels)
+	if eventErr == nil {
+		event.Measurements = observability.NewMetricMeasurements(map[string]float64{
+			observability.MetricMeasurementDurationSeconds: duration.Seconds(),
+		})
+		recorder.Record(ctx, event)
+	}
+
+	span.SetAttributes(fields)
+	span.End(observationResult, reasonClass)
+
+	return result, err
+}
+
 // normalize trims static auth observation labels and applies safe fallbacks.
 func (c ObservationConfig) normalize() ObservationConfig {
 	c.AuthorityName = strings.TrimSpace(c.AuthorityName)
@@ -135,40 +195,109 @@ func (c ObservationConfig) normalize() ObservationConfig {
 
 // observationFields returns log and trace attributes without credential material.
 func (a *observedAuthenticator) observationFields(request AuthRequest, result string, reasonClass string) map[string]string {
-	fields := map[string]string{}
-	maps.Copy(fields, request.LogFields())
+	return observationFieldsFromSafe(
+		a.config,
+		request.LogFields(),
+		authObservationMechanism(request),
+		request.Context.Protocol,
+		result,
+		reasonClass,
+	)
+}
 
-	fields[authObservationFieldAuthority] = a.config.AuthorityName
-	fields[authObservationFieldBackendPool] = a.config.BackendPool
-	fields[authObservationFieldListener] = a.config.ListenerName
-	fields[authObservationFieldMechanism] = authObservationMechanism(request)
+// bearerObservationFields returns log and trace attributes for one introspection call.
+func (i *observedBearerIntrospector) bearerObservationFields(request BearerIntrospectionRequest, result string, reasonClass string) map[string]string {
+	return observationFieldsFromSafe(
+		i.config,
+		request.LogFields(),
+		bearerObservationMechanism(request),
+		request.Context.Protocol,
+		result,
+		reasonClass,
+	)
+}
+
+// observationFieldsFromSafe builds common secret-free observation fields.
+func observationFieldsFromSafe(
+	config ObservationConfig,
+	safe SafeFields,
+	mechanism string,
+	protocol string,
+	result string,
+	reasonClass string,
+) map[string]string {
+	fields := map[string]string{}
+	maps.Copy(fields, safe)
+
+	fields[authObservationFieldAuthority] = config.AuthorityName
+	fields[authObservationFieldBackendPool] = config.BackendPool
+	fields[authObservationFieldListener] = config.ListenerName
+	fields[authObservationFieldMechanism] = mechanism
 	fields[authObservationFieldOperation] = string(operationAuthenticate)
-	fields[authObservationFieldProtocol] = strings.ToLower(strings.TrimSpace(request.Context.Protocol))
+	fields[authObservationFieldProtocol] = strings.ToLower(strings.TrimSpace(protocol))
 	fields[authObservationFieldReasonClass] = reasonClass
 	fields[authObservationFieldResult] = result
-	fields[authObservationFieldService] = a.config.ServiceName
-	fields[authObservationFieldTransport] = a.config.Transport
+	fields[authObservationFieldService] = config.ServiceName
+	fields[authObservationFieldTransport] = config.Transport
 
 	return fields
 }
 
 // observationLabels returns the low-cardinality metric labels for one auth call.
 func (a *observedAuthenticator) observationLabels(request AuthRequest, result string, reasonClass string) map[string]string {
+	return observationLabelsFromValues(
+		a.config,
+		authObservationMechanism(request),
+		request.Context.Protocol,
+		result,
+		reasonClass,
+	)
+}
+
+// bearerObservationLabels returns the low-cardinality metric labels for one introspection call.
+func (i *observedBearerIntrospector) bearerObservationLabels(request BearerIntrospectionRequest, result string, reasonClass string) map[string]string {
+	return observationLabelsFromValues(
+		i.config,
+		bearerObservationMechanism(request),
+		request.Context.Protocol,
+		result,
+		reasonClass,
+	)
+}
+
+// observationLabelsFromValues builds bounded low-cardinality metric labels.
+func observationLabelsFromValues(
+	config ObservationConfig,
+	mechanism string,
+	protocol string,
+	result string,
+	reasonClass string,
+) map[string]string {
 	return map[string]string{
-		authObservationFieldBackendPool: a.config.BackendPool,
-		authObservationFieldListener:    a.config.ListenerName,
-		authObservationFieldMechanism:   authObservationMechanism(request),
-		authObservationFieldProtocol:    strings.ToLower(strings.TrimSpace(request.Context.Protocol)),
+		authObservationFieldBackendPool: config.BackendPool,
+		authObservationFieldListener:    config.ListenerName,
+		authObservationFieldMechanism:   mechanism,
+		authObservationFieldProtocol:    strings.ToLower(strings.TrimSpace(protocol)),
 		authObservationFieldReasonClass: reasonClass,
 		authObservationFieldResult:      result,
-		authObservationFieldService:     a.config.ServiceName,
-		authObservationFieldTransport:   a.config.Transport,
+		authObservationFieldService:     config.ServiceName,
+		authObservationFieldTransport:   config.Transport,
 	}
 }
 
 // authObservationMechanism normalizes frontend auth mechanisms for labels.
 func authObservationMechanism(request AuthRequest) string {
 	return strings.ToLower(strings.TrimSpace(request.Context.Method))
+}
+
+// bearerObservationMechanism normalizes bearer mechanisms for labels.
+func bearerObservationMechanism(request BearerIntrospectionRequest) string {
+	mechanism := strings.ToLower(strings.TrimSpace(request.Context.Method))
+	if mechanism != "" {
+		return mechanism
+	}
+
+	return strings.ToLower(strings.TrimSpace(request.Mechanism))
 }
 
 // authObservationOutcome classifies one authority result without raw errors.

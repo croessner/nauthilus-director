@@ -86,6 +86,7 @@ type SessionConfig struct {
 	MaxPreauthLiteralBytes int
 	FrontendTLSConfig      *tls.Config
 	Authenticator          nauthilus.Authenticator
+	BearerIntrospector     nauthilus.BearerIntrospector
 	RoutingResolver        routing.RoutingResolver
 	SessionStore           state.SessionStore
 	PlacementService       placement.SessionPlacer

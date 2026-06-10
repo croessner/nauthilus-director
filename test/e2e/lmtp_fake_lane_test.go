@@ -35,6 +35,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -62,6 +63,8 @@ const (
 	e2eLMTPRecipientMaint   = "maintenance-a@example.test"
 	e2eLMTPRecipientMixed   = "temp-a@example.test"
 	e2eLMTPMessageSecret    = "top-secret-message-body"
+	e2eLMTPXOAuth2Token     = "e2e-lmtp-xoauth2-token-sentinel"
+	e2eLMTPOAuthBearerToken = "e2e-lmtp-oauthbearer-token-sentinel"
 )
 
 // TestServerBinaryPublicLMTPProductionFlow proves LMTP behavior through process, socket, REST and CLI boundaries.
@@ -113,6 +116,87 @@ func TestServerBinaryPublicLMTPProductionFlow(t *testing.T) {
 	exerciseLMTPSMTLSPeerAuth(t, lmtpsAddress, tlsBundle, fakeLMTPA)
 	exerciseLMTPMaintenanceEffects(t, lmtpAddress, controlURL, ctl, fakeLMTPA)
 	exerciseLMTPRuntimeOut(t, lmtpAddress, controlURL, ctl)
+	assertLMTPProcessOutputSafe(t, process.output.String())
+}
+
+// TestServerBinaryPublicLMTPBearerPeerIntrospectionFlow proves LMTP peer bearer auth uses OIDC introspection.
+func TestServerBinaryPublicLMTPBearerPeerIntrospectionFlow(t *testing.T) {
+	binary := e2eServerBinary(t)
+	ctl := buildDirectorctl(t)
+	redisFixture := startValkeySessionStore(t)
+	authority := startMappedFakeOIDCHTTPAuthority(t, lmtpMappedAuthorityIdentities(), nil, fakeOIDCAuthorityOptions{
+		SASLBearerTokens: map[string]fakeSASLBearerToken{
+			e2eLMTPXOAuth2Token:     activeFakeSASLBearerToken(e2eLMTPSubmitter, e2eShardTag),
+			e2eLMTPOAuthBearerToken: activeFakeSASLBearerToken(e2eLMTPSSubmitter, e2eShardTag),
+		},
+		SkipBackchannelAuth: true,
+	})
+	tlsBundle := writeLMTPPeerTLSBundle(t)
+	fakeLMTPA := lmtpbackend.Start(t, lmtpbackend.Options{Capabilities: []string{"CHUNKING"}})
+	fakeLMTPB := lmtpbackend.Start(t, lmtpbackend.Options{Capabilities: []string{"CHUNKING"}})
+	fakeIMAPA := startFakeIMAPBackend(t, fakeBackendOptions{})
+	fakeIMAPB := startFakeIMAPBackend(t, fakeBackendOptions{})
+	lmtpAddress := loopbackAddress(t)
+	lmtpsAddress := loopbackAddress(t)
+	imapAddress := loopbackAddress(t)
+	controlAddress := loopbackAddress(t)
+	publishHealthyLMTPBackends(t, redisFixture, []string{e2eLMTPBackendAID, e2eLMTPBackendBID}, "CHUNKING")
+	configPath := writeLMTPProcessConfig(t, lmtpProcessConfigOptions{
+		RedisAddress:           redisFixture.addr,
+		AuthorityURL:           authority.URL(),
+		AuthorityBearer:        processAuthorityBearerForFake(authority),
+		LMTPAddress:            lmtpAddress,
+		LMTPSAddress:           lmtpsAddress,
+		IMAPAddress:            imapAddress,
+		ControlAddress:         controlAddress,
+		LMTPPeerAuthMechanisms: []string{"xoauth2", "oauthbearer"},
+		LMTPBackends: map[string]string{
+			e2eLMTPBackendAID: fakeLMTPA.Address(),
+			e2eLMTPBackendBID: fakeLMTPB.Address(),
+		},
+		IMAPBackends: map[string]string{
+			e2eBackendAID: fakeIMAPA.Address(),
+			e2eBackendBID: fakeIMAPB.Address(),
+		},
+		TLS: tlsBundle,
+	})
+	process := startDirectorProcess(t, binary, configPath)
+	controlURL := "http://" + controlAddress
+
+	waitForLMTPGreeting(t, lmtpAddress, process)
+	waitForControlReady(t, controlURL, process)
+
+	beforeRouteLookup := authority.SASLBearerIntrospectionCount()
+	routeOutput := runDirectorctl(t, ctl, controlURL, "route", "lookup", "--protocol", e2eLMTPProtocol, "--recipient", e2eLMTPRecipientA, "--listener", e2eLMTPListenerName, "--include-affinity")
+	assertCLIOutputFields(t, routeOutput, "selected_backend="+e2eLMTPBackendAID, "identity_source=nauthilus_lookup")
+	assertOutputOmits(t, routeOutput, e2eLMTPXOAuth2Token, e2eLMTPOAuthBearerToken)
+	if authority.SASLBearerIntrospectionCount() != beforeRouteLookup {
+		t.Fatal("LMTP route lookup called bearer introspection")
+	}
+
+	backchannelBeforeAuth := authority.RequestCount()
+	beforeAuth := authority.SASLBearerIntrospectionCount()
+	xoauth2 := authenticatedLMTPBearerClient(t, lmtpAddress, "XOAUTH2", e2eLMTPSubmitter, e2eLMTPXOAuth2Token)
+	authority.ExpectSASLBearerIntrospection(t, beforeAuth, 1)
+	if authority.RequestCount() != backchannelBeforeAuth {
+		t.Fatal("LMTP XOAUTH2 peer auth used the password backchannel")
+	}
+	deliverLMTPMessage(t, xoauth2, e2eLMTPRecipientA, "lmtp-xoauth2-delivery-body")
+	xoauth2.Close()
+	assertLMTPBackendObservation(t, fakeLMTPA.ExpectObservation(t), []string{lmtpPath(e2eLMTPRecipientA)}, false)
+
+	backchannelBeforeAuth = authority.RequestCount()
+	beforeAuth = authority.SASLBearerIntrospectionCount()
+	oauthbearer := authenticatedLMTPBearerClient(t, lmtpAddress, "OAUTHBEARER", e2eLMTPSSubmitter, e2eLMTPOAuthBearerToken)
+	authority.ExpectSASLBearerIntrospection(t, beforeAuth, 1)
+	if authority.RequestCount() != backchannelBeforeAuth {
+		t.Fatal("LMTP OAUTHBEARER peer auth used the password backchannel")
+	}
+	deliverLMTPMessage(t, oauthbearer, e2eLMTPRecipientASecond, "lmtp-oauthbearer-delivery-body")
+	oauthbearer.Close()
+	assertLMTPBackendObservation(t, fakeLMTPA.ExpectObservation(t), []string{lmtpPath(e2eLMTPRecipientASecond)}, false)
+	expectNoAuthorityRequestMethod(t, authority, e2eLMTPProtocol, "xoauth2")
+	expectNoAuthorityRequestMethod(t, authority, e2eLMTPProtocol, "oauthbearer")
 	assertLMTPProcessOutputSafe(t, process.output.String())
 }
 
@@ -436,10 +520,46 @@ func authenticatedLMTPClient(t *testing.T, address string) *lmtpClient {
 	return client
 }
 
+// authenticatedLMTPBearerClient returns a STARTTLS and bearer-authenticated LMTP client.
+func authenticatedLMTPBearerClient(t *testing.T, address string, mechanism string, username string, token string) *lmtpClient {
+	t.Helper()
+
+	client := dialLMTP(t, address)
+	client.ExpectLine("220 2.0.0 nauthilus-director LMTP ready\r\n")
+	client.WriteLine("LHLO bearer-peer.example")
+	capabilities := client.ReadResponse()
+	assertLMTPHasCapability(t, capabilities, "STARTTLS")
+	client.WriteLine("STARTTLS")
+	client.ExpectLine("220 2.0.0 Ready to start TLS\r\n")
+	client.UpgradeTLS(&tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12})
+	client.WriteLine("LHLO bearer-peer.example")
+	capabilities = client.ReadResponse()
+	assertLMTPAuthMechanism(t, capabilities, mechanism)
+	client.WriteLine("AUTH " + mechanism + " " + lmtpBearerPayload(mechanism, username, token))
+	client.ExpectLine("235 2.7.0 Authentication successful\r\n")
+
+	return client
+}
+
+// deliverLMTPMessage sends one message through an already-authenticated public LMTP connection.
+func deliverLMTPMessage(t *testing.T, client *lmtpClient, recipient string, body string) {
+	t.Helper()
+
+	client.WriteLine("MAIL FROM:<sender@example.test>")
+	client.ExpectLine("250 2.0.0 Sender accepted\r\n")
+	client.WriteLine("RCPT TO:<" + recipient + ">")
+	client.ExpectLine("250 2.0.0 Recipient accepted\r\n")
+	client.WriteLine("DATA")
+	client.ExpectLine("354 2.0.0 End data with <CR><LF>.<CR><LF>\r\n")
+	client.WriteRaw(body + "\r\n.\r\n")
+	client.ExpectLine("250 2.1.5 Message accepted\r\n")
+}
+
 type lmtpProcessConfigOptions struct {
 	RedisAddress                string
 	AuthorityURL                string
 	AuthorityOIDC               processAuthorityOIDCOptions
+	AuthorityBearer             processAuthorityBearerOptions
 	LMTPAddress                 string
 	LMTPSAddress                string
 	IMAPAddress                 string
@@ -450,6 +570,7 @@ type lmtpProcessConfigOptions struct {
 	LMTPBackendHAProxy          map[string]bool
 	LMTPBackendHealth           map[string]bool
 	LMTPBackendDeepHealth       map[string]bool
+	LMTPPeerAuthMechanisms      []string
 	TLS                         lmtpPeerTLSBundle
 	DisableLMTPPeerAuth         bool
 	IMAPBackendTLSMode          string
@@ -476,6 +597,8 @@ func writeLMTPProcessConfig(t *testing.T, options lmtpProcessConfigOptions) stri
 		lmtpBackendTLSMode = "plaintext"
 	}
 	lmtpPeerAuthRequired := !options.DisableLMTPPeerAuth
+	lmtpPeerAuthMechanisms := normalizedLMTPPeerAuthMechanisms(options.LMTPPeerAuthMechanisms)
+	lmtpPeerAuthCapability := "AUTH " + strings.ToUpper(strings.Join(lmtpPeerAuthMechanisms, " "))
 	backendRetentionTTL := strings.TrimSpace(options.BackendRetentionTTL)
 	if backendRetentionTTL == "" {
 		backendRetentionTTL = "15m"
@@ -584,11 +707,11 @@ director:
         client_auth:
           required: %t
           authority: default
-          mechanisms: [plain]
+          mechanisms: [%s]
           mtls:
             satisfies_required: false
             identity_source: subject_common_name
-        capabilities: [SMTPUTF8, STARTTLS, AUTH PLAIN, CHUNKING]
+        capabilities: [SMTPUTF8, STARTTLS, %q, CHUNKING]
     lmtps:
       protocol: lmtp
       service_name: lmtps
@@ -610,11 +733,11 @@ director:
         client_auth:
           required: true
           authority: default
-          mechanisms: [plain]
+          mechanisms: [%s]
           mtls:
             satisfies_required: true
             identity_source: subject_common_name
-        capabilities: [SMTPUTF8, AUTH PLAIN, CHUNKING]
+        capabilities: [SMTPUTF8, %q, CHUNKING]
   backend_pools:
     imap-default:
       protocol: imap
@@ -736,7 +859,7 @@ director:
 	`, options.ControlAddress,
 		processControlAuthYAML(t),
 		options.RedisAddress,
-		processAuthorityOIDCYAMLForOptions(t, options.AuthorityOIDC),
+		processAuthorityYAML(t, options.AuthorityOIDC, options.AuthorityBearer),
 		options.AuthorityURL,
 		backendRetentionTTL,
 		e2eShardTag,
@@ -747,10 +870,14 @@ director:
 		options.TLS.ServerCertPath,
 		options.TLS.ServerKeyPath,
 		lmtpPeerAuthRequired,
+		quotedYAMLStrings(lmtpPeerAuthMechanisms),
+		lmtpPeerAuthCapability,
 		options.LMTPSAddress,
 		options.TLS.ServerCertPath,
 		options.TLS.ServerKeyPath,
 		options.TLS.CAPath,
+		quotedYAMLStrings(lmtpPeerAuthMechanisms),
+		lmtpPeerAuthCapability,
 		e2eShardTag,
 		options.IMAPBackends[e2eBackendAID],
 		imapBackendTLSMode,
@@ -786,6 +913,26 @@ director:
 	}
 
 	return path
+}
+
+// normalizedLMTPPeerAuthMechanisms returns lower-case configured LMTP peer mechanisms.
+func normalizedLMTPPeerAuthMechanisms(mechanisms []string) []string {
+	if len(mechanisms) == 0 {
+		return []string{"plain"}
+	}
+
+	normalized := make([]string, 0, len(mechanisms))
+	for _, mechanism := range mechanisms {
+		mechanism = strings.ToLower(strings.TrimSpace(mechanism))
+		if mechanism != "" {
+			normalized = append(normalized, mechanism)
+		}
+	}
+	if len(normalized) == 0 {
+		return []string{"plain"}
+	}
+
+	return normalized
 }
 
 // publishHealthyLMTPBackends seeds backend CHUNKING capability proof before process startup.
@@ -980,6 +1127,39 @@ func lmtpAuthorityIdentities() map[string]lmtpAuthorityIdentity {
 	}
 }
 
+// lmtpMappedAuthorityIdentities adapts LMTP identity fixtures to the shared HTTP authority.
+func lmtpMappedAuthorityIdentities() map[string]map[string][]string {
+	return mappedAttributesFromLMTPIdentities(lmtpAuthorityIdentities())
+}
+
+// mappedAttributesFromLMTPIdentities adapts caller-provided LMTP fixtures to the shared HTTP authority.
+func mappedAttributesFromLMTPIdentities(identities map[string]lmtpAuthorityIdentity) map[string]map[string][]string {
+	mapped := make(map[string]map[string][]string, len(identities))
+	for username, identity := range identities {
+		mapped[username] = map[string][]string{
+			"account":   {identity.Account},
+			"tenant":    {identity.Tenant},
+			"mailShard": {identity.Shard},
+		}
+	}
+
+	return mapped
+}
+
+// expectNoAuthorityRequestMethod verifies bearer peer auth did not use password auth JSON.
+func expectNoAuthorityRequestMethod(t *testing.T, authority *fakeHTTPAuthority, protocol string, method string) {
+	t.Helper()
+
+	authority.requestsLock.Lock()
+	defer authority.requestsLock.Unlock()
+
+	for _, request := range authority.requests {
+		if request["protocol"] == protocol && request["method"] == method {
+			t.Fatalf("authority saw forbidden protocol=%s method=%s request", protocol, method)
+		}
+	}
+}
+
 type lmtpClient struct {
 	conn   net.Conn
 	reader *bufio.Reader
@@ -1108,6 +1288,27 @@ func lmtpCapabilityPresent(lines []string, capability string) bool {
 	return false
 }
 
+// assertLMTPAuthMechanism verifies an advertised AUTH list contains one mechanism.
+func assertLMTPAuthMechanism(t *testing.T, lines []string, mechanism string) {
+	t.Helper()
+
+	want := strings.ToUpper(strings.TrimSpace(mechanism))
+	for _, line := range lines {
+		if len(line) < 4 {
+			continue
+		}
+		fields := strings.Fields(strings.ToUpper(strings.TrimSpace(line[4:])))
+		if len(fields) == 0 || fields[0] != "AUTH" {
+			continue
+		}
+		if slices.Contains(fields[1:], want) {
+			return
+		}
+	}
+
+	t.Fatalf("capabilities = %v, want AUTH mechanism %q", lines, mechanism)
+}
+
 // assertLMTPBackendObservation verifies recipient forwarding and DATA/BDAT mode.
 func assertLMTPBackendObservation(t *testing.T, observation lmtpbackend.Observation, recipients []string, usedBDAT bool) {
 	t.Helper()
@@ -1218,6 +1419,16 @@ func plainLMTPPayload(username string, password string) string {
 	return base64.StdEncoding.EncodeToString([]byte(payload))
 }
 
+// lmtpBearerPayload renders a bearer SASL initial response for LMTP AUTH.
+func lmtpBearerPayload(mechanism string, username string, token string) string {
+	switch strings.ToLower(strings.TrimSpace(mechanism)) {
+	case "oauthbearer":
+		return base64.StdEncoding.EncodeToString([]byte("n,a=" + username + ",\x01auth=Bearer " + token + "\x01\x01"))
+	default:
+		return base64.StdEncoding.EncodeToString([]byte("user=" + username + "\x01auth=Bearer " + token + "\x01\x01"))
+	}
+}
+
 // lmtpPath returns one backend wire recipient path.
 func lmtpPath(recipient string) string {
 	return "<" + recipient + ">"
@@ -1234,7 +1445,13 @@ func assertLMTPProcessOutputSafe(t *testing.T, output string) {
 		e2eLMTPRecipientB,
 		e2eLMTPRecipientMaint,
 		e2eLMTPRecipientMixed,
+		e2eLMTPSubmitter,
+		e2eLMTPSSubmitter,
 		e2eLMTPMessageSecret,
+		e2eLMTPXOAuth2Token,
+		e2eLMTPOAuthBearerToken,
+		"lmtp-xoauth2-delivery-body",
+		"lmtp-oauthbearer-delivery-body",
 		"maintenance-body",
 		"mtls-body",
 	} {

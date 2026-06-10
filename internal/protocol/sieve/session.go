@@ -92,6 +92,7 @@ type SessionConfig struct {
 	MaxBearerTokenBytes    int
 	FrontendTLSConfig      *tls.Config
 	Authenticator          nauthilus.Authenticator
+	BearerIntrospector     nauthilus.BearerIntrospector
 	RoutingResolver        routing.RoutingResolver
 	PlacementService       placement.SessionPlacer
 	PlacementGate          runtimectl.PlacementGate
@@ -134,6 +135,7 @@ type Session struct {
 	maxBearerTokenBytes    int
 	frontendTLSConfig      *tls.Config
 	authenticator          nauthilus.Authenticator
+	bearerIntrospector     nauthilus.BearerIntrospector
 
 	tlsActive bool
 
@@ -262,6 +264,7 @@ func NewSession(config SessionConfig, conn net.Conn) (*Session, error) {
 		maxBearerTokenBytes:    maxBearerBytes,
 		frontendTLSConfig:      cloneTLSConfig(config.FrontendTLSConfig),
 		authenticator:          config.Authenticator,
+		bearerIntrospector:     config.BearerIntrospector,
 		tlsActive:              config.TLSMode == TLSModeImplicit,
 		sessionID:              sessionID,
 		directorInstanceID:     config.DirectorInstanceID,

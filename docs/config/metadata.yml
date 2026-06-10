@@ -17,6 +17,18 @@ paths:
   auth.authorities.**:
     stability: stable
     description: Nauthilus authentication authority transport and mechanism configuration.
+  auth.authorities.*.mechanisms.bearer.introspection.**:
+    stability: stable
+    description: Mail SASL bearer-token introspection policy and endpoint client-auth material.
+  auth.authorities.*.oidc.client_credentials.introspection_endpoint_auth_method:
+    stability: stable
+    description: Endpoint client-auth method used when control-plane OIDC validation introspects operator tokens with this authority; mail SASL bearer introspection uses mechanisms.bearer.introspection.auth_method.
+  auth.authorities.*.oidc.client_credentials.scopes:
+    stability: stable
+    description: Director-to-Nauthilus caller-token request scopes only; mail SASL bearer required end-user token scope uses mechanisms.bearer.introspection.required_scope.
+  auth.authorities.*.oidc.client_credentials.**:
+    stability: stable
+    description: Director-to-Nauthilus OIDC client-credentials caller authentication.
   director.security.**:
     stability: stable
     description: Director fail-closed and protocol input safety limits.

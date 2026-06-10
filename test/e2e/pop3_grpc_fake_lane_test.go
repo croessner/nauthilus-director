@@ -19,6 +19,7 @@ package e2e
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net"
 	"os"
@@ -38,6 +39,7 @@ import (
 const (
 	e2ePOP3GRPCCallerUser   = "director"
 	e2ePOP3GRPCCallerSecret = "director-api-secret"
+	e2ePOP3GRPCXOAuth2Token = "e2e-pop3-grpc-xoauth2-token-sentinel"
 )
 
 // TestServerBinaryPublicPOP3GRPCAuthorityFlow proves POP3 auth through the generated gRPC authority boundary.
@@ -51,16 +53,30 @@ func TestServerBinaryPublicPOP3GRPCAuthorityFlow(t *testing.T) {
 		"mailShard": {e2eShardTag},
 	}
 	authority := startFakePOP3GRPCAuthority(t, identities)
-	fakePOP3 := pop3backend.Start(t, pop3backend.Options{Messages: pop3SentinelMessages()})
+	bearerAuthority := startFakeOIDCHTTPAuthority(t, nil, fakeOIDCAuthorityOptions{
+		SASLBearerTokens: map[string]fakeSASLBearerToken{
+			e2ePOP3GRPCXOAuth2Token: activeFakeSASLBearerToken(e2ePOP3BearerAccount, e2eShardTag),
+		},
+		SkipBackchannelAuth: true,
+	})
+	backendCertPath, _, backendCertificate := writeTestCertificate(t)
+	fakePOP3 := pop3backend.Start(t, pop3backend.Options{
+		Messages:  pop3SentinelMessages(),
+		TLSConfig: &tls.Config{Certificates: []tls.Certificate{backendCertificate}, MinVersion: tls.VersionTLS12},
+		TLSMode:   "starttls",
+	})
 	pop3Address := loopbackAddress(t)
 	configPath := writePOP3GRPCProcessConfig(t, pop3GRPCProcessConfigOptions{
 		AuthorityContextGRPCMetadata: map[string]string{
 			e2eContextMetadata: e2eContextGRPCValue,
 		},
-		RedisAddress: redisFixture.addr,
-		GRPCAddress:  authority.Address(),
-		POP3Address:  pop3Address,
-		POP3Backend:  fakePOP3.Address(),
+		RedisAddress:         redisFixture.addr,
+		AuthorityBearer:      processAuthorityBearerForFake(bearerAuthority),
+		GRPCAddress:          authority.Address(),
+		POP3Address:          pop3Address,
+		POP3Backend:          fakePOP3.Address(),
+		POP3BackendTLSMode:   "starttls",
+		POP3BackendTLSCAFile: backendCertPath,
 	})
 	process := startDirectorProcess(t, binary, configPath)
 
@@ -76,25 +92,32 @@ func TestServerBinaryPublicPOP3GRPCAuthorityFlow(t *testing.T) {
 	authority.ExpectMetadata(t, e2eContextMetadata, e2eContextGRPCValue)
 	assertPOP3Observation(t, fakePOP3.ExpectObservation(t), "userpass", false)
 
+	grpcRequestCount := authority.RequestCount()
+	beforeBearer := bearerAuthority.SASLBearerIntrospectionCount()
 	bearerClient := dialPOP3StartedTLS(t, pop3Address)
-	bearerClient.WriteLine(pop3CommandAuth + " XOAUTH2 " + pop3XOAUTH2Payload(e2ePOP3BearerAccount, e2eToken))
+	bearerClient.WriteLine(pop3CommandAuth + " XOAUTH2 " + pop3XOAUTH2Payload(e2ePOP3BearerAccount, e2ePOP3GRPCXOAuth2Token))
 	bearerClient.ExpectStatusPrefix("+OK")
 	bearerClient.WriteLine(pop3CommandQuit)
 	bearerClient.ExpectStatusPrefix("+OK")
 	bearerClient.Close()
-	authority.ExpectRequest(t, e2ePOP3Protocol, "xoauth2")
-	authority.ExpectMetadata(t, e2eContextMetadata, e2eContextGRPCValue)
-	assertPOP3Observation(t, fakePOP3.ExpectObservation(t), "userpass", false)
-	assertOutputOmits(t, process.output.String(), e2ePassword, e2eToken)
+	bearerAuthority.ExpectSASLBearerIntrospection(t, beforeBearer, 1)
+	if authority.RequestCount() != grpcRequestCount {
+		t.Fatal("POP3 bearer auth reached the gRPC password authority")
+	}
+	assertPOP3Observation(t, fakePOP3.ExpectObservation(t), "xoauth2", false)
+	assertOutputOmits(t, process.output.String(), e2ePassword, e2eToken, e2ePOP3GRPCXOAuth2Token)
 	assertOutputOmitsAuthorityContext(t, process.output.String(), e2eContextGRPCValue)
 }
 
 type pop3GRPCProcessConfigOptions struct {
 	AuthorityContextGRPCMetadata map[string]string
 	RedisAddress                 string
+	AuthorityBearer              processAuthorityBearerOptions
 	GRPCAddress                  string
 	POP3Address                  string
 	POP3Backend                  string
+	POP3BackendTLSMode           string
+	POP3BackendTLSCAFile         string
 }
 
 // writePOP3GRPCProcessConfig writes a minimal POP3 config using a generated gRPC authority.
@@ -102,6 +125,10 @@ func writePOP3GRPCProcessConfig(t *testing.T, options pop3GRPCProcessConfigOptio
 	t.Helper()
 
 	certPath, keyPath, _ := writeTestCertificate(t)
+	pop3BackendTLSMode := strings.TrimSpace(options.POP3BackendTLSMode)
+	if pop3BackendTLSMode == "" {
+		pop3BackendTLSMode = "plaintext"
+	}
 	content := fmt.Sprintf(`patch:
   - op: remove
     path: director.listeners
@@ -200,8 +227,13 @@ director:
       max_connections: 100
       maintenance: disabled
       tls:
-        mode: plaintext
+        mode: %q
+        ca_file: %q
+        cert: ""
+        key: ""
+        server_name: "127.0.0.1"
         min_tls_version: TLS1.2
+        insecure_skip_verify: false
       auth:
         mode: master_user
         master_user:
@@ -209,11 +241,15 @@ director:
           password_file: %q
           user_format: "{user}*{master_user}"
           mechanism: plain
+        credential_replay:
+          require_backend_tls: true
+          preserve_mechanism: true
+          allowed_mechanisms: [userpass, xoauth2, oauthbearer]
       health_check:
         enabled: false
 `, processControlAuthYAML(t),
 		options.RedisAddress,
-		processAuthorityOIDCYAML(),
+		processAuthorityYAML(t, processAuthorityOIDCOptions{}, options.AuthorityBearer),
 		options.GRPCAddress,
 		e2ePOP3GRPCCallerUser,
 		e2ePOP3GRPCCallerSecret,
@@ -224,6 +260,8 @@ director:
 		keyPath,
 		e2eShardTag,
 		options.POP3Backend,
+		pop3BackendTLSMode,
+		options.POP3BackendTLSCAFile,
 		e2ePassword,
 	)
 	content = strings.ReplaceAll(content, "\t", "")
@@ -278,6 +316,14 @@ func startFakePOP3GRPCAuthority(t *testing.T, identities map[string]map[string][
 // Address returns the loopback address of the generated gRPC fixture.
 func (a *fakePOP3GRPCAuthority) Address() string {
 	return a.listener.Addr().String()
+}
+
+// RequestCount returns the number of password authority calls.
+func (a *fakePOP3GRPCAuthority) RequestCount() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	return len(a.requests)
 }
 
 // Authenticate records POP3 authority input and returns canonical account facts.

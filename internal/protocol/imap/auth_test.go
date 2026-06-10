@@ -18,6 +18,7 @@
 package imap
 
 import (
+	"context"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -237,6 +238,108 @@ func TestAuthenticateSASLIRAndContinuationFlows(t *testing.T) {
 	}
 }
 
+// TestBearerSASLUsesIntrospectionNotPasswordAuth verifies bearer auth avoids Authenticator.
+func TestBearerSASLUsesIntrospectionNotPasswordAuth(t *testing.T) {
+	testCases := []struct {
+		name      string
+		mechanism string
+		encoded   string
+	}{
+		{name: "xoauth2", mechanism: "XOAUTH2", encoded: xoauth2Payload("xoauth2-user@example.test", "xoauth2-token")},
+		{name: "oauthbearer", mechanism: "OAUTHBEARER", encoded: oauthBearerPayload("oauth-user@example.test", "oauth-token")},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			authenticator := &recordingAuthenticator{result: nauthilus.AuthResult{Decision: nauthilus.DecisionRejected}}
+			introspector := &recordingBearerIntrospector{result: nauthilus.AuthResult{Decision: nauthilus.DecisionRejected}}
+			config := testPreauthConfig(TLSModeImplicit, false)
+			config.Authenticator = authenticator
+			config.BearerIntrospector = introspector
+
+			harness := startTestSession(t, config)
+			harness.expectLine(t, greetingLine)
+			harness.write(t, fmt.Sprintf("A001 AUTHENTICATE %s %s\r\n", testCase.mechanism, testCase.encoded))
+			harness.expectLine(t, "A001 NO [AUTHENTICATIONFAILED] Authentication failed\r\n")
+
+			if len(authenticator.requests) != 0 {
+				t.Fatalf("password auth calls = %d, want 0", len(authenticator.requests))
+			}
+
+			request := introspector.singleRequest(t)
+			if request.Context.Protocol != protocolIMAP || request.Context.Method != strings.ToLower(testCase.mechanism) {
+				t.Fatalf("introspection context = %q/%q, want imap/%s", request.Context.Protocol, request.Context.Method, strings.ToLower(testCase.mechanism))
+			}
+		})
+	}
+}
+
+// TestPasswordSASLStillUsesPasswordAuthenticator verifies PLAIN remains on Authenticator.
+func TestPasswordSASLStillUsesPasswordAuthenticator(t *testing.T) {
+	authenticator := &recordingAuthenticator{result: nauthilus.AuthResult{Decision: nauthilus.DecisionRejected}}
+	introspector := &recordingBearerIntrospector{result: nauthilus.AuthResult{Decision: nauthilus.DecisionRejected}}
+	config := testPreauthConfig(TLSModeImplicit, false)
+	config.Authenticator = authenticator
+	config.BearerIntrospector = introspector
+
+	harness := startTestSession(t, config)
+	harness.expectLine(t, greetingLine)
+	harness.write(t, "A001 AUTHENTICATE PLAIN "+plainPayload("plain-user@example.test", "plain-passphrase")+"\r\n")
+	harness.expectLine(t, "A001 NO [AUTHENTICATIONFAILED] Authentication failed\r\n")
+
+	if len(authenticator.requests) != 1 {
+		t.Fatalf("password auth calls = %d, want 1", len(authenticator.requests))
+	}
+	if introspector.callCount() != 0 {
+		t.Fatalf("introspection calls = %d, want 0", introspector.callCount())
+	}
+}
+
+// TestBearerSASLBeforeTLSDoesNotIntrospect verifies the TLS gate stays authority-free.
+func TestBearerSASLBeforeTLSDoesNotIntrospect(t *testing.T) {
+	authenticator := &recordingAuthenticator{}
+	introspector := &recordingBearerIntrospector{result: nauthilus.AuthResult{Decision: nauthilus.DecisionRejected}}
+	config := testPreauthConfig(TLSModeStartTLS, false)
+	config.Authenticator = authenticator
+	config.BearerIntrospector = introspector
+
+	harness := startTestSession(t, config)
+	harness.expectLine(t, greetingLine)
+	harness.write(t, "A001 AUTHENTICATE XOAUTH2 "+xoauth2Payload("alice@example.test", "token-before-tls")+"\r\n")
+	harness.expectLine(t, "A001 NO "+authPrivacyRequiredText+"\r\n")
+
+	if len(authenticator.requests) != 0 {
+		t.Fatalf("password auth calls = %d, want 0", len(authenticator.requests))
+	}
+	if introspector.callCount() != 0 {
+		t.Fatalf("introspection calls = %d, want 0", introspector.callCount())
+	}
+}
+
+// TestBearerIntrospectionTemporaryFailureMapsToUnavailable verifies transport errors tempfail.
+func TestBearerIntrospectionTemporaryFailureMapsToUnavailable(t *testing.T) {
+	config := testPreauthConfig(TLSModeImplicit, false)
+	config.Authenticator = &recordingAuthenticator{}
+	config.BearerIntrospector = &recordingBearerIntrospector{err: errors.New("temporary introspection failure")}
+
+	harness := startTestSession(t, config)
+	harness.expectLine(t, greetingLine)
+	harness.write(t, "A001 AUTHENTICATE XOAUTH2 "+xoauth2Payload("alice@example.test", "xoauth-token")+"\r\n")
+	harness.expectLine(t, "A001 NO [UNAVAILABLE] Authentication service temporarily unavailable\r\n")
+}
+
+// TestBearerIntrospectionRejectionMapsToAuthFailure verifies inactive tokens reject auth.
+func TestBearerIntrospectionRejectionMapsToAuthFailure(t *testing.T) {
+	config := testPreauthConfig(TLSModeImplicit, false)
+	config.Authenticator = &recordingAuthenticator{}
+	config.BearerIntrospector = &recordingBearerIntrospector{result: nauthilus.AuthResult{Decision: nauthilus.DecisionRejected}}
+
+	harness := startTestSession(t, config)
+	harness.expectLine(t, greetingLine)
+	harness.write(t, "A001 AUTHENTICATE OAUTHBEARER "+oauthBearerPayload("alice@example.test", "oauth-token")+"\r\n")
+	harness.expectLine(t, "A001 NO [AUTHENTICATIONFAILED] Authentication failed\r\n")
+}
+
 // TestBearerTokenLimitUsesSessionConfig verifies authority-derived bearer limits fail closed.
 func TestBearerTokenLimitUsesSessionConfig(t *testing.T) {
 	config := testPreauthConfig(TLSModeImplicit, false)
@@ -315,13 +418,48 @@ func TestCredentialsBuildNauthilusRequest(t *testing.T) {
 	}
 	defer bearerCredentials.Clear()
 
-	bearerRequest := bearerCredentials.NauthilusAuthRequest(nauthilus.RequestContext{Protocol: "imap"})
+	bearerRequest := bearerCredentials.BearerIntrospectionRequest(nauthilus.RequestContext{Protocol: "imap"}, protocolIMAP, "imap", "default")
 	if bearerRequest.Context.Username != "bearer@example.test" || bearerRequest.Context.Method != mechanismXOAUTH2 {
 		t.Fatalf("bearer request context = %#v, want XOAUTH2 identity", bearerRequest.Context)
 	}
-	if bearerRequest.Credential.Value() != testBearerToken {
-		t.Fatal("Nauthilus request did not carry the bearer token as credential material")
+	if bearerRequest.BearerToken.Value() != testBearerToken {
+		t.Fatal("introspection request did not carry the bearer token as credential material")
 	}
+}
+
+type recordingBearerIntrospector struct {
+	requests []nauthilus.BearerIntrospectionRequest
+	result   nauthilus.AuthResult
+	err      error
+}
+
+// Introspect records bearer requests and returns the configured result.
+func (i *recordingBearerIntrospector) Introspect(_ context.Context, request nauthilus.BearerIntrospectionRequest) (nauthilus.AuthResult, error) {
+	i.requests = append(i.requests, request)
+	if i.err != nil {
+		return nauthilus.AuthResult{Decision: nauthilus.DecisionTemporaryFailure}, i.err
+	}
+	if i.result.Decision != "" {
+		return i.result, nil
+	}
+
+	return nauthilus.AuthResult{Decision: nauthilus.DecisionAuthenticated, Account: request.Context.Username}, nil
+}
+
+// callCount returns how many introspection requests were recorded.
+func (i *recordingBearerIntrospector) callCount() int {
+	return len(i.requests)
+}
+
+// singleRequest returns the only recorded introspection request.
+func (i *recordingBearerIntrospector) singleRequest(t *testing.T) nauthilus.BearerIntrospectionRequest {
+	t.Helper()
+
+	if len(i.requests) != 1 {
+		t.Fatalf("introspection requests = %d, want 1", len(i.requests))
+	}
+
+	return i.requests[0]
 }
 
 // parseTestCommand parses one test command line with the package parser.

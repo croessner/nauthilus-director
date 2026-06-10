@@ -198,31 +198,61 @@ auth:
             - plain
             - login
         bearer:
+          # This subtree validates incoming mail SASL end-user bearer tokens.
+          # It is separate from oidc.client_credentials below.
           enabled: true
           names:
             - xoauth2
             - oauthbearer
-          validation: nauthilus
+          validation: nauthilus_introspection
           token_max_bytes: 16384
+          introspection:
+            enabled: true
+            # Configure either issuer or discovery_url. Discovery must expose
+            # an introspection_endpoint before bearer-capable listeners start.
+            issuer: https://auth.example.org
+            discovery_url: ""
+            client_id: nauthilus-director-sasl
+            client_secret: ""
+            client_secret_file: /etc/nauthilus-director/nauthilus-introspection-client-secret
+            auth_method: client_secret_basic
+            # For private_key_jwt, clear client_secret/client_secret_file and
+            # configure the mounted private key file:
+            # auth_method: private_key_jwt
+            # client_private_key_file: /etc/nauthilus-director/nauthilus-introspection-client-key.pem
+            # client_key_id: director-sasl-key-1
+            # client_assertion_alg: RS256
+            client_private_key_file: ""
+            client_key_id: ""
+            client_assertion_alg: ""
+            # required_scope applies to the introspected end-user token.
+            # It is not the Director caller-token scope list.
+            required_scope: email
+            # Leave empty to use the conservative default account-claim chain,
+            # or set one non-secret claim name expected from Nauthilus.
+            account_claim: ""
 
       oidc:
+        # This subtree is Director-to-Nauthilus caller auth. It obtains the
+        # Director's own backchannel token for HTTP/gRPC authority calls.
         enabled: true
         authority_mode: nauthilus
         issuer_hint: https://auth.example.org
         issuer: https://auth.example.org
         discovery_url: ""
         audience_hint: mail
-        required_scopes:
-          - email
         client_credentials:
           enabled: true
           client_id: nauthilus-director
           client_secret: ""
           client_secret_file: /etc/nauthilus-director/nauthilus-oidc-client-secret
           token_endpoint_auth_method: client_secret_basic
+          # This controls endpoint auth for control-plane OIDC token introspection
+          # through this authority, not mail SASL bearer introspection.
+          # Mail SASL uses mechanisms.bearer.introspection.auth_method.
           introspection_endpoint_auth_method: client_secret_basic
-          # For Nauthilus private_key_jwt, set token endpoint auth and,
-          # when Discovery announces it, introspection auth to private_key_jwt:
+          # For Nauthilus private_key_jwt caller auth, set token endpoint auth
+          # and, for control-plane OIDC introspection, introspection auth:
           # token_endpoint_auth_method: private_key_jwt
           # introspection_endpoint_auth_method: private_key_jwt
           # client_private_key_file: /etc/nauthilus-director/nauthilus-oidc-client-key.pem
@@ -233,6 +263,8 @@ auth:
           client_key_id: ""
           client_assertion_alg: RS256
           audience: ""
+          # These are requested for the Director caller token only. They are
+          # not required end-user token scopes for mail SASL bearer auth.
           scopes:
             - nauthilus:authenticate
             - nauthilus:lookup_identity

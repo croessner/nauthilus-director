@@ -14,7 +14,7 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-//nolint:goconst // Protocol fixtures repeat stable public wire and backend-node values.
+//nolint:dupl,goconst // Protocol fixtures repeat stable public wire and backend-node values.
 package lmtp
 
 import (
@@ -316,8 +316,8 @@ func TestSASLPeerAuthUsesSubmitterIdentity(t *testing.T) {
 	}
 }
 
-// TestSASLPeerBearerAuthForwardsTokensToNauthilus proves mail bearer material stays authority-owned.
-func TestSASLPeerBearerAuthForwardsTokensToNauthilus(t *testing.T) {
+// TestSASLPeerBearerAuthUsesIntrospection proves peer bearer auth avoids password auth.
+func TestSASLPeerBearerAuthUsesIntrospection(t *testing.T) {
 	tests := []struct {
 		name     string
 		command  string
@@ -344,10 +344,14 @@ func TestSASLPeerBearerAuthForwardsTokensToNauthilus(t *testing.T) {
 	for _, testCase := range tests {
 		t.Run(testCase.name, func(t *testing.T) {
 			authenticator := &recordingAuthenticator{}
+			introspector := &recordingBearerIntrospector{
+				result: nauthilus.AuthResult{Decision: nauthilus.DecisionAuthenticated, Account: testCase.username},
+			}
 			config := testSessionConfig()
 			config.TLSMode = TLSModeImplicit
 			config.RequirePeerAuth = true
 			config.Authenticator = authenticator
+			config.BearerIntrospector = introspector
 			config.Capabilities = []string{testAllAuthCapability}
 
 			harness := startLMTPHarness(t, config)
@@ -358,16 +362,114 @@ func TestSASLPeerBearerAuthForwardsTokensToNauthilus(t *testing.T) {
 			harness.write(t, testCase.command)
 			harness.expectLine(t, "235 2.7.0 Authentication successful\r\n")
 
-			request := authenticator.singleRequest(t)
+			if authenticator.callCount() != 0 {
+				t.Fatalf("password auth calls = %d, want 0", authenticator.callCount())
+			}
+
+			request := introspector.singleRequest(t)
 			if request.Context.Protocol != protocolLMTP || request.Context.Method != testCase.method {
 				t.Fatalf("request context protocol/method = %q/%q, want lmtp/%s", request.Context.Protocol, request.Context.Method, testCase.method)
 			}
 
-			if request.Context.Username != testCase.username || request.Credential.Value() != testCase.token {
-				t.Fatalf("request username/token = %q/%q, want forwarded bearer material", request.Context.Username, request.Credential.String())
+			if request.Context.Username != testCase.username || request.BearerToken.Value() != testCase.token {
+				t.Fatalf("request username/token = %q/%q, want introspected bearer material", request.Context.Username, request.BearerToken.String())
 			}
 		})
 	}
+}
+
+// TestSASLPeerPasswordAuthStillUsesAuthenticator proves PLAIN remains on password auth.
+func TestSASLPeerPasswordAuthStillUsesAuthenticator(t *testing.T) {
+	authenticator := &recordingAuthenticator{}
+	introspector := &recordingBearerIntrospector{}
+	config := testSessionConfig()
+	config.TLSMode = TLSModeImplicit
+	config.RequirePeerAuth = true
+	config.Authenticator = authenticator
+	config.BearerIntrospector = introspector
+	config.Capabilities = []string{testAllAuthCapability}
+
+	harness := startLMTPHarness(t, config)
+	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+	harness.write(t, "LHLO submitter.example\r\n")
+	harness.expectLine(t, "250-nauthilus-director\r\n")
+	harness.expectLine(t, "250 AUTH PLAIN LOGIN XOAUTH2 OAUTHBEARER\r\n")
+	harness.write(t, "AUTH PLAIN "+plainPayload(testSubmitterIdentity, testPeerPassword)+"\r\n")
+	harness.expectLine(t, "235 2.7.0 Authentication successful\r\n")
+
+	if authenticator.callCount() != 1 {
+		t.Fatalf("password auth calls = %d, want 1", authenticator.callCount())
+	}
+
+	if introspector.callCount() != 0 {
+		t.Fatalf("introspection calls = %d, want 0", introspector.callCount())
+	}
+}
+
+// TestSASLPeerBearerBeforeTLSDoesNotIntrospect verifies plaintext AUTH stays fail-closed.
+func TestSASLPeerBearerBeforeTLSDoesNotIntrospect(t *testing.T) {
+	authenticator := &recordingAuthenticator{}
+	introspector := &recordingBearerIntrospector{}
+	config := testSessionConfig()
+	config.TLSMode = TLSModeStartTLS
+	config.RequirePeerAuth = true
+	config.Authenticator = authenticator
+	config.BearerIntrospector = introspector
+	config.Capabilities = []string{testAllAuthCapability, capabilitySTARTTLS}
+
+	harness := startLMTPHarness(t, config)
+	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+	harness.write(t, "LHLO submitter.example\r\n")
+	harness.expectLine(t, "250-nauthilus-director\r\n")
+	harness.expectLine(t, "250 STARTTLS\r\n")
+	harness.write(t, "AUTH XOAUTH2 "+xoauth2Payload("alice@example.test", "token-before-tls")+"\r\n")
+	harness.expectLine(t, "530 5.7.0 Must issue STARTTLS first\r\n")
+
+	if authenticator.callCount() != 0 {
+		t.Fatalf("password auth calls = %d, want 0", authenticator.callCount())
+	}
+
+	if introspector.callCount() != 0 {
+		t.Fatalf("introspection calls = %d, want 0", introspector.callCount())
+	}
+}
+
+// TestSASLPeerBearerTemporaryFailureMapsTo454 verifies transport errors stay temporary.
+func TestSASLPeerBearerTemporaryFailureMapsTo454(t *testing.T) {
+	config := testSessionConfig()
+	config.TLSMode = TLSModeImplicit
+	config.RequirePeerAuth = true
+	config.Authenticator = &recordingAuthenticator{}
+	config.BearerIntrospector = &recordingBearerIntrospector{err: errors.New("temporary introspection failure")}
+	config.Capabilities = []string{testAllAuthCapability}
+
+	harness := startLMTPHarness(t, config)
+	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+	harness.write(t, "LHLO submitter.example\r\n")
+	harness.expectLine(t, "250-nauthilus-director\r\n")
+	harness.expectLine(t, "250 AUTH PLAIN LOGIN XOAUTH2 OAUTHBEARER\r\n")
+	harness.write(t, "AUTH XOAUTH2 "+xoauth2Payload("alice@example.test", "xoauth-token")+"\r\n")
+	harness.expectLine(t, "454 4.7.0 Authentication service temporarily unavailable\r\n")
+}
+
+// TestSASLPeerBearerRejectionMapsTo535 verifies inactive tokens reject authentication.
+func TestSASLPeerBearerRejectionMapsTo535(t *testing.T) {
+	config := testSessionConfig()
+	config.TLSMode = TLSModeImplicit
+	config.RequirePeerAuth = true
+	config.Authenticator = &recordingAuthenticator{}
+	config.BearerIntrospector = &recordingBearerIntrospector{
+		result: nauthilus.AuthResult{Decision: nauthilus.DecisionRejected},
+	}
+	config.Capabilities = []string{testAllAuthCapability}
+
+	harness := startLMTPHarness(t, config)
+	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+	harness.write(t, "LHLO submitter.example\r\n")
+	harness.expectLine(t, "250-nauthilus-director\r\n")
+	harness.expectLine(t, "250 AUTH PLAIN LOGIN XOAUTH2 OAUTHBEARER\r\n")
+	harness.write(t, "AUTH OAUTHBEARER "+oauthBearerPayload("alice@example.test", "oauth-token")+"\r\n")
+	harness.expectLine(t, "535 5.7.8 Authentication credentials invalid\r\n")
 }
 
 // TestSASLPeerAuthPassesVerifiedTLSFacts verifies client certificate metadata reaches Nauthilus.
@@ -2818,6 +2920,14 @@ func (a *recordingAuthenticator) Authenticate(_ context.Context, request nauthil
 	return nauthilus.AuthResult{Decision: nauthilus.DecisionAuthenticated, Account: request.Context.Username}, nil
 }
 
+// callCount returns how many password auth requests were recorded.
+func (a *recordingAuthenticator) callCount() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	return len(a.requests)
+}
+
 // singleRequest returns the only recorded auth request.
 func (a *recordingAuthenticator) singleRequest(t *testing.T) nauthilus.AuthRequest {
 	t.Helper()
@@ -2830,6 +2940,52 @@ func (a *recordingAuthenticator) singleRequest(t *testing.T) nauthilus.AuthReque
 	}
 
 	return a.requests[0]
+}
+
+type recordingBearerIntrospector struct {
+	mu       sync.Mutex
+	requests []nauthilus.BearerIntrospectionRequest
+	result   nauthilus.AuthResult
+	err      error
+}
+
+// Introspect records the request and returns a deterministic success by default.
+func (i *recordingBearerIntrospector) Introspect(_ context.Context, request nauthilus.BearerIntrospectionRequest) (nauthilus.AuthResult, error) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+
+	i.requests = append(i.requests, request)
+	if i.err != nil {
+		return nauthilus.AuthResult{Decision: nauthilus.DecisionTemporaryFailure}, i.err
+	}
+
+	if i.result.Decision != "" {
+		return i.result, nil
+	}
+
+	return nauthilus.AuthResult{Decision: nauthilus.DecisionAuthenticated, Account: request.Context.Username}, nil
+}
+
+// callCount returns how many introspection requests were recorded.
+func (i *recordingBearerIntrospector) callCount() int {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+
+	return len(i.requests)
+}
+
+// singleRequest returns the only recorded introspection request.
+func (i *recordingBearerIntrospector) singleRequest(t *testing.T) nauthilus.BearerIntrospectionRequest {
+	t.Helper()
+
+	i.mu.Lock()
+	defer i.mu.Unlock()
+
+	if len(i.requests) != 1 {
+		t.Fatalf("introspection requests = %d, want 1", len(i.requests))
+	}
+
+	return i.requests[0]
 }
 
 type recordingMessageSink struct {

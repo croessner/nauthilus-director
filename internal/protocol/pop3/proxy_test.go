@@ -35,6 +35,7 @@ import (
 	"github.com/croessner/nauthilus-director/internal/nauthilus"
 	"github.com/croessner/nauthilus-director/internal/observability"
 	"github.com/croessner/nauthilus-director/internal/placement"
+	"github.com/croessner/nauthilus-director/internal/protocol/saslcred"
 	runtimectl "github.com/croessner/nauthilus-director/internal/runtime"
 )
 
@@ -289,6 +290,11 @@ func newPOP3ProxyPlacement() (*recordingSessionPlacer, *recordingPlacementLease)
 			Password:   config.Secret(testPOP3BackendMasterPass),
 			UserFormat: "{user}*{master_user}",
 			Mechanism:  "plain",
+		},
+		CredentialReplay: backend.CredentialReplayConfig{
+			RequireBackendTLS: true,
+			PreserveMechanism: true,
+			AllowedMechanisms: []string{authMethodUserPass, saslcred.MechanismXOAUTH2, saslcred.MechanismOAuthBearer},
 		},
 	}
 

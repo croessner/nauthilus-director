@@ -65,10 +65,14 @@ func TestMetricLabelAllowlistRejectsForbiddenLabels(t *testing.T) {
 // TestSanitizeLogFieldsRedactsSecretsAndCollapsesIdentityValues checks log safety.
 func TestSanitizeLogFieldsRedactsSecretsAndCollapsesIdentityValues(t *testing.T) {
 	fields := SanitizeLogFields(map[string]string{
+		fieldAccount:         "account-a",
+		fieldAccountKey:      "account-key-a",
 		fieldClientIP:        "192.0.2.10",
+		fieldEmail:           "alice@example.org",
 		metricLabelOperation: testOperationAuthenticate,
 		fieldPassword:        "secret",
 		fieldSessionID:       "session-1",
+		fieldSub:             "subject-a",
 		fieldUsername:        "user@example.org",
 	})
 
@@ -78,6 +82,22 @@ func TestSanitizeLogFieldsRedactsSecretsAndCollapsesIdentityValues(t *testing.T)
 
 	if fields["username_present"] != logBoolTrue {
 		t.Fatalf("username_present = %q, want true", fields["username_present"])
+	}
+
+	if fields["account_present"] != logBoolTrue {
+		t.Fatalf("account_present = %q, want true", fields["account_present"])
+	}
+
+	if fields["account_key_present"] != logBoolTrue {
+		t.Fatalf("account_key_present = %q, want true", fields["account_key_present"])
+	}
+
+	if fields["email_present"] != logBoolTrue {
+		t.Fatalf("email_present = %q, want true", fields["email_present"])
+	}
+
+	if fields["sub_present"] != logBoolTrue {
+		t.Fatalf("sub_present = %q, want true", fields["sub_present"])
 	}
 
 	if fields["client_ip_present"] != logBoolTrue {
@@ -90,6 +110,12 @@ func TestSanitizeLogFieldsRedactsSecretsAndCollapsesIdentityValues(t *testing.T)
 
 	if _, ok := fields[fieldUsername]; ok {
 		t.Fatal("raw username remained in log fields")
+	}
+
+	for _, name := range []string{fieldAccount, fieldAccountKey, fieldEmail, fieldSub} {
+		if _, ok := fields[name]; ok {
+			t.Fatalf("raw %s remained in log fields", name)
+		}
 	}
 
 	if fields[metricLabelOperation] != testOperationAuthenticate {
@@ -217,13 +243,17 @@ func TestEventNormalizationRejectsForbiddenMetricLabels(t *testing.T) {
 // TestTraceAttributesApplyDiagnosticPolicy verifies traces have their own safe attribute policy.
 func TestTraceAttributesApplyDiagnosticPolicy(t *testing.T) {
 	fields := SanitizeTraceFields(map[string]string{
+		fieldAccount:           "account-a",
+		fieldAccountKey:        "account-key-a",
 		fieldBackendIdentifier: testDiagnosticBackendID,
 		fieldBackendNode:       testDiagnosticBackendNode,
 		fieldClientIP:          "192.0.2.10",
+		fieldEmail:             testDiagnosticAccount,
 		fieldPassword:          "secret",
 		fieldRawError:          "dial tcp 192.0.2.10:143: secret",
 		fieldRecipient:         testDiagnosticAccount,
 		fieldRedisKey:          "{alice}:session",
+		fieldSub:               "subject-a",
 		fieldUsername:          testDiagnosticAccount,
 		metricLabelOperation:   testOperationAuthenticate,
 	})
@@ -240,7 +270,17 @@ func TestTraceAttributesApplyDiagnosticPolicy(t *testing.T) {
 		t.Fatalf("backend node trace attribute = %q", fields[fieldBackendNode])
 	}
 
-	for _, name := range []string{fieldClientIP, fieldRawError, fieldRecipient, fieldRedisKey, fieldUsername} {
+	for _, name := range []string{
+		fieldAccount,
+		fieldAccountKey,
+		fieldClientIP,
+		fieldEmail,
+		fieldRawError,
+		fieldRecipient,
+		fieldRedisKey,
+		fieldSub,
+		fieldUsername,
+	} {
 		if _, ok := fields[name]; ok {
 			t.Fatalf("raw trace attribute %q remained", name)
 		}

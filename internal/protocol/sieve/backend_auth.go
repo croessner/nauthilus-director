@@ -114,6 +114,10 @@ func AuthenticateHealthBackend(connection *BackendConnection, target backend.Bac
 func backendAuthCommand(target backend.Backend, connection *BackendConnection, credentials *frontendCredentials) (string, error) {
 	switch strings.ToLower(strings.TrimSpace(target.Auth.Mode)) {
 	case backendAuthModeMasterUser:
+		if credentials.Kind() == saslcred.KindBearer {
+			return credentialReplayCommand(target.Auth.CredentialReplay, connection, credentials)
+		}
+
 		return masterUserAuthCommand(target.Auth.MasterUser, connection.capabilities, credentials)
 	case backendAuthModeCredentialReplay:
 		return credentialReplayCommand(target.Auth.CredentialReplay, connection, credentials)

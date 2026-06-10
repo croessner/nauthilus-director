@@ -56,6 +56,11 @@ type Authenticator interface {
 	Authenticate(ctx context.Context, request AuthRequest) (AuthResult, error)
 }
 
+// BearerIntrospector verifies mail SASL bearer tokens through Nauthilus OIDC.
+type BearerIntrospector interface {
+	Introspect(ctx context.Context, request BearerIntrospectionRequest) (AuthResult, error)
+}
+
 // IdentityLookuper resolves identity attributes without sending credentials.
 type IdentityLookuper interface {
 	LookupIdentity(ctx context.Context, request IdentityLookupRequest) (AuthResult, error)

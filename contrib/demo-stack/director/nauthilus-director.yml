@@ -201,7 +201,6 @@ auth:
         enabled: true
         authority_mode: nauthilus
         issuer: "https://nauthilus-haproxy:8443"
-        required_scopes: []
         client_credentials:
           enabled: true
           client_id: "nauthilus-director-demo"

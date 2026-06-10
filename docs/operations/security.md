@@ -39,6 +39,11 @@ Director parses only the bearer envelope locally. Inactive tokens, missing
 ordinary scopes, missing protected scopes, audience mismatch and introspection
 errors fail closed.
 
+This control-plane OIDC path is separate from mail SASL bearer introspection.
+Control scopes live under `runtime.servers.control.auth.oidc`; mail SASL
+end-user token policy lives under
+`auth.authorities.<name>.mechanisms.bearer.introspection`.
+
 Static bearer auth reads `runtime.servers.control.auth.bearer.token_file` from a
 mounted secret file and compares the token in constant time. Prefer
 `nauthilus-directorctl --auth-bearer-token-file <path>` or
@@ -74,6 +79,28 @@ $CTL --auth-bearer-token-file "$TOKEN_FILE" config dump --non-default --protecte
 Use a token with the protected scope only for the bounded operation that needs
 protected config or profile access. Store short-lived operator tokens outside
 shell history, tickets and long-lived logs.
+
+## Mail SASL Bearer Tokens
+
+Mail-protocol `XOAUTH2` and `OAUTHBEARER` credentials carry end-user bearer
+tokens. The Director validates them by calling Nauthilus' discovered HTTP OIDC
+introspection endpoint as the configured SASL introspection client. This path is
+used even when password-oriented Nauthilus authority calls use gRPC.
+
+`auth.authorities.<name>.oidc.client_credentials.*` is Director-to-Nauthilus
+caller auth. `auth.authorities.<name>.mechanisms.bearer.introspection.*`
+validates incoming mail SASL end-user bearer tokens. The required end-user token
+scope belongs to `mechanisms.bearer.introspection.required_scope`; the
+caller-token request scopes in `oidc.client_credentials.scopes` do not authorize
+mail SASL bearer sessions.
+
+The original end-user bearer token may remain in memory only long enough for
+policy-gated backend replay. Backend replay requires an allowed original
+mechanism and the configured backend TLS policy; it must not bypass TLS,
+allowed-mechanism checks or fail-closed backend auth behavior. End-user bearer
+tokens, token hashes, account keys, configured claim values and raw
+introspection errors must not appear in logs, traces, metrics, CLI output or
+test failure output.
 
 ## Protected Config
 
@@ -123,6 +150,7 @@ Use mounted files for secret-bearing paths:
 | --- | --- |
 | Control bearer token | `/etc/nauthilus-director/control-token` |
 | Nauthilus OIDC client secret | `/etc/nauthilus-director/nauthilus-oidc-client-secret` |
+| Nauthilus SASL introspection client secret | `/etc/nauthilus-director/nauthilus-introspection-client-secret` |
 | Redis password | `/etc/nauthilus-director/redis-password` |
 | TLS private keys | `/etc/nauthilus-director/*.key` |
 | Client certificates and CA bundles | `/etc/nauthilus-director/*.pem` |

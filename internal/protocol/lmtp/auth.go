@@ -155,10 +155,38 @@ func (c *peerCredentials) NauthilusAuthRequest(requestContext nauthilus.RequestC
 
 	requestContext.Username = c.username
 	requestContext.Method = c.mechanism.Normalized()
+	if c.kind == credentialKindBearer {
+		return nauthilus.AuthRequest{Context: requestContext}
+	}
 
 	return nauthilus.AuthRequest{
 		Context:    requestContext,
 		Credential: nauthilus.NewSecret(c.secret.Value()),
+	}
+}
+
+// BearerIntrospectionRequest builds the dedicated submitter bearer validation request.
+func (c *peerCredentials) BearerIntrospectionRequest(
+	requestContext nauthilus.RequestContext,
+	protocol string,
+	listenerName string,
+	authorityName string,
+) nauthilus.BearerIntrospectionRequest {
+	if c == nil {
+		return nauthilus.BearerIntrospectionRequest{Context: requestContext}
+	}
+
+	requestContext.Username = c.username
+	requestContext.Method = c.mechanism.Normalized()
+
+	return nauthilus.BearerIntrospectionRequest{
+		Context:               requestContext,
+		Mechanism:             c.mechanism.Normalized(),
+		Protocol:              protocol,
+		ListenerName:          listenerName,
+		AuthorityName:         authorityName,
+		AuthorizationIdentity: firstNonEmpty(c.authzid, c.username),
+		BearerToken:           nauthilus.NewSecret(c.secret.Value()),
 	}
 }
 
@@ -180,6 +208,17 @@ func (c *peerCredentials) String() string {
 // GoString returns only credential-safe metadata for Go-syntax formatting.
 func (c *peerCredentials) GoString() string {
 	return c.String()
+}
+
+// firstNonEmpty returns the first non-empty trimmed value.
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+
+	return ""
 }
 
 // handleAUTH parses and verifies one SMTP-style AUTH command.
@@ -613,6 +652,10 @@ func decodeGS2AuthzID(value string) (string, error) {
 
 // authenticatePeer delegates technical submitter credential verification to Nauthilus.
 func (s *Session) authenticatePeer(ctx context.Context, credentials *peerCredentials) error {
+	if credentials.kind == credentialKindBearer {
+		return s.introspectPeerBearer(ctx, credentials)
+	}
+
 	if s.authenticator == nil {
 		return s.writeEnhanced(responseStatusAuthUnavailable, enhancedAuthUnavailable, authUnavailableText)
 	}
@@ -629,6 +672,39 @@ func (s *Session) authenticatePeer(ctx context.Context, credentials *peerCredent
 		return s.writeEnhanced(responseStatusAuthUnavailable, enhancedAuthUnavailable, authUnavailableText)
 	}
 
+	return s.applyPeerAuthResult(ctx, credentials, result)
+}
+
+// introspectPeerBearer delegates submitter bearer-token validation to Nauthilus OIDC.
+func (s *Session) introspectPeerBearer(ctx context.Context, credentials *peerCredentials) error {
+	if s.bearerIntrospector == nil {
+		s.recordPeerAuth(ctx, lmtpObservationResultFailure, lmtpReasonTemporaryFailure, credentials.mechanism.Normalized())
+
+		return s.writeEnhanced(responseStatusAuthUnavailable, enhancedAuthUnavailable, authUnavailableText)
+	}
+
+	authCtx, cancel := context.WithTimeout(ctx, defaultAuthTimeout(s.authTimeout))
+	defer cancel()
+
+	request := credentials.BearerIntrospectionRequest(
+		s.nauthilusRequestContext(),
+		protocolLMTP,
+		s.listenerName,
+		s.authorityName,
+	)
+
+	result, err := s.bearerIntrospector.Introspect(authCtx, request)
+	if err != nil {
+		s.recordPeerAuth(ctx, lmtpObservationResultFailure, lmtpReasonTemporaryFailure, credentials.mechanism.Normalized())
+
+		return s.writeEnhanced(responseStatusAuthUnavailable, enhancedAuthUnavailable, authUnavailableText)
+	}
+
+	return s.applyPeerAuthResult(ctx, credentials, result)
+}
+
+// applyPeerAuthResult maps one authority decision to LMTP peer-auth state.
+func (s *Session) applyPeerAuthResult(ctx context.Context, credentials *peerCredentials, result nauthilus.AuthResult) error {
 	switch result.Decision {
 	case nauthilus.DecisionAuthenticated:
 		s.peerAuthenticated = true

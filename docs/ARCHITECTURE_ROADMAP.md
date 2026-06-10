@@ -311,7 +311,22 @@ The Nauthilus auth transport is configurable. A deployment uses either HTTP or g
 - HTTP structured auth endpoint: `/api/v1/auth/json` with `application/json`
 - gRPC AuthService endpoint: `nauthilus.auth.v1.AuthService`
 
-OIDC-backed authentication belongs to Nauthilus. The director may receive OAuth/OIDC bearer material through mail SASL mechanisms or through the control API, but it should not become a local OIDC validation authority. It extracts the mechanism payload, preserves the mechanism identity, applies size and secrecy rules, and asks Nauthilus to validate the credential over the configured HTTP or gRPC authority.
+OIDC-backed authentication belongs to Nauthilus. The director has two separate
+OIDC responsibilities that must not share one configuration contract:
+
+- Director-to-Nauthilus caller auth uses the configured OIDC
+  client-credentials flow to authorize the director's own HTTP or gRPC
+  backchannel calls.
+- Mail SASL `XOAUTH2` and `OAUTHBEARER` validation uses Nauthilus' discovered
+  OIDC introspection endpoint to validate the end-user bearer token.
+
+The director must not become a local OIDC validation authority. It parses mail
+SASL bearer envelopes only far enough to extract bounded identity metadata and
+the bearer token, asks Nauthilus to introspect the token, and maps the active
+introspection response into the same director-internal auth result used by
+password credentials. The original end-user bearer token remains short-lived
+credential material for the backend replay branch when backend policy allows it;
+it must not be cached, logged or converted into a master-user password login.
 
 Both transports must map into the same director-internal auth result:
 
@@ -342,12 +357,47 @@ Mechanism handling rules:
 - `XOAUTH2` and `OAUTHBEARER` provide bearer-token credentials.
 - Tokens, passwords and SASL blobs must never be logged, traced or exposed in metrics.
 - The director may parse the SASL envelope enough to extract the authorization identity, authentication identity, bearer token and optional client metadata.
-- The request sent to Nauthilus must include the original mechanism name so Nauthilus can apply mechanism-specific policy.
+- The original mechanism name must stay in director request context and
+  observability. Password-style Nauthilus authority calls include it in their
+  auth DTO; bearer introspection keeps it as the director-side mechanism
+  context around the OIDC introspection result.
 - The director owns the transport privacy gate. Credential-bearing frontend mechanisms, including password and bearer mechanisms, must be rejected before Nauthilus is called unless the client has already crossed an implicit TLS or STARTTLS boundary with the director.
 - When frontend TLS is active, every protocol handler must populate the flat Nauthilus SSL DTO fields it can derive from the connection state, including `ssl`, TLS protocol, cipher, client-certificate verification status and bounded peer-certificate metadata. Missing TLS metadata must not be invented, but `ssl` must still truthfully report whether the frontend connection was encrypted.
 - SASL-IR is allowed where the frontend protocol supports it, but size limits and pre-auth timeouts still apply.
 
-### 7.2 HTTP JSON authentication request
+### 7.2 SASL bearer introspection
+
+SASL bearer validation is an OIDC introspection flow, not a password-auth
+request and not director-local JWT validation.
+
+The configured authority must expose a dedicated bearer-introspection config
+surface under the bearer mechanism settings. It is separate from
+`auth.authorities.<name>.oidc.client_credentials`, which remains caller auth for
+the director itself.
+
+For bearer mechanisms:
+
+- Startup or safe reload discovers the OIDC metadata from the configured issuer
+  or discovery URL before bearer-capable listeners accept traffic.
+- Discovery must provide an `introspection_endpoint`.
+- The director authenticates to the introspection endpoint as a configured
+  confidential client, supporting `client_secret_basic`,
+  `client_secret_post` and `private_key_jwt`.
+- `private_key_jwt` assertions for introspection use the discovered
+  `introspection_endpoint` as audience.
+- The required end-user token scope belongs only to the introspection config and
+  defaults to `email`.
+- An optional `account_claim` names the introspection response claim that
+  provides the account key used by routing, affinity and placement.
+- End-user bearer tokens are held only in short-lived credential state through
+  introspection and policy-gated backend replay, then cleared.
+
+The authority transport choice still applies to password-style authority calls:
+HTTP authorities use `/api/v1/auth/json`, and gRPC authorities use
+`nauthilus.auth.v1.AuthService`. Bearer introspection uses the discovered HTTP
+OIDC endpoint even when the password authority transport is gRPC.
+
+### 7.3 HTTP JSON authentication request
 
 The director uses only the HTTP JSON endpoint when `auth.authorities.<name>.transport` is `http`. The request body is the real structured Nauthilus auth DTO encoded as `application/json`. JSON is strict: unknown top-level fields are rejected.
 
@@ -382,7 +432,7 @@ Example successful response with routing facts in attributes:
 }
 ```
 
-### 7.3 gRPC AuthService
+### 7.4 gRPC AuthService
 
 Nauthilus also exposes a typed gRPC AuthService:
 
@@ -395,7 +445,7 @@ nauthilus.auth.v1.AuthService
 
 `AuthRequest` is the protobuf equivalent of the shared structured auth DTO plus `password` and `auth_login_attempt`. `LookupIdentityRequest` is a dedicated no-password request. `ListAccountsRequest` is a dedicated account-listing request. The director's gRPC client must translate these protobuf responses into the same `AuthResult` shape as the HTTP client.
 
-### 7.4 Backend selection boundary
+### 7.5 Backend selection boundary
 
 There is one routing model for this project: Nauthilus authenticates; the director resolves routing facts and selects the backend.
 
@@ -646,7 +696,20 @@ Backend authentication is explicit and configurable. Supported backend auth mode
 - `master_user`: the director authenticates to the backend with a configured master credential and opens the session as the authenticated user.
 - `credential_replay`: the director forwards the original authentication material to the backend after Nauthilus has accepted it.
 
-`credential_replay` must be opt-in because it extends the lifetime and blast radius of user passwords or bearer tokens inside the director. Both modes must avoid logging passwords, master credentials, SASL blobs and bearer tokens.
+`master_user` mode is hybrid by credential kind. Password frontend credentials
+use the configured master-user login. `XOAUTH2` and `OAUTHBEARER` frontend
+credentials must delegate to the credential-replay backend branch after
+successful OIDC introspection, because the original end-user bearer token is the
+backend credential. The director must not discard that token immediately after
+introspection and must not transform it into a master-user password login.
+
+`credential_replay` must be opt-in because it extends the lifetime and blast
+radius of user passwords or bearer tokens inside the director. Bearer replay is
+allowed only when backend policy explicitly permits the original mechanism,
+preserves it where required and enforces the configured backend TLS policy. All
+backend auth modes must avoid logging passwords, master credentials, SASL blobs
+and bearer tokens, and must clear short-lived credential material after backend
+auth succeeds or the session aborts.
 
 ## 11. POP3 design
 
@@ -1408,8 +1471,9 @@ completion evidence lives in
   profiles, reload and mutation endpoints
 - Nauthilus-backed OIDC caller auth for HTTP/gRPC authority requests, with
   in-memory per-process token caching only
-- mail SASL bearer forwarding to Nauthilus without local token validation or
-  bearer-token caching
+- mail SASL bearer introspection through Nauthilus without local token
+  validation or bearer-token caching, followed by policy-gated backend replay of
+  the original end-user bearer token where backend auth requires it
 - operational deployment, failure-mode, reload/upgrade, OIDC and migration docs
 - operator migration workflows that combine user placement holds, user moves,
   backend pins and active-affinity draining without rewriting YAML runtime

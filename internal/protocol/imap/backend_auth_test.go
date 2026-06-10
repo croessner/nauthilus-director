@@ -117,6 +117,101 @@ func TestCredentialReplayCommandsCoverSupportedMechanisms(t *testing.T) {
 	}
 }
 
+// TestMasterUserModeBranchesByCredentialKind verifies bearer credentials are policy-replayed.
+func TestMasterUserModeBranchesByCredentialKind(t *testing.T) {
+	t.Run("password uses master user", func(t *testing.T) {
+		credentials := loginCredentialsForBackendTest(t)
+		defer credentials.Clear()
+
+		command, err := backendAuthCommand(testMasterUserBackend(), testVerifiedBackendConnection(testBackendCapabilities()), credentials)
+		if err != nil {
+			t.Fatalf("backendAuthCommand returned error: %v", err)
+		}
+
+		payload := decodeInitialResponse(t, command, "AUTHENTICATE PLAIN ")
+		if payload != "\x00alice@example.test*director-master\x00master-secret" {
+			t.Fatalf("PLAIN payload = %q, want master-user payload", payload)
+		}
+		if strings.Contains(payload, testPassword) {
+			t.Fatal("master-user branch replayed the frontend password")
+		}
+	})
+
+	t.Run("bearer uses credential replay", func(t *testing.T) {
+		credentials := xoauth2CredentialsForBackendTest(t)
+		defer credentials.Clear()
+
+		command, err := backendAuthCommand(testMasterUserBackend(), testVerifiedBackendConnection(testBackendCapabilities()), credentials)
+		if err != nil {
+			t.Fatalf("backendAuthCommand returned error: %v", err)
+		}
+
+		payload := decodeInitialResponse(t, command, "AUTHENTICATE XOAUTH2 ")
+		if payload != "user=alice@example.test\x01auth=Bearer "+testBearerToken+"\x01\x01" {
+			t.Fatalf("XOAUTH2 payload = %q, want bearer replay payload", payload)
+		}
+		for _, forbidden := range []string{"director-master", "master-secret", "*director-master"} {
+			if strings.Contains(payload, forbidden) {
+				t.Fatalf("bearer replay payload used master-user material %q", forbidden)
+			}
+		}
+	})
+}
+
+// TestMasterUserBearerReplayFailsClosedBeforeCommand verifies unsafe hybrid policy writes nothing.
+func TestMasterUserBearerReplayFailsClosedBeforeCommand(t *testing.T) {
+	testCases := map[string]struct {
+		target       backend.Backend
+		connection   *BackendConnection
+		wantContains string
+	}{
+		"missing allowlist": {
+			target: func() backend.Backend {
+				target := testMasterUserBackend()
+				target.Auth.CredentialReplay.AllowedMechanisms = []string{mechanismOAuthBearer}
+
+				return target
+			}(),
+			connection:   testVerifiedBackendConnection(testBackendCapabilities()),
+			wantContains: "bearer replay mechanism unavailable",
+		},
+		"missing capability": {
+			target:       testMasterUserBackend(),
+			connection:   testVerifiedBackendConnection(newBackendCapabilities("IMAP4rev1", "AUTH=PLAIN")),
+			wantContains: "bearer replay mechanism unavailable",
+		},
+		"tls required": {
+			target: testMasterUserBackend(),
+			connection: &BackendConnection{
+				capabilities: testBackendCapabilities(),
+				tlsActive:    true,
+				tlsVerified:  false,
+			},
+			wantContains: "credential replay requires verified backend TLS",
+		},
+	}
+
+	for name, testCase := range testCases {
+		t.Run(name, func(t *testing.T) {
+			credentials := xoauth2CredentialsForBackendTest(t)
+			defer credentials.Clear()
+
+			command, err := backendAuthCommand(testCase.target, testCase.connection, credentials)
+			if !errors.Is(err, ErrBackendAuthPolicy) {
+				t.Fatalf("backendAuthCommand error = %v, want policy rejection", err)
+			}
+			if command != "" {
+				t.Fatalf("backendAuthCommand returned command before policy rejection: %q", command)
+			}
+			if !strings.Contains(err.Error(), testCase.wantContains) {
+				t.Fatalf("error = %q, want %q", err.Error(), testCase.wantContains)
+			}
+			assertDoesNotContain(t, err.Error(), testBearerToken)
+			assertDoesNotContain(t, err.Error(), "alice@example.test")
+		})
+	}
+}
+
 // TestCredentialReplayTLSEnforcement verifies replay fails before secrets cross plaintext.
 func TestCredentialReplayTLSEnforcement(t *testing.T) {
 	credentials := plainCredentialsForBackendTest(t)
@@ -212,6 +307,24 @@ func testReplayBackend() backend.Backend {
 				AllowedMechanisms: []string{mechanismPlain, mechanismLogin, mechanismXOAUTH2, mechanismOAuthBearer},
 			},
 		},
+	}
+}
+
+// testMasterUserBackend returns a hybrid master-user backend fixture.
+func testMasterUserBackend() backend.Backend {
+	target := testReplayBackend()
+	target.Auth.Mode = backendAuthModeMasterUser
+	target.Auth.MasterUser = testMasterUserConfig()
+
+	return target
+}
+
+// testVerifiedBackendConnection returns a prepared backend connection fixture.
+func testVerifiedBackendConnection(capabilities backendCapabilities) *BackendConnection {
+	return &BackendConnection{
+		capabilities: capabilities,
+		tlsActive:    true,
+		tlsVerified:  true,
 	}
 }
 

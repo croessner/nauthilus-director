@@ -41,10 +41,26 @@ type PasswordMechanismConfig struct {
 }
 
 type BearerMechanismConfig struct {
-	Enabled       bool     `mapstructure:"enabled" yaml:"enabled"`
-	Names         []string `mapstructure:"names" yaml:"names"`
-	Validation    string   `mapstructure:"validation" yaml:"validation"`
-	TokenMaxBytes int      `mapstructure:"token_max_bytes" yaml:"token_max_bytes"`
+	Enabled       bool                      `mapstructure:"enabled" yaml:"enabled"`
+	Names         []string                  `mapstructure:"names" yaml:"names"`
+	Validation    string                    `mapstructure:"validation" yaml:"validation"`
+	TokenMaxBytes int                       `mapstructure:"token_max_bytes" yaml:"token_max_bytes"`
+	Introspection BearerIntrospectionConfig `mapstructure:"introspection" yaml:"introspection" validate:"required"`
+}
+
+type BearerIntrospectionConfig struct {
+	Enabled              bool         `mapstructure:"enabled" yaml:"enabled"`
+	Issuer               string       `mapstructure:"issuer" yaml:"issuer"`
+	DiscoveryURL         string       `mapstructure:"discovery_url" yaml:"discovery_url"`
+	ClientID             string       `mapstructure:"client_id" yaml:"client_id"`
+	ClientSecret         SecretString `mapstructure:"client_secret" yaml:"client_secret" protected:"true"`
+	ClientSecretFile     SecretString `mapstructure:"client_secret_file" yaml:"client_secret_file" protected:"true"`
+	ClientPrivateKeyFile SecretString `mapstructure:"client_private_key_file" yaml:"client_private_key_file" protected:"true"`
+	ClientKeyID          string       `mapstructure:"client_key_id" yaml:"client_key_id"`
+	ClientAssertionAlg   string       `mapstructure:"client_assertion_alg" yaml:"client_assertion_alg"`
+	AuthMethod           string       `mapstructure:"auth_method" yaml:"auth_method"`
+	RequiredScope        string       `mapstructure:"required_scope" yaml:"required_scope"`
+	AccountClaim         string       `mapstructure:"account_claim" yaml:"account_claim"`
 }
 
 type AuthorityOIDCConfig struct {
@@ -54,7 +70,6 @@ type AuthorityOIDCConfig struct {
 	Issuer            string                               `mapstructure:"issuer" yaml:"issuer"`
 	DiscoveryURL      string                               `mapstructure:"discovery_url" yaml:"discovery_url"`
 	AudienceHint      string                               `mapstructure:"audience_hint" yaml:"audience_hint"`
-	RequiredScopes    []string                             `mapstructure:"required_scopes" yaml:"required_scopes"`
 	ClientCredentials AuthorityOIDCClientCredentialsConfig `mapstructure:"client_credentials" yaml:"client_credentials" validate:"required"`
 }
 

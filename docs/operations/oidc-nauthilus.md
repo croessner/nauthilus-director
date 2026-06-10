@@ -1,9 +1,10 @@
 # Nauthilus OIDC Operations
 
-This runbook covers OIDC for two different Director paths:
+This runbook covers OIDC for three different Director paths:
 
 1. Director-to-Nauthilus caller authentication for authority calls.
 2. Control-plane OIDC validation for operator and automation requests.
+3. Mail SASL `XOAUTH2` and `OAUTHBEARER` end-user bearer-token validation.
 
 OIDC with Nauthilus-issued client-credentials tokens is the recommended
 production caller-auth mode. Basic Auth and static bearer files remain explicit
@@ -46,7 +47,8 @@ The Director discovers Nauthilus metadata from the issuer's
 `/.well-known/openid-configuration` unless an explicit discovery URL is
 configured. Discovery must provide usable `token_endpoint` and
 `introspection_endpoint` values and must advertise the configured client auth
-methods. Missing metadata fails closed when OIDC is enabled.
+methods. Missing metadata fails closed when OIDC caller auth, control-plane
+OIDC validation or SASL bearer introspection requires it.
 
 Direct `token_endpoint` overrides are compatibility settings. Prefer discovery
 unless a deployment has a documented reason to pin a token endpoint.
@@ -91,6 +93,12 @@ auth:
           client_assertion_alg: RS256
 ```
 
+`auth.authorities.<name>.oidc.client_credentials.*` configures the Director as
+the OAuth client for Nauthilus backchannel calls. Its
+`introspection_endpoint_auth_method` is used when control-plane OIDC validation
+introspects operator tokens through this authority. It is not the mail SASL
+bearer introspection endpoint-auth setting.
+
 Do not put client secrets or private key material directly in examples, unit
 files or image layers.
 
@@ -107,6 +115,11 @@ operations the Director can perform:
 
 If a deployment uses one shared authority token for all operations, configure
 all scopes required by the enabled authority client.
+
+These caller-token request scopes are independent from the end-user token scope
+required for mail SASL bearer introspection. Do not use
+`auth.authorities.<name>.oidc.client_credentials.scopes` as the mail SASL
+bearer policy surface.
 
 Control-plane OIDC uses different scopes under
 `runtime.servers.control.auth.oidc`:
@@ -145,19 +158,64 @@ appear in logs, metrics, traces, CLI output or test output.
 
 ## End-User Mail Bearer Tokens
 
-Mail-protocol `XOAUTH2` and `OAUTHBEARER` credentials are not Director caller
-auth. The Director parses those SASL envelopes only enough to extract the
-authentication identity, mechanism identity and bearer material, then forwards
-that credential material to Nauthilus through the selected authority transport.
+Mail-protocol `XOAUTH2` and `OAUTHBEARER` credentials are end-user bearer
+tokens. They are not Director caller-auth tokens and they are not validated
+through the password-shaped Nauthilus AuthService contract.
 
-The Director does not locally validate, introspect, cache or log end-user mail
-bearer tokens.
+Configure mail SASL bearer validation under
+`auth.authorities.<name>.mechanisms.bearer.introspection`:
+
+```yaml
+auth:
+  authorities:
+    default:
+      mechanisms:
+        bearer:
+          enabled: true
+          names:
+            - xoauth2
+            - oauthbearer
+          validation: nauthilus_introspection
+          token_max_bytes: 16384
+          introspection:
+            enabled: true
+            issuer: https://auth.example.org
+            discovery_url: ""
+            client_id: nauthilus-director-sasl
+            client_secret_file: /etc/nauthilus-director/nauthilus-introspection-client-secret
+            auth_method: client_secret_basic
+            required_scope: email
+            account_claim: ""
+```
+
+The Director parses the SASL envelope only enough to extract bounded mechanism
+metadata and bearer material. It then calls the discovered HTTP OIDC
+`introspection_endpoint` as a configured confidential introspection client.
+This HTTP introspection path is used even when password-oriented authority calls
+use gRPC.
+
+`required_scope` names the end-user token scope that must be present in the
+introspection response. It defaults to `email`. `account_claim` optionally names
+the non-secret response claim used as the Director account key for routing,
+affinity and placement; when empty, the Director uses its conservative
+account-claim chain.
+
+The original end-user bearer token may be retained only in short-lived
+credential state after successful introspection and only long enough for
+policy-gated backend replay. Backend replay is allowed only when backend auth
+policy explicitly permits the original mechanism and the configured backend TLS
+policy is satisfied. It is not a compatibility bypass for TLS or allowed
+mechanism policy.
+
+The Director does not locally validate JWTs, cache introspection responses,
+persist end-user bearer tokens, log bearer material or expose account keys,
+token hashes or claim values as metric labels.
 
 ## Proof Commands
 
 | Command | Behavior proved |
 | --- | --- |
-| `make e2e` | Deterministic public-socket proof for OIDC caller-token acquisition, Bearer authority requests, insufficient-scope denial, bad-client-secret denial and mail SASL bearer forwarding through fake Nauthilus fixtures. |
+| `make e2e` | Deterministic public-socket proof for OIDC caller-token acquisition, Bearer authority requests, insufficient-scope denial, bad-client-secret denial and mail SASL bearer introspection through fake Nauthilus fixtures. |
 | `make e2e-interop` | Docker-capable real Dovecot/Postfix protocol proof with fake Nauthilus requiring OIDC Bearer caller auth instead of Basic Auth. |
 | `contrib/demo-stack/scripts/send-mail.sh alice@example.test` and `contrib/demo-stack/scripts/fetch-mail.sh alice@example.test` | Demo-stack SMTP-to-LMTPS delivery and IMAPS read path while the paired demo configs use OIDC as the primary Director-to-Nauthilus caller-auth mode. |
 | `contrib/demo-stack/scripts/prove-affinity.sh` | Demo-stack public IMAPS plus SMTP/LMTP proof through the control API using the OIDC-primary authority config. |
@@ -190,6 +248,13 @@ authority configs to OIDC caller auth.
 9. Remove or rotate Basic Auth secrets after the deployment no longer needs the
    compatibility path.
 
+Mail SASL bearer introspection is a separate rollout step. Register a
+confidential Nauthilus introspection client for the Director, mount its secret
+or private key, configure `mechanisms.bearer.introspection.*`, restart, then
+prove `XOAUTH2` or `OAUTHBEARER` through a public protocol socket. Do not move
+the required end-user token scope into the caller-auth `client_credentials`
+scope list.
+
 Rollback is a config restart, not a runtime mutation. Restore the previous
 authority caller-auth config from version control or a reviewed backup, restart,
 then rotate any failed OIDC secret material.
@@ -205,4 +270,5 @@ then rotate any failed OIDC secret material.
 | Insufficient authority scope | Nauthilus rejects the backchannel request. | Add the missing backchannel scope to the Nauthilus client and restart after config validation. |
 | Control token audience mismatch | Nauthilus introspection returns inactive for the operator token. | Issue the control token for the Director control OIDC client audience expected by Nauthilus introspection. |
 | Control token missing protected scope | Normal control commands work; protected config or pprof returns `403`. | Use a short-lived token with the protected scope only for the protected operation. |
-| Introspection inactive or denied | Control requests return `401` or `403` without revealing token detail. | Check token lifetime, audience, client registration, introspection auth method and Nauthilus logs. |
+| Control introspection inactive or denied | Control requests return `401` or `403` without revealing token detail. | Check token lifetime, audience, client registration, `oidc.client_credentials.introspection_endpoint_auth_method` and Nauthilus logs. |
+| Mail SASL bearer introspection denied | `XOAUTH2` or `OAUTHBEARER` auth is rejected or temporarily fails without token detail. | Check `mechanisms.bearer.introspection.required_scope`, `account_claim`, endpoint client-auth method, Nauthilus introspection logs and backend replay policy. |
