@@ -120,7 +120,7 @@ jobs:
 
       - name: Create release with generated notes
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
           PRERELEASE: ${{ steps.release_metadata.outputs.prerelease }}
         run: |
           if gh release view "${{ github.ref_name }}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
@@ -216,6 +216,7 @@ jobs:
       - create-release
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
         goos: [linux]
         goarch: [amd64, arm64]
@@ -229,7 +230,7 @@ jobs:
 
       - name: Upload asset
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           assets="${{ env.APP_NAME }}-${{ matrix.goos }}-${{ matrix.goarch }}"
           gh release upload "${{ github.ref_name }}" \
