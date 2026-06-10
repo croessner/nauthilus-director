@@ -96,6 +96,7 @@ jobs:
       - name: Attest release artifact
         uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
         with:
+          create-storage-record: false
           subject-path: |
             dist/*.tar.gz
             dist/*/*.spdx.json
