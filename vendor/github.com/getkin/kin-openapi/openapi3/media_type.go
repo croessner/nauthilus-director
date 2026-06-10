@@ -3,9 +3,7 @@ package openapi3
 import (
 	"context"
 	"encoding/json"
-	"errors"
-	"fmt"
-	"slices"
+	"maps"
 
 	"github.com/go-openapi/jsonpointer"
 )
@@ -14,7 +12,7 @@ import (
 // See https://github.com/OAI/OpenAPI-Specification/blob/main/versions/3.0.3.md#media-type-object
 type MediaType struct {
 	Extensions map[string]any `json:"-" yaml:"-"`
-	Origin     *Origin        `json:"__origin__,omitempty" yaml:"__origin__,omitempty"`
+	Origin     *Origin        `json:"-" yaml:"-"`
 
 	Schema   *SchemaRef `json:"schema,omitempty" yaml:"schema,omitempty"`
 	Example  any        `json:"example,omitempty" yaml:"example,omitempty"`
@@ -76,9 +74,7 @@ func (mediaType MediaType) MarshalJSON() ([]byte, error) {
 // MarshalYAML returns the YAML encoding of MediaType.
 func (mediaType MediaType) MarshalYAML() (any, error) {
 	m := make(map[string]any, 4+len(mediaType.Extensions))
-	for k, v := range mediaType.Extensions {
-		m[k] = v
-	}
+	maps.Copy(m, mediaType.Extensions)
 	if x := mediaType.Schema; x != nil {
 		m["schema"] = x
 	}
@@ -109,6 +105,7 @@ func (mediaType *MediaType) UnmarshalJSON(data []byte) error {
 	if len(x.Extensions) == 0 {
 		x.Extensions = nil
 	}
+	delete(x.Encoding, originKey)
 	*mediaType = MediaType(x)
 	return nil
 }
@@ -126,36 +123,33 @@ func (mediaType *MediaType) Validate(ctx context.Context, opts ...ValidationOpti
 		}
 
 		if mediaType.Example != nil && mediaType.Examples != nil {
-			return errors.New("example and examples are mutually exclusive")
+			return newMediaTypeExampleExamplesExclusive(mediaType.Origin)
 		}
 
 		if vo := getValidationOptions(ctx); !vo.examplesValidationDisabled {
 			if example := mediaType.Example; example != nil {
 				if err := validateExampleValue(ctx, example, schema.Value); err != nil {
-					return fmt.Errorf("invalid example: %w", err)
+					return newSchemaValueError("example", err, mediaType.Origin)
 				}
 			}
 
 			if examples := mediaType.Examples; examples != nil {
-				names := make([]string, 0, len(examples))
-				for name := range examples {
-					names = append(names, name)
-				}
-				slices.Sort(names)
-				for _, k := range names {
+				for _, k := range componentNames(examples) {
 					v := examples[k]
 					if err := v.Validate(ctx); err != nil {
-						return fmt.Errorf("example %s: %w", k, err)
+						return &MediaTypeExampleValidationError{ExampleName: k, Cause: err}
 					}
 					if err := validateExampleValue(ctx, v.Value.Value, schema.Value); err != nil {
-						return fmt.Errorf("example %s: %w", k, err)
+						return newSchemaValueError("example",
+							&MediaTypeExampleValidationError{ExampleName: k, Cause: err},
+							exampleValueOrigin(v.Value, mediaType.Origin))
 					}
 				}
 			}
 		}
 	}
 
-	return validateExtensions(ctx, mediaType.Extensions)
+	return validateExtensions(ctx, mediaType.Extensions, mediaType.Origin)
 }
 
 // JSONLookup implements https://pkg.go.dev/github.com/go-openapi/jsonpointer#JSONPointable
