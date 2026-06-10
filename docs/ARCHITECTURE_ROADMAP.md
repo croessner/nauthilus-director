@@ -1388,13 +1388,18 @@ deterministic fake-service E2E proof and real Postfix-to-Director-to-Dovecot
 interop lane are in place. The detailed M5 completion evidence lives in
 `docs/specs/implementation/M5_LMTP_PRODUCTION_SPEC.md`,
 `docs/specs/implementation/M5_CROSS_PROTOCOL_BACKEND_AFFINITY_FOLLOWUP.md` and
-`docs/specs/implementation/M5_BACKEND_PROXY_PROTOCOL_FOLLOWUP.md`.
+`docs/specs/implementation/M5_BACKEND_PROXY_PROTOCOL_FOLLOWUP.md`. The
+plaintext/no-auth and capability follow-up is also complete with evidence in
+`docs/specs/implementation/M5_LMTP_PLAINTEXT_AND_CAPABILITY_FOLLOWUP.md`.
 
 - production-ready LMTP and LMTPS entrypoints within the M5 scope
 - LMTP state machine with DATA and BDAT handling
 - LMTP STARTTLS, implicit TLS and client-auth handling
+- auth-free plaintext LMTP listener and backend paths when explicitly
+  configured without credential-bearing frontend auth and with backend
+  `auth.mode: none`
 - truthfully mediated LMTP capability enforcement, including SMTPUTF8 and
-  CHUNKING/BDAT boundaries
+  CHUNKING/BDAT, ENHANCEDSTATUSCODES and 8BITMIME/BODY=8BITMIME boundaries
 - recipient identity lookup through Nauthilus and routing through the resolver
   model
 - delivery-scoped active-affinity holds for concurrent user-stateful placement;

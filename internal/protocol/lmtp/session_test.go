@@ -69,6 +69,7 @@ const (
 	testTemporaryDelivery   = "451 4.3.0 Message delivery temporarily failed\r\n"
 	testSubmitterIdentity   = "technical-submit@example.test"
 	testTLSActive           = "true"
+	testTLSInactive         = "false"
 	testTLSClientVerifyNone = "NONE"
 	testTLSClientVerifyOK   = "SUCCESS"
 	testUnicodeRecipient    = "M\xc3\xbcller@example.test"
@@ -92,6 +93,51 @@ func TestGreetingAndLHLOCapabilitiesAreDeterministic(t *testing.T) {
 	harness.expectLine(t, "250-nauthilus-director\r\n")
 	harness.expectLine(t, "250-SMTPUTF8\r\n")
 	harness.expectLine(t, "250 AUTH PLAIN LOGIN XOAUTH2 OAUTHBEARER\r\n")
+}
+
+// TestLHLOAdvertisesEnhancedStatusCodesOnlyWhenConfigured verifies frontend-owned capability filtering.
+func TestLHLOAdvertisesEnhancedStatusCodesOnlyWhenConfigured(t *testing.T) {
+	t.Run("omitted", func(t *testing.T) {
+		config := testSessionConfig()
+		config.TLSMode = TLSModeImplicit
+		config.Capabilities = []string{capabilitySMTPUTF8}
+
+		harness := startLMTPHarness(t, config)
+		harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+		harness.write(t, "LHLO submitter.example\r\n")
+		harness.expectLine(t, "250-nauthilus-director\r\n")
+		harness.expectLine(t, "250 SMTPUTF8\r\n")
+	})
+
+	t.Run("configured duplicate", func(t *testing.T) {
+		config := testSessionConfig()
+		config.TLSMode = TLSModeImplicit
+		config.Capabilities = []string{capabilityEnhancedStatusCodes, "enhancedstatuscodes", capabilitySMTPUTF8}
+
+		harness := startLMTPHarness(t, config)
+		harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+		harness.write(t, "LHLO submitter.example\r\n")
+		harness.expectLine(t, "250-nauthilus-director\r\n")
+		harness.expectLine(t, "250-ENHANCEDSTATUSCODES\r\n")
+		harness.expectLine(t, "250 SMTPUTF8\r\n")
+	})
+}
+
+// TestEnhancedStatusResponsesRemainStable verifies capability advertisement does not alter replies.
+func TestEnhancedStatusResponsesRemainStable(t *testing.T) {
+	config := testSessionConfig()
+	config.TLSMode = TLSModeImplicit
+	config.Capabilities = []string{capabilityEnhancedStatusCodes}
+
+	harness := startLMTPHarness(t, config)
+	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+	harness.write(t, "LHLO submitter.example\r\n")
+	harness.expectLine(t, "250-nauthilus-director\r\n")
+	harness.expectLine(t, "250 ENHANCEDSTATUSCODES\r\n")
+	harness.write(t, "NOOP\r\n")
+	harness.expectLine(t, "250 2.0.0 OK\r\n")
+	harness.write(t, "MAIL FROM:<sender@example.test>\r\n")
+	harness.expectLine(t, "250 2.0.0 Sender accepted\r\n")
 }
 
 // TestCommandsBeforeLHLOFailWithStableBadSequence verifies transaction commands do not run before LHLO.
@@ -185,6 +231,15 @@ func TestSMTPUTF8CapabilityGatesEnvelopeSyntax(t *testing.T) {
 	t.Run("advertised transaction opt-in", testSMTPUTF8AdvertisedTransactionOptIn)
 }
 
+// Test8BITMIMECapabilityGatesMailBodyParameter verifies BODY=8BITMIME follows LHLO advertisement.
+func Test8BITMIMECapabilityGatesMailBodyParameter(t *testing.T) {
+	t.Run("configured without backend proof", test8BITMIMEConfiguredWithoutBackendProof)
+	t.Run("advertised transaction opt-in", test8BITMIMEAdvertisedTransactionOptIn)
+	t.Run("duplicate body parameter", test8BITMIMEDuplicateBodyParameter)
+	t.Run("unsupported body values", test8BITMIMEUnsupportedBodyValues)
+	t.Run("coexists with smtputf8", test8BITMIMECoexistsWithSMTPUTF8)
+}
+
 // testSMTPUTF8ParameterWithoutCapability verifies explicit opt-in needs advertisement.
 func testSMTPUTF8ParameterWithoutCapability(t *testing.T) {
 	config := testSessionConfig()
@@ -208,9 +263,7 @@ func testSMTPUTF8UnsupportedMailParameter(t *testing.T) {
 	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
 	harness.write(t, "LHLO submitter.example\r\n")
 	harness.drainLHLO(t)
-	harness.write(t, "MAIL FROM:<sender@example.test> BODY=8BITMIME\r\n")
-	harness.expectLine(t, "501 5.5.4 Invalid MAIL command\r\n")
-	harness.write(t, "MAIL FROM:<sender@example.test>SMTPUTF8\r\n")
+	harness.write(t, "MAIL FROM:<sender@example.test> SIZE=42\r\n")
 	harness.expectLine(t, "501 5.5.4 Invalid MAIL command\r\n")
 }
 
@@ -248,6 +301,78 @@ func testSMTPUTF8AdvertisedTransactionOptIn(t *testing.T) {
 	harness.expectLine(t, "250 2.0.0 Recipient accepted\r\n")
 }
 
+// test8BITMIMEConfiguredWithoutBackendProof verifies config alone cannot enable BODY=8BITMIME.
+func test8BITMIMEConfiguredWithoutBackendProof(t *testing.T) {
+	config := testSessionConfig()
+	config.TLSMode = TLSModeImplicit
+	config.Capabilities = []string{capability8BITMIME}
+
+	harness := startLMTPHarness(t, config)
+	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+	harness.write(t, "LHLO submitter.example\r\n")
+	harness.expectLine(t, "250 nauthilus-director\r\n")
+	harness.write(t, "MAIL FROM:<sender@example.test> BODY=8BITMIME\r\n")
+	harness.expectLine(t, "501 5.5.4 Invalid MAIL command\r\n")
+}
+
+// test8BITMIMEAdvertisedTransactionOptIn verifies advertised BODY=8BITMIME is accepted.
+func test8BITMIMEAdvertisedTransactionOptIn(t *testing.T) {
+	config := test8BITMIMEConfig()
+
+	harness := startLMTPHarness(t, config)
+	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+	harness.write(t, "LHLO submitter.example\r\n")
+	harness.expectLine(t, "250-nauthilus-director\r\n")
+	harness.expectLine(t, "250 8BITMIME\r\n")
+	harness.write(t, "MAIL FROM:<sender@example.test> BODY=8BITMIME\r\n")
+	harness.expectLine(t, "250 2.0.0 Sender accepted\r\n")
+}
+
+// test8BITMIMEDuplicateBodyParameter verifies only one BODY parameter is accepted.
+func test8BITMIMEDuplicateBodyParameter(t *testing.T) {
+	config := test8BITMIMEConfig()
+
+	harness := startLMTPHarness(t, config)
+	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+	harness.write(t, "LHLO submitter.example\r\n")
+	harness.drainLHLO(t)
+	harness.write(t, "MAIL FROM:<sender@example.test> BODY=8BITMIME BODY=8BITMIME\r\n")
+	harness.expectLine(t, "501 5.5.4 Invalid MAIL command\r\n")
+}
+
+// test8BITMIMEUnsupportedBodyValues verifies unsupported BODY modes remain fail-closed.
+func test8BITMIMEUnsupportedBodyValues(t *testing.T) {
+	for _, parameter := range []string{"BODY=BINARYMIME", "BODY=7BIT", "BODY=8BITMIME=YES"} {
+		t.Run(parameter, func(t *testing.T) {
+			config := test8BITMIMEConfig()
+
+			harness := startLMTPHarness(t, config)
+			harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+			harness.write(t, "LHLO submitter.example\r\n")
+			harness.drainLHLO(t)
+			harness.write(t, "MAIL FROM:<sender@example.test> "+parameter+"\r\n")
+			harness.expectLine(t, "501 5.5.4 Invalid MAIL command\r\n")
+		})
+	}
+}
+
+// test8BITMIMECoexistsWithSMTPUTF8 verifies both MAIL opt-ins can share one transaction.
+func test8BITMIMECoexistsWithSMTPUTF8(t *testing.T) {
+	config := test8BITMIMEConfig()
+	config.Capabilities = []string{capabilitySMTPUTF8, capability8BITMIME}
+
+	harness := startLMTPHarness(t, config)
+	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+	harness.write(t, "LHLO submitter.example\r\n")
+	harness.expectLine(t, "250-nauthilus-director\r\n")
+	harness.expectLine(t, "250-SMTPUTF8\r\n")
+	harness.expectLine(t, "250 8BITMIME\r\n")
+	harness.write(t, "MAIL FROM:<"+testUnicodeSender+"> SMTPUTF8 BODY=8BITMIME\r\n")
+	harness.expectLine(t, "250 2.0.0 Sender accepted\r\n")
+	harness.write(t, "RCPT TO:<"+testUnicodeRecipient+">\r\n")
+	harness.expectLine(t, "250 2.0.0 Recipient accepted\r\n")
+}
+
 // TestRequiredPeerAuthBlocksTransactionCommands verifies submitter auth gates envelope and body commands.
 func TestRequiredPeerAuthBlocksTransactionCommands(t *testing.T) {
 	for _, command := range []string{
@@ -260,7 +385,7 @@ func TestRequiredPeerAuthBlocksTransactionCommands(t *testing.T) {
 			config := testSessionConfig()
 			config.TLSMode = TLSModeImplicit
 			config.RequirePeerAuth = true
-			config.BackendChunkingAllowed = true
+			config.BackendCapabilities = []string{capabilityCHUNKING}
 			config.Capabilities = []string{testAllAuthCapability, capabilityCHUNKING}
 
 			harness := startLMTPHarness(t, config)
@@ -431,6 +556,96 @@ func TestSASLPeerBearerBeforeTLSDoesNotIntrospect(t *testing.T) {
 
 	if introspector.callCount() != 0 {
 		t.Fatalf("introspection calls = %d, want 0", introspector.callCount())
+	}
+}
+
+// TestPlaintextLMTPAUTHFailsLocally verifies miswired plaintext auth never reaches Nauthilus.
+func TestPlaintextLMTPAUTHFailsLocally(t *testing.T) {
+	authenticator := &recordingAuthenticator{}
+	introspector := &recordingBearerIntrospector{}
+	config := testSessionConfig()
+	config.TLSMode = TLSModePlaintext
+	config.RequirePeerAuth = false
+	config.Authenticator = authenticator
+	config.BearerIntrospector = introspector
+	config.Capabilities = []string{capabilitySMTPUTF8, capabilitySTARTTLS, testAllAuthCapability}
+
+	harness := startLMTPHarness(t, config)
+	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+	harness.write(t, "LHLO submitter.example\r\n")
+	harness.expectLine(t, "250-nauthilus-director\r\n")
+	harness.expectLine(t, "250 SMTPUTF8\r\n")
+	harness.write(t, "STARTTLS\r\n")
+	harness.expectLine(t, "503 5.5.1 STARTTLS is not available\r\n")
+	harness.write(t, "AUTH XOAUTH2 "+xoauth2Payload("alice@example.test", "token-before-tls")+"\r\n")
+	harness.expectLine(t, "530 5.7.0 Must issue STARTTLS first\r\n")
+
+	if authenticator.callCount() != 0 {
+		t.Fatalf("password auth calls = %d, want 0", authenticator.callCount())
+	}
+
+	if introspector.callCount() != 0 {
+		t.Fatalf("introspection calls = %d, want 0", introspector.callCount())
+	}
+}
+
+// TestPlaintextLMTPAllowsUnauthenticatedTransaction verifies auth-free plaintext delivery commands work.
+func TestPlaintextLMTPAllowsUnauthenticatedTransaction(t *testing.T) {
+	sink := &recordingMessageSink{}
+	config := testSessionConfig()
+	config.TLSMode = TLSModePlaintext
+	config.Capabilities = []string{capabilitySMTPUTF8}
+	config.PeerAuthMechanisms = nil
+	config.MessageSink = sink
+
+	harness := startLMTPHarness(t, config)
+	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+	harness.write(t, "LHLO submitter.example\r\n")
+	harness.expectLine(t, "250-nauthilus-director\r\n")
+	harness.expectLine(t, "250 SMTPUTF8\r\n")
+	harness.write(t, "MAIL FROM:<sender@example.test>\r\n")
+	harness.expectLine(t, "250 2.0.0 Sender accepted\r\n")
+	harness.write(t, "RCPT TO:<recipient@example.test>\r\n")
+	harness.expectLine(t, "250 2.0.0 Recipient accepted\r\n")
+	harness.write(t, "DATA\r\n")
+	harness.expectLine(t, "354 2.0.0 End data with <CR><LF>.<CR><LF>\r\n")
+	harness.write(t, "line-one\r\n..line-two\r\n.\r\n")
+	harness.expectLine(t, "250 2.0.0 Message accepted\r\n")
+
+	if got := sink.bodyString(); got != testDataBody {
+		t.Fatalf("DATA body = %q, want dot-unescaped lines", got)
+	}
+}
+
+// TestPlaintextLMTPRecipientLookupReportsInactiveTLS verifies no-auth lookup context stays truthful.
+func TestPlaintextLMTPRecipientLookupReportsInactiveTLS(t *testing.T) {
+	identity := identityLookuperForRecipients(map[string]string{
+		testRecipientSingle: testPlacementShardA,
+	})
+	resolver := &recordingRoutingResolver{}
+	store := &recordingDeliveryStore{}
+	selector := &recordingBackendSelector{}
+	config := placementSessionConfig(identity, resolver, store, selector)
+	config.TLSMode = TLSModePlaintext
+	config.Capabilities = []string{capabilitySMTPUTF8}
+
+	harness := startLMTPHarness(t, config)
+	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+	harness.write(t, "LHLO submitter.example\r\n")
+	harness.expectLine(t, "250-nauthilus-director\r\n")
+	harness.expectLine(t, "250 SMTPUTF8\r\n")
+	harness.write(t, "MAIL FROM:<sender@example.test>\r\n")
+	harness.expectLine(t, "250 2.0.0 Sender accepted\r\n")
+	harness.write(t, "RCPT TO:<recipient@example.test>\r\n")
+	harness.expectLine(t, "250 2.0.0 Recipient accepted\r\n")
+
+	lookup := identity.singleLookup(t)
+	if lookup.Context.TLS != testTLSInactive {
+		t.Fatalf("lookup TLS = %q, want plaintext ssl=false", lookup.Context.TLS)
+	}
+
+	if lookup.Context.TLSProtocol != "" || lookup.Context.TLSCipher != "" || lookup.Context.TLSClientVerify != "" {
+		t.Fatalf("lookup TLS metadata = %#v, want no invented TLS fields", lookup.Context)
 	}
 }
 
@@ -637,6 +852,25 @@ func TestBDATRejectsInvalidStateAndMalformedSizes(t *testing.T) {
 		harness.expectLine(t, "502 5.5.1 BDAT is not available\r\n")
 	})
 
+	t.Run("configured without backend proof", func(t *testing.T) {
+		config := testSessionConfig()
+		config.TLSMode = TLSModeImplicit
+		config.Capabilities = []string{capabilitySMTPUTF8, capabilityCHUNKING}
+		config.BackendCapabilities = nil
+
+		harness := startLMTPHarness(t, config)
+		harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+		harness.write(t, "LHLO submitter.example\r\n")
+		harness.expectLine(t, "250-nauthilus-director\r\n")
+		harness.expectLine(t, "250 SMTPUTF8\r\n")
+		harness.write(t, "MAIL FROM:<sender@example.test>\r\n")
+		harness.expectLine(t, "250 2.0.0 Sender accepted\r\n")
+		harness.write(t, "RCPT TO:<recipient@example.test>\r\n")
+		harness.expectLine(t, "250 2.0.0 Recipient accepted\r\n")
+		harness.write(t, "BDAT 0 LAST\r\n")
+		harness.expectLine(t, "502 5.5.1 BDAT is not available\r\n")
+	})
+
 	t.Run("missing recipient", func(t *testing.T) {
 		config := testChunkingConfig()
 		harness := startLMTPHarness(t, config)
@@ -670,14 +904,17 @@ func TestBDATRejectsInvalidStateAndMalformedSizes(t *testing.T) {
 func TestBDATStreamsExactChunkSizesAndHonorsLAST(t *testing.T) {
 	sink := &recordingMessageSink{}
 	config := testChunkingConfig()
+	config.Capabilities = []string{capabilityCHUNKING, capability8BITMIME}
+	config.BackendCapabilities = []string{capabilityCHUNKING, capability8BITMIME}
 	config.MessageSink = sink
 
 	harness := startLMTPHarness(t, config)
 	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
 	harness.write(t, "LHLO submitter.example\r\n")
 	harness.expectLine(t, "250-nauthilus-director\r\n")
-	harness.expectLine(t, "250 CHUNKING\r\n")
-	harness.write(t, "MAIL FROM:<sender@example.test>\r\n")
+	harness.expectLine(t, "250-CHUNKING\r\n")
+	harness.expectLine(t, "250 8BITMIME\r\n")
+	harness.write(t, "MAIL FROM:<sender@example.test> BODY=8BITMIME\r\n")
 	harness.expectLine(t, "250 2.0.0 Sender accepted\r\n")
 	harness.write(t, "RCPT TO:<recipient@example.test>\r\n")
 	harness.expectLine(t, "250 2.0.0 Recipient accepted\r\n")
@@ -699,14 +936,15 @@ func TestBDATStreamsExactChunkSizesAndHonorsLAST(t *testing.T) {
 // TestDATATerminatorStreamsIncrementally verifies DATA handling avoids whole-message buffering.
 func TestDATATerminatorStreamsIncrementally(t *testing.T) {
 	sink := &recordingMessageSink{}
-	config := testSessionConfig()
+	config := test8BITMIMEConfig()
 	config.MessageSink = sink
 
 	harness := startLMTPHarness(t, config)
 	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
 	harness.write(t, "LHLO submitter.example\r\n")
-	harness.drainLHLO(t)
-	harness.write(t, "MAIL FROM:<sender@example.test>\r\n")
+	harness.expectLine(t, "250-nauthilus-director\r\n")
+	harness.expectLine(t, "250 8BITMIME\r\n")
+	harness.write(t, "MAIL FROM:<sender@example.test> BODY=8BITMIME\r\n")
 	harness.expectLine(t, "250 2.0.0 Sender accepted\r\n")
 	harness.write(t, "RCPT TO:<recipient@example.test>\r\n")
 	harness.expectLine(t, "250 2.0.0 Recipient accepted\r\n")
@@ -1585,7 +1823,7 @@ func TestDifferentBackendRecipientIsNotForwardedBeforeBDAT(t *testing.T) {
 	})
 	config := backendForwardingSessionConfig(identity, resolver, store, selector, dialer)
 	config.Capabilities = []string{capabilityCHUNKING}
-	config.BackendChunkingAllowed = true
+	config.BackendCapabilities = []string{capabilityCHUNKING}
 
 	harness := startLMTPHarness(t, config)
 	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
@@ -1635,7 +1873,7 @@ func TestBackendBDATFinalRepliesMatchRecipientOrder(t *testing.T) {
 	})
 	config := backendForwardingSessionConfig(identity, resolver, store, selector, dialer)
 	config.Capabilities = []string{capabilityCHUNKING}
-	config.BackendChunkingAllowed = true
+	config.BackendCapabilities = []string{capabilityCHUNKING}
 
 	harness := startLMTPHarness(t, config)
 	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
@@ -1733,7 +1971,7 @@ func TestMidBDATFailureMapsUnknownRecipientsToTemporaryFailure(t *testing.T) {
 	})
 	config := backendForwardingSessionConfig(identity, resolver, store, selector, dialer)
 	config.Capabilities = []string{capabilityCHUNKING}
-	config.BackendChunkingAllowed = true
+	config.BackendCapabilities = []string{capabilityCHUNKING}
 
 	harness := startLMTPHarness(t, config)
 	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
@@ -1781,6 +2019,47 @@ func TestRSETClearsBackendTransactionState(t *testing.T) {
 	harness.expectLine(t, "250 2.0.0 Recipient accepted\r\n")
 	harness.write(t, "RSET\r\n")
 	harness.expectLine(t, "250 2.0.0 Transaction reset\r\n")
+
+	store.assertClosed(t, 1)
+	dialer.Wait(t)
+}
+
+// TestBackendMAILForwardsAccepted8BITMIMEParameter verifies deterministic backend MAIL parameters.
+func TestBackendMAILForwardsAccepted8BITMIMEParameter(t *testing.T) {
+	identity := identityLookuperForRecipients(map[string]string{testRecipientSingle: testPlacementShardA})
+	resolver := &recordingRoutingResolver{}
+	store := &recordingDeliveryStore{}
+	selector := &recordingBackendSelector{}
+	dialer := scriptedLMTPBackendDialer(t, func(t *testing.T, conn net.Conn) {
+		reader := greetTransactionBackend(t, conn)
+		expectLMTPBackendLine(t, reader, "MAIL FROM:<sender@example.test> SMTPUTF8 BODY=8BITMIME")
+		writeLMTPBackendLine(t, conn, "250 2.1.0 sender ok")
+		expectLMTPBackendLine(t, reader, "RCPT TO:<recipient@example.test>")
+		writeLMTPBackendLine(t, conn, "250 2.1.5 recipient ok")
+		expectLMTPBackendLine(t, reader, "DATA")
+		writeLMTPBackendLine(t, conn, "354 2.0.0 data")
+		expectLMTPBackendLine(t, reader, "body")
+		expectLMTPBackendLine(t, reader, ".")
+		writeLMTPBackendLine(t, conn, "250 2.1.5 delivered")
+	})
+	config := backendForwardingSessionConfig(identity, resolver, store, selector, dialer)
+	config.Capabilities = []string{capabilitySMTPUTF8, capability8BITMIME}
+	config.BackendCapabilities = []string{capability8BITMIME}
+
+	harness := startLMTPHarness(t, config)
+	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+	harness.write(t, "LHLO submitter.example\r\n")
+	harness.expectLine(t, "250-nauthilus-director\r\n")
+	harness.expectLine(t, "250-SMTPUTF8\r\n")
+	harness.expectLine(t, "250 8BITMIME\r\n")
+	harness.write(t, "MAIL FROM:<sender@example.test> BODY=8BITMIME SMTPUTF8\r\n")
+	harness.expectLine(t, "250 2.0.0 Sender accepted\r\n")
+	harness.write(t, "RCPT TO:<recipient@example.test>\r\n")
+	harness.expectLine(t, "250 2.0.0 Recipient accepted\r\n")
+	harness.write(t, "DATA\r\n")
+	harness.expectLine(t, "354 2.0.0 End data with <CR><LF>.<CR><LF>\r\n")
+	harness.write(t, "body\r\n.\r\n")
+	harness.expectLine(t, "250 2.1.5 Message accepted\r\n")
 
 	store.assertClosed(t, 1)
 	dialer.Wait(t)
@@ -1859,7 +2138,17 @@ func testChunkingConfig() SessionConfig {
 	config := testSessionConfig()
 	config.TLSMode = TLSModeImplicit
 	config.Capabilities = []string{"CHUNKING"}
-	config.BackendChunkingAllowed = true
+	config.BackendCapabilities = []string{capabilityCHUNKING}
+
+	return config
+}
+
+// test8BITMIMEConfig returns a session config where BODY=8BITMIME is safe to advertise.
+func test8BITMIMEConfig() SessionConfig {
+	config := testSessionConfig()
+	config.TLSMode = TLSModeImplicit
+	config.Capabilities = []string{capability8BITMIME}
+	config.BackendCapabilities = []string{capability8BITMIME}
 
 	return config
 }

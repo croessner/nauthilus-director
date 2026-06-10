@@ -103,6 +103,7 @@ func (s *Session) handleLHLO(ctx context.Context, command frontendCommand) error
 
 	s.effectiveCapabilities = s.effectiveCapabilitySet()
 	s.chunkingAdvertised = containsCapability(s.effectiveCapabilities, capabilityCHUNKING)
+	s.eightBitAdvertised = containsCapability(s.effectiveCapabilities, capability8BITMIME)
 	s.lhloSeen = true
 	s.recordCommand(ctx, lmtpObservationOperationLHLO, lmtpObservationResultOK, lmtpReasonOK, nil)
 
@@ -124,7 +125,7 @@ func (s *Session) handleMAIL(ctx context.Context, command frontendCommand) error
 		return s.writeEnhanced(responseStatusParameter, enhancedParameter, malformedMailText)
 	}
 
-	if err := s.requireMAILSMTPUTF8(mail); err != nil {
+	if err := s.requireMAILCapabilities(mail); err != nil {
 		s.recordCommand(ctx, lmtpObservationOperationMAIL, lmtpObservationResultFailure, lmtpReasonParser, nil)
 
 		return err
@@ -139,6 +140,7 @@ func (s *Session) handleMAIL(ctx context.Context, command frontendCommand) error
 	s.transaction.mailSeen = true
 	s.transaction.mailFrom = mail.wirePath
 	s.transaction.smtpUTF8 = mail.smtpUTF8
+	s.transaction.body8BitMIME = mail.body8BitMIME
 	ctx = s.beginTransactionObservation(ctx)
 	s.recordCommand(ctx, lmtpObservationOperationMAIL, lmtpObservationResultOK, lmtpReasonOK, nil)
 
@@ -370,10 +372,14 @@ func (s *Session) requirePeerAuthSatisfied() error {
 	return s.writeEnhanced(responseStatusAuthRequired, enhancedAuthRequired, authRequiredText)
 }
 
-// requireMAILSMTPUTF8 enforces the SMTPUTF8 MAIL parameter and path policy.
-func (s *Session) requireMAILSMTPUTF8(mail mailCommand) error {
+// requireMAILCapabilities enforces advertised MAIL parameters and path policy.
+func (s *Session) requireMAILCapabilities(mail mailCommand) error {
 	advertised := containsCapability(s.effectiveCapabilities, capabilitySMTPUTF8)
 	if mail.smtpUTF8 && !advertised {
+		return s.writeEnhanced(responseStatusParameter, enhancedParameter, malformedMailText)
+	}
+
+	if mail.body8BitMIME && !s.eightBitAdvertised {
 		return s.writeEnhanced(responseStatusParameter, enhancedParameter, malformedMailText)
 	}
 

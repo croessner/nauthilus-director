@@ -583,6 +583,7 @@ director:
             lmtp:
                 capabilities:
                     - SMTPUTF8
+                    - ENHANCEDSTATUSCODES
                     - STARTTLS
                     - AUTH PLAIN LOGIN XOAUTH2 OAUTHBEARER
                 client_auth:
@@ -619,6 +620,7 @@ director:
             lmtp:
                 capabilities:
                     - SMTPUTF8
+                    - ENHANCEDSTATUSCODES
                     - AUTH PLAIN LOGIN XOAUTH2 OAUTHBEARER
                 client_auth:
                     authority: default

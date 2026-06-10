@@ -429,8 +429,12 @@ director:
         capabilities:
           # Capabilities are the desired listener surface. Runtime advertisement
           # is mediated by implemented command support, TLS state, auth policy
-          # and backend-pool capabilities. CHUNKING requires full BDAT support.
+          # and backend-pool capabilities. CHUNKING requires full BDAT support;
+          # 8BITMIME requires BODY=8BITMIME parsing and backend-safe forwarding.
           - SMTPUTF8
+          - ENHANCEDSTATUSCODES
+          - CHUNKING
+          # - 8BITMIME
           - STARTTLS
           - AUTH PLAIN LOGIN XOAUTH2 OAUTHBEARER
 
@@ -473,8 +477,12 @@ director:
         capabilities:
           # Capabilities are the desired listener surface. Runtime advertisement
           # is mediated by implemented command support, TLS state, auth policy
-          # and backend-pool capabilities. CHUNKING requires full BDAT support.
+          # and backend-pool capabilities. CHUNKING requires full BDAT support;
+          # 8BITMIME requires BODY=8BITMIME parsing and backend-safe forwarding.
           - SMTPUTF8
+          - ENHANCEDSTATUSCODES
+          - CHUNKING
+          # - 8BITMIME
           - AUTH PLAIN LOGIN XOAUTH2 OAUTHBEARER
 
     sieve:
@@ -816,6 +824,12 @@ director:
       haproxy:
         enabled: false
 
+      # Auth-free plaintext LMTP backend hops are valid only when this hop sends
+      # no credentials. For a trusted internal delivery network, set tls.mode to
+      # plaintext, disabled, or none together with auth.mode: none. SASL and
+      # OAuth bearer keep require_tls: true by default and reject plaintext
+      # unless an operator explicitly accepts the weaker require_tls: false
+      # policy. mTLS always requires verified backend TLS plus client cert/key.
       tls:
         mode: implicit
         ca_file: /etc/nauthilus-director/mailstore-ca.pem
@@ -826,7 +840,7 @@ director:
         insecure_skip_verify: false
 
       auth:
-        mode: sasl # none, mtls, sasl
+        mode: sasl # none, mtls, sasl, oauthbearer
         sasl:
           mechanism: plain
           username: nauthilus-director-lmtp

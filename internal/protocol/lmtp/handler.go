@@ -36,6 +36,8 @@ import (
 const (
 	// TLSModeImplicit marks LMTPS-style listeners where TLS is active before greeting.
 	TLSModeImplicit = "implicit"
+	// TLSModePlaintext marks LMTP listeners without implicit TLS or STARTTLS.
+	TLSModePlaintext = "plaintext"
 	// TLSModeStartTLS marks cleartext LMTP listeners where STARTTLS may be advertised.
 	TLSModeStartTLS = "starttls"
 
@@ -70,7 +72,7 @@ type SessionConfig struct {
 	RequireTLSClientCert    bool
 	PeerAuthMechanisms      []string
 	MTLSPeerAuth            MTLSPeerAuthConfig
-	BackendChunkingAllowed  bool
+	BackendCapabilities     []string
 	RecipientLookupRequired bool
 	FrontendTLSConfig       *tls.Config
 	Authenticator           nauthilus.Authenticator

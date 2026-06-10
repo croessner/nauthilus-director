@@ -700,7 +700,7 @@ func lmtpSessionHandler(
 		PlacementService:        placementService,
 		BackendConnector:        lmtp.NewTCPBackendConnector(nil),
 		PlacementGate:           placementGate,
-		BackendChunkingAllowed:  lmtpBackendChunkingAllowed(capabilityReader, options.Config.BackendPool),
+		BackendCapabilities:     lmtpBackendCapabilities(capabilityReader, options.Config.BackendPool, "CHUNKING", "8BITMIME"),
 		RecipientLookupRequired: true,
 		Observability:           options.Observability,
 		MTLSPeerAuth: lmtp.MTLSPeerAuthConfig{
@@ -823,18 +823,28 @@ func pop3SessionHandler(
 	})
 }
 
-// lmtpBackendChunkingAllowed checks fresh backend-pool proof before advertising BDAT.
-func lmtpBackendChunkingAllowed(capabilities backendCapabilityReader, backendPool string) bool {
+// lmtpBackendCapabilities returns mediated capabilities with fresh backend-pool proof.
+func lmtpBackendCapabilities(capabilities backendCapabilityReader, backendPool string, desired ...string) []string {
 	if capabilities == nil {
-		return false
+		return nil
 	}
 
-	allowed, err := capabilities.PoolSupportsCapability(context.Background(), backendPool, "CHUNKING")
-	if err != nil {
-		return false
+	allowedCapabilities := make([]string, 0, len(desired))
+	for _, capability := range desired {
+		capability = strings.ToUpper(strings.TrimSpace(capability))
+		if capability == "" {
+			continue
+		}
+
+		allowed, err := capabilities.PoolSupportsCapability(context.Background(), backendPool, capability)
+		if err != nil || !allowed {
+			continue
+		}
+
+		allowedCapabilities = append(allowedCapabilities, capability)
 	}
 
-	return allowed
+	return allowedCapabilities
 }
 
 // imapListenerOptions extracts IMAP-specific values from a listener config.

@@ -262,7 +262,7 @@ func lmtpCapabilitiesFromLHLO(response backendStatusResponse) backend.Capability
 // knownLHLOCapability recognizes extension keywords without trusting prose text.
 func knownLHLOCapability(keyword string) bool {
 	switch strings.ToUpper(strings.TrimSpace(keyword)) {
-	case "8BITMIME", capabilityAUTH, capabilityCHUNKING, "ENHANCEDSTATUSCODES", "PIPELINING", "SIZE", capabilitySMTPUTF8, capabilitySTARTTLS:
+	case capability8BITMIME, capabilityAUTH, capabilityCHUNKING, capabilityEnhancedStatusCodes, "PIPELINING", "SIZE", capabilitySMTPUTF8, capabilitySTARTTLS:
 		return true
 	default:
 		return strings.HasPrefix(keyword, capabilityAUTH+"=")

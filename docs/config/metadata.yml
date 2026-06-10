@@ -35,6 +35,9 @@ paths:
   director.listeners.**:
     stability: stable
     description: Public protocol listener, TLS, proxy protocol, authority, and backend-pool binding.
+  director.listeners.*.lmtp.capabilities:
+    stability: stable
+    description: Desired LMTP LHLO surface. STARTTLS and AUTH are mediated by listener TLS and auth policy; CHUNKING and 8BITMIME are advertised only when configured, implemented, and backed by fresh backend-pool capability proof.
   director.listeners.*.authority_context.http_headers:
     stability: stable
     description: Static non-secret HTTP authority context facts consumed by Nauthilus only through explicit auth.policy.request_headers allowlists.
@@ -62,3 +65,21 @@ paths:
   director.backends.**:
     stability: stable
     description: Backend protocol, shard, backend-node identity, transport, authentication, health, and runtime baseline settings.
+  director.backends.mailstore-a-lmtp.tls.**:
+    stability: stable
+    description: Backend transport TLS policy. LMTP accepts disabled, none, plaintext, starttls, and implicit; plaintext is for trusted internal hops and must not carry credentials unless auth policy explicitly permits it.
+  director.backends.mailstore-a-lmtp.auth.**:
+    stability: stable
+    description: Protocol-specific backend authentication policy. LMTP auth.mode none sends no credentials over plaintext; SASL and OAuth bearer require verified backend TLS by default, while mTLS requires verified TLS plus client certificate material.
+  director.backends.mailstore-a-lmtp.health_check.**:
+    stability: stable
+    description: Backend health-check credentials and depth. LMTP health checks reuse the same backend TLS and auth policy as sessions before stopping short of envelope or message-body commands.
+  director.backends.mailstore-b-lmtp.tls.**:
+    stability: stable
+    description: Backend transport TLS policy. LMTP accepts disabled, none, plaintext, starttls, and implicit; plaintext is for trusted internal hops and must not carry credentials unless auth policy explicitly permits it.
+  director.backends.mailstore-b-lmtp.auth.**:
+    stability: stable
+    description: Protocol-specific backend authentication policy. LMTP auth.mode none sends no credentials over plaintext; SASL and OAuth bearer require verified backend TLS by default, while mTLS requires verified TLS plus client certificate material.
+  director.backends.mailstore-b-lmtp.health_check.**:
+    stability: stable
+    description: Backend health-check credentials and depth. LMTP health checks reuse the same backend TLS and auth policy as sessions before stopping short of envelope or message-body commands.

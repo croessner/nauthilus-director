@@ -200,7 +200,7 @@ func TestServerBinaryPublicLMTPBearerPeerIntrospectionFlow(t *testing.T) {
 	assertLMTPProcessOutputSafe(t, process.output.String())
 }
 
-// TestServerBinaryPublicLMTPChunkingSuppression proves CHUNKING is hidden without backend proof.
+// TestServerBinaryPublicLMTPChunkingSuppression proves configured CHUNKING is hidden without backend proof.
 func TestServerBinaryPublicLMTPChunkingSuppression(t *testing.T) {
 	binary := e2eServerBinary(t)
 	redisFixture := startValkeySessionStore(t)
@@ -241,6 +241,146 @@ func TestServerBinaryPublicLMTPChunkingSuppression(t *testing.T) {
 	capabilities := client.ReadResponse()
 	assertLMTPHasCapability(t, capabilities, "SMTPUTF8")
 	assertLMTPNoCapability(t, capabilities, "CHUNKING")
+	assertLMTPProcessOutputSafe(t, process.output.String())
+}
+
+// TestServerBinaryPublicPlaintextLMTPNoAuthFlow proves auth-free plaintext LMTP through public sockets.
+func TestServerBinaryPublicPlaintextLMTPNoAuthFlow(t *testing.T) {
+	binary := e2eServerBinary(t)
+	redisFixture := startValkeySessionStore(t)
+	authority := startLMTPAuthority(t, lmtpAuthorityIdentities())
+	tlsBundle := writeLMTPPeerTLSBundle(t)
+	fakeLMTPA := lmtpbackend.Start(t, lmtpbackend.Options{Capabilities: []string{"CHUNKING"}})
+	fakeLMTPB := lmtpbackend.Start(t, lmtpbackend.Options{Capabilities: []string{"CHUNKING"}})
+	fakeIMAPA := startFakeIMAPBackend(t, fakeBackendOptions{})
+	fakeIMAPB := startFakeIMAPBackend(t, fakeBackendOptions{})
+	lmtpAddress := loopbackAddress(t)
+	lmtpsAddress := loopbackAddress(t)
+	imapAddress := loopbackAddress(t)
+	controlAddress := loopbackAddress(t)
+	publishHealthyLMTPBackends(t, redisFixture, []string{e2eLMTPBackendAID, e2eLMTPBackendBID}, "CHUNKING")
+	configPath := writeLMTPProcessConfig(t, lmtpProcessConfigOptions{
+		RedisAddress:           redisFixture.addr,
+		AuthorityURL:           authority.URL(),
+		LMTPAddress:            lmtpAddress,
+		LMTPSAddress:           lmtpsAddress,
+		IMAPAddress:            imapAddress,
+		ControlAddress:         controlAddress,
+		LMTPListenerTLSMode:    "plaintext",
+		DisableLMTPPeerAuth:    true,
+		LMTPPeerAuthMechanisms: nil,
+		LMTPBackends: map[string]string{
+			e2eLMTPBackendAID: fakeLMTPA.Address(),
+			e2eLMTPBackendBID: fakeLMTPB.Address(),
+		},
+		IMAPBackends: map[string]string{
+			e2eBackendAID: fakeIMAPA.Address(),
+			e2eBackendBID: fakeIMAPB.Address(),
+		},
+		TLS: tlsBundle,
+	})
+	process := startDirectorProcess(t, binary, configPath)
+
+	waitForLMTPGreeting(t, lmtpAddress, process)
+	client := dialLMTP(t, lmtpAddress)
+	defer client.Close()
+	client.ExpectLine("220 2.0.0 nauthilus-director LMTP ready\r\n")
+	client.WriteLine("LHLO plaintext.example")
+	capabilities := client.ReadResponse()
+	assertLMTPHasCapability(t, capabilities, "ENHANCEDSTATUSCODES")
+	assertLMTPHasCapability(t, capabilities, "CHUNKING")
+	assertLMTPNoCapability(t, capabilities, "STARTTLS")
+	assertLMTPNoCapability(t, capabilities, "AUTH")
+	client.WriteLine("STARTTLS")
+	client.ExpectLine("503 5.5.1 STARTTLS is not available\r\n")
+	beforeAuth := authority.RequestCount()
+	client.WriteLine("AUTH PLAIN " + plainLMTPPayload(e2eLMTPSubmitter, e2ePassword))
+	client.ExpectLine("530 5.7.0 Must issue STARTTLS first\r\n")
+	if authority.RequestCount() != beforeAuth {
+		t.Fatal("plaintext LMTP AUTH reached Nauthilus")
+	}
+	client.WriteLine("MAIL FROM:<sender@example.test>")
+	client.ExpectLine("250 2.0.0 Sender accepted\r\n")
+	client.WriteLine("RCPT TO:<" + e2eLMTPRecipientA + ">")
+	client.ExpectLine("250 2.0.0 Recipient accepted\r\n")
+	authority.ExpectLookupMode(t, e2eLMTPRecipientA, "no-auth")
+	client.WriteLine("DATA")
+	client.ExpectLine("354 2.0.0 End data with <CR><LF>.<CR><LF>\r\n")
+	client.WriteRaw("plaintext-body\r\n.\r\n")
+	client.ExpectLine("250 2.1.5 Message accepted\r\n")
+	assertLMTPBackendObservation(t, fakeLMTPA.ExpectObservation(t), []string{lmtpPath(e2eLMTPRecipientA)}, false)
+	assertLMTPProcessOutputSafe(t, process.output.String())
+}
+
+// TestServerBinaryPublicLMTP8BITMIMEFlow proves BODY=8BITMIME through public and backend sockets.
+func TestServerBinaryPublicLMTP8BITMIMEFlow(t *testing.T) {
+	binary := e2eServerBinary(t)
+	redisFixture := startValkeySessionStore(t)
+	authority := startLMTPAuthority(t, lmtpAuthorityIdentities())
+	tlsBundle := writeLMTPPeerTLSBundle(t)
+	fakeLMTPA := lmtpbackend.Start(t, lmtpbackend.Options{Capabilities: []string{"8BITMIME"}})
+	fakeLMTPB := lmtpbackend.Start(t, lmtpbackend.Options{Capabilities: []string{"8BITMIME"}})
+	fakeIMAPA := startFakeIMAPBackend(t, fakeBackendOptions{})
+	fakeIMAPB := startFakeIMAPBackend(t, fakeBackendOptions{})
+	lmtpAddress := loopbackAddress(t)
+	lmtpsAddress := loopbackAddress(t)
+	imapAddress := loopbackAddress(t)
+	controlAddress := loopbackAddress(t)
+	publishHealthyLMTPBackends(t, redisFixture, []string{e2eLMTPBackendAID, e2eLMTPBackendBID}, "8BITMIME")
+	configPath := writeLMTPProcessConfig(t, lmtpProcessConfigOptions{
+		RedisAddress:          redisFixture.addr,
+		AuthorityURL:          authority.URL(),
+		LMTPAddress:           lmtpAddress,
+		LMTPSAddress:          lmtpsAddress,
+		IMAPAddress:           imapAddress,
+		ControlAddress:        controlAddress,
+		LMTPExtraCapabilities: []string{"8BITMIME"},
+		LMTPBackends: map[string]string{
+			e2eLMTPBackendAID: fakeLMTPA.Address(),
+			e2eLMTPBackendBID: fakeLMTPB.Address(),
+		},
+		IMAPBackends: map[string]string{
+			e2eBackendAID: fakeIMAPA.Address(),
+			e2eBackendBID: fakeIMAPB.Address(),
+		},
+		TLS: tlsBundle,
+	})
+	process := startDirectorProcess(t, binary, configPath)
+
+	waitForLMTPGreeting(t, lmtpAddress, process)
+	client := dialLMTP(t, lmtpAddress)
+	defer client.Close()
+	client.ExpectLine("220 2.0.0 nauthilus-director LMTP ready\r\n")
+	client.WriteLine("LHLO eightbit.example")
+	capabilities := client.ReadResponse()
+	assertLMTPHasCapability(t, capabilities, "STARTTLS")
+	assertLMTPHasCapability(t, capabilities, "8BITMIME")
+	assertLMTPNoCapability(t, capabilities, "CHUNKING")
+	client.WriteLine("STARTTLS")
+	client.ExpectLine("220 2.0.0 Ready to start TLS\r\n")
+	client.UpgradeTLS(&tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12})
+	client.WriteLine("LHLO eightbit.example")
+	capabilities = client.ReadResponse()
+	assertLMTPHasCapability(t, capabilities, "AUTH PLAIN")
+	assertLMTPHasCapability(t, capabilities, "8BITMIME")
+	assertLMTPNoCapability(t, capabilities, "CHUNKING")
+	client.WriteLine("AUTH PLAIN " + plainLMTPPayload(e2eLMTPSubmitter, e2ePassword))
+	client.ExpectLine("235 2.7.0 Authentication successful\r\n")
+	client.WriteLine("MAIL FROM:<sender@example.test> BODY=8BITMIME")
+	client.ExpectLine("250 2.0.0 Sender accepted\r\n")
+	client.WriteLine("RCPT TO:<" + e2eLMTPRecipientA + ">")
+	client.ExpectLine("250 2.0.0 Recipient accepted\r\n")
+	client.WriteLine("DATA")
+	client.ExpectLine("354 2.0.0 End data with <CR><LF>.<CR><LF>\r\n")
+	client.WriteRaw("eight-bit-body\r\n.\r\n")
+	client.ExpectLine("250 2.1.5 Message accepted\r\n")
+	authority.ExpectPeerAuth(t, e2eLMTPSubmitter)
+
+	observation := fakeLMTPA.ExpectObservation(t)
+	assertLMTPBackendObservation(t, observation, []string{lmtpPath(e2eLMTPRecipientA)}, false)
+	if !slices.Contains(observation.Commands, "MAIL FROM:<sender@example.test> BODY=8BITMIME") {
+		t.Fatalf("backend commands = %v, want forwarded BODY=8BITMIME", observation.Commands)
+	}
 	assertLMTPProcessOutputSafe(t, process.output.String())
 }
 
@@ -570,6 +710,8 @@ type lmtpProcessConfigOptions struct {
 	LMTPBackendHAProxy          map[string]bool
 	LMTPBackendHealth           map[string]bool
 	LMTPBackendDeepHealth       map[string]bool
+	LMTPListenerTLSMode         string
+	LMTPExtraCapabilities       []string
 	LMTPPeerAuthMechanisms      []string
 	TLS                         lmtpPeerTLSBundle
 	DisableLMTPPeerAuth         bool
@@ -596,9 +738,14 @@ func writeLMTPProcessConfig(t *testing.T, options lmtpProcessConfigOptions) stri
 	if strings.TrimSpace(lmtpBackendTLSMode) == "" {
 		lmtpBackendTLSMode = "plaintext"
 	}
+	lmtpListenerTLSMode := strings.ToLower(strings.TrimSpace(options.LMTPListenerTLSMode))
+	if lmtpListenerTLSMode == "" {
+		lmtpListenerTLSMode = "starttls"
+	}
 	lmtpPeerAuthRequired := !options.DisableLMTPPeerAuth
-	lmtpPeerAuthMechanisms := normalizedLMTPPeerAuthMechanisms(options.LMTPPeerAuthMechanisms)
-	lmtpPeerAuthCapability := "AUTH " + strings.ToUpper(strings.Join(lmtpPeerAuthMechanisms, " "))
+	lmtpPeerAuthMechanisms := configuredLMTPPeerAuthMechanisms(options)
+	lmtpCapabilities := lmtpListenerCapabilities(lmtpListenerTLSMode, lmtpPeerAuthMechanisms, options.LMTPExtraCapabilities)
+	lmtpsCapabilities := lmtpListenerCapabilities("implicit", lmtpPeerAuthMechanisms, options.LMTPExtraCapabilities)
 	backendRetentionTTL := strings.TrimSpace(options.BackendRetentionTTL)
 	if backendRetentionTTL == "" {
 		backendRetentionTTL = "15m"
@@ -697,7 +844,7 @@ director:
         enabled: false
         trusted_cidrs: []
       tls:
-        mode: starttls
+        mode: %q
         cert: %q
         key: %q
         client_ca: ""
@@ -711,7 +858,7 @@ director:
           mtls:
             satisfies_required: false
             identity_source: subject_common_name
-        capabilities: [SMTPUTF8, STARTTLS, %q, CHUNKING]
+        capabilities: [%s]
     lmtps:
       protocol: lmtp
       service_name: lmtps
@@ -737,7 +884,7 @@ director:
           mtls:
             satisfies_required: true
             identity_source: subject_common_name
-        capabilities: [SMTPUTF8, %q, CHUNKING]
+        capabilities: [%s]
   backend_pools:
     imap-default:
       protocol: imap
@@ -867,17 +1014,18 @@ director:
 		options.TLS.ServerCertPath,
 		options.TLS.ServerKeyPath,
 		options.LMTPAddress,
+		lmtpListenerTLSMode,
 		options.TLS.ServerCertPath,
 		options.TLS.ServerKeyPath,
 		lmtpPeerAuthRequired,
 		quotedYAMLStrings(lmtpPeerAuthMechanisms),
-		lmtpPeerAuthCapability,
+		quotedYAMLStrings(lmtpCapabilities),
 		options.LMTPSAddress,
 		options.TLS.ServerCertPath,
 		options.TLS.ServerKeyPath,
 		options.TLS.CAPath,
 		quotedYAMLStrings(lmtpPeerAuthMechanisms),
-		lmtpPeerAuthCapability,
+		quotedYAMLStrings(lmtpsCapabilities),
 		e2eShardTag,
 		options.IMAPBackends[e2eBackendAID],
 		imapBackendTLSMode,
@@ -935,7 +1083,30 @@ func normalizedLMTPPeerAuthMechanisms(mechanisms []string) []string {
 	return normalized
 }
 
-// publishHealthyLMTPBackends seeds backend CHUNKING capability proof before process startup.
+// configuredLMTPPeerAuthMechanisms returns configured peer-auth mechanisms or an empty auth-free set.
+func configuredLMTPPeerAuthMechanisms(options lmtpProcessConfigOptions) []string {
+	if options.DisableLMTPPeerAuth && len(options.LMTPPeerAuthMechanisms) == 0 {
+		return nil
+	}
+
+	return normalizedLMTPPeerAuthMechanisms(options.LMTPPeerAuthMechanisms)
+}
+
+// lmtpListenerCapabilities renders desired frontend capabilities for one LMTP listener.
+func lmtpListenerCapabilities(tlsMode string, mechanisms []string, extra []string) []string {
+	capabilities := []string{"SMTPUTF8", "ENHANCEDSTATUSCODES"}
+	if strings.EqualFold(tlsMode, "starttls") {
+		capabilities = append(capabilities, "STARTTLS")
+	}
+	if len(mechanisms) > 0 {
+		capabilities = append(capabilities, "AUTH "+strings.ToUpper(strings.Join(mechanisms, " ")))
+	}
+	capabilities = append(capabilities, "CHUNKING")
+
+	return append(capabilities, extra...)
+}
+
+// publishHealthyLMTPBackends seeds backend capability proof before process startup.
 func publishHealthyLMTPBackends(t *testing.T, fixture redisSessionFixture, backendIDs []string, capabilities ...string) {
 	t.Helper()
 
@@ -1047,6 +1218,14 @@ func (a *lmtpAuthority) ExpectLookupMode(t *testing.T, username string, mode str
 	}
 
 	t.Fatalf("lookup request for %q mode=%q not observed: %#v", username, mode, a.snapshot())
+}
+
+// RequestCount returns how many public authority calls reached the fake.
+func (a *lmtpAuthority) RequestCount() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	return len(a.requests)
 }
 
 // handle maps one HTTP auth or lookup request to deterministic identity facts.
@@ -1450,6 +1629,9 @@ func assertLMTPProcessOutputSafe(t *testing.T, output string) {
 		e2eLMTPMessageSecret,
 		e2eLMTPXOAuth2Token,
 		e2eLMTPOAuthBearerToken,
+		"sender@example.test",
+		"plaintext-body",
+		"eight-bit-body",
 		"lmtp-xoauth2-delivery-body",
 		"lmtp-oauthbearer-delivery-body",
 		"maintenance-body",

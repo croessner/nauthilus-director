@@ -49,10 +49,14 @@ The current lane has five scenarios:
   LMTPS backends and IMAP to the matching real Dovecot IMAP backends. A pinned
   Postfix container accepts a `swaks` SMTP submission and relays through
   Director to Dovecot LMTP. The same scenario verifies the delivered message
-  with `curl --url imap...`, and also proves `CHUNKING` capability exposure,
-  same-backend recipient handling, different-backend temporary failure before
-  message body, and a delivery-scoped LMTP hold influencing concurrent IMAP
-  placement through public sockets and `nauthilus-directorctl`
+  with `curl --url imap...`, and also proves configured, backend-mediated
+  `CHUNKING` capability exposure, BDAT delivery, same-backend recipient
+  handling, different-backend temporary failure before message body, and a
+  delivery-scoped LMTP hold influencing concurrent IMAP placement through
+  public sockets and `nauthilus-directorctl`. The Director does not copy
+  backend transcripts into frontend `LHLO`; listener config expresses the
+  desired `CHUNKING` surface, and fresh health state for every LMTP backend in
+  the pool must prove the capability before the frontend advertises it.
 - one production `nauthilus-director` process proxying public ManageSieve
   STARTTLS traffic to real Dovecot ManageSieve backends. The scenario proves
   frontend auth through fake Nauthilus OIDC caller auth, Dovecot master-user backend auth,

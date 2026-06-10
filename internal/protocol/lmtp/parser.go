@@ -61,8 +61,9 @@ type bdatCommand struct {
 }
 
 type mailCommand struct {
-	wirePath string
-	smtpUTF8 bool
+	wirePath     string
+	smtpUTF8     bool
+	body8BitMIME bool
 }
 
 // readLine reads one bounded line from the frontend stream.
@@ -169,20 +170,48 @@ func parseMailCommand(command frontendCommand) (mailCommand, error) {
 	}
 
 	parsed := mailCommand{wirePath: path}
+	bodySeen := false
 
 	for parameter := range strings.FieldsSeq(tail) {
-		if !strings.EqualFold(parameter, capabilitySMTPUTF8) {
+		switch {
+		case strings.EqualFold(parameter, capabilitySMTPUTF8):
+			if parsed.smtpUTF8 {
+				return mailCommand{}, fmt.Errorf("%w: duplicate SMTPUTF8 parameter", ErrMalformedCommand)
+			}
+
+			parsed.smtpUTF8 = true
+		case isMailBodyParameter(parameter):
+			if bodySeen {
+				return mailCommand{}, fmt.Errorf("%w: duplicate BODY parameter", ErrMalformedCommand)
+			}
+
+			bodySeen = true
+
+			if !strings.EqualFold(mailBodyParameterValue(parameter), capability8BITMIME) {
+				return mailCommand{}, fmt.Errorf("%w: unsupported BODY parameter", ErrMalformedCommand)
+			}
+
+			parsed.body8BitMIME = true
+		default:
 			return mailCommand{}, fmt.Errorf("%w: unsupported MAIL parameter", ErrMalformedCommand)
 		}
-
-		if parsed.smtpUTF8 {
-			return mailCommand{}, fmt.Errorf("%w: duplicate SMTPUTF8 parameter", ErrMalformedCommand)
-		}
-
-		parsed.smtpUTF8 = true
 	}
 
 	return parsed, nil
+}
+
+// isMailBodyParameter reports whether a MAIL parameter uses the BODY key.
+func isMailBodyParameter(parameter string) bool {
+	key, _, ok := strings.Cut(parameter, "=")
+
+	return ok && strings.EqualFold(key, "BODY")
+}
+
+// mailBodyParameterValue returns the raw BODY value from one syntactically keyed parameter.
+func mailBodyParameterValue(parameter string) string {
+	_, value, _ := strings.Cut(parameter, "=")
+
+	return value
 }
 
 // splitCommandPath extracts one bracketed path and returns trailing parameters.

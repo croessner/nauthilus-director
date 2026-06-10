@@ -1532,6 +1532,32 @@ func TestIMAPValidationRejectsFalseCapabilityAdvertisements(t *testing.T) {
 	})
 }
 
+// TestIMAPValidationRejectsUnsafeFrontendAuthTLS keeps plaintext outside IMAP scope.
+func TestIMAPValidationRejectsUnsafeFrontendAuthTLS(t *testing.T) {
+	cfg := DefaultConfig()
+	entry := cfg.Director.Listeners["imap"]
+	entry.TLS.Mode = listenerTLSModePlaintext
+	entry.IMAP.AuthMechanisms = []string{"plain"}
+	entry.IMAP.Capabilities = []string{"IMAP4rev1", "ID", "SASL-IR", "AUTH=PLAIN"}
+	cfg.Director.Listeners["imap"] = entry
+
+	expectValidationError(t, cfg, "auth_mechanisms requires frontend TLS mode starttls or implicit")
+}
+
+// TestNonLMTPPlaintextListenersRemainRejected keeps this follow-up scoped to LMTP.
+func TestNonLMTPPlaintextListenersRemainRejected(t *testing.T) {
+	for _, name := range []string{"imap", "sieve", "pop3"} {
+		t.Run(name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			entry := cfg.Director.Listeners[name]
+			entry.TLS.Mode = listenerTLSModePlaintext
+			cfg.Director.Listeners[name] = entry
+
+			expectValidationError(t, cfg, "tls.mode plaintext is supported only for lmtp listeners")
+		})
+	}
+}
+
 // TestLMTPValidationRejectsMissingProtocolConfig keeps LMTP listener config typed and explicit.
 func TestLMTPValidationRejectsMissingProtocolConfig(t *testing.T) {
 	cfg := DefaultConfig()
@@ -1556,15 +1582,63 @@ func TestListenerValidationRejectsUnsupportedProtocol(t *testing.T) {
 func TestLMTPCapabilitiesNormalizeStableWireForms(t *testing.T) {
 	cfg := DefaultConfig()
 	entry := cfg.Director.Listeners["lmtp"]
-	entry.LMTP.Capabilities = []string{" smtpUtf8 ", " auth   plain  xoauth2 ", "starttls", "AUTH PLAIN XOAUTH2"}
+	entry.LMTP.Capabilities = []string{
+		" smtpUtf8 ",
+		" 8bitmime ",
+		" enhancedstatuscodes ",
+		" auth   plain  xoauth2 ",
+		"starttls",
+		"EnhancedStatusCodes",
+		"8BITMIME",
+		"AUTH PLAIN XOAUTH2",
+	}
 	cfg.Director.Listeners["lmtp"] = entry
 
 	normalized := cfg.Normalize()
 	got := normalized.Director.Listeners["lmtp"].LMTP.Capabilities
-	want := []string{"SMTPUTF8", "AUTH PLAIN XOAUTH2", "STARTTLS"}
+	want := []string{"SMTPUTF8", lmtpCapability8BITMIME, lmtpCapabilityEnhancedStatus, "AUTH PLAIN XOAUTH2", "STARTTLS"}
 
 	if !slices.Equal(got, want) {
 		t.Fatalf("LMTP capabilities = %v, want %v", got, want)
+	}
+}
+
+// TestLMTPValidationAcceptsEnhancedStatusCodes verifies frontend-owned enhanced replies may be advertised.
+func TestLMTPValidationAcceptsEnhancedStatusCodes(t *testing.T) {
+	cfg := DefaultConfig()
+	entry := cfg.Director.Listeners["lmtp"]
+	entry.LMTP.Capabilities = []string{lmtpCapabilityEnhancedStatus}
+	cfg.Director.Listeners["lmtp"] = entry
+
+	if err := NewLoader().Validate(cfg); err != nil {
+		t.Fatalf("Validate returned error for configured ENHANCEDSTATUSCODES: %v", err)
+	}
+}
+
+// TestLMTPValidationAccepts8BITMIME verifies frontend-owned BODY=8BITMIME may be configured.
+func TestLMTPValidationAccepts8BITMIME(t *testing.T) {
+	cfg := DefaultConfig()
+	entry := cfg.Director.Listeners["lmtp"]
+	entry.LMTP.Capabilities = []string{lmtpCapability8BITMIME}
+	cfg.Director.Listeners["lmtp"] = entry
+
+	if err := NewLoader().Validate(cfg); err != nil {
+		t.Fatalf("Validate returned error for configured 8BITMIME: %v", err)
+	}
+}
+
+// TestDefaultLMTPCapabilitiesAdvertiseEnhancedStatusCodes keeps generated defaults truthful.
+func TestDefaultLMTPCapabilitiesAdvertiseEnhancedStatusCodes(t *testing.T) {
+	cfg := DefaultConfig()
+	for _, listenerName := range []string{"lmtp", "lmtps"} {
+		listener := cfg.Director.Listeners[listenerName]
+		if listener.LMTP == nil {
+			t.Fatalf("%s LMTP config is nil", listenerName)
+		}
+
+		if !containsString(listener.LMTP.Capabilities, lmtpCapabilityEnhancedStatus) {
+			t.Fatalf("%s capabilities = %v, want ENHANCEDSTATUSCODES", listenerName, listener.LMTP.Capabilities)
+		}
 	}
 }
 
@@ -1598,6 +1672,73 @@ func TestLMTPStartTLSCapabilityMatchesListenerTLSMode(t *testing.T) {
 	cfg.Director.Listeners["lmtps"] = entry
 
 	expectValidationError(t, cfg, "STARTTLS for non-starttls listener TLS mode")
+}
+
+// TestLMTPPlaintextListenerWithoutFrontendAuthValidates accepts auth-free plaintext delivery.
+func TestLMTPPlaintextListenerWithoutFrontendAuthValidates(t *testing.T) {
+	for _, mode := range []string{listenerTLSModePlaintext, listenerTLSModeDisabled, listenerTLSModeNone} {
+		t.Run(mode, func(t *testing.T) {
+			cfg := plaintextLMTPListenerConfig(mode)
+
+			if err := NewLoader().Validate(cfg); err != nil {
+				t.Fatalf("Validate rejected auth-free plaintext LMTP listener: %v", err)
+			}
+
+			normalized := cfg.Normalize()
+			if got := normalized.Director.Listeners["lmtp"].TLS.Mode; got != listenerTLSModePlaintext {
+				t.Fatalf("normalized TLS mode = %q, want %q", got, listenerTLSModePlaintext)
+			}
+		})
+	}
+}
+
+// TestLMTPPlaintextListenerRejectsCredentialAuthConfiguration keeps plaintext auth-free.
+func TestLMTPPlaintextListenerRejectsCredentialAuthConfiguration(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*LMTPListenerConfig)
+		want   string
+	}{
+		{
+			name: "required peer auth",
+			mutate: func(lmtp *LMTPListenerConfig) {
+				lmtp.ClientAuth.Required = true
+			},
+			want: "client_auth.required must be false for plaintext listener",
+		},
+		{
+			name: "client auth mechanisms",
+			mutate: func(lmtp *LMTPListenerConfig) {
+				lmtp.ClientAuth.Mechanisms = []string{"plain"}
+			},
+			want: "client_auth.mechanisms must be empty for plaintext listener",
+		},
+		{
+			name: "starttls capability",
+			mutate: func(lmtp *LMTPListenerConfig) {
+				lmtp.Capabilities = append(lmtp.Capabilities, "STARTTLS")
+			},
+			want: "must not advertise STARTTLS for plaintext listener",
+		},
+		{
+			name: "auth capability",
+			mutate: func(lmtp *LMTPListenerConfig) {
+				lmtp.Capabilities = append(lmtp.Capabilities, "AUTH PLAIN")
+			},
+			want: "must not advertise AUTH for plaintext listener",
+		},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			cfg := plaintextLMTPListenerConfig(listenerTLSModePlaintext)
+			entry := cfg.Director.Listeners["lmtp"]
+			testCase.mutate(entry.LMTP)
+			cfg.Director.Listeners["lmtp"] = entry
+
+			expectValidationError(t, cfg, testCase.want)
+		})
+	}
 }
 
 // TestLMTPMTLSPeerAuthRequiresVerifiedClientCertificates prevents unauthenticated mTLS shortcuts.
@@ -1652,6 +1793,89 @@ func TestLMTPBackendAuthValidationRejectsIncompleteSASLAndOAuth(t *testing.T) {
 		cfg.Director.Backends["mailstore-a-lmtp"] = backend
 
 		expectValidationError(t, cfg, "auth.oauthbearer.token_file is required in oauthbearer mode")
+	})
+}
+
+// TestLMTPBackendPlaintextNoAuthValidation accepts auth-free plaintext backend delivery.
+func TestLMTPBackendPlaintextNoAuthValidation(t *testing.T) {
+	for _, mode := range []string{"plaintext", "disabled", "none"} {
+		t.Run(mode, func(t *testing.T) {
+			cfg := lmtpBackendPolicyConfig(mode, backendAuthModeNone)
+
+			if err := NewLoader().Validate(cfg); err != nil {
+				t.Fatalf("Validate rejected auth-free plaintext LMTP backend: %v", err)
+			}
+		})
+	}
+}
+
+// TestLMTPBackendPlaintextRejectsCredentialAuthRequiringTLS protects backend secrets.
+func TestLMTPBackendPlaintextRejectsCredentialAuthRequiringTLS(t *testing.T) {
+	tests := []struct {
+		name string
+		mode string
+		want string
+	}{
+		{
+			name: "sasl",
+			mode: backendAuthModeSASL,
+			want: "director.backends.mailstore-a-lmtp.auth.sasl.require_tls requires verified backend TLS",
+		},
+		{
+			name: "oauthbearer",
+			mode: backendAuthModeOAuthBearer,
+			want: "director.backends.mailstore-a-lmtp.auth.oauthbearer.require_tls requires verified backend TLS",
+		},
+		{
+			name: "mtls",
+			mode: backendAuthModeMTLS,
+			want: "director.backends.mailstore-a-lmtp.auth.mtls requires verified backend TLS",
+		},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			cfg := lmtpBackendPolicyConfig("plaintext", testCase.mode)
+
+			expectValidationError(t, cfg, testCase.want)
+		})
+	}
+}
+
+// TestLMTPBackendPlaintextCredentialAuthCanExplicitlyDisableTLSRequirement documents weaker policy.
+func TestLMTPBackendPlaintextCredentialAuthCanExplicitlyDisableTLSRequirement(t *testing.T) {
+	for _, mode := range []string{backendAuthModeSASL, backendAuthModeOAuthBearer} {
+		t.Run(mode, func(t *testing.T) {
+			cfg := lmtpBackendPolicyConfig("plaintext", mode)
+			backend := cfg.Director.Backends["mailstore-a-lmtp"]
+			backend.Auth.SASL.RequireTLS = false
+			backend.Auth.OAuthBearer.RequireTLS = false
+			cfg.Director.Backends["mailstore-a-lmtp"] = backend
+
+			if err := NewLoader().Validate(cfg); err != nil {
+				t.Fatalf("Validate rejected explicit plaintext credential policy: %v", err)
+			}
+		})
+	}
+}
+
+// TestLMTPBackendMTLSValidationRequiresVerifiedTLSAndClientCertificate pins mTLS prerequisites.
+func TestLMTPBackendMTLSValidationRequiresVerifiedTLSAndClientCertificate(t *testing.T) {
+	t.Run("verified tls", func(t *testing.T) {
+		cfg := lmtpBackendPolicyConfig("plaintext", backendAuthModeMTLS)
+
+		expectValidationError(t, cfg, "director.backends.mailstore-a-lmtp.auth.mtls requires verified backend TLS")
+	})
+
+	t.Run("client certificate", func(t *testing.T) {
+		cfg := DefaultConfig()
+		backend := cfg.Director.Backends["mailstore-a-lmtp"]
+		backend.Auth.Mode = backendAuthModeMTLS
+		backend.TLS.Cert = ""
+		backend.TLS.Key = Secret("")
+		cfg.Director.Backends["mailstore-a-lmtp"] = backend
+
+		expectValidationError(t, cfg, "director.backends.mailstore-a-lmtp.auth.mtls requires backend tls.cert and tls.key")
 	})
 }
 
@@ -2405,6 +2629,35 @@ func expectValidationError(t *testing.T, cfg Config, want string) {
 // containsString keeps slice assertions compact without pulling in another dependency.
 func containsString(values []string, needle string) bool {
 	return slices.Contains(values, needle)
+}
+
+// plaintextLMTPListenerConfig returns a safe auth-free plaintext LMTP listener profile.
+func plaintextLMTPListenerConfig(mode string) Config {
+	cfg := DefaultConfig()
+	entry := cfg.Director.Listeners["lmtp"]
+	entry.TLS.Mode = mode
+	entry.TLS.Cert = ""
+	entry.TLS.Key = Secret("")
+	entry.TLS.ClientCA = ""
+	entry.TLS.RequireClientCert = false
+	entry.LMTP.ClientAuth.Required = false
+	entry.LMTP.ClientAuth.Mechanisms = nil
+	entry.LMTP.ClientAuth.MTLS.SatisfiesRequired = false
+	entry.LMTP.Capabilities = []string{"SMTPUTF8"}
+	cfg.Director.Listeners["lmtp"] = entry
+
+	return cfg
+}
+
+// lmtpBackendPolicyConfig returns one LMTP backend with the requested transport/auth policy.
+func lmtpBackendPolicyConfig(tlsMode string, authMode string) Config {
+	cfg := DefaultConfig()
+	backend := cfg.Director.Backends["mailstore-a-lmtp"]
+	backend.TLS = BackendTLSConfig{Mode: tlsMode}
+	backend.Auth.Mode = authMode
+	cfg.Director.Backends["mailstore-a-lmtp"] = backend
+
+	return cfg
 }
 
 // removeBearerFrontendMechanisms removes bearer advertisements from default listeners.

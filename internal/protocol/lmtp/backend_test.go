@@ -48,38 +48,44 @@ const (
 	testBackendTLSHost       = "localhost"
 	testBackendTLSHostTarget = "localhost:2424"
 	testBackendToken         = "backend-token"
+	testBackendCommandMail   = "MAIL FROM"
+	testBackendCommandRCPT   = "RCPT TO"
 	testLMTPProxyHeaderV4    = "PROXY TCP4 203.0.113.10 198.51.100.20 42500 24"
 	testLMTPHealthProxyV4    = "PROXY TCP4 10.10.0.1 10.10.0.2 5024 24"
 )
 
-// TestBackendConnectorHandlesPlaintext verifies cleartext LMTP capability discovery.
-func TestBackendConnectorHandlesPlaintext(t *testing.T) {
-	dialer := scriptedLMTPBackendDialer(t, func(t *testing.T, conn net.Conn) {
-		reader := bufio.NewReader(conn)
-		writeLMTPBackendLine(t, conn, "220 backend ready")
-		expectLMTPBackendLine(t, reader, "LHLO "+backendLHLOName)
-		writeLMTPBackendLine(t, conn, "250-mailstore")
-		writeLMTPBackendLine(t, conn, "250 "+capabilityCHUNKING)
-	})
+// TestBackendConnectorHandlesPlaintextModes verifies cleartext LMTP capability discovery.
+func TestBackendConnectorHandlesPlaintextModes(t *testing.T) {
+	for _, mode := range []string{backendTLSPlaintext, backendTLSDisabled, backendTLSNone} {
+		t.Run(mode, func(t *testing.T) {
+			dialer := scriptedLMTPBackendDialer(t, func(t *testing.T, conn net.Conn) {
+				reader := bufio.NewReader(conn)
+				writeLMTPBackendLine(t, conn, "220 backend ready")
+				expectLMTPBackendLine(t, reader, "LHLO "+backendLHLOName)
+				writeLMTPBackendLine(t, conn, "250-mailstore")
+				writeLMTPBackendLine(t, conn, "250 "+capabilityCHUNKING)
+			})
 
-	connection, err := NewTCPBackendConnector(dialer).Connect(
-		context.Background(),
-		testLMTPBackendConnectRequest(testLMTPBackendTarget(backendTLSPlaintext)),
-	)
-	if err != nil {
-		t.Fatalf("Connect returned error: %v", err)
+			connection, err := NewTCPBackendConnector(dialer).Connect(
+				context.Background(),
+				testLMTPBackendConnectRequest(testLMTPBackendTarget(mode)),
+			)
+			if err != nil {
+				t.Fatalf("Connect returned error: %v", err)
+			}
+			defer func() { _ = connection.Conn().Close() }()
+
+			if connection.TLSActive() || connection.TLSVerified() {
+				t.Fatalf("TLS state active=%v verified=%v, want plaintext", connection.TLSActive(), connection.TLSVerified())
+			}
+
+			if !connection.CapabilitySet().Has(capabilityCHUNKING) {
+				t.Fatalf("capabilities = %v, want CHUNKING", connection.Capabilities())
+			}
+
+			dialer.Wait(t)
+		})
 	}
-	defer func() { _ = connection.Conn().Close() }()
-
-	if connection.TLSActive() || connection.TLSVerified() {
-		t.Fatalf("TLS state active=%v verified=%v, want plaintext", connection.TLSActive(), connection.TLSVerified())
-	}
-
-	if !connection.CapabilitySet().Has(capabilityCHUNKING) {
-		t.Fatalf("capabilities = %v, want CHUNKING", connection.Capabilities())
-	}
-
-	dialer.Wait(t)
 }
 
 // TestBackendConnectorWritesProxyBeforePlaintextGreeting verifies PROXY precedes greeting reads.
@@ -328,23 +334,25 @@ func TestLHLOCapabilitiesAreParsedWithoutBannerText(t *testing.T) {
 	response := backendStatusResponse{
 		code: responseStatusOK,
 		lines: []string{
-			"mailstore says CHUNKING is a word in prose",
+			"mailstore says CHUNKING and 8BITMIME are words in prose",
 			"AUTH PLAIN LOGIN",
 			capabilityCHUNKING,
+			capability8BITMIME,
 		},
 	}
 
 	capabilities := lmtpCapabilitiesFromLHLO(response)
-	if !capabilities.Has(capabilityCHUNKING) || !capabilities.Has(capabilityAUTH+"=PLAIN") || !capabilities.Has(capabilityAUTH+"=LOGIN") {
-		t.Fatalf("capabilities = %v, want CHUNKING and AUTH mechanisms", capabilities.List())
+	if !capabilities.Has(capabilityCHUNKING) || !capabilities.Has(capability8BITMIME) ||
+		!capabilities.Has(capabilityAUTH+"=PLAIN") || !capabilities.Has(capabilityAUTH+"=LOGIN") {
+		t.Fatalf("capabilities = %v, want CHUNKING, 8BITMIME and AUTH mechanisms", capabilities.List())
 	}
 
 	bannerOnly := lmtpCapabilitiesFromLHLO(backendStatusResponse{
 		code:  responseStatusOK,
-		lines: []string{"mailstore says CHUNKING"},
+		lines: []string{"mailstore says CHUNKING and 8BITMIME"},
 	})
-	if bannerOnly.Has(capabilityCHUNKING) {
-		t.Fatalf("banner-only capabilities = %v, want no CHUNKING", bannerOnly.List())
+	if bannerOnly.Has(capabilityCHUNKING) || bannerOnly.Has(capability8BITMIME) {
+		t.Fatalf("banner-only capabilities = %v, want no CHUNKING or 8BITMIME", bannerOnly.List())
 	}
 }
 
@@ -398,6 +406,100 @@ func TestOAuthBearerBackendAuthRequiresTokenAndVerifiedTLS(t *testing.T) {
 	if err := AuthenticateBackend(connection, target); !errors.Is(err, ErrBackendAuthPolicy) {
 		t.Fatalf("AuthenticateBackend without token error = %v, want policy", err)
 	}
+}
+
+// TestNoAuthBackendDoesNotSendCredentials verifies plaintext no-auth is credential-free.
+func TestNoAuthBackendDoesNotSendCredentials(t *testing.T) {
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	connection := newBackendConnection(client)
+	connection.capabilities = backend.NewCapabilitySet(capabilityAUTH+"=PLAIN", capabilityAUTH+"=OAUTHBEARER")
+
+	target := testLMTPBackendTarget(backendTLSPlaintext)
+	target.Auth.Mode = backendAuthModeNone
+
+	if err := AuthenticateBackend(connection, target); err != nil {
+		t.Fatalf("AuthenticateBackend returned error: %v", err)
+	}
+
+	_ = server.SetReadDeadline(time.Now().Add(25 * time.Millisecond))
+
+	line, err := bufio.NewReader(server).ReadString('\n')
+	if err == nil {
+		t.Fatalf("no-auth backend auth wrote unexpected command %q", line)
+	}
+}
+
+// TestSASLBackendAuthAllowsExplicitPlaintextPolicy documents the weaker opt-in path.
+func TestSASLBackendAuthAllowsExplicitPlaintextPolicy(t *testing.T) {
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+
+		reader := bufio.NewReader(server)
+		expectLMTPBackendLine(t, reader, expectedPlainAuthCommand())
+		writeLMTPBackendLine(t, server, "235 2.7.0 ok")
+	}()
+
+	connection := newBackendConnection(client)
+	connection.capabilities = backend.NewCapabilitySet(capabilityAUTH + "=PLAIN")
+
+	target := testLMTPBackendTarget(backendTLSPlaintext)
+	target.Auth = backend.AuthConfig{
+		Mode: backendAuthModeSASL,
+		SASL: backend.SASLConfig{
+			Mechanism:  mechanismPlain,
+			Username:   testBackendServiceUser,
+			Password:   config.Secret(testBackendPassword),
+			RequireTLS: false,
+		},
+	}
+
+	if err := AuthenticateBackend(connection, target); err != nil {
+		t.Fatalf("AuthenticateBackend returned error: %v", err)
+	}
+
+	waitForBackendAuthScript(t, done)
+}
+
+// TestOAuthBearerBackendAuthAllowsExplicitPlaintextPolicy documents the weaker opt-in path.
+func TestOAuthBearerBackendAuthAllowsExplicitPlaintextPolicy(t *testing.T) {
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+
+		reader := bufio.NewReader(server)
+		expectLMTPBackendLine(t, reader, expectedOAuthBearerAuthCommand())
+		writeLMTPBackendLine(t, server, "235 2.7.0 ok")
+	}()
+
+	connection := newBackendConnection(client)
+	connection.capabilities = backend.NewCapabilitySet(capabilityAUTH + "=OAUTHBEARER")
+
+	target := testLMTPBackendTarget(backendTLSPlaintext)
+	target.Auth = backend.AuthConfig{
+		Mode: backendAuthModeOAuthBearer,
+		OAuthBearer: backend.OAuthBearerConfig{
+			Token:      config.Secret(testBackendToken),
+			RequireTLS: false,
+		},
+	}
+
+	if err := AuthenticateBackend(connection, target); err != nil {
+		t.Fatalf("AuthenticateBackend returned error: %v", err)
+	}
+
+	waitForBackendAuthScript(t, done)
 }
 
 // TestBackendMTLSAuthDoesNotSendSASL verifies certificate auth never emits AUTH commands.
@@ -457,6 +559,55 @@ func TestLightHealthWritesProxyBeforeGreeting(t *testing.T) {
 	dialer.Wait(t)
 }
 
+// TestDeepHealthNoAuthDoesNotSendCredentials verifies health honors auth.mode none.
+func TestDeepHealthNoAuthDoesNotSendCredentials(t *testing.T) {
+	commands := make(chan string, 8)
+	dialer := scriptedLMTPBackendDialerWithAddrs(
+		t,
+		tcpAddr("10.10.0.1", 5024),
+		tcpAddr("10.10.0.2", 24),
+		func(t *testing.T, conn net.Conn) {
+			reader := bufio.NewReader(conn)
+			expectLMTPBackendLine(t, reader, testLMTPHealthProxyV4)
+			writeLMTPBackendLine(t, conn, "220 backend ready")
+			recordAndExpectLMTPBackendLine(t, reader, commands, "LHLO "+backendLHLOName)
+			writeLMTPBackendLine(t, conn, "250-mailstore")
+			writeLMTPBackendLine(t, conn, "250-AUTH PLAIN")
+			writeLMTPBackendLine(t, conn, "250 CHUNKING")
+			recordAndExpectLMTPBackendLine(t, reader, commands, "NOOP")
+			writeLMTPBackendLine(t, conn, "250 2.0.0 ok")
+			recordAndExpectLMTPBackendLine(t, reader, commands, "RSET")
+			writeLMTPBackendLine(t, conn, "250 2.0.0 ok")
+			recordAndExpectLMTPBackendLine(t, reader, commands, "QUIT")
+			writeLMTPBackendLine(t, conn, "221 2.0.0 bye")
+		},
+	)
+
+	target := testLMTPBackendTarget(backendTLSPlaintext)
+	target.HAProxy.Enabled = true
+	target.Auth = backend.AuthConfig{Mode: backendAuthModeNone}
+
+	result := NewHealthChecker(NewTCPBackendConnector(dialer)).CheckBackend(context.Background(), target, backend.HealthCheckRequest{
+		Deep:    true,
+		Timeout: time.Second,
+	})
+	if !result.Healthy || !result.Capabilities.Has(capabilityCHUNKING) {
+		t.Fatalf("health result = %#v, want healthy with CHUNKING", result)
+	}
+
+	dialer.Wait(t)
+	close(commands)
+
+	for command := range commands {
+		upper := strings.ToUpper(command)
+		for _, forbidden := range []string{commandAuth, testBackendCommandMail, testBackendCommandRCPT, commandDATA, commandBDAT} {
+			if strings.HasPrefix(upper, forbidden) {
+				t.Fatalf("no-auth deep health sent forbidden command %q", command)
+			}
+		}
+	}
+}
+
 // TestDeepHealthUsesSafeCommandSequence verifies health stops before envelope state.
 func TestDeepHealthUsesSafeCommandSequence(t *testing.T) {
 	commands := make(chan string, 8)
@@ -507,7 +658,7 @@ func TestDeepHealthUsesSafeCommandSequence(t *testing.T) {
 
 	for command := range commands {
 		upper := strings.ToUpper(command)
-		for _, forbidden := range []string{"MAIL FROM", "RCPT TO", "DATA", "BDAT"} {
+		for _, forbidden := range []string{testBackendCommandMail, testBackendCommandRCPT, commandDATA, commandBDAT} {
 			if strings.HasPrefix(upper, forbidden) {
 				t.Fatalf("deep health sent forbidden command %q", command)
 			}
@@ -781,4 +932,20 @@ func expectedPlainAuthCommand() string {
 	payload := "\x00" + testBackendServiceUser + "\x00" + testBackendPassword
 
 	return "AUTH PLAIN " + base64.StdEncoding.EncodeToString([]byte(payload))
+}
+
+// expectedOAuthBearerAuthCommand returns the service-token AUTH OAUTHBEARER command.
+func expectedOAuthBearerAuthCommand() string {
+	return "AUTH OAUTHBEARER " + base64.StdEncoding.EncodeToString([]byte(oauthBearerBackendPayload(testBackendToken)))
+}
+
+// waitForBackendAuthScript asserts that an inline backend auth script finished.
+func waitForBackendAuthScript(t *testing.T, done <-chan struct{}) {
+	t.Helper()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for backend auth script")
+	}
 }

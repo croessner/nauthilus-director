@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -509,11 +510,22 @@ func validateNetwork(network string) error {
 
 // validateTLSMode accepts the frontend TLS modes supported by mail protocol listeners.
 func validateTLSMode(mode string) error {
-	switch mode {
-	case tlsModeStartTLS, tlsModeImplicit:
+	switch normalizeListenerTLSMode(mode) {
+	case tlsModeStartTLS, tlsModeImplicit, tlsModePlaintext:
 		return nil
 	default:
 		return fmt.Errorf("unsupported listener TLS mode %q", mode)
+	}
+}
+
+// normalizeListenerTLSMode maps frontend non-TLS aliases to the runtime mode.
+func normalizeListenerTLSMode(mode string) string {
+	normalized := strings.ToLower(strings.TrimSpace(mode))
+	switch normalized {
+	case tlsModeDisabled, tlsModeNone, tlsModePlaintext:
+		return tlsModePlaintext
+	default:
+		return normalized
 	}
 }
 

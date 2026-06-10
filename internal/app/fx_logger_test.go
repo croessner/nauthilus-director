@@ -37,7 +37,7 @@ type recordingFxRecorder struct {
 }
 
 type fakeBackendCapabilityReader struct {
-	allowed bool
+	allowed map[string]bool
 	err     error
 }
 
@@ -47,8 +47,8 @@ func (r *recordingFxRecorder) Record(_ context.Context, event observability.Even
 }
 
 // PoolSupportsCapability returns the configured fake capability decision.
-func (r fakeBackendCapabilityReader) PoolSupportsCapability(context.Context, string, string) (bool, error) {
-	return r.allowed, r.err
+func (r fakeBackendCapabilityReader) PoolSupportsCapability(_ context.Context, _ string, capability string) (bool, error) {
+	return r.allowed[strings.ToUpper(strings.TrimSpace(capability))], r.err
 }
 
 // TestFxLoggerFiltersDebugEventsAtInfo verifies Fx wiring chatter stays below info logs.
@@ -77,18 +77,19 @@ func TestFxLoggerFiltersDebugEventsAtInfo(t *testing.T) {
 	}
 }
 
-// TestLMTPBackendChunkingAllowedFailsClosed verifies app wiring suppresses unsafe BDAT.
-func TestLMTPBackendChunkingAllowedFailsClosed(t *testing.T) {
-	if lmtpBackendChunkingAllowed(nil, "lmtp-default") {
-		t.Fatal("nil capability reader allowed CHUNKING")
+// TestLMTPBackendCapabilityPolicyFailsClosed verifies app wiring suppresses unsafe LMTP extensions.
+func TestLMTPBackendCapabilityPolicyFailsClosed(t *testing.T) {
+	if got := lmtpBackendCapabilities(nil, "lmtp-default", "CHUNKING", "8BITMIME"); len(got) != 0 {
+		t.Fatalf("nil capability reader allowed capabilities %v", got)
 	}
 
-	if lmtpBackendChunkingAllowed(fakeBackendCapabilityReader{err: errors.New("redis unavailable")}, "lmtp-default") {
-		t.Fatal("capability reader error allowed CHUNKING")
+	if got := lmtpBackendCapabilities(fakeBackendCapabilityReader{err: errors.New("redis unavailable")}, "lmtp-default", "CHUNKING"); len(got) != 0 {
+		t.Fatalf("capability reader error allowed capabilities %v", got)
 	}
 
-	if !lmtpBackendChunkingAllowed(fakeBackendCapabilityReader{allowed: true}, "lmtp-default") {
-		t.Fatal("fresh backend capability proof did not allow CHUNKING")
+	allowed := fakeBackendCapabilityReader{allowed: map[string]bool{"CHUNKING": true, "8BITMIME": true}}
+	if got := strings.Join(lmtpBackendCapabilities(allowed, "lmtp-default", "CHUNKING", "8BITMIME"), ","); got != "CHUNKING,8BITMIME" {
+		t.Fatalf("fresh backend capability proof allowed %q, want CHUNKING,8BITMIME", got)
 	}
 }
 

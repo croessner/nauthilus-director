@@ -70,7 +70,7 @@ func TestDovecotLMTPInterop(t *testing.T) {
 	lmtpsAddress := loopbackAddress(t)
 	imapAddress := loopbackAddress(t)
 	controlAddress := loopbackAddress(t)
-	publishHealthyLMTPBackends(t, redisFixture, []string{e2eLMTPBackendAID, e2eLMTPBackendBID}, "CHUNKING")
+	publishHealthyLMTPBackends(t, redisFixture, []string{e2eLMTPBackendAID, e2eLMTPBackendBID}, "CHUNKING", "8BITMIME")
 	configPath := writeLMTPProcessConfig(t, lmtpProcessConfigOptions{
 		RedisAddress:                redisFixture.addr,
 		AuthorityURL:                authority.URL(),
@@ -81,6 +81,7 @@ func TestDovecotLMTPInterop(t *testing.T) {
 		ControlAddress:              controlAddress,
 		LMTPBackends:                map[string]string{e2eLMTPBackendAID: lmtpA, e2eLMTPBackendBID: lmtpB},
 		IMAPBackends:                map[string]string{e2eBackendAID: imapA, e2eBackendBID: imapB},
+		LMTPExtraCapabilities:       []string{"8BITMIME"},
 		TLS:                         tlsBundle,
 		DisableLMTPPeerAuth:         true,
 		IMAPBackendTLSMode:          "starttls",
@@ -117,7 +118,8 @@ func proveRealDeliveryHoldPinsIMAP(t *testing.T, lmtpAddress string, imapAddress
 	client.WriteLine("LHLO interop.example")
 	capabilities := client.ReadResponse()
 	assertLMTPHasCapability(t, capabilities, "CHUNKING")
-	client.WriteLine("MAIL FROM:<sender@example.test>")
+	assertLMTPHasCapability(t, capabilities, "8BITMIME")
+	client.WriteLine("MAIL FROM:<sender@example.test> BODY=8BITMIME")
 	client.ExpectLine("250 2.0.0 Sender accepted\r\n")
 	client.WriteLine("RCPT TO:<" + interopLMTPRecipientA + ">")
 	client.ExpectLine("250 2.0.0 Recipient accepted\r\n")

@@ -469,9 +469,9 @@ func defaultIMAPCapabilities(tlsMode string) []string {
 
 // defaultLMTPListener builds conservative LMTP listener defaults for typed config decoding.
 func defaultLMTPListener(serviceName string, address string, tlsMode string, cert string, key string) ListenerConfig {
-	capabilities := []string{"SMTPUTF8", "AUTH PLAIN LOGIN XOAUTH2 OAUTHBEARER"}
+	capabilities := []string{"SMTPUTF8", lmtpCapabilityEnhancedStatus, "AUTH PLAIN LOGIN XOAUTH2 OAUTHBEARER"}
 	if tlsMode == "starttls" {
-		capabilities = append([]string{"SMTPUTF8", "STARTTLS"}, "AUTH PLAIN LOGIN XOAUTH2 OAUTHBEARER")
+		capabilities = append([]string{"SMTPUTF8", lmtpCapabilityEnhancedStatus, "STARTTLS"}, "AUTH PLAIN LOGIN XOAUTH2 OAUTHBEARER")
 	}
 
 	return ListenerConfig{

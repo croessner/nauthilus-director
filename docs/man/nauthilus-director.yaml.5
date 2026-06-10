@@ -376,8 +376,13 @@ The implemented surface uses configured
 .B capabilities
 for the
 .B LHLO
-reply, including SMTPUTF8, and peer authentication through
+reply, including SMTPUTF8 and ENHANCEDSTATUSCODES, and peer authentication
+through
 .BR client_auth .
+The configured capability list is a desired surface, not a blind backend mirror:
+CHUNKING and 8BITMIME are advertised only when the Director implements the
+frontend behavior and fresh backend-pool health proof shows every backend member
+supports the matching extension.
 Peer authentication verifies the submitting LMTP peer; it is separate from
 recipient routing and does not authenticate the mailbox recipient.
 .PP
@@ -391,8 +396,42 @@ values with other protocol backends that represent the same concrete mailstore
 authority.
 Backend TLS, SASL, OAuth bearer, credential replay, master-user and health-check
 settings use the shared backend config paths.
+Supported LMTP backend auth modes are
+.BR none ,
+.BR mtls ,
+.B sasl
+and
+.BR oauthbearer .
+.B auth.mode: none
+sends no backend credentials and is the normal plaintext backend choice on
+trusted internal delivery networks when
+.B tls.mode
+is
+.BR plaintext ,
+.B disabled
+or
+.BR none .
+This is not the general recommended default.
+Credential-bearing SASL and OAuth bearer backend auth keep
+.B require_tls: true
+by default; with that policy they require verified backend TLS and reject
+plaintext backend TLS modes.
+Setting
+.B require_tls: false
+is an explicit weaker policy that permits configured service credentials on the
+backend hop.
+.B mtls
+always requires verified backend TLS plus configured
+.B tls.cert
+and
+.BR tls.key .
+LMTP health checks use the same backend TLS and auth policy as real LMTP
+sessions, then stop before envelope or message-body commands.
 BDAT forwarding is available only when the configured frontend capability and
 backend capability boundary allow CHUNKING.
+BODY=8BITMIME is accepted only when 8BITMIME was advertised in the current
+LHLO response and is forwarded to the selected backend without inspecting,
+rewriting or downgrading DATA or BDAT payload bytes.
 After a successful delivery or transaction close, LMTP retains the selected
 backend node under
 .B director.affinity.backend_retention

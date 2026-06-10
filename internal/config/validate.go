@@ -646,6 +646,10 @@ func validateDirector(director DirectorConfig, authorities map[string]AuthorityC
 			addProblem(problems, path+".protocol must be imap, lmtp, pop3, or sieve")
 		}
 
+		if listenerTLSModeIsPlaintext(listener.TLS.Mode) && listener.Protocol != protocolLMTP {
+			addProblem(problems, path+".tls.mode plaintext is supported only for lmtp listeners")
+		}
+
 		if listener.Protocol == protocolIMAP && listener.IMAP == nil {
 			addProblem(problems, path+".imap is required for imap listeners")
 		}
@@ -692,7 +696,7 @@ func validateDirector(director DirectorConfig, authorities map[string]AuthorityC
 		if strings.TrimSpace(listener.TLS.Mode) == "" {
 			addProblem(problems, path+".tls.mode is required")
 		} else if !validListenerTLSMode(listener.TLS.Mode) {
-			addProblem(problems, path+".tls.mode must be starttls or implicit")
+			addProblem(problems, path+".tls.mode must be starttls, implicit, plaintext, disabled, or none")
 		}
 		if listener.ProxyProtocol.Enabled {
 			if len(listener.ProxyProtocol.TrustedCIDRs) == 0 {
@@ -1072,6 +1076,10 @@ func validateBackendProtocol(path string, protocol string, problems *[]string) {
 
 // validateIMAPListener rejects unsupported pre-auth advertisements and mechanisms.
 func validateIMAPListener(path string, listener ListenerConfig, imap IMAPListenerConfig, problems *[]string) {
+	if len(imap.AuthMechanisms) > 0 && !listenerTLSProtectsCredentialAuth(listener.TLS.Mode) {
+		addProblem(problems, path+".auth_mechanisms requires frontend TLS mode starttls or implicit")
+	}
+
 	allowedMechanisms := make(map[string]struct{}, len(imap.AuthMechanisms))
 	for _, mechanism := range imap.AuthMechanisms {
 		allowedMechanisms[strings.ToUpper(strings.TrimSpace(mechanism))] = struct{}{}
@@ -1131,8 +1139,24 @@ func validateLMTPListener(path string, listener ListenerConfig, authorities map[
 		}
 	}
 
+	validatePlaintextLMTPListener(path, listener, *lmtp, problems)
 	validateLMTPClientMTLS(path+".client_auth.mtls", listener, lmtp.ClientAuth, problems)
 	validateLMTPCapabilities(path+".capabilities", listener, *lmtp, problems)
+}
+
+// validatePlaintextLMTPListener rejects credential-capable auth on no-TLS LMTP listeners.
+func validatePlaintextLMTPListener(path string, listener ListenerConfig, lmtp LMTPListenerConfig, problems *[]string) {
+	if !listenerTLSModeIsPlaintext(listener.TLS.Mode) {
+		return
+	}
+
+	if lmtp.ClientAuth.Required {
+		addProblem(problems, path+".client_auth.required must be false for plaintext listener")
+	}
+
+	if len(lmtp.ClientAuth.Mechanisms) > 0 {
+		addProblem(problems, path+".client_auth.mechanisms must be empty for plaintext listener")
+	}
 }
 
 // validateLMTPClientMTLS rejects mTLS peer-auth settings that cannot verify a submitter identity.
@@ -1164,8 +1188,14 @@ func validateLMTPCapabilities(path string, listener ListenerConfig, lmtp LMTPLis
 		switch {
 		case capability == "SMTPUTF8":
 			continue
+		case capability == lmtpCapability8BITMIME:
+			continue
+		case capability == lmtpCapabilityEnhancedStatus:
+			continue
 		case capability == "STARTTLS":
-			if listener.TLS.Mode != "starttls" {
+			if listenerTLSModeIsPlaintext(listener.TLS.Mode) {
+				addProblem(problems, path+" must not advertise STARTTLS for plaintext listener")
+			} else if listener.TLS.Mode != listenerTLSModeStartTLS {
 				addProblem(problems, path+" advertises STARTTLS for non-starttls listener TLS mode")
 			}
 		case capability == "CHUNKING":
@@ -1173,9 +1203,19 @@ func validateLMTPCapabilities(path string, listener ListenerConfig, lmtp LMTPLis
 				addProblem(problems, path+" advertises CHUNKING before BDAT support and backend capability mediation are implemented")
 			}
 		case strings.HasPrefix(capability, "AUTH "):
+			if listenerTLSModeIsPlaintext(listener.TLS.Mode) {
+				addProblem(problems, path+" must not advertise AUTH for plaintext listener")
+
+				continue
+			}
+
 			validateLMTPAuthCapability(path, capability, lmtp.ClientAuth.Mechanisms, problems)
 		case capability == "AUTH":
-			addProblem(problems, path+" AUTH capability requires at least one mechanism")
+			if listenerTLSModeIsPlaintext(listener.TLS.Mode) {
+				addProblem(problems, path+" must not advertise AUTH for plaintext listener")
+			} else {
+				addProblem(problems, path+" AUTH capability requires at least one mechanism")
+			}
 		default:
 			addProblem(problems, path+" contains unsupported capability "+capability)
 		}
@@ -1291,8 +1331,8 @@ func validateSieveCapabilities(path string, capabilities SieveCapabilitiesConfig
 
 // validListenerTLSMode reports whether the shared listener lifecycle can enforce this TLS mode.
 func validListenerTLSMode(mode string) bool {
-	switch strings.ToLower(strings.TrimSpace(mode)) {
-	case "starttls", "implicit":
+	switch normalizeListenerTLSMode(mode) {
+	case listenerTLSModeStartTLS, listenerTLSModeImplicit, listenerTLSModePlaintext:
 		return true
 	default:
 		return false
@@ -1301,7 +1341,17 @@ func validListenerTLSMode(mode string) bool {
 
 // listenerTLSProtectsCredentialAuth reports whether credential-bearing SASL can be gated by TLS.
 func listenerTLSProtectsCredentialAuth(mode string) bool {
-	return validListenerTLSMode(mode)
+	switch normalizeListenerTLSMode(mode) {
+	case listenerTLSModeStartTLS, listenerTLSModeImplicit:
+		return true
+	default:
+		return false
+	}
+}
+
+// listenerTLSModeIsPlaintext reports whether the listener has no TLS upgrade surface.
+func listenerTLSModeIsPlaintext(mode string) bool {
+	return normalizeListenerTLSMode(mode) == listenerTLSModePlaintext
 }
 
 // validSieveAuthMechanism reports whether ManageSieve frontend auth can accept this mechanism shape.

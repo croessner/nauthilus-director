@@ -8,6 +8,13 @@ used pinned `dovecot/dovecot:2.4.3-dev`, pinned
 `chrroessner/postfix:3.11.1` and a pinned `debian:trixie-slim` tool container
 for `swaks` submission plus `curl --url imap...` delivery proof.
 
+The 2026-06-10 plaintext and capability follow-up extends this completed M5
+surface with auth-free plaintext LMTP listener proof, plaintext
+`auth.mode: none` backend proof, `ENHANCEDSTATUSCODES` advertisement,
+backend-mediated `8BITMIME`, `BODY=8BITMIME` session gating and backend
+forwarding. Detailed evidence lives in
+`docs/specs/implementation/M5_LMTP_PLAINTEXT_AND_CAPABILITY_FOLLOWUP.md`.
+
 This document defines the LMTP milestone for `nauthilus-director`. M5 delivers a
 production-ready LMTP delivery-path protocol entrypoint within the explicit
 scope below: LMTP and LMTPS listeners, peer authentication, recipient identity
@@ -1494,6 +1501,15 @@ different-backend recipient temporary failure before message body, concurrent
 LMTP delivery and IMAP placement on the same backend node, `swaks` injection
 into Postfix from a tool container and `curl --url imap...` verification of a
 unique delivered message marker in the real Dovecot mailbox.
+
+The 2026-06-10 follow-up evidence adds public-boundary coverage for an
+auth-free plaintext LMTP listener, local plaintext `AUTH` rejection without a
+Nauthilus credential or bearer call, plaintext LMTP backend delivery with
+`auth.mode: none`, configured `ENHANCEDSTATUSCODES`, backend-mediated
+`8BITMIME`, `BODY=8BITMIME` parser/session gating, backend `MAIL FROM`
+forwarding and continued `CHUNKING`/`BDAT` behavior. The follow-up closeout
+also refreshed generated config references, target config comments and the
+LMTP manpage text.
 
 ## Required M5 Review Pass
 

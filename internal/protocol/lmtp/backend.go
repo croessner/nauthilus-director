@@ -38,6 +38,7 @@ const (
 	backendResponseLineLimit = 64
 	backendTLSDisabled       = "disabled"
 	backendTLSImplicit       = "implicit"
+	backendTLSNone           = "none"
 	backendTLSPlaintext      = "plaintext"
 	backendTLSStartTLS       = "starttls"
 	backendTLSMinDefault     = "TLS1.2"
@@ -241,7 +242,7 @@ func newBackendConnection(conn net.Conn) *BackendConnection {
 // prepare performs greeting, configured TLS, and post-TLS LHLO discovery.
 func (c *BackendConnection) prepare(ctx context.Context, target backend.Backend) error {
 	switch strings.ToLower(strings.TrimSpace(target.TLS.Mode)) {
-	case backendTLSDisabled, backendTLSPlaintext:
+	case backendTLSDisabled, backendTLSNone, backendTLSPlaintext:
 		if err := c.readGreeting(); err != nil {
 			return err
 		}

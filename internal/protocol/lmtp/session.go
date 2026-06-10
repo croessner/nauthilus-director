@@ -36,10 +36,12 @@ import (
 )
 
 const (
-	capabilityAUTH     = "AUTH"
-	capabilityCHUNKING = "CHUNKING"
-	capabilitySMTPUTF8 = "SMTPUTF8"
-	capabilitySTARTTLS = "STARTTLS"
+	capabilityAUTH                = "AUTH"
+	capability8BITMIME            = "8BITMIME"
+	capabilityCHUNKING            = "CHUNKING"
+	capabilityEnhancedStatusCodes = "ENHANCEDSTATUSCODES"
+	capabilitySMTPUTF8            = "SMTPUTF8"
+	capabilitySTARTTLS            = "STARTTLS"
 
 	identitySourceDNSName           = "dns_san"
 	identitySourceSubjectCommonName = "subject_common_name"
@@ -85,7 +87,7 @@ type Session struct {
 	maxBearerTokenBytes        int
 	requirePeerAuth            bool
 	requireTLSClientCert       bool
-	backendChunkingAllowed     bool
+	backendSafeCapabilities    []string
 	recipientPlacementRequired bool
 	routingResolver            routing.RoutingResolver
 	sessionStore               state.SessionStore
@@ -103,6 +105,7 @@ type Session struct {
 	peerIdentity          string
 	effectiveCapabilities []string
 	chunkingAdvertised    bool
+	eightBitAdvertised    bool
 	transaction           transactionState
 }
 
@@ -110,6 +113,7 @@ type transactionState struct {
 	mailSeen               bool
 	mailFrom               string
 	smtpUTF8               bool
+	body8BitMIME           bool
 	recipientCount         int
 	recipients             []RecipientPlacement
 	body                   MessageBody
@@ -172,7 +176,7 @@ func NewSession(config SessionConfig, conn net.Conn) (*Session, error) {
 		maxBearerTokenBytes:        config.MaxBearerTokenBytes,
 		requirePeerAuth:            config.RequirePeerAuth,
 		requireTLSClientCert:       config.RequireTLSClientCert,
-		backendChunkingAllowed:     config.BackendChunkingAllowed,
+		backendSafeCapabilities:    append([]string(nil), config.BackendCapabilities...),
 		recipientPlacementRequired: config.RecipientLookupRequired,
 		routingResolver:            config.RoutingResolver,
 		sessionStore:               config.SessionStore,
@@ -360,6 +364,14 @@ func (s *Session) effectiveCapability(configured string) string {
 	switch fields[0] {
 	case capabilitySMTPUTF8:
 		return capabilitySMTPUTF8
+	case capabilityEnhancedStatusCodes:
+		return capabilityEnhancedStatusCodes
+	case capability8BITMIME:
+		if s.backendCapabilitySafe(capability8BITMIME) {
+			return capability8BITMIME
+		}
+
+		return ""
 	case capabilitySTARTTLS:
 		if s.startTLSPermitted() {
 			return capabilitySTARTTLS
@@ -369,7 +381,7 @@ func (s *Session) effectiveCapability(configured string) string {
 	case capabilityAUTH:
 		return s.authCapability(strings.Join(fields, " "))
 	case capabilityCHUNKING:
-		if s.backendChunkingAllowed {
+		if s.backendCapabilitySafe(capabilityCHUNKING) {
 			return capabilityCHUNKING
 		}
 
@@ -377,6 +389,11 @@ func (s *Session) effectiveCapability(configured string) string {
 	default:
 		return ""
 	}
+}
+
+// backendCapabilitySafe reports whether fresh backend-pool proof allows a mediated capability.
+func (s *Session) backendCapabilitySafe(capability string) bool {
+	return containsCapability(s.backendSafeCapabilities, capability)
 }
 
 // refreshMTLSPeerAuth evaluates explicit verified client-certificate peer auth.
@@ -482,6 +499,7 @@ func (t *transactionState) reset() {
 	t.mailSeen = false
 	t.mailFrom = ""
 	t.smtpUTF8 = false
+	t.body8BitMIME = false
 	t.recipientCount = 0
 	t.recipients = nil
 	t.body = nil

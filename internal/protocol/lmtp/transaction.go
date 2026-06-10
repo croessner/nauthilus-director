@@ -108,7 +108,7 @@ func (s *Session) ensureBackendTransaction(ctx context.Context, target backend.B
 		target:     target,
 	}
 
-	if err := transaction.sendMAIL(s.transaction.mailFrom, s.transaction.smtpUTF8); err != nil {
+	if err := transaction.sendMAIL(s.transaction.mailFrom, s.transaction.smtpUTF8, s.transaction.body8BitMIME); err != nil {
 		_ = transaction.close("mail_error")
 
 		return err
@@ -174,11 +174,15 @@ func (t *backendTransaction) sameTarget(target backend.Backend) bool {
 		strings.TrimSpace(t.target.BackendNode) == strings.TrimSpace(target.BackendNode)
 }
 
-// sendMAIL forwards the frontend sender path to the selected backend.
-func (t *backendTransaction) sendMAIL(wirePath string, smtpUTF8 bool) error {
+// sendMAIL forwards accepted frontend sender parameters to the selected backend.
+func (t *backendTransaction) sendMAIL(wirePath string, smtpUTF8 bool, body8BitMIME bool) error {
 	command := "MAIL FROM:" + wirePath
 	if smtpUTF8 {
 		command += " " + capabilitySMTPUTF8
+	}
+
+	if body8BitMIME {
+		command += " BODY=" + capability8BITMIME
 	}
 
 	response, err := t.connection.commandResponse(command)

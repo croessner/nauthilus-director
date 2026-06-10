@@ -83,5 +83,6 @@ func (s *Session) resetAfterSTARTTLS() {
 	s.lhloSeen = false
 	s.effectiveCapabilities = nil
 	s.chunkingAdvertised = false
+	s.eightBitAdvertised = false
 	s.transaction.reset()
 }

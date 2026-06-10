@@ -27,6 +27,13 @@ const (
 	defaultRoutingTenantAttribute   = "tenant"
 	defaultRoutingShardTagAttribute = "mailShard"
 	lmtpCapabilityAuth              = "AUTH"
+	lmtpCapability8BITMIME          = "8BITMIME"
+	lmtpCapabilityEnhancedStatus    = "ENHANCEDSTATUSCODES"
+	listenerTLSModeDisabled         = "disabled"
+	listenerTLSModeImplicit         = "implicit"
+	listenerTLSModeNone             = "none"
+	listenerTLSModePlaintext        = "plaintext"
+	listenerTLSModeStartTLS         = "starttls"
 )
 
 // Normalize returns a config snapshot with derived runtime defaults applied.
@@ -103,7 +110,7 @@ func (d DirectorConfig) Normalize() DirectorConfig {
 		listeners := make(map[string]ListenerConfig, len(d.Listeners))
 		for name, listener := range d.Listeners {
 			listener.Protocol = strings.ToLower(strings.TrimSpace(listener.Protocol))
-			listener.TLS.Mode = strings.ToLower(strings.TrimSpace(listener.TLS.Mode))
+			listener.TLS.Mode = normalizeListenerTLSMode(listener.TLS.Mode)
 			listener.AuthorityContext = listener.AuthorityContext.Normalize()
 
 			if listener.LMTP != nil {
@@ -260,6 +267,17 @@ func normalizeLMTPCapability(capability string) string {
 	}
 
 	return strings.Join(fields, " ")
+}
+
+// normalizeListenerTLSMode maps non-TLS listener aliases to the single runtime mode.
+func normalizeListenerTLSMode(mode string) string {
+	normalized := strings.ToLower(strings.TrimSpace(mode))
+	switch normalized {
+	case listenerTLSModeDisabled, listenerTLSModeNone, listenerTLSModePlaintext:
+		return listenerTLSModePlaintext
+	default:
+		return normalized
+	}
 }
 
 // normalizeLowerList trims, lower-cases and de-duplicates configured names.

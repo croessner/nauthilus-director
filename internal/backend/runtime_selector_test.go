@@ -777,21 +777,32 @@ func TestPoolCapabilityPolicyFailsClosed(t *testing.T) {
 	cfg := config.DefaultConfig()
 	registry := mustStaticRegistry(t, cfg)
 
-	healthyChunking := capabilitySnapshot(now, time.Minute, "CHUNKING")
+	for _, capability := range []string{"CHUNKING", "8BITMIME"} {
+		t.Run(capability, func(t *testing.T) {
+			testPoolCapabilityPolicy(t, now, registry, capability)
+		})
+	}
+}
+
+// testPoolCapabilityPolicy verifies one backend-mediated capability across the whole pool.
+func testPoolCapabilityPolicy(t *testing.T, now time.Time, registry Registry, capability string) {
+	t.Helper()
+
+	healthyCapability := capabilitySnapshot(now, time.Minute, capability)
 	testCases := []struct {
 		name      string
 		snapshots fakeSnapshots
 		want      bool
 	}{
-		{name: "all backends support capability", snapshots: fakeSnapshots{testBackendIDLMTP: healthyChunking, testBackendIDBLMTP: healthyChunking}, want: true},
-		{name: "missing data", snapshots: fakeSnapshots{testBackendIDLMTP: healthyChunking}},
-		{name: "mixed capability", snapshots: fakeSnapshots{testBackendIDLMTP: healthyChunking, testBackendIDBLMTP: capabilitySnapshot(now, time.Minute, "PIPELINING")}},
-		{name: "stale data", snapshots: fakeSnapshots{testBackendIDLMTP: healthyChunking, testBackendIDBLMTP: capabilitySnapshot(now, -time.Second, "CHUNKING")}},
+		{name: "all backends support capability", snapshots: fakeSnapshots{testBackendIDLMTP: healthyCapability, testBackendIDBLMTP: healthyCapability}, want: true},
+		{name: "missing data", snapshots: fakeSnapshots{testBackendIDLMTP: healthyCapability}},
+		{name: "mixed capability", snapshots: fakeSnapshots{testBackendIDLMTP: healthyCapability, testBackendIDBLMTP: capabilitySnapshot(now, time.Minute, "PIPELINING")}},
+		{name: "stale data", snapshots: fakeSnapshots{testBackendIDLMTP: healthyCapability, testBackendIDBLMTP: capabilitySnapshot(now, -time.Second, capability)}},
 	}
 
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
-			allowed, err := PoolSupportsCapability(context.Background(), registry, testCase.snapshots, testPoolLMTP, "CHUNKING", now)
+			allowed, err := PoolSupportsCapability(context.Background(), registry, testCase.snapshots, testPoolLMTP, capability, now)
 			if err != nil {
 				t.Fatalf("PoolSupportsCapability returned error: %v", err)
 			}
