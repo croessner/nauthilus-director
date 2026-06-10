@@ -11,7 +11,7 @@
 set -euo pipefail
 
 certs_image="${CERTS_IMAGE:-alpine:3.23}"
-golang_image="${GO_IMAGE:-golang:1.26-alpine3.23}"
+golang_image="${GO_IMAGE:-golang:1.26.4-alpine3.23}"
 
 # hash_cmd chooses a local SHA-256 implementation for manifest digest snapshots.
 hash_cmd() {

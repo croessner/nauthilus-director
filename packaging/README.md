@@ -13,7 +13,7 @@ the production image or host-install layout.
 
 ## Release Target Conventions
 
-- Build and packaging references use Go 1.26.
+- Build and packaging references use Go 1.26.4.
 - Production binaries are `cmd/nauthilus-director` and
   `cmd/nauthilus-directorctl`.
 - `make build` and `make build-check` remain the binary build validation path.
@@ -29,7 +29,7 @@ the production image or host-install layout.
 
 | Artifact class | Owner path | Validation path | Guardrail status | Notes |
 | --- | --- | --- | --- | --- |
-| Production binaries | `cmd/nauthilus-director/`, `cmd/nauthilus-directorctl/`, `Makefile` | `make build-check`; `make build` for concrete binary output | In `make guardrails` through `build-check` | Binaries must build from the root production module with Go 1.26. |
+| Production binaries | `cmd/nauthilus-director/`, `cmd/nauthilus-directorctl/`, `Makefile` | `make build-check`; `make build` for concrete binary output | In `make guardrails` through `build-check` | Binaries must build from the root production module with Go 1.26.4. |
 | Host binary and manpage install | `Makefile`, `docs/man/` | `make install DESTDIR=<staging-dir>` when install layout changes | Outside normal guardrails | Install validation writes to a chosen staging directory. |
 | Production Docker image | `packaging/docker/Dockerfile`, `packaging/docker/README.md`, `.dockerignore`, `Makefile` | `make check-packaging`; optional `make docker-build`; optional `make docker-smoke` | Static checks only in guardrails | Docker daemon proof stays optional and separate. |
 | systemd service | `packaging/systemd/nauthilus-director.service`, `packaging/systemd/nauthilus-director.env.example`, `packaging/systemd/README.md` | `make check-packaging`; optional `make systemd-verify` | Static checks only in guardrails | Host systemd must not be required for normal guardrails. |

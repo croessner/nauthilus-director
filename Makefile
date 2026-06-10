@@ -7,7 +7,7 @@ COMMANDS := $(APP_NAME) $(APP_NAME)ctl
 DOCKER ?= docker
 SYSTEMD_ANALYZE ?= systemd-analyze
 IMAGE_TAG ?= $(APP_NAME):$(VERSION)
-GO_IMAGE ?= golang:1.26-alpine3.23
+GO_IMAGE ?= golang:1.26.4-alpine3.23
 CERTS_IMAGE ?= alpine:3.23
 RUNTIME_IMAGE ?= scratch
 REVISION ?= $(shell git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)
@@ -27,6 +27,8 @@ GOLANGCI_LINT ?= golangci-lint
 GOLANGCI_NEW_FROM_REV ?= HEAD
 GO ?= go
 GOVULNCHECK ?= govulncheck
+GOVULNCHECK_GOFLAGS ?= -mod=mod
+GOVULNCHECK_SCAN ?= package
 POC_DIR := poc
 E2E_SCRIPT ?= ./test/e2e/run.sh
 E2E_INTEROP_SCRIPT ?= ./test/e2e/interop/run.sh
@@ -295,7 +297,7 @@ govulncheck:
 		set -e; \
 		for dir in $(MODULE_DIRS); do \
 			echo "==> govulncheck $$dir"; \
-			(cd "$$dir" && $(GOVULNCHECK) ./...); \
+			(cd "$$dir" && CGO_ENABLED=0 GOFLAGS="$(GOVULNCHECK_GOFLAGS)" $(GOVULNCHECK) -scan=$(GOVULNCHECK_SCAN) ./...); \
 		done; \
 	fi
 
