@@ -741,6 +741,36 @@ func TestRuntimeSelectorStaleHealthFailsClosedAfterStartupGrace(t *testing.T) {
 	}
 }
 
+// TestRuntimeSelectorAdmitsLightHealthySnapshotAfterStartupGrace verifies Redis health admits placement.
+func TestRuntimeSelectorAdmitsLightHealthySnapshotAfterStartupGrace(t *testing.T) {
+	now := time.Date(2026, 5, 26, 12, 0, 0, 0, time.UTC)
+	selector := mustRuntimeSelector(t, lightHealthBackendConfig(testBackendID, testPoolIMAP), fakeSnapshots{
+		testBackendID: {
+			Health: HealthState{
+				Enabled:   true,
+				Status:    HealthStatusHealthy,
+				CheckedAt: now,
+				ExpiresAt: now.Add(time.Minute),
+			},
+		},
+	}, SelectionPolicy{
+		SoftAllowsActivePins:       true,
+		EffectiveBackend:           healthEffectivePolicy(true),
+		HealthEnforcementStartedAt: now.Add(-time.Minute),
+		HealthStartupGrace:         time.Second,
+	})
+	selector.WithClock(func() time.Time { return now })
+
+	result, err := selector.Select(context.Background(), defaultSelectionRequest(testAccountKey))
+	if err != nil {
+		t.Fatalf("Select returned error: %v", err)
+	}
+
+	if result.Backend.Identifier != testBackendID {
+		t.Fatalf("selected backend = %q, want %q", result.Backend.Identifier, testBackendID)
+	}
+}
+
 // TestPoolCapabilityPolicyFailsClosed verifies backend-mediated capability policy.
 func TestPoolCapabilityPolicyFailsClosed(t *testing.T) {
 	now := time.Date(2026, 5, 28, 12, 0, 0, 0, time.UTC)
@@ -805,6 +835,172 @@ func TestHealthRunnerSupportsStatefulProtocolHealth(t *testing.T) {
 		if !healthSupportedProtocol(protocol) {
 			t.Fatalf("protocol %q should support health checks", protocol)
 		}
+	}
+}
+
+// TestHealthRunnerPublishesHealthyLightCheck verifies light checks become shared health state.
+func TestHealthRunnerPublishesHealthyLightCheck(t *testing.T) {
+	cfg := lightHealthBackendConfig(testBackendID, testPoolIMAP)
+	registry := mustStaticRegistry(t, cfg)
+	checker := &recordingHealthChecker{
+		result: &HealthCheckResult{Healthy: true, Capabilities: NewCapabilitySet("IMAP4rev1")},
+	}
+	coordinator := &fakeHealthCoordinator{owned: true}
+
+	runner, err := NewHealthRunner(registry, coordinator, checker, HealthRunnerConfig{
+		InstanceID: "director-a",
+		Interval:   time.Second,
+		Timeout:    time.Second,
+		StateTTL:   time.Second,
+	})
+	if err != nil {
+		t.Fatalf("NewHealthRunner returned error: %v", err)
+	}
+
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce returned error: %v", err)
+	}
+
+	if coordinator.published != 1 || coordinator.acquisitions != 1 {
+		t.Fatalf("acquisitions/published = %d/%d, want 1/1", coordinator.acquisitions, coordinator.published)
+	}
+
+	if checker.deepChecks != 0 {
+		t.Fatalf("deep checks = %d, want 0", checker.deepChecks)
+	}
+
+	if coordinator.lastState.Status != HealthStatusHealthy {
+		t.Fatalf("published status = %q, want healthy", coordinator.lastState.Status)
+	}
+
+	if !coordinator.lastState.Capabilities.Has("IMAP4REV1") {
+		t.Fatalf("published capabilities = %v, want IMAP4REV1", coordinator.lastState.Capabilities.List())
+	}
+}
+
+// TestHealthRunnerPublishesUnhealthyLightCheck verifies bounded failures publish without capabilities.
+func TestHealthRunnerPublishesUnhealthyLightCheck(t *testing.T) {
+	cfg := lightHealthBackendConfig(testBackendID, testPoolIMAP)
+	registry := mustStaticRegistry(t, cfg)
+	checker := &recordingHealthChecker{
+		result: &HealthCheckResult{
+			ReasonClass:  testProxyHealthFailureReason,
+			Capabilities: NewCapabilitySet("IMAP4rev1"),
+		},
+	}
+	coordinator := &fakeHealthCoordinator{owned: true}
+
+	runner, err := NewHealthRunner(registry, coordinator, checker, HealthRunnerConfig{
+		InstanceID: "director-a",
+		Interval:   time.Second,
+		Timeout:    time.Second,
+		StateTTL:   time.Second,
+	})
+	if err != nil {
+		t.Fatalf("NewHealthRunner returned error: %v", err)
+	}
+
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce returned error: %v", err)
+	}
+
+	if coordinator.published != 1 {
+		t.Fatalf("published states = %d, want 1", coordinator.published)
+	}
+
+	if checker.deepChecks != 0 {
+		t.Fatalf("deep checks = %d, want 0", checker.deepChecks)
+	}
+
+	if coordinator.lastState.Status != HealthStatusUnhealthy {
+		t.Fatalf("published status = %q, want unhealthy", coordinator.lastState.Status)
+	}
+
+	if coordinator.lastState.ReasonClass != testProxyHealthFailureReason {
+		t.Fatalf("published reason = %q, want proxy_write_failed", coordinator.lastState.ReasonClass)
+	}
+
+	if len(coordinator.lastState.Capabilities.List()) != 0 {
+		t.Fatalf("unhealthy state published capabilities = %v, want none", coordinator.lastState.Capabilities.List())
+	}
+}
+
+// TestHealthRunnerKeepsNonOwnerLightCheckLocal verifies only the fenced owner publishes.
+func TestHealthRunnerKeepsNonOwnerLightCheckLocal(t *testing.T) {
+	cfg := lightHealthBackendConfig(testBackendID, testPoolIMAP)
+	registry := mustStaticRegistry(t, cfg)
+	checker := &recordingHealthChecker{}
+	coordinator := &fakeHealthCoordinator{owned: false}
+
+	runner, err := NewHealthRunner(registry, coordinator, checker, HealthRunnerConfig{
+		InstanceID: "director-a",
+		Interval:   time.Second,
+		Timeout:    time.Second,
+		StateTTL:   time.Second,
+	})
+	if err != nil {
+		t.Fatalf("NewHealthRunner returned error: %v", err)
+	}
+
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce returned error: %v", err)
+	}
+
+	if coordinator.published != 0 || coordinator.acquisitions != 1 {
+		t.Fatalf("acquisitions/published = %d/%d, want 1/0", coordinator.acquisitions, coordinator.published)
+	}
+
+	if checker.deepChecks != 0 {
+		t.Fatalf("deep checks = %d, want 0", checker.deepChecks)
+	}
+
+	local, ok := runner.LocalState(testBackendID)
+	if !ok || local.Status != HealthStatusHealthy {
+		t.Fatalf("local state = %#v ok=%v, want healthy", local, ok)
+	}
+}
+
+// TestHealthRunnerPublishesLightCheckForSupportedProtocols verifies protocol-neutral publication.
+func TestHealthRunnerPublishesLightCheckForSupportedProtocols(t *testing.T) {
+	testCases := []struct {
+		name      string
+		backendID string
+		poolID    string
+	}{
+		{name: "imap", backendID: testBackendID, poolID: testPoolIMAP},
+		{name: "lmtp", backendID: testBackendIDLMTP, poolID: testPoolLMTP},
+		{name: "sieve", backendID: testBackendIDSIEVE, poolID: testPoolSIEVE},
+		{name: "pop3", backendID: "mailstore-a-pop3", poolID: "pop3-default"},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			registry := mustStaticRegistry(t, lightHealthBackendConfig(testCase.backendID, testCase.poolID))
+			checker := &recordingHealthChecker{}
+			coordinator := &fakeHealthCoordinator{owned: true}
+
+			runner, err := NewHealthRunner(registry, coordinator, checker, HealthRunnerConfig{
+				InstanceID: "director-a",
+				Interval:   time.Second,
+				Timeout:    time.Second,
+				StateTTL:   time.Second,
+			})
+			if err != nil {
+				t.Fatalf("NewHealthRunner returned error: %v", err)
+			}
+
+			if err := runner.RunOnce(context.Background()); err != nil {
+				t.Fatalf("RunOnce returned error: %v", err)
+			}
+
+			if coordinator.published != 1 {
+				t.Fatalf("published states = %d, want 1", coordinator.published)
+			}
+
+			if checker.deepChecks != 0 {
+				t.Fatalf("deep checks = %d, want 0", checker.deepChecks)
+			}
+		})
 	}
 }
 
@@ -952,9 +1148,10 @@ func (c *recordingHealthChecker) CheckBackend(_ context.Context, _ Backend, requ
 }
 
 type fakeHealthCoordinator struct {
-	owned     bool
-	published int
-	lastState HealthState
+	owned        bool
+	acquisitions int
+	published    int
+	lastState    HealthState
 }
 
 // PublishInstanceHeartbeat records instance liveness for the fake coordinator.
@@ -964,6 +1161,8 @@ func (c *fakeHealthCoordinator) PublishInstanceHeartbeat(context.Context, string
 
 // AcquireHealthOwner returns the configured owner state for the fake coordinator.
 func (c *fakeHealthCoordinator) AcquireHealthOwner(_ context.Context, request HealthOwnershipRequest) (HealthOwnershipRecord, error) {
+	c.acquisitions++
+
 	return HealthOwnershipRecord{
 		InstanceID:        request.InstanceID,
 		OwnerInstanceID:   request.InstanceID,
@@ -1007,6 +1206,24 @@ func defaultSelectionRequest(account string) SelectionRequest {
 		Protocol:    protocolIMAP,
 		BackendPool: testPoolIMAP,
 	}
+}
+
+// lightHealthBackendConfig creates a one-backend fixture with non-deep health checks enabled.
+func lightHealthBackendConfig(backendID string, poolID string) config.Config {
+	cfg := config.DefaultConfig()
+	backend := cfg.Director.Backends[backendID]
+	backend.HealthCheck.Enabled = true
+	backend.HealthCheck.DeepCheck = false
+	cfg.Director.Backends = map[string]config.BackendConfig{
+		backendID: backend,
+	}
+	pool := cfg.Director.BackendPools[poolID]
+	pool.Backends = []string{backendID}
+	cfg.Director.BackendPools = map[string]config.BackendPoolConfig{
+		poolID: pool,
+	}
+
+	return cfg
 }
 
 // lmtpSelectionRequest returns a complete LMTP selection request fixture.

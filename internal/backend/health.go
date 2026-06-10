@@ -443,9 +443,9 @@ func (r *HealthRunner) checkBackend(ctx context.Context, candidate Backend) erro
 
 	if !candidate.Health.DeepCheck {
 		result := r.checker.CheckBackend(ctx, candidate, HealthCheckRequest{Timeout: r.config.Timeout, Observability: r.recorder})
-		r.storeLocal(candidate, result)
+		state := r.storeLocal(candidate, result)
 
-		return nil
+		return r.publishOwnedHealthState(ctx, candidate, state)
 	}
 
 	owner, err := r.coordinator.AcquireHealthOwner(ctx, HealthOwnershipRequest{
@@ -464,7 +464,30 @@ func (r *HealthRunner) checkBackend(ctx context.Context, candidate Backend) erro
 	result := r.checker.CheckBackend(ctx, candidate, HealthCheckRequest{Deep: true, Timeout: r.config.Timeout, Observability: r.recorder})
 	state := r.storeLocal(candidate, result)
 
-	_, err = r.coordinator.PublishHealthState(ctx, HealthPublishRequest{
+	return r.publishHealthState(ctx, candidate, owner, state)
+}
+
+// publishOwnedHealthState publishes a locally thresholded state only from the fenced owner.
+func (r *HealthRunner) publishOwnedHealthState(ctx context.Context, candidate Backend, state HealthState) error {
+	owner, err := r.coordinator.AcquireHealthOwner(ctx, HealthOwnershipRequest{
+		InstanceID:        r.config.InstanceID,
+		BackendIdentifier: candidate.Identifier,
+		LeaseTTL:          r.config.OwnerLeaseTTL,
+	})
+	if err != nil {
+		return err
+	}
+
+	if !owner.Owned {
+		return nil
+	}
+
+	return r.publishHealthState(ctx, candidate, owner, state)
+}
+
+// publishHealthState writes one health state through the coordinator fence.
+func (r *HealthRunner) publishHealthState(ctx context.Context, candidate Backend, owner HealthOwnershipRecord, state HealthState) error {
+	_, err := r.coordinator.PublishHealthState(ctx, HealthPublishRequest{
 		InstanceID:        r.config.InstanceID,
 		BackendIdentifier: candidate.Identifier,
 		FencingToken:      owner.FencingToken,

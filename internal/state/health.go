@@ -109,7 +109,7 @@ func (s *RedisSessionStore) RenewHealthOwner(ctx context.Context, request Health
 	return parseHealthOwnershipRecord(value)
 }
 
-// PublishHealthState writes a fenced deep-health result after a credentialed check.
+// PublishHealthState writes a fenced health result from the current backend owner.
 func (s *RedisSessionStore) PublishHealthState(ctx context.Context, request HealthPublishRequest) (backend.HealthState, error) {
 	if err := validateHealthPublishRequest(request); err != nil {
 		return backend.HealthState{}, err
