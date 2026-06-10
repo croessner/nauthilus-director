@@ -55,6 +55,7 @@ func DefaultConfig() Config {
 					Enabled: true,
 					Address: "127.0.0.1:9090",
 					Auth: ControlAuthConfig{
+						Basic: ControlBasicAuthConfig{},
 						Bearer: ControlBearerAuthConfig{
 							Enabled:   true,
 							TokenFile: Secret("/etc/nauthilus-director/control-token"),

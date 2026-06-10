@@ -824,6 +824,10 @@ runtime:
         control:
             address: 127.0.0.1:9090
             auth:
+                basic:
+                    enabled: false
+                    password_file: ""
+                    username: ""
                 bearer:
                     enabled: true
                     token_file: <redacted>

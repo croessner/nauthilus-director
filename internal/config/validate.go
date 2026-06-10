@@ -126,11 +126,20 @@ func validateRuntime(runtime RuntimeConfig, authorities map[string]AuthorityConf
 		addProblem(problems, "runtime.servers.control.address is required when control server is enabled")
 	}
 	if runtime.Servers.Control.Enabled && enabledCount(
+		runtime.Servers.Control.Auth.Basic.Enabled,
 		runtime.Servers.Control.Auth.Bearer.Enabled,
 		runtime.Servers.Control.Auth.OIDC.Enabled,
 		runtime.Servers.Control.Auth.MTLS.Enabled,
 	) == 0 {
 		addProblem(problems, "runtime.servers.control.auth must enable at least one authentication mode")
+	}
+	if runtime.Servers.Control.Auth.Basic.Enabled {
+		if strings.TrimSpace(runtime.Servers.Control.Auth.Basic.Username) == "" {
+			addProblem(problems, "runtime.servers.control.auth.basic.username is required when basic auth is enabled")
+		}
+		if runtime.Servers.Control.Auth.Basic.PasswordFile.IsZero() {
+			addProblem(problems, "runtime.servers.control.auth.basic.password_file is required when basic auth is enabled")
+		}
 	}
 	if runtime.Servers.Control.Auth.Bearer.Enabled && runtime.Servers.Control.Auth.Bearer.TokenFile.IsZero() {
 		addProblem(problems, "runtime.servers.control.auth.bearer.token_file is required when bearer auth is enabled")

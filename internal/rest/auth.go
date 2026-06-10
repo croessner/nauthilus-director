@@ -37,12 +37,14 @@ import (
 )
 
 const (
+	authMethodBasic               = "basic"
 	authMethodMTLS                = "mtls"
 	authMethodOIDC                = "oidc"
 	authMethodStaticBearer        = "static_bearer"
 	authSchemeBearer              = "bearer"
 	defaultActorStatic            = "static-bearer"
 	pathHealthz                   = "/healthz"
+	pathMetrics                   = "/metrics"
 	pathReadyz                    = "/readyz"
 	maxRouteLookupInspectionBytes = 1 << 20
 	maxStaticBearerTokenBytes     = 64 << 10
@@ -107,7 +109,10 @@ func NewControlAuthenticator(options ControlAuthOptions) ControlAuthenticator {
 
 // zeroControlAuth reports whether no authentication configuration was supplied.
 func zeroControlAuth(auth config.ControlAuthConfig) bool {
-	return !auth.Bearer.Enabled &&
+	return !auth.Basic.Enabled &&
+		strings.TrimSpace(auth.Basic.Username) == "" &&
+		auth.Basic.PasswordFile.IsZero() &&
+		!auth.Bearer.Enabled &&
 		auth.Bearer.TokenFile.IsZero() &&
 		!auth.OIDC.Enabled &&
 		strings.TrimSpace(auth.OIDC.Authority) == "" &&
@@ -195,6 +200,17 @@ func (a ControlAuthenticator) publicControlPath(r *http.Request) bool {
 
 // authenticate resolves one configured authentication mode for a protected request.
 func (a ControlAuthenticator) authenticate(r *http.Request) (ControlAuthState, error) {
+	if username, password, basicPresent := r.BasicAuth(); basicPresent {
+		if a.config.Auth.Basic.Enabled && a.basicAuthPath(r) {
+			state, ok := a.authenticateBasic(username, password)
+			if ok {
+				return state, nil
+			}
+		}
+
+		return ControlAuthState{}, errControlUnauthorized
+	}
+
 	token, bearerPresent, malformed := bearerToken(r.Header.Get("Authorization"))
 	if malformed {
 		return ControlAuthState{}, errControlUnauthorized
@@ -222,6 +238,29 @@ func (a ControlAuthenticator) authenticate(r *http.Request) (ControlAuthState, e
 	}
 
 	return ControlAuthState{}, errControlUnauthorized
+}
+
+// basicAuthPath limits Prometheus-friendly Basic auth to the scrape endpoint.
+func (a ControlAuthenticator) basicAuthPath(r *http.Request) bool {
+	return r.Method == http.MethodGet && r.URL.Path == pathMetrics
+}
+
+// authenticateBasic checks the configured username and password file in constant time.
+func (a ControlAuthenticator) authenticateBasic(username string, password string) (ControlAuthState, bool) {
+	expectedPassword, err := readStaticBasicPassword(a.config.Auth.Basic.PasswordFile)
+	if err != nil {
+		return ControlAuthState{}, false
+	}
+	if !constantTimeEqualString(username, strings.TrimSpace(a.config.Auth.Basic.Username)) {
+		return ControlAuthState{}, false
+	}
+	if !constantTimeEqualString(password, expectedPassword) {
+		return ControlAuthState{}, false
+	}
+
+	actor := runtime.Actor{ID: username, AuthMethod: authMethodBasic, Authenticated: true}
+
+	return ControlAuthState{Actor: actor, AuthMethod: authMethodBasic}, true
 }
 
 // authenticateStaticBearer checks the configured token file in constant time.
@@ -290,6 +329,9 @@ func (a ControlAuthenticator) writeAuthFailure(w http.ResponseWriter, err error)
 		return
 	}
 
+	if a.config.Auth.Basic.Enabled {
+		w.Header().Set("WWW-Authenticate", `Basic realm="nauthilus-director"`)
+	}
 	writeProblem(w, http.StatusUnauthorized, problemCodeUnauthorized, "authentication required", "")
 }
 
@@ -371,6 +413,41 @@ func readStaticBearerToken(tokenFile config.SecretString) (string, error) {
 	}
 
 	return token, nil
+}
+
+// readStaticBasicPassword loads one newline-terminated HTTP Basic password from a secret file.
+func readStaticBasicPassword(passwordFile config.SecretString) (string, error) {
+	if passwordFile.IsZero() {
+		return "", errControlUnauthorized
+	}
+
+	file, err := os.Open(passwordFile.Value())
+	if err != nil {
+		return "", errControlUnauthorized
+	}
+	defer func() {
+		_ = file.Close()
+	}()
+
+	body, err := io.ReadAll(io.LimitReader(file, maxStaticBearerTokenBytes+1))
+	if err != nil {
+		return "", errControlUnauthorized
+	}
+	if len(body) > maxStaticBearerTokenBytes {
+		return "", errControlUnauthorized
+	}
+
+	password := strings.TrimRight(string(body), "\r\n")
+	if password == "" {
+		return "", errControlUnauthorized
+	}
+
+	return password, nil
+}
+
+// constantTimeEqualString compares strings without leaking prefix matches.
+func constantTimeEqualString(got string, want string) bool {
+	return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
 }
 
 // hasRequiredScopes reports whether every required scope is present.

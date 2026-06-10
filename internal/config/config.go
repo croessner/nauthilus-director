@@ -150,9 +150,16 @@ type ControlServerConfig struct {
 }
 
 type ControlAuthConfig struct {
+	Basic  ControlBasicAuthConfig  `mapstructure:"basic" yaml:"basic" validate:"required"`
 	Bearer ControlBearerAuthConfig `mapstructure:"bearer" yaml:"bearer" validate:"required"`
 	OIDC   ControlOIDCAuthConfig   `mapstructure:"oidc" yaml:"oidc" validate:"required"`
 	MTLS   ControlMTLSAuthConfig   `mapstructure:"mtls" yaml:"mtls" validate:"required"`
+}
+
+type ControlBasicAuthConfig struct {
+	Enabled      bool         `mapstructure:"enabled" yaml:"enabled"`
+	Username     string       `mapstructure:"username" yaml:"username"`
+	PasswordFile SecretString `mapstructure:"password_file" yaml:"password_file" protected:"true"`
 }
 
 type ControlBearerAuthConfig struct {

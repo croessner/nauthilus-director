@@ -222,6 +222,64 @@ func TestOIDCControlAuthEnforcesScopes(t *testing.T) {
 	}
 }
 
+// TestBasicControlAuthAcceptsConfiguredCredentialsForMetrics verifies Prometheus-friendly Basic auth.
+func TestBasicControlAuthAcceptsConfiguredCredentialsForMetrics(t *testing.T) {
+	cfg := testMetricsConfig()
+
+	runtime, err := observability.NewRuntime(cfg, observability.WithLogWriter(io.Discard))
+	if err != nil {
+		t.Fatalf("NewRuntime returned error: %v", err)
+	}
+
+	server := rest.NewServer(rest.Options{
+		Version: testVersion,
+		Control: basicControlConfig(t, "metrics", "secret"),
+		HandlerOptions: adapters.HandlerOptions{
+			Metrics:       runtime.MetricsProvider(),
+			Observability: runtime.Recorder(),
+		},
+	})
+
+	missing := request(t, server, http.MethodGet, pathVersion, "")
+	if missing.Code != http.StatusUnauthorized {
+		t.Fatalf("missing auth status = %d, want 401", missing.Code)
+	}
+
+	if challenge := missing.Header().Get("WWW-Authenticate"); !strings.Contains(challenge, "Basic") {
+		t.Fatalf("WWW-Authenticate = %q, want Basic challenge", challenge)
+	}
+
+	bad := httptest.NewRequest(http.MethodGet, pathVersion, nil)
+	bad.SetBasicAuth("metrics", "wrong")
+
+	badResponse := httptest.NewRecorder()
+	server.ServeHTTP(badResponse, bad)
+
+	if badResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("bad password status = %d, want 401", badResponse.Code)
+	}
+
+	blockedControl := httptest.NewRequest(http.MethodGet, pathVersion, nil)
+	blockedControl.SetBasicAuth("metrics", "secret")
+
+	blockedResponse := httptest.NewRecorder()
+	server.ServeHTTP(blockedResponse, blockedControl)
+
+	if blockedResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("basic control status = %d, want 401", blockedResponse.Code)
+	}
+
+	good := httptest.NewRequest(http.MethodGet, pathMetrics, nil)
+	good.SetBasicAuth("metrics", "secret")
+
+	goodResponse := httptest.NewRecorder()
+	server.ServeHTTP(goodResponse, good)
+
+	if goodResponse.Code != http.StatusOK {
+		t.Fatalf("good auth status = %d, want 200 body=%s", goodResponse.Code, goodResponse.Body.String())
+	}
+}
+
 // TestMTLSControlAuthRequiresVerifiedCertificate verifies mTLS uses verified TLS state only.
 func TestMTLSControlAuthRequiresVerifiedCertificate(t *testing.T) {
 	server := rest.NewServer(rest.Options{Version: testVersion, Control: mtlsControlConfig()})
@@ -568,6 +626,29 @@ func oidcControlConfig() config.ControlServerConfig {
 	control.Auth.OIDC.Validation = "nauthilus"
 	control.Auth.OIDC.RequiredScopes = []string{"nauthilus-director.admin"}
 	control.Auth.OIDC.ProtectedScopes = []string{"nauthilus-director.protected"}
+	control.Auth.MTLS.Enabled = false
+
+	return control
+}
+
+// basicControlConfig returns control auth configured only for HTTP Basic credentials.
+func basicControlConfig(t *testing.T, username string, password string) config.ControlServerConfig {
+	t.Helper()
+
+	passwordPath := filepath.Join(t.TempDir(), "control-basic-password")
+	if err := os.WriteFile(passwordPath, []byte(password+"\n"), 0o600); err != nil {
+		t.Fatalf("write control basic password: %v", err)
+	}
+
+	control := config.DefaultConfig().Runtime.Servers.Control
+	control.Auth.Basic.Enabled = true
+	control.Auth.Basic.Username = username
+	control.Auth.Basic.PasswordFile = config.Secret(passwordPath)
+	control.Auth.Bearer.Enabled = false
+	control.Auth.Bearer.TokenFile = config.Secret("")
+	control.Auth.OIDC.Enabled = false
+	control.Auth.OIDC.RequiredScopes = nil
+	control.Auth.OIDC.ProtectedScopes = nil
 	control.Auth.MTLS.Enabled = false
 
 	return control
