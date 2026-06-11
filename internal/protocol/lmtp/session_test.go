@@ -2536,19 +2536,7 @@ func TestBackendDATAOversizeThroughBDATClosesBackend(t *testing.T) {
 		expectLMTPBackendLine(t, reader, "RCPT TO:<recipient@example.test>")
 		writeLMTPBackendLine(t, conn, "250 2.1.5 recipient ok")
 
-		if err := conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
-			t.Fatalf("set backend read deadline: %v", err)
-		}
-
-		line, err := reader.ReadString('\n')
-		if err == nil {
-			t.Fatalf("backend received unexpected command after DATA size failure: %q", strings.TrimRight(line, "\r\n"))
-		}
-
-		var netErr net.Error
-		if errors.As(err, &netErr) && netErr.Timeout() {
-			t.Fatal("backend stream was not closed after DATA size failure")
-		}
+		assertBackendClosedBeforeLine(t, conn, reader, "backend received unexpected command after DATA size failure", "backend stream was not closed after DATA size failure")
 	})
 	config := backendForwardingSessionConfig(identity, resolver, store, selector, dialer)
 	config.Capabilities = []string{capabilitySIZE}
@@ -2592,19 +2580,7 @@ func TestBackendDATAOversizeFallbackClosesBackend(t *testing.T) {
 		expectLMTPBackendLine(t, reader, "DATA")
 		writeLMTPBackendLine(t, conn, "354 2.0.0 send data")
 
-		if err := conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
-			t.Fatalf("set backend read deadline: %v", err)
-		}
-
-		line, err := reader.ReadString('\n')
-		if err == nil {
-			t.Fatalf("backend received unexpected DATA after size failure: %q", strings.TrimRight(line, "\r\n"))
-		}
-
-		var netErr net.Error
-		if errors.As(err, &netErr) && netErr.Timeout() {
-			t.Fatal("backend DATA stream was not closed after size failure")
-		}
+		assertBackendClosedBeforeLine(t, conn, reader, "backend received unexpected DATA after size failure", "backend DATA stream was not closed after size failure")
 	})
 	config := backendForwardingSessionConfig(identity, resolver, store, selector, dialer)
 	config.Capabilities = []string{capabilitySIZE}
@@ -2768,19 +2744,7 @@ func TestBackendDATAtoBDATNonFinalRejectionTempfailsAndClosesBackend(t *testing.
 		expectLMTPBackendBytes(t, reader, fullChunk)
 		writeLMTPBackendLine(t, conn, "451 4.3.0 chunk rejected")
 
-		if err := conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
-			return
-		}
-
-		line, err := reader.ReadString('\n')
-		if err == nil {
-			t.Fatalf("backend received unexpected command after rejected BDAT chunk: %q", strings.TrimRight(line, "\r\n"))
-		}
-
-		var netErr net.Error
-		if errors.As(err, &netErr) && netErr.Timeout() {
-			t.Fatal("backend stream was not closed after rejected BDAT chunk")
-		}
+		assertBackendClosedBeforeLine(t, conn, reader, "backend received unexpected command after rejected BDAT chunk", "backend stream was not closed after rejected BDAT chunk")
 	})
 	config := backendForwardingSessionConfig(identity, resolver, store, selector, dialer)
 
@@ -2948,19 +2912,7 @@ func TestFrontendDATAReadFailureAfterBackendBDATBeginsClosesBackend(t *testing.T
 		expectLMTPBackendBytes(t, reader, fullChunk)
 		writeLMTPBackendLine(t, conn, "250 2.0.0 chunk ok")
 
-		if err := conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
-			return
-		}
-
-		line, err := reader.ReadString('\n')
-		if err == nil {
-			t.Fatalf("backend received unexpected command after frontend DATA read failure: %q", strings.TrimRight(line, "\r\n"))
-		}
-
-		var netErr net.Error
-		if errors.As(err, &netErr) && netErr.Timeout() {
-			t.Fatal("backend stream was not closed after frontend DATA read failure")
-		}
+		assertBackendClosedBeforeLine(t, conn, reader, "backend received unexpected command after frontend DATA read failure", "backend stream was not closed after frontend DATA read failure")
 	})
 	config := backendForwardingSessionConfig(identity, resolver, store, selector, dialer)
 
@@ -3138,24 +3090,7 @@ func TestBackendBDATWithoutSelectedChunkingTempfailsAndClosesBackend(t *testing.
 		expectLMTPBackendLine(t, reader, "RCPT TO:<recipient@example.test>")
 		writeLMTPBackendLine(t, conn, "250 2.1.5 recipient ok")
 
-		if err := conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
-			t.Fatalf("set backend read deadline: %v", err)
-		}
-
-		line, err := reader.ReadString('\n')
-		if err == nil {
-			command := strings.TrimRight(line, "\r\n")
-			if strings.HasPrefix(strings.ToUpper(command), commandBDAT) {
-				t.Fatalf("backend received BDAT without selected CHUNKING support")
-			}
-
-			t.Fatalf("backend received unexpected command %q after unsupported BDAT", command)
-		}
-
-		var netErr net.Error
-		if errors.As(err, &netErr) && netErr.Timeout() {
-			t.Fatal("backend stream was not closed after unsupported BDAT")
-		}
+		assertBackendClosedBeforeLine(t, conn, reader, "backend received unexpected command after unsupported BDAT", "backend stream was not closed after unsupported BDAT")
 	})
 	config := backendForwardingSessionConfig(identity, resolver, store, selector, dialer)
 	config.Capabilities = []string{capabilityCHUNKING}
@@ -3194,19 +3129,7 @@ func TestBackendBDATOversizeDrainsAndStopsForwarding(t *testing.T) {
 		expectLMTPBackendLine(t, reader, "RCPT TO:<recipient@example.test>")
 		writeLMTPBackendLine(t, conn, "250 2.1.5 recipient ok")
 
-		if err := conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
-			t.Fatalf("set backend read deadline: %v", err)
-		}
-
-		line, err := reader.ReadString('\n')
-		if err == nil {
-			t.Fatalf("backend received unexpected command after BDAT size failure: %q", strings.TrimRight(line, "\r\n"))
-		}
-
-		var netErr net.Error
-		if errors.As(err, &netErr) && netErr.Timeout() {
-			t.Fatal("backend stream was not closed after BDAT size failure")
-		}
+		assertBackendClosedBeforeLine(t, conn, reader, "backend received unexpected command after BDAT size failure", "backend stream was not closed after BDAT size failure")
 	})
 	config := backendForwardingSessionConfig(identity, resolver, store, selector, dialer)
 	config.Capabilities = []string{capabilityCHUNKING, capabilitySIZE}
@@ -3300,19 +3223,7 @@ func TestPipelinedFailedBDATDrainsQueuedChunksAndStopsBackend(t *testing.T) {
 		expectLMTPBackendLine(t, reader, "RCPT TO:<recipient@example.test>")
 		writeLMTPBackendLine(t, conn, "250 2.1.5 recipient ok")
 
-		if err := conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
-			t.Fatalf("set backend read deadline: %v", err)
-		}
-
-		line, err := reader.ReadString('\n')
-		if err == nil {
-			t.Fatalf("backend received unexpected command after failed frontend BDAT: %q", strings.TrimRight(line, "\r\n"))
-		}
-
-		var netErr net.Error
-		if errors.As(err, &netErr) && netErr.Timeout() {
-			t.Fatal("backend stream was not closed after failed frontend BDAT")
-		}
+		assertBackendClosedBeforeLine(t, conn, reader, "backend received unexpected command after failed frontend BDAT", "backend stream was not closed after failed frontend BDAT")
 	})
 	config := backendForwardingSessionConfig(identity, resolver, store, selector, dialer)
 	config.Capabilities = []string{capabilityCHUNKING, capabilitySIZE, capabilityPIPELINING}
@@ -3923,19 +3834,39 @@ func greetChunkingSizedTransactionBackend(t *testing.T, conn net.Conn, maximum s
 func assertNoBackendMAILBeforeClose(t *testing.T, conn net.Conn, reader *bufio.Reader) {
 	t.Helper()
 
+	assertBackendClosedBeforeLine(t, conn, reader, "backend received unexpected command before SIZE failure", "backend stream was not closed after selected-backend SIZE failure")
+}
+
+// assertBackendClosedBeforeLine proves the backend stream closes before another command.
+func assertBackendClosedBeforeLine(t *testing.T, conn net.Conn, reader *bufio.Reader, unexpectedMessage, timeoutMessage string) {
+	t.Helper()
+
 	if err := conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		if isClosedConnectionError(err) {
+			return
+		}
+
 		t.Fatalf("set backend read deadline: %v", err)
 	}
 
 	line, err := reader.ReadString('\n')
 	if err == nil {
-		t.Fatalf("backend received unexpected command before SIZE failure: %q", strings.TrimRight(line, "\r\n"))
+		t.Fatalf("%s: %q", unexpectedMessage, strings.TrimRight(line, "\r\n"))
+	}
+
+	if isClosedConnectionError(err) {
+		return
 	}
 
 	var netErr net.Error
 	if errors.As(err, &netErr) && netErr.Timeout() {
-		t.Fatal("backend stream was not closed after selected-backend SIZE failure")
+		t.Fatal(timeoutMessage)
 	}
+}
+
+// isClosedConnectionError reports whether an operation observed an already closed pipe.
+func isClosedConnectionError(err error) bool {
+	return errors.Is(err, io.ErrClosedPipe) || errors.Is(err, net.ErrClosed)
 }
 
 // expectLMTPBackendBytes reads exact opaque backend payload bytes.
