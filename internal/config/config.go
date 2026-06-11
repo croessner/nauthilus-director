@@ -287,11 +287,11 @@ type RedisStandaloneConfig struct {
 }
 
 type RedisClusterConfig struct {
-	Addresses      []string `mapstructure:"addresses" yaml:"addresses"`
-	MaxRedirects   int      `mapstructure:"max_redirects" yaml:"max_redirects"`
-	ReadOnly       bool     `mapstructure:"read_only" yaml:"read_only"`
-	RouteByLatency bool     `mapstructure:"route_by_latency" yaml:"route_by_latency"`
-	RouteRandomly  bool     `mapstructure:"route_randomly" yaml:"route_randomly"`
+	Addresses            []string `mapstructure:"addresses" yaml:"addresses"`
+	MaxRedirects         int      `mapstructure:"max_redirects" yaml:"max_redirects"`
+	RouteReadsToReplicas bool     `mapstructure:"route_reads_to_replicas" yaml:"route_reads_to_replicas"`
+	RouteByLatency       bool     `mapstructure:"route_by_latency" yaml:"route_by_latency"`
+	RouteRandomly        bool     `mapstructure:"route_randomly" yaml:"route_randomly"`
 }
 
 type RedisSentinelConfig struct {

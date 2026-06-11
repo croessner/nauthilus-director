@@ -618,9 +618,9 @@ Generated from the typed config model, `DefaultConfig()` and `docs/config/metada
 | `storage.redis.auth.username` | string | `nauthilus-director` | stable | no | `NAUTHILUS_DIRECTOR_STORAGE_REDIS_AUTH_USERNAME` | Central Redis connectivity, security, namespace, retry, and health settings. |
 | `storage.redis.cluster.addresses` | array | `["127.0.0.1:6379"]` | stable | no | `NAUTHILUS_DIRECTOR_STORAGE_REDIS_CLUSTER_ADDRESSES` | Central Redis connectivity, security, namespace, retry, and health settings. |
 | `storage.redis.cluster.max_redirects` | integer | `8` | stable | no | `NAUTHILUS_DIRECTOR_STORAGE_REDIS_CLUSTER_MAX_REDIRECTS` | Central Redis connectivity, security, namespace, retry, and health settings. |
-| `storage.redis.cluster.read_only` | boolean | `false` | stable | no | `NAUTHILUS_DIRECTOR_STORAGE_REDIS_CLUSTER_READ_ONLY` | Central Redis connectivity, security, namespace, retry, and health settings. |
 | `storage.redis.cluster.route_by_latency` | boolean | `false` | stable | no | `NAUTHILUS_DIRECTOR_STORAGE_REDIS_CLUSTER_ROUTE_BY_LATENCY` | Central Redis connectivity, security, namespace, retry, and health settings. |
 | `storage.redis.cluster.route_randomly` | boolean | `false` | stable | no | `NAUTHILUS_DIRECTOR_STORAGE_REDIS_CLUSTER_ROUTE_RANDOMLY` | Central Redis connectivity, security, namespace, retry, and health settings. |
+| `storage.redis.cluster.route_reads_to_replicas` | boolean | `false` | stable | no | `NAUTHILUS_DIRECTOR_STORAGE_REDIS_CLUSTER_ROUTE_READS_TO_REPLICAS` | Central Redis connectivity, security, namespace, retry, and health settings. |
 | `storage.redis.database_number` | integer | `0` | stable | no | `NAUTHILUS_DIRECTOR_STORAGE_REDIS_DATABASE_NUMBER` | Central Redis connectivity, security, namespace, retry, and health settings. |
 | `storage.redis.dial_timeout` | string | `5s` | stable | no | `NAUTHILUS_DIRECTOR_STORAGE_REDIS_DIAL_TIMEOUT` | Central Redis connectivity, security, namespace, retry, and health settings. |
 | `storage.redis.enabled` | boolean | `true` | stable | no | `NAUTHILUS_DIRECTOR_STORAGE_REDIS_ENABLED` | Central Redis connectivity, security, namespace, retry, and health settings. |

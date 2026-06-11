@@ -2814,6 +2814,42 @@ func TestRedisValidationModes(t *testing.T) {
 	}
 }
 
+// TestRedisClusterRouteReadsToReplicasConfigPath verifies the explicit replica-read path decodes.
+func TestRedisClusterRouteReadsToReplicasConfigPath(t *testing.T) {
+	path := writeConfigFile(t, t.TempDir(), "cluster-replica-reads.yaml", `storage:
+  redis:
+    mode: cluster
+    cluster:
+      route_reads_to_replicas: true
+`)
+
+	snapshot, err := NewLoader().LoadFile(path)
+	if err != nil {
+		t.Fatalf("LoadFile rejected route_reads_to_replicas: %v", err)
+	}
+	if !snapshot.Config.Storage.Redis.Cluster.RouteReadsToReplicas {
+		t.Fatal("route_reads_to_replicas did not decode into Redis cluster config")
+	}
+}
+
+// TestRedisClusterReadOnlyConfigPathIsRejected verifies the old ambiguous path is a hard breaking change.
+func TestRedisClusterReadOnlyConfigPathIsRejected(t *testing.T) {
+	path := writeConfigFile(t, t.TempDir(), "cluster-read-only.yaml", `storage:
+  redis:
+    mode: cluster
+    cluster:
+      read_only: true
+`)
+
+	_, err := NewLoader().LoadFile(path)
+	if err == nil {
+		t.Fatal("LoadFile accepted obsolete storage.redis.cluster.read_only")
+	}
+	if !strings.Contains(err.Error(), "read_only") {
+		t.Fatalf("error = %q, want obsolete read_only path", err.Error())
+	}
+}
+
 // writeConfigFile creates a mode-restricted fixture file under a test temp directory.
 func writeConfigFile(t *testing.T, root string, name string, content string) string {
 	t.Helper()

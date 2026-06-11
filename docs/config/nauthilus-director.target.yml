@@ -141,7 +141,7 @@ storage:
       addresses:
         - "127.0.0.1:6379"
       max_redirects: 8
-      read_only: false
+      route_reads_to_replicas: false
       route_by_latency: false
       route_randomly: false
 

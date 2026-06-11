@@ -53,6 +53,30 @@ Restart is required for process-owned or security-sensitive configuration:
 If safe reload reports a restart-required reason, choose a restart window or
 roll back the config edit and reload again.
 
+## Breaking Config Changes
+
+The Redis Cluster replica-read switch is named for the routing behavior it
+enables. Replace the old ambiguous path:
+
+```yaml
+storage:
+  redis:
+    cluster:
+      read_only: true
+```
+
+with:
+
+```yaml
+storage:
+  redis:
+    cluster:
+      route_reads_to_replicas: true
+```
+
+The old `storage.redis.cluster.read_only` path is not accepted. Redis connection
+settings are restart-required, so apply this change during a Director restart.
+
 ## Graceful Shutdown
 
 `SIGTERM` and `SIGINT` are graceful shutdown signals. The default systemd unit
