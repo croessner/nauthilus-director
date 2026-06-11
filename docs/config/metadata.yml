@@ -37,7 +37,13 @@ paths:
     description: Public protocol listener, TLS, proxy protocol, authority, and backend-pool binding.
   director.listeners.*.lmtp.capabilities:
     stability: stable
-    description: Desired LMTP LHLO surface. STARTTLS and AUTH are mediated by listener TLS and auth policy; CHUNKING and 8BITMIME are advertised only when configured, implemented, and backed by fresh backend-pool capability proof.
+    description: Positive LMTP frontend capability allowlist. STARTTLS and AUTH are mediated by listener TLS and auth policy; CHUNKING, 8BITMIME and SIZE are advertised only when configured, implemented, allowed by capability_filter.deny, and backed by fresh backend-pool capability proof. PIPELINING is frontend-only and never enables backend command batching.
+  director.listeners.*.lmtp.capability_filter.deny:
+    stability: stable
+    description: Listener-scoped hard deny for whole LMTP capability names. Denied capabilities are not advertised and are not consumed from backend-pool or selected-backend capability proof for this listener.
+  director.listeners.*.lmtp.size.max_message_bytes:
+    stability: stable
+    description: Listener-owned fixed frontend LMTP message-size policy. A positive value is required before SIZE can be configured and advertised; DATA and BDAT enforce the effective maximum, and accepted MAIL FROM SIZE declarations are forwarded only to selected backends that advertised SIZE.
   director.listeners.*.authority_context.http_headers:
     stability: stable
     description: Static non-secret HTTP authority context facts consumed by Nauthilus only through explicit auth.policy.request_headers allowlists.

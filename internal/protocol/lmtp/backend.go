@@ -89,6 +89,7 @@ type BackendConnection struct {
 	reader                      *bufio.Reader
 	writer                      *bufio.Writer
 	capabilities                backend.CapabilitySet
+	capabilityFacts             backend.CapabilityFacts
 	tlsActive                   bool
 	tlsVerified                 bool
 	clientCertificateConfigured bool
@@ -133,7 +134,7 @@ func (c *HealthChecker) CheckBackend(ctx context.Context, target backend.Backend
 	if !request.Deep {
 		_ = connection.quit()
 
-		return backend.HealthCheckResult{Healthy: true, Capabilities: connection.CapabilitySet()}
+		return backend.HealthCheckResult{Healthy: true, Capabilities: connection.CapabilitySet(), CapabilityFacts: connection.CapabilityFacts()}
 	}
 
 	if err := AuthenticateBackend(connection, target); err != nil {
@@ -158,7 +159,7 @@ func (c *HealthChecker) CheckBackend(ctx context.Context, target backend.Backend
 		return backend.HealthCheckResult{ReasonClass: backendHealthReason(err)}
 	}
 
-	return backend.HealthCheckResult{Healthy: true, Capabilities: connection.CapabilitySet()}
+	return backend.HealthCheckResult{Healthy: true, Capabilities: connection.CapabilitySet(), CapabilityFacts: connection.CapabilityFacts()}
 }
 
 // Conn returns the backend stream for the later transaction-forwarding boundary.
@@ -189,6 +190,20 @@ func (c *BackendConnection) CapabilitySet() backend.CapabilitySet {
 	return backend.NewCapabilitySet(c.capabilities.List()...)
 }
 
+// CapabilityFacts returns detached structured backend LHLO capability facts.
+func (c *BackendConnection) CapabilityFacts() backend.CapabilityFacts {
+	if c == nil {
+		return backend.CapabilityFacts{}
+	}
+
+	facts, err := c.capabilityFacts.Normalize()
+	if err != nil {
+		return backend.CapabilityFacts{}
+	}
+
+	return facts
+}
+
 // Capabilities returns a detached backend LHLO capability list.
 func (c *BackendConnection) Capabilities() []string {
 	if c == nil {
@@ -201,6 +216,24 @@ func (c *BackendConnection) Capabilities() []string {
 // supportsChunking reports selected-backend CHUNKING support from LHLO state.
 func (c *BackendConnection) supportsChunking() bool {
 	return c != nil && c.capabilities.Has(capabilityCHUNKING)
+}
+
+// supportsSizeDeclaration reports whether selected-backend SIZE proof accepts a declaration.
+func (c *BackendConnection) supportsSizeDeclaration(declaredSizeBytes int64) bool {
+	if c == nil || declaredSizeBytes < 0 {
+		return false
+	}
+
+	size := c.CapabilityFacts().Size()
+	if !size.Supported {
+		return false
+	}
+
+	if maximum, ok := size.Maximum(); ok {
+		return uint64(declaredSizeBytes) <= maximum
+	}
+
+	return true
 }
 
 // Connect dials, negotiates configured TLS, and collects backend LHLO capabilities.
@@ -307,7 +340,7 @@ func (c *BackendConnection) queryCapabilities() error {
 		return fmt.Errorf("%w: backend rejected lhlo", ErrBackendProtocol)
 	}
 
-	c.capabilities = lmtpCapabilitiesFromLHLO(response)
+	c.capabilities, c.capabilityFacts = lmtpBackendCapabilityFactsFromLHLO(response)
 
 	return nil
 }

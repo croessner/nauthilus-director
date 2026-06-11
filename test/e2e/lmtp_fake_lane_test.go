@@ -574,6 +574,136 @@ func TestServerBinaryPublicLMTP8BITMIMEFlow(t *testing.T) {
 	assertLMTPProcessOutputSafe(t, process.output.String())
 }
 
+// TestServerBinaryPublicLMTPSIZEForwardingTranscript proves accepted SIZE reaches only capable backends.
+func TestServerBinaryPublicLMTPSIZEForwardingTranscript(t *testing.T) {
+	fixture := startLMTPBackendChunkingFixture(t, lmtpBackendChunkingFixtureOptions{
+		BackendCapabilities:     []string{"8BITMIME", "SIZE 100"},
+		HealthCapabilities:      []string{"8BITMIME", "SIZE 100"},
+		ExtraCapabilities:       []string{"8BITMIME", "SIZE"},
+		MaxMessageBytes:         50,
+		DisableFrontendChunking: true,
+	})
+
+	client, capabilities := authenticatedLMTPClientWithCapabilities(t, fixture.address, "size-forward.example")
+	defer client.Close()
+	assertLMTPHasCapability(t, capabilities, "8BITMIME")
+	assertLMTPHasCapability(t, capabilities, "SIZE 50")
+	client.WriteLine("MAIL FROM:<sender@example.test> SIZE=42 BODY=8BITMIME")
+	client.ExpectLine("250 2.0.0 Sender accepted\r\n")
+	client.WriteLine("RCPT TO:<" + e2eLMTPRecipientA + ">")
+	client.ExpectLine("250 2.0.0 Recipient accepted\r\n")
+	client.WriteLine("DATA")
+	client.ExpectLine("354 2.0.0 End data with <CR><LF>.<CR><LF>\r\n")
+	client.WriteRaw("size-forward-body\r\n.\r\n")
+	client.ExpectLine("250 2.1.5 Message accepted\r\n")
+
+	observation := fixture.fakeLMTPA.ExpectObservation(t)
+	assertBackendMAILCommand(t, observation, "MAIL FROM:<sender@example.test> BODY=8BITMIME SIZE=42")
+	assertLMTPBackendObservation(t, observation, []string{lmtpPath(e2eLMTPRecipientA)}, false)
+
+	omittedClient, omittedCapabilities := authenticatedLMTPClientWithCapabilities(t, fixture.address, "size-omitted.example")
+	defer omittedClient.Close()
+	assertLMTPHasCapability(t, omittedCapabilities, "SIZE 50")
+	deliverLMTPMessage(t, omittedClient, e2eLMTPRecipientASecond, "size-omitted-body")
+
+	omittedObservation := fixture.fakeLMTPA.ExpectObservation(t)
+	assertBackendMAILCommand(t, omittedObservation, "MAIL FROM:<sender@example.test>")
+	assertNoBackendMAILParameter(t, omittedObservation, "SIZE=")
+	assertLMTPProcessOutputSafe(t, fixture.process.output.String())
+}
+
+// TestServerBinaryPublicLMTPSIZESuppressedByMixedHealth proves pool proof is fail-closed.
+func TestServerBinaryPublicLMTPSIZESuppressedByMixedHealth(t *testing.T) {
+	fixture := startLMTPBackendChunkingFixture(t, lmtpBackendChunkingFixtureOptions{
+		BackendCapabilities: []string{"SIZE 100"},
+		HealthCapabilitiesByBackend: map[string][]string{
+			e2eLMTPBackendAID: {"SIZE 100"},
+			e2eLMTPBackendBID: {},
+		},
+		ExtraCapabilities:       []string{"SIZE"},
+		MaxMessageBytes:         50,
+		DisableFrontendChunking: true,
+	})
+
+	client, capabilities := authenticatedLMTPClientWithCapabilities(t, fixture.address, "size-suppressed.example")
+	defer client.Close()
+	assertLMTPNoCapability(t, capabilities, "SIZE")
+	client.WriteLine("MAIL FROM:<sender@example.test> SIZE=42")
+	client.ExpectLine("501 5.5.4 Invalid MAIL command\r\n")
+	fixture.fakeLMTPA.AssertNoObservation(t, 300*time.Millisecond)
+	assertLMTPProcessOutputSafe(t, fixture.process.output.String())
+}
+
+// TestServerBinaryPublicLMTPSIZEOversizeRejectsBeforeBackend proves declared oversize is local.
+func TestServerBinaryPublicLMTPSIZEOversizeRejectsBeforeBackend(t *testing.T) {
+	fixture := startLMTPBackendChunkingFixture(t, lmtpBackendChunkingFixtureOptions{
+		BackendCapabilities:     []string{"SIZE 100"},
+		HealthCapabilities:      []string{"SIZE 100"},
+		ExtraCapabilities:       []string{"SIZE"},
+		MaxMessageBytes:         5,
+		DisableFrontendChunking: true,
+	})
+
+	client, capabilities := authenticatedLMTPClientWithCapabilities(t, fixture.address, "size-oversize.example")
+	defer client.Close()
+	assertLMTPHasCapability(t, capabilities, "SIZE 5")
+	client.WriteLine("MAIL FROM:<sender@example.test> SIZE=6")
+	client.ExpectLine("552 5.3.4 Message size exceeds fixed maximum message size\r\n")
+	fixture.fakeLMTPA.AssertNoObservation(t, 300*time.Millisecond)
+	assertLMTPProcessOutputSafe(t, fixture.process.output.String())
+}
+
+// TestServerBinaryPublicLMTPSIZESelectedBackendRaceFailsClosed proves selected proof is enforced.
+func TestServerBinaryPublicLMTPSIZESelectedBackendRaceFailsClosed(t *testing.T) {
+	fixture := startLMTPBackendChunkingFixture(t, lmtpBackendChunkingFixtureOptions{
+		HealthCapabilities:      []string{"SIZE 100"},
+		ExtraCapabilities:       []string{"SIZE"},
+		MaxMessageBytes:         50,
+		DisableFrontendChunking: true,
+	})
+
+	client, capabilities := authenticatedLMTPClientWithCapabilities(t, fixture.address, "size-race.example")
+	defer client.Close()
+	assertLMTPHasCapability(t, capabilities, "SIZE 50")
+	client.WriteLine("MAIL FROM:<sender@example.test> SIZE=42")
+	client.ExpectLine("250 2.0.0 Sender accepted\r\n")
+	client.WriteLine("RCPT TO:<" + e2eLMTPRecipientA + ">")
+	client.ExpectLine("451 4.3.0 Message delivery temporarily failed\r\n")
+	fixture.fakeLMTPA.AssertNoObservation(t, 300*time.Millisecond)
+	assertLMTPProcessOutputSafe(t, fixture.process.output.String())
+}
+
+// TestServerBinaryPublicLMTPPipeliningDoesNotBatchBackend proves frontend grouping stays local.
+func TestServerBinaryPublicLMTPPipeliningDoesNotBatchBackend(t *testing.T) {
+	fixture := startLMTPBackendChunkingFixture(t, lmtpBackendChunkingFixtureOptions{
+		ExtraCapabilities:       []string{"PIPELINING"},
+		DisableFrontendChunking: true,
+		DetectCommandBatching:   true,
+	})
+
+	client, capabilities := authenticatedLMTPClientWithCapabilities(t, fixture.address, "pipelining.example")
+	defer client.Close()
+	assertLMTPHasCapability(t, capabilities, "PIPELINING")
+	client.WriteRaw(strings.Join([]string{
+		"MAIL FROM:<sender@example.test>",
+		"RCPT TO:<" + e2eLMTPRecipientA + ">",
+		"DATA",
+		"",
+	}, "\r\n"))
+	client.ExpectLine("250 2.0.0 Sender accepted\r\n")
+	client.ExpectLine("250 2.0.0 Recipient accepted\r\n")
+	client.ExpectLine("354 2.0.0 End data with <CR><LF>.<CR><LF>\r\n")
+	client.WriteRaw("pipelined-body\r\n.\r\n")
+	client.ExpectLine("250 2.1.5 Message accepted\r\n")
+
+	observation := fixture.fakeLMTPA.ExpectObservation(t)
+	if observation.CommandBatched {
+		t.Fatalf("backend observation = %#v, want sequential backend commands", observation)
+	}
+	assertBackendMAILCommand(t, observation, "MAIL FROM:<sender@example.test>")
+	assertLMTPProcessOutputSafe(t, fixture.process.output.String())
+}
+
 // TestServerBinaryPublicLMTPBackendProxyProtocolFlow proves LMTP delivery and health through outbound PROXY.
 func TestServerBinaryPublicLMTPBackendProxyProtocolFlow(t *testing.T) {
 	binary := e2eServerBinary(t)
@@ -850,6 +980,26 @@ func authenticatedLMTPClient(t *testing.T, address string) *lmtpClient {
 	return client
 }
 
+// authenticatedLMTPClientWithCapabilities authenticates and returns the post-TLS LHLO capabilities.
+func authenticatedLMTPClientWithCapabilities(t *testing.T, address string, lhloName string) (*lmtpClient, []string) {
+	t.Helper()
+
+	client := dialLMTP(t, address)
+	client.ExpectLine("220 2.0.0 nauthilus-director LMTP ready\r\n")
+	client.WriteLine("LHLO " + lhloName)
+	capabilities := client.ReadResponse()
+	assertLMTPHasCapability(t, capabilities, "STARTTLS")
+	client.WriteLine("STARTTLS")
+	client.ExpectLine("220 2.0.0 Ready to start TLS\r\n")
+	client.UpgradeTLS(&tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12})
+	client.WriteLine("LHLO " + lhloName)
+	capabilities = client.ReadResponse()
+	client.WriteLine("AUTH PLAIN " + plainLMTPPayload(e2eLMTPSubmitter, e2ePassword))
+	client.ExpectLine("235 2.7.0 Authentication successful\r\n")
+
+	return client, capabilities
+}
+
 // authenticatedLMTPBearerClient returns a STARTTLS and bearer-authenticated LMTP client.
 func authenticatedLMTPBearerClient(t *testing.T, address string, mechanism string, username string, token string) *lmtpClient {
 	t.Helper()
@@ -902,6 +1052,8 @@ type lmtpProcessConfigOptions struct {
 	LMTPBackendDeepHealth       map[string]bool
 	LMTPListenerTLSMode         string
 	LMTPExtraCapabilities       []string
+	LMTPCapabilityFilterDeny    []string
+	LMTPMaxMessageBytes         int64
 	LMTPDisableChunking         bool
 	LMTPPeerAuthMechanisms      []string
 	TLS                         lmtpPeerTLSBundle
@@ -937,6 +1089,7 @@ func writeLMTPProcessConfig(t *testing.T, options lmtpProcessConfigOptions) stri
 	lmtpPeerAuthMechanisms := configuredLMTPPeerAuthMechanisms(options)
 	lmtpCapabilities := lmtpListenerCapabilities(lmtpListenerTLSMode, lmtpPeerAuthMechanisms, options.LMTPExtraCapabilities, !options.LMTPDisableChunking)
 	lmtpsCapabilities := lmtpListenerCapabilities("implicit", lmtpPeerAuthMechanisms, options.LMTPExtraCapabilities, !options.LMTPDisableChunking)
+	lmtpCapabilityDeny := quotedYAMLStrings(options.LMTPCapabilityFilterDeny)
 	backendRetentionTTL := strings.TrimSpace(options.BackendRetentionTTL)
 	if backendRetentionTTL == "" {
 		backendRetentionTTL = "15m"
@@ -1050,6 +1203,10 @@ director:
             satisfies_required: false
             identity_source: subject_common_name
         capabilities: [%s]
+        capability_filter:
+          deny: [%s]
+        size:
+          max_message_bytes: %d
     lmtps:
       protocol: lmtp
       service_name: lmtps
@@ -1076,6 +1233,10 @@ director:
             satisfies_required: true
             identity_source: subject_common_name
         capabilities: [%s]
+        capability_filter:
+          deny: [%s]
+        size:
+          max_message_bytes: %d
   backend_pools:
     imap-default:
       protocol: imap
@@ -1211,12 +1372,16 @@ director:
 		lmtpPeerAuthRequired,
 		quotedYAMLStrings(lmtpPeerAuthMechanisms),
 		quotedYAMLStrings(lmtpCapabilities),
+		lmtpCapabilityDeny,
+		options.LMTPMaxMessageBytes,
 		options.LMTPSAddress,
 		options.TLS.ServerCertPath,
 		options.TLS.ServerKeyPath,
 		options.TLS.CAPath,
 		quotedYAMLStrings(lmtpPeerAuthMechanisms),
 		quotedYAMLStrings(lmtpsCapabilities),
+		lmtpCapabilityDeny,
+		options.LMTPMaxMessageBytes,
 		e2eShardTag,
 		options.IMAPBackends[e2eBackendAID],
 		imapBackendTLSMode,
@@ -1303,6 +1468,8 @@ func lmtpListenerCapabilities(tlsMode string, mechanisms []string, extra []strin
 func publishHealthyLMTPBackends(t *testing.T, fixture redisSessionFixture, backendIDs []string, capabilities ...string) {
 	t.Helper()
 
+	capabilitySet, capabilityFacts := lmtpHealthCapabilityFacts(capabilities)
+
 	for _, backendID := range backendIDs {
 		ctx := context.Background()
 		if err := fixture.store.PublishInstanceHeartbeat(ctx, "e2e-director", time.Minute); err != nil {
@@ -1321,10 +1488,11 @@ func publishHealthyLMTPBackends(t *testing.T, fixture redisSessionFixture, backe
 			BackendIdentifier: backendID,
 			FencingToken:      owner.FencingToken,
 			State: backend.HealthState{
-				Enabled:      true,
-				Status:       backend.HealthStatusHealthy,
-				ReasonClass:  "ok",
-				Capabilities: backend.NewCapabilitySet(capabilities...),
+				Enabled:         true,
+				Status:          backend.HealthStatusHealthy,
+				ReasonClass:     "ok",
+				Capabilities:    capabilitySet,
+				CapabilityFacts: capabilityFacts,
 			},
 			TTL: time.Minute,
 		})
@@ -1334,13 +1502,47 @@ func publishHealthyLMTPBackends(t *testing.T, fixture redisSessionFixture, backe
 	}
 }
 
+// lmtpHealthCapabilityFacts converts test LHLO strings into backend health proof.
+func lmtpHealthCapabilityFacts(capabilities []string) (backend.CapabilitySet, backend.CapabilityFacts) {
+	var (
+		capabilitySet   backend.CapabilitySet
+		capabilityFacts backend.CapabilityFacts
+	)
+
+	for _, capability := range capabilities {
+		fields := strings.Fields(strings.ToUpper(strings.TrimSpace(capability)))
+		if len(fields) == 0 {
+			continue
+		}
+
+		if fields[0] == "SIZE" {
+			size, ok := backend.ParseSizeCapabilityFact(fields[1:])
+			if ok {
+				capabilitySet.Add("SIZE")
+				capabilityFacts.SetSize(size)
+			}
+
+			continue
+		}
+
+		capabilitySet.Add(strings.Join(fields, " "))
+	}
+
+	return capabilitySet, capabilityFacts
+}
+
 type lmtpBackendChunkingFixtureOptions struct {
-	BackendCapabilities     []string
-	HealthCapabilities      []string
-	DisableFrontendChunking bool
-	FinalStatus             map[string]lmtpbackend.Status
-	FinalStatusLimit        int
-	NonFinalBDATStatuses    []lmtpbackend.Status
+	BackendCapabilities         []string
+	HealthCapabilities          []string
+	HealthCapabilitiesByBackend map[string][]string
+	ExtraCapabilities           []string
+	CapabilityFilterDeny        []string
+	MaxMessageBytes             int64
+	DisableFrontendChunking     bool
+	DetectCommandBatching       bool
+	FinalStatus                 map[string]lmtpbackend.Status
+	FinalStatusLimit            int
+	NonFinalBDATStatuses        []lmtpbackend.Status
 }
 
 type lmtpBackendChunkingFixture struct {
@@ -1358,30 +1560,42 @@ func startLMTPBackendChunkingFixture(t *testing.T, options lmtpBackendChunkingFi
 	authority := startLMTPAuthority(t, lmtpAuthorityIdentities())
 	tlsBundle := writeLMTPPeerTLSBundle(t)
 	fakeLMTPA := lmtpbackend.Start(t, lmtpbackend.Options{
-		Capabilities:       options.BackendCapabilities,
-		FinalStatus:        options.FinalStatus,
-		FinalStatusLimit:   options.FinalStatusLimit,
-		NonFinalBDATStatus: options.NonFinalBDATStatuses,
+		Capabilities:          options.BackendCapabilities,
+		FinalStatus:           options.FinalStatus,
+		FinalStatusLimit:      options.FinalStatusLimit,
+		NonFinalBDATStatus:    options.NonFinalBDATStatuses,
+		DetectCommandBatching: options.DetectCommandBatching,
 	})
-	fakeLMTPB := lmtpbackend.Start(t, lmtpbackend.Options{Capabilities: options.BackendCapabilities})
+	fakeLMTPB := lmtpbackend.Start(t, lmtpbackend.Options{
+		Capabilities:          options.BackendCapabilities,
+		DetectCommandBatching: options.DetectCommandBatching,
+	})
 	fakeIMAPA := startFakeIMAPBackend(t, fakeBackendOptions{})
 	fakeIMAPB := startFakeIMAPBackend(t, fakeBackendOptions{})
 	lmtpAddress := loopbackAddress(t)
 	lmtpsAddress := loopbackAddress(t)
 	imapAddress := loopbackAddress(t)
 	controlAddress := loopbackAddress(t)
-	publishHealthyLMTPBackends(t, redisFixture, []string{e2eLMTPBackendAID, e2eLMTPBackendBID}, options.HealthCapabilities...)
+	if len(options.HealthCapabilitiesByBackend) > 0 {
+		publishHealthyLMTPBackends(t, redisFixture, []string{e2eLMTPBackendAID}, options.HealthCapabilitiesByBackend[e2eLMTPBackendAID]...)
+		publishHealthyLMTPBackends(t, redisFixture, []string{e2eLMTPBackendBID}, options.HealthCapabilitiesByBackend[e2eLMTPBackendBID]...)
+	} else {
+		publishHealthyLMTPBackends(t, redisFixture, []string{e2eLMTPBackendAID, e2eLMTPBackendBID}, options.HealthCapabilities...)
+	}
 	configPath := writeLMTPProcessConfig(t, lmtpProcessConfigOptions{
-		RedisAddress:        redisFixture.addr,
-		AuthorityURL:        authority.URL(),
-		LMTPAddress:         lmtpAddress,
-		LMTPSAddress:        lmtpsAddress,
-		IMAPAddress:         imapAddress,
-		ControlAddress:      controlAddress,
-		LMTPDisableChunking: options.DisableFrontendChunking,
-		LMTPBackends:        map[string]string{e2eLMTPBackendAID: fakeLMTPA.Address(), e2eLMTPBackendBID: fakeLMTPB.Address()},
-		IMAPBackends:        map[string]string{e2eBackendAID: fakeIMAPA.Address(), e2eBackendBID: fakeIMAPB.Address()},
-		TLS:                 tlsBundle,
+		RedisAddress:             redisFixture.addr,
+		AuthorityURL:             authority.URL(),
+		LMTPAddress:              lmtpAddress,
+		LMTPSAddress:             lmtpsAddress,
+		IMAPAddress:              imapAddress,
+		ControlAddress:           controlAddress,
+		LMTPExtraCapabilities:    options.ExtraCapabilities,
+		LMTPCapabilityFilterDeny: options.CapabilityFilterDeny,
+		LMTPMaxMessageBytes:      options.MaxMessageBytes,
+		LMTPDisableChunking:      options.DisableFrontendChunking,
+		LMTPBackends:             map[string]string{e2eLMTPBackendAID: fakeLMTPA.Address(), e2eLMTPBackendBID: fakeLMTPB.Address()},
+		IMAPBackends:             map[string]string{e2eBackendAID: fakeIMAPA.Address(), e2eBackendBID: fakeIMAPB.Address()},
+		TLS:                      tlsBundle,
 	})
 	process := startDirectorProcess(t, binary, configPath)
 	waitForLMTPGreeting(t, lmtpAddress, process)
@@ -1795,6 +2009,26 @@ func assertLMTPBackendObservation(t *testing.T, observation lmtpbackend.Observat
 	}
 	if observation.UsedBDAT != usedBDAT {
 		t.Fatalf("backend BDAT = %t, want %t", observation.UsedBDAT, usedBDAT)
+	}
+}
+
+// assertBackendMAILCommand verifies the exact backend MAIL command transcript.
+func assertBackendMAILCommand(t *testing.T, observation lmtpbackend.Observation, want string) {
+	t.Helper()
+
+	if !slices.Contains(observation.Commands, want) {
+		t.Fatalf("backend commands = %v, want %q", observation.Commands, want)
+	}
+}
+
+// assertNoBackendMAILParameter verifies no backend MAIL command contains one parameter token.
+func assertNoBackendMAILParameter(t *testing.T, observation lmtpbackend.Observation, parameter string) {
+	t.Helper()
+
+	for _, command := range observation.Commands {
+		if strings.HasPrefix(command, "MAIL FROM:") && strings.Contains(command, parameter) {
+			t.Fatalf("backend MAIL command = %q, did not want parameter %q", command, parameter)
+		}
 	}
 }
 

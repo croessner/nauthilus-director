@@ -60,6 +60,8 @@ type SessionConfig struct {
 	DefaultShard            string
 	TLSMode                 string
 	Capabilities            []string
+	CapabilityFilterDeny    []string
+	MaxMessageBytes         int64
 	PreauthTimeout          time.Duration
 	AuthTimeout             time.Duration
 	BackendConnectTimeout   time.Duration
@@ -83,9 +85,15 @@ type SessionConfig struct {
 	BackendSelector         backend.Selector
 	PlacementService        placement.DeliveryPlacer
 	BackendConnector        BackendConnector
+	BackendSizeProof        BackendSizeProofReader
 	PlacementGate           runtimectl.PlacementGate
 	MessageSink             MessageSink
 	Observability           observability.Recorder
+}
+
+// BackendSizeProofReader reports fresh pool-wide SIZE capability proof.
+type BackendSizeProofReader interface {
+	PoolSupportsSize(ctx context.Context, backendPool string) (backend.PoolSizeProof, error)
 }
 
 // MTLSPeerAuthConfig describes when verified client certificates may satisfy peer auth.
@@ -108,8 +116,10 @@ type MessageBody interface {
 
 // TransactionSnapshot exposes bounded transaction facts to backend message handling.
 type TransactionSnapshot struct {
-	RecipientCount int
-	Recipients     []RecipientSnapshot
+	RecipientCount      int
+	DeclaredSizeBytes   int64
+	DeclaredSizePresent bool
+	Recipients          []RecipientSnapshot
 }
 
 // RecipientSnapshot exposes backend-safe recipient routing facts to the message sink.

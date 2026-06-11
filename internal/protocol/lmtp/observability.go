@@ -36,6 +36,7 @@ const (
 	lmtpObservationOperationBackendSelect    = "backend_select"
 	lmtpObservationOperationBDATChunk        = "bdat_chunk"
 	lmtpObservationOperationBDATComplete     = "bdat_complete"
+	lmtpObservationOperationCapabilityPolicy = "capability_policy"
 	lmtpObservationOperationDATA             = "data"
 	lmtpObservationOperationLHLO             = "lhlo"
 	lmtpObservationOperationMAIL             = "mail"
@@ -71,6 +72,7 @@ const (
 	lmtpReasonCanceled            = "canceled"
 	lmtpReasonCredentialInput     = "credential_input"
 	lmtpReasonDATA                = "data"
+	lmtpReasonDenied              = "denied"
 	lmtpReasonMalformed           = "malformed"
 	lmtpReasonOK                  = "ok"
 	lmtpReasonOperatorPin         = "operator_backend_pin"
@@ -79,8 +81,10 @@ const (
 	lmtpReasonRejected            = "rejected"
 	lmtpReasonRouting             = "routing"
 	lmtpReasonSameBackend         = "same_backend"
+	lmtpReasonSizeBodyTooLarge    = "size_body_too_large"
 	lmtpReasonState               = "state_failed"
 	lmtpReasonTemporaryFailure    = "temporary_failure"
+	lmtpReasonUnavailable         = "unavailable"
 	lmtpReasonUnsupported         = "unsupported"
 
 	lmtpStatusClass2xx     = "2xx"
@@ -92,6 +96,7 @@ const (
 const (
 	lmtpObsFieldBackendIdentifier = "backend_identifier"
 	lmtpObsFieldBackendBody       = "backend_body_transport"
+	lmtpObsFieldCapability        = "capability"
 	lmtpObsFieldBackendNode       = "backend_node"
 	lmtpObsFieldBackendPool       = "backend_pool"
 	lmtpObsFieldListener          = "listener"
@@ -126,6 +131,18 @@ func (s *Session) recordCommand(ctx context.Context, operation string, result st
 	}
 
 	s.recordObservation(ctx, observability.EventLMTPCommand, boundary, operation, result, reason, extraFields)
+}
+
+// recordCapabilityPolicy emits log/trace-only capability policy decisions.
+func (s *Session) recordCapabilityPolicy(ctx context.Context, capability string, result string, reason string) {
+	name := capabilityName(capability)
+	if name == "" {
+		name = lmtpReasonMalformed
+	}
+
+	s.recordCommand(ctx, lmtpObservationOperationCapabilityPolicy, result, reason, map[string]string{
+		lmtpObsFieldCapability: name,
+	})
 }
 
 // recordPeerAuth emits a bounded peer-auth command observation.
@@ -473,6 +490,8 @@ func lmtpReasonClass(err error) string {
 		return lmtpReasonCredentialInput
 	case errors.Is(err, ErrMalformedRecipient), errors.Is(err, ErrLineTooLarge), errors.Is(err, ErrPartialCommand):
 		return lmtpReasonParser
+	case errors.Is(err, errMessageSizeExceeded):
+		return lmtpReasonSizeBodyTooLarge
 	case errors.Is(err, ErrUnsupportedAuthMechanism):
 		return lmtpReasonUnsupported
 	case errors.Is(err, errDifferentBackendRecipient):
@@ -519,6 +538,8 @@ func resetObservationOutcome(reason string) (string, string) {
 		return lmtpObservationResultFailure, lmtpReasonDATA
 	case "bdat_stream", "bdat_rejected":
 		return lmtpObservationResultFailure, lmtpReasonBDAT
+	case "size_body_too_large":
+		return lmtpObservationResultRejected, lmtpReasonSizeBodyTooLarge
 	case "read_error", "command_error":
 		return lmtpObservationResultFailure, lmtpReasonParser
 	default:
@@ -562,6 +583,10 @@ func deliveryStatusObservation(status DeliveryStatus) (string, string) {
 	case lmtpStatusClass4xx:
 		return lmtpObservationResultTempfail, lmtpReasonTemporaryFailure
 	case lmtpStatusClass5xx:
+		if status.Status == responseStatusSizeExceeded && status.Enhanced == enhancedSizeExceeded && status.Text == sizeExceededText {
+			return lmtpObservationResultRejected, lmtpReasonSizeBodyTooLarge
+		}
+
 		return lmtpObservationResultRejected, lmtpReasonRejected
 	default:
 		return lmtpObservationResultFailure, lmtpReasonBackendStatus
@@ -596,6 +621,12 @@ func deliveryReasonClass(result MessageResult) string {
 	case lmtpObservationResultTempfail:
 		return lmtpReasonTemporaryFailure
 	case lmtpObservationResultRejected:
+		for _, status := range deliveryStatusesForObservation(result, 1) {
+			if status.Status == responseStatusSizeExceeded && status.Enhanced == enhancedSizeExceeded && status.Text == sizeExceededText {
+				return lmtpReasonSizeBodyTooLarge
+			}
+		}
+
 		return lmtpReasonRejected
 	default:
 		return lmtpReasonBackendStatus

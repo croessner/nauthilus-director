@@ -426,19 +426,41 @@ director:
           mtls:
             satisfies_required: false
             identity_source: subject_common_name
+        size:
+          # Listener-owned frontend SIZE policy. SIZE can be advertised only
+          # when this value is positive, SIZE is listed below, the deny filter
+          # permits it and every eligible backend has fresh SIZE proof. The
+          # advertised effective max is the lower of this value and the
+          # backend-pool proof. DATA and BDAT enforce the effective max.
+          max_message_bytes: 0
         capabilities:
           # Capabilities are the desired listener surface. Runtime advertisement
           # is mediated by implemented command support, TLS state, auth policy
-          # and backend-pool capabilities. CHUNKING controls frontend BDAT
-          # availability; selected backend CHUNKING is evaluated separately and
-          # may enable backend BDAT delivery for frontend DATA or BDAT.
-          # 8BITMIME requires BODY=8BITMIME parsing and backend-safe forwarding.
+          # and backend-pool capabilities. Omitted extensions are deny rules:
+          # their frontend commands or MAIL parameters fail closed.
+          #
+          # CHUNKING controls frontend BDAT availability; selected backend
+          # CHUNKING is evaluated separately and may enable backend BDAT
+          # delivery for frontend DATA or BDAT. 8BITMIME requires
+          # BODY=8BITMIME parsing and backend-safe forwarding. SIZE accepts
+          # MAIL FROM SIZE=<n> only after current-session advertisement and
+          # forwards the accepted declaration only to a selected backend that
+          # advertised SIZE. PIPELINING is a frontend ordered-reply contract and
+          # does not enable backend command batching.
           - SMTPUTF8
           - ENHANCEDSTATUSCODES
           - CHUNKING
           # - 8BITMIME
+          # - SIZE
+          # - PIPELINING
           - STARTTLS
           - AUTH PLAIN LOGIN XOAUTH2 OAUTHBEARER
+        capability_filter:
+          # Hard-denied capabilities are never advertised and are not consumed
+          # from backend capability proof for this listener. Deny whole
+          # capability names only. This overrides fresh backend proof and
+          # selected-backend LHLO discovery; disable BDAT through CHUNKING.
+          deny: []
 
     lmtps:
       protocol: lmtp
@@ -476,18 +498,40 @@ director:
           mtls:
             satisfies_required: false
             identity_source: subject_common_name
+        size:
+          # Listener-owned frontend SIZE policy. SIZE can be advertised only
+          # when this value is positive, SIZE is listed below, the deny filter
+          # permits it and every eligible backend has fresh SIZE proof. The
+          # advertised effective max is the lower of this value and the
+          # backend-pool proof. DATA and BDAT enforce the effective max.
+          max_message_bytes: 0
         capabilities:
           # Capabilities are the desired listener surface. Runtime advertisement
           # is mediated by implemented command support, TLS state, auth policy
-          # and backend-pool capabilities. CHUNKING controls frontend BDAT
-          # availability; selected backend CHUNKING is evaluated separately and
-          # may enable backend BDAT delivery for frontend DATA or BDAT.
-          # 8BITMIME requires BODY=8BITMIME parsing and backend-safe forwarding.
+          # and backend-pool capabilities. Omitted extensions are deny rules:
+          # their frontend commands or MAIL parameters fail closed.
+          #
+          # CHUNKING controls frontend BDAT availability; selected backend
+          # CHUNKING is evaluated separately and may enable backend BDAT
+          # delivery for frontend DATA or BDAT. 8BITMIME requires
+          # BODY=8BITMIME parsing and backend-safe forwarding. SIZE accepts
+          # MAIL FROM SIZE=<n> only after current-session advertisement and
+          # forwards the accepted declaration only to a selected backend that
+          # advertised SIZE. PIPELINING is a frontend ordered-reply contract and
+          # does not enable backend command batching.
           - SMTPUTF8
           - ENHANCEDSTATUSCODES
           - CHUNKING
           # - 8BITMIME
+          # - SIZE
+          # - PIPELINING
           - AUTH PLAIN LOGIN XOAUTH2 OAUTHBEARER
+        capability_filter:
+          # Hard-denied capabilities are never advertised and are not consumed
+          # from backend capability proof for this listener. Deny whole
+          # capability names only. This overrides fresh backend proof and
+          # selected-backend LHLO discovery; disable BDAT through CHUNKING.
+          deny: []
 
     sieve:
       protocol: sieve

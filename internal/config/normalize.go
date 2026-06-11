@@ -28,7 +28,12 @@ const (
 	defaultRoutingShardTagAttribute = "mailShard"
 	lmtpCapabilityAuth              = "AUTH"
 	lmtpCapability8BITMIME          = "8BITMIME"
+	lmtpCapabilityCHUNKING          = "CHUNKING"
 	lmtpCapabilityEnhancedStatus    = "ENHANCEDSTATUSCODES"
+	lmtpCapabilityPIPELINING        = "PIPELINING"
+	lmtpCapabilitySIZE              = "SIZE"
+	lmtpCapabilitySMTPUTF8          = "SMTPUTF8"
+	lmtpCapabilitySTARTTLS          = "STARTTLS"
 	listenerTLSModeDisabled         = "disabled"
 	listenerTLSModeImplicit         = "implicit"
 	listenerTLSModeNone             = "none"
@@ -116,6 +121,7 @@ func (d DirectorConfig) Normalize() DirectorConfig {
 			if listener.LMTP != nil {
 				lmtp := *listener.LMTP
 				lmtp.Capabilities = normalizeLMTPCapabilities(lmtp.Capabilities)
+				lmtp.CapabilityFilter = lmtp.CapabilityFilter.Normalize()
 				lmtp.ClientAuth.Authority = strings.TrimSpace(lmtp.ClientAuth.Authority)
 				lmtp.ClientAuth.Mechanisms = normalizeLowerList(lmtp.ClientAuth.Mechanisms)
 				lmtp.ClientAuth.MTLS.IdentitySource = strings.ToLower(strings.TrimSpace(lmtp.ClientAuth.MTLS.IdentitySource))
@@ -228,6 +234,13 @@ func (r RoutingAuthAttributesConfig) Normalize() RoutingAuthAttributesConfig {
 	return r
 }
 
+// Normalize returns an LMTP capability filter with deterministic deny entries.
+func (f LMTPCapabilityFilterConfig) Normalize() LMTPCapabilityFilterConfig {
+	f.Deny = normalizeLMTPCapabilityFilterDeny(f.Deny)
+
+	return f
+}
+
 // normalizeLMTPCapabilities converts configured LMTP capability strings into stable wire forms.
 func normalizeLMTPCapabilities(capabilities []string) []string {
 	normalized := make([]string, 0, len(capabilities))
@@ -237,6 +250,28 @@ func normalizeLMTPCapabilities(capabilities []string) []string {
 		canonical := normalizeLMTPCapability(capability)
 		if canonical == "" {
 			continue
+		}
+
+		if _, exists := seen[canonical]; exists {
+			continue
+		}
+
+		seen[canonical] = struct{}{}
+		normalized = append(normalized, canonical)
+	}
+
+	return normalized
+}
+
+// normalizeLMTPCapabilityFilterDeny converts deny-filter entries without hiding invalid values.
+func normalizeLMTPCapabilityFilterDeny(capabilities []string) []string {
+	normalized := make([]string, 0, len(capabilities))
+	seen := make(map[string]struct{}, len(capabilities))
+
+	for _, capability := range capabilities {
+		canonical := normalizeLMTPCapability(capability)
+		if strings.TrimSpace(capability) == "" {
+			canonical = ""
 		}
 
 		if _, exists := seen[canonical]; exists {

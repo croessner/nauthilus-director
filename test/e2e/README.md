@@ -26,7 +26,8 @@ The default lane is fake-service based and deterministic:
 - fake LMTP backend wire transcripts for DATA-to-DATA fallback,
   DATA-to-BDAT delivery, frontend/backend CHUNKING independence, BDAT gating,
   dot-unstuffing, CRLF preservation, empty and multi-chunk bodies, rejected
-  backend chunks and final recipient status ordering
+  backend chunks, SIZE forwarding and suppression, frontend-only PIPELINING
+  behavior and final recipient status ordering
 - CLI commands through `nauthilus-directorctl` when the control API exists
 - REST calls through the control listener when `runtime.servers.control` is
   runnable from the server binary

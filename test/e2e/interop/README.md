@@ -59,7 +59,9 @@ The current lane has five scenarios:
   the pool must prove the capability before the frontend advertises it. Backend
   BDAT transport is still selected per chosen backend capability; the
   deterministic fake-service lane owns transcript-level edge coverage such as
-  DATA-to-BDAT conversion, DATA fallback and backend BDAT rejection.
+  DATA-to-BDAT conversion, DATA fallback, backend BDAT rejection, LMTP SIZE
+  forwarding and suppression, denied capability behavior and frontend-only
+  PIPELINING without backend command batching.
 - one production `nauthilus-director` process proxying public ManageSieve
   STARTTLS traffic to real Dovecot ManageSieve backends. The scenario proves
   frontend auth through fake Nauthilus OIDC caller auth, Dovecot master-user backend auth,

@@ -30,6 +30,7 @@ var (
 	errBackendBDATBodySender    = errors.New("backend bdat payload sender is unavailable")
 	errBackendBDATChunkRejected = errors.New("backend bdat chunk rejected")
 	errBackendBDATInvalidChunk  = errors.New("backend bdat chunk size is invalid")
+	errMessageSizeExceeded      = errors.New("lmtp message size exceeds fixed maximum")
 )
 
 type dataLineWriter interface {
@@ -72,7 +73,13 @@ func (s *Session) handleBackendDATA(ctx context.Context) error {
 		return err
 	}
 
-	writeFailed, err := s.streamDATA(ctx, body)
+	writeFailed, err := s.streamDATA(ctx, s.messageBodyWithSizeCounter(body))
+	if errors.Is(err, errMessageSizeExceeded) {
+		s.recordDATAStream(ctx, lmtpObservationResultRejected, lmtpReasonSizeBodyTooLarge, statusClass(responseStatusSizeExceeded), time.Since(started), transport)
+
+		return s.finishSizeExceededDelivery(ctx)
+	}
+
 	if err != nil {
 		_ = body.Abort(ctx, "data_stream")
 		s.recordDATAStream(ctx, lmtpObservationResultFailure, lmtpReasonDATA, lmtpStatusClassUnknown, time.Since(started), transport)
@@ -137,6 +144,19 @@ func (s *Session) handleBackendBDAT(ctx context.Context, chunk bdatCommand) erro
 		s.recordBDATStream(ctx, operation, lmtpObservationResultFailure, lmtpReasonBackendConnect, lmtpStatusClassUnknown, time.Since(started))
 
 		return s.writeDeliveryStatus(unknownDeliveryStatus())
+	}
+
+	if err := s.countBDATChunk(chunk.size); err != nil {
+		if drainErr := s.discardBDATChunk(chunk.size); drainErr != nil {
+			s.recordBDATStream(ctx, operation, lmtpObservationResultFailure, lmtpReasonBDAT, lmtpStatusClassUnknown, time.Since(started))
+			s.resetTransaction(ctx, "bdat_stream")
+
+			return drainErr
+		}
+
+		s.recordBDATStream(ctx, operation, lmtpObservationResultRejected, lmtpReasonSizeBodyTooLarge, statusClass(responseStatusSizeExceeded), time.Since(started))
+
+		return s.failSizeExceededBDAT(ctx, chunk.last)
 	}
 
 	if !s.transaction.backend.supportsChunking() {
@@ -211,6 +231,30 @@ func (s *Session) finishUnknownDelivery(ctx context.Context) error {
 	s.recordDeliveryStatuses(ctx, result)
 	err := s.writeMessageResult(result)
 	s.resetTransaction(ctx, "unknown_delivery")
+
+	return err
+}
+
+// finishSizeExceededDelivery writes permanent size failures and clears transaction state.
+func (s *Session) finishSizeExceededDelivery(ctx context.Context) error {
+	result := MessageResult{Statuses: sizeExceededDeliveryStatuses(s.transaction.recipientCount)}
+	s.recordDeliveryStatuses(ctx, result)
+	err := s.writeMessageResult(result)
+	s.resetTransaction(ctx, "size_body_too_large")
+
+	return err
+}
+
+// failSizeExceededBDAT maps a failed frontend BDAT chunk to its required reply shape.
+func (s *Session) failSizeExceededBDAT(ctx context.Context, last bool) error {
+	if last {
+		return s.finishSizeExceededDelivery(ctx)
+	}
+
+	status := sizeExceededDeliveryStatus()
+	s.recordDeliveryStatuses(ctx, MessageResult{Statuses: []DeliveryStatus{status}})
+	err := s.writeDeliveryStatus(status)
+	s.resetTransaction(ctx, "size_body_too_large")
 
 	return err
 }
@@ -438,4 +482,120 @@ func unknownDeliveryStatuses(count int) []DeliveryStatus {
 	}
 
 	return statuses
+}
+
+// sizeExceededDeliveryStatus returns the permanent status for fixed maximum violations.
+func sizeExceededDeliveryStatus() DeliveryStatus {
+	return DeliveryStatus{
+		Status:   responseStatusSizeExceeded,
+		Enhanced: enhancedSizeExceeded,
+		Text:     sizeExceededText,
+	}
+}
+
+// sizeExceededDeliveryStatuses repeats the size status for every accepted recipient.
+func sizeExceededDeliveryStatuses(count int) []DeliveryStatus {
+	if count <= 0 {
+		return nil
+	}
+
+	statuses := make([]DeliveryStatus, 0, count)
+	for range count {
+		statuses = append(statuses, sizeExceededDeliveryStatus())
+	}
+
+	return statuses
+}
+
+type countingMessageBody struct {
+	body    MessageBody
+	counter *messageSizeCounter
+}
+
+// messageBodyWithSizeCounter wraps a body when this transaction has a fixed size limit.
+func (s *Session) messageBodyWithSizeCounter(body MessageBody) MessageBody {
+	if body == nil || s.transaction.sizeCounter == nil {
+		return body
+	}
+
+	return countingMessageBody{body: body, counter: s.transaction.sizeCounter}
+}
+
+// WriteDATALine counts DATA content bytes after transfer decoding.
+func (b countingMessageBody) WriteDATALine(line []byte) (int, error) {
+	if err := b.counter.CountDATA(line); err != nil {
+		return 0, err
+	}
+
+	return writeDATALine(b.body, line)
+}
+
+// Write counts raw payload bytes before forwarding them to the wrapped body.
+func (b countingMessageBody) Write(payload []byte) (int, error) {
+	if err := b.counter.CountPayload(len(payload)); err != nil {
+		return 0, err
+	}
+
+	return b.body.Write(payload)
+}
+
+// Finish delegates completion without changing final delivery status semantics.
+func (b countingMessageBody) Finish(ctx context.Context) (MessageResult, error) {
+	return b.body.Finish(ctx)
+}
+
+// Abort delegates cleanup to the wrapped body.
+func (b countingMessageBody) Abort(ctx context.Context, reasonClass string) error {
+	return b.body.Abort(ctx, reasonClass)
+}
+
+type messageSizeCounter struct {
+	maximum  int64
+	seen     int64
+	exceeded bool
+}
+
+// newMessageSizeCounter returns nil when the session has no effective fixed maximum.
+func newMessageSizeCounter(maximum int64) *messageSizeCounter {
+	if maximum <= 0 {
+		return nil
+	}
+
+	return &messageSizeCounter{maximum: maximum}
+}
+
+// CountDATA accounts for a DATA line after removing one dot-stuffed leading dot.
+func (c *messageSizeCounter) CountDATA(line []byte) error {
+	return c.CountPayload(len(unescapeDataLine(line)))
+}
+
+// CountBDAT accounts for one exact frontend BDAT payload size.
+func (c *messageSizeCounter) CountBDAT(size int64) error {
+	return c.add(size)
+}
+
+// CountPayload accounts for already-decoded message bytes.
+func (c *messageSizeCounter) CountPayload(size int) error {
+	if size < 0 {
+		return errMessageSizeExceeded
+	}
+
+	return c.add(int64(size))
+}
+
+// add updates the counter without overflowing and reports the first limit crossing.
+func (c *messageSizeCounter) add(size int64) error {
+	if c == nil || size == 0 {
+		return nil
+	}
+
+	if c.exceeded || size < 0 || size > c.maximum-c.seen {
+		c.exceeded = true
+
+		return errMessageSizeExceeded
+	}
+
+	c.seen += size
+
+	return nil
 }

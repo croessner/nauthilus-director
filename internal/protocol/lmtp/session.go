@@ -21,8 +21,10 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"io"
 	"net"
+	"strconv"
 	"strings"
 	"time"
 
@@ -40,6 +42,8 @@ const (
 	capability8BITMIME            = "8BITMIME"
 	capabilityCHUNKING            = "CHUNKING"
 	capabilityEnhancedStatusCodes = "ENHANCEDSTATUSCODES"
+	capabilityPIPELINING          = "PIPELINING"
+	capabilitySIZE                = "SIZE"
 	capabilitySMTPUTF8            = "SMTPUTF8"
 	capabilitySTARTTLS            = "STARTTLS"
 
@@ -74,6 +78,7 @@ type Session struct {
 	defaultShard           string
 	tlsMode                string
 	configuredCapabilities []string
+	capabilityPolicy       CapabilityPolicy
 	peerAuthMechanisms     []string
 	mtlsPeerAuth           MTLSPeerAuthConfig
 
@@ -84,6 +89,7 @@ type Session struct {
 	sessionIdleGrace           time.Duration
 	backendRetentionTTL        time.Duration
 	maxLineBytes               int
+	maxMessageBytes            int64
 	maxBearerTokenBytes        int
 	requirePeerAuth            bool
 	requireTLSClientCert       bool
@@ -92,6 +98,7 @@ type Session struct {
 	routingResolver            routing.RoutingResolver
 	sessionStore               state.SessionStore
 	backendSelector            backend.Selector
+	backendSizeProof           BackendSizeProofReader
 	placementService           placement.DeliveryPlacer
 	placementGate              runtimectl.PlacementGate
 	observability              observability.Recorder
@@ -106,6 +113,8 @@ type Session struct {
 	effectiveCapabilities []string
 	chunkingAdvertised    bool
 	eightBitAdvertised    bool
+	sizeAdvertised        bool
+	effectiveSizeBytes    int64
 	transaction           transactionState
 }
 
@@ -114,6 +123,9 @@ type transactionState struct {
 	mailFrom               string
 	smtpUTF8               bool
 	body8BitMIME           bool
+	declaredSizeBytes      int64
+	declaredSizePresent    bool
+	sizeCounter            *messageSizeCounter
 	recipientCount         int
 	recipients             []RecipientPlacement
 	body                   MessageBody
@@ -143,6 +155,8 @@ func NewSession(config SessionConfig, conn net.Conn) (*Session, error) {
 		messageSink = discardMessageSink{}
 	}
 
+	capabilityPolicy := NewCapabilityPolicy(config.Capabilities, config.CapabilityFilterDeny)
+
 	return &Session{
 		conn:                       conn,
 		reader:                     bufio.NewReaderSize(conn, maxLineBytes+1),
@@ -163,7 +177,8 @@ func NewSession(config SessionConfig, conn net.Conn) (*Session, error) {
 		defaultTenant:              defaultLookupTenant(config.DefaultTenant),
 		defaultShard:               defaultLookupShard(config.DefaultShard),
 		tlsMode:                    config.TLSMode,
-		configuredCapabilities:     append([]string(nil), config.Capabilities...),
+		configuredCapabilities:     capabilityPolicy.ConfiguredCapabilities(),
+		capabilityPolicy:           capabilityPolicy,
 		peerAuthMechanisms:         append([]string(nil), config.PeerAuthMechanisms...),
 		mtlsPeerAuth:               config.MTLSPeerAuth,
 		preauthTimeout:             config.PreauthTimeout,
@@ -173,14 +188,16 @@ func NewSession(config SessionConfig, conn net.Conn) (*Session, error) {
 		sessionIdleGrace:           defaultDeliveryGrace(config.SessionIdleGrace, config.SessionLeaseTTL),
 		backendRetentionTTL:        config.BackendRetentionTTL,
 		maxLineBytes:               maxLineBytes,
+		maxMessageBytes:            config.MaxMessageBytes,
 		maxBearerTokenBytes:        config.MaxBearerTokenBytes,
 		requirePeerAuth:            config.RequirePeerAuth,
 		requireTLSClientCert:       config.RequireTLSClientCert,
-		backendSafeCapabilities:    append([]string(nil), config.BackendCapabilities...),
+		backendSafeCapabilities:    capabilityPolicy.FilterBackendCapabilities(config.BackendCapabilities),
 		recipientPlacementRequired: config.RecipientLookupRequired,
 		routingResolver:            config.RoutingResolver,
 		sessionStore:               config.SessionStore,
 		backendSelector:            config.BackendSelector,
+		backendSizeProof:           config.BackendSizeProof,
 		placementService:           config.PlacementService,
 		placementGate:              config.PlacementGate,
 		observability:              observability.NormalizeRecorder(config.Observability),
@@ -323,6 +340,10 @@ func (s *Session) processLine(ctx context.Context, line []byte) (bool, error) {
 	}
 
 	outcome, err := s.handleCommand(ctx, command)
+	if errors.Is(err, errCommandRejected) {
+		err = nil
+	}
+
 	if !outcome.flushed {
 		if flushErr := s.writer.Flush(); flushErr != nil {
 			return false, flushErr
@@ -333,67 +354,122 @@ func (s *Session) processLine(ctx context.Context, line []byte) (bool, error) {
 }
 
 // effectiveCapabilitySet computes the capabilities that are both configured and currently safe.
-func (s *Session) effectiveCapabilitySet() []string {
+func (s *Session) effectiveCapabilitySet(ctx context.Context) []string {
 	capabilities := make([]string, 0, len(s.configuredCapabilities))
 	seen := make(map[string]struct{}, len(s.configuredCapabilities))
 
 	for _, configured := range s.configuredCapabilities {
-		capability := s.effectiveCapability(configured)
+		capability, reason := s.effectiveCapability(ctx, configured)
 		if capability == "" {
+			s.recordCapabilityPolicy(ctx, configured, lmtpObservationResultRejected, reason)
 			continue
 		}
 
-		if _, exists := seen[capability]; exists {
+		seenKey := capability
+		if capabilityName(capability) == capabilitySIZE {
+			seenKey = capabilitySIZE
+		}
+
+		if _, exists := seen[seenKey]; exists {
 			continue
 		}
 
-		seen[capability] = struct{}{}
+		seen[seenKey] = struct{}{}
 		capabilities = append(capabilities, capability)
+		s.recordCapabilityPolicy(ctx, capability, lmtpObservationResultOK, lmtpReasonOK)
 	}
 
 	return capabilities
 }
 
 // effectiveCapability returns one configured capability only when implemented and safe now.
-func (s *Session) effectiveCapability(configured string) string {
+func (s *Session) effectiveCapability(ctx context.Context, configured string) (string, string) {
 	fields := strings.Fields(strings.ToUpper(strings.TrimSpace(configured)))
 	if len(fields) == 0 {
-		return ""
+		return "", lmtpReasonMalformed
+	}
+
+	if s.capabilityPolicy.Denies(configured) {
+		return "", lmtpReasonDenied
 	}
 
 	switch fields[0] {
 	case capabilitySMTPUTF8:
-		return capabilitySMTPUTF8
+		return capabilitySMTPUTF8, lmtpReasonOK
 	case capabilityEnhancedStatusCodes:
-		return capabilityEnhancedStatusCodes
+		return capabilityEnhancedStatusCodes, lmtpReasonOK
 	case capability8BITMIME:
-		if s.backendCapabilitySafe(capability8BITMIME) {
-			return capability8BITMIME
-		}
-
-		return ""
+		return s.effectiveBackendCapability(capability8BITMIME)
 	case capabilitySTARTTLS:
-		if s.startTLSPermitted() {
-			return capabilitySTARTTLS
-		}
-
-		return ""
+		return s.effectiveSTARTTLSCapability()
 	case capabilityAUTH:
-		return s.authCapability(strings.Join(fields, " "))
-	case capabilityCHUNKING:
-		if s.backendCapabilitySafe(capabilityCHUNKING) {
-			return capabilityCHUNKING
+		capability := s.authCapability(strings.Join(fields, " "))
+		if capability == "" {
+			return "", lmtpReasonUnavailable
 		}
 
-		return ""
+		return capability, lmtpReasonOK
+	case capabilityCHUNKING:
+		return s.effectiveBackendCapability(capabilityCHUNKING)
+	case capabilityPIPELINING:
+		return capabilityPIPELINING, lmtpReasonOK
+	case capabilitySIZE:
+		return s.effectiveSizeCapability(ctx)
 	default:
-		return ""
+		return "", lmtpReasonUnsupported
 	}
+}
+
+// effectiveBackendCapability returns a token-only backend-mediated capability when proof is safe.
+func (s *Session) effectiveBackendCapability(capability string) (string, string) {
+	if s.backendCapabilitySafe(capability) {
+		return capability, lmtpReasonOK
+	}
+
+	return "", lmtpReasonUnavailable
+}
+
+// effectiveSTARTTLSCapability returns STARTTLS when listener state can still upgrade.
+func (s *Session) effectiveSTARTTLSCapability() (string, string) {
+	if s.startTLSPermitted() {
+		return capabilitySTARTTLS, lmtpReasonOK
+	}
+
+	return "", lmtpReasonUnavailable
+}
+
+// effectiveSizeCapability renders SIZE with the current fixed maximum.
+func (s *Session) effectiveSizeCapability(ctx context.Context) (string, string) {
+	maximum, ok := s.effectiveSizeMaximum(ctx)
+	if !ok {
+		return "", lmtpReasonUnavailable
+	}
+
+	return capabilitySIZE + " " + strconv.FormatInt(maximum, 10), lmtpReasonOK
 }
 
 // backendCapabilitySafe reports whether fresh backend-pool proof allows a mediated capability.
 func (s *Session) backendCapabilitySafe(capability string) bool {
-	return containsCapability(s.backendSafeCapabilities, capability)
+	return !s.capabilityPolicy.Denies(capability) && containsCapability(s.backendSafeCapabilities, capability)
+}
+
+// effectiveSizeMaximum combines listener policy with fresh backend-pool SIZE proof.
+func (s *Session) effectiveSizeMaximum(ctx context.Context) (int64, bool) {
+	if s.maxMessageBytes <= 0 || s.backendSizeProof == nil || s.capabilityPolicy.Denies(capabilitySIZE) {
+		return 0, false
+	}
+
+	proof, err := s.backendSizeProof.PoolSupportsSize(ctx, s.backendPool)
+	if err != nil || !proof.Supported {
+		return 0, false
+	}
+
+	maximum := uint64(s.maxMessageBytes)
+	if proof.HasMaximum && proof.MaximumBytes > 0 && proof.MaximumBytes < maximum {
+		maximum = proof.MaximumBytes
+	}
+
+	return int64(maximum), true
 }
 
 // refreshMTLSPeerAuth evaluates explicit verified client-certificate peer auth.
@@ -491,7 +567,12 @@ func (t *transactionState) snapshot() TransactionSnapshot {
 		})
 	}
 
-	return TransactionSnapshot{RecipientCount: t.recipientCount, Recipients: recipients}
+	return TransactionSnapshot{
+		RecipientCount:      t.recipientCount,
+		DeclaredSizeBytes:   t.declaredSizeBytes,
+		DeclaredSizePresent: t.declaredSizePresent,
+		Recipients:          recipients,
+	}
 }
 
 // reset clears command sequencing state without touching protocol auth state.
@@ -500,6 +581,9 @@ func (t *transactionState) reset() {
 	t.mailFrom = ""
 	t.smtpUTF8 = false
 	t.body8BitMIME = false
+	t.declaredSizeBytes = 0
+	t.declaredSizePresent = false
+	t.sizeCounter = nil
 	t.recipientCount = 0
 	t.recipients = nil
 	t.body = nil

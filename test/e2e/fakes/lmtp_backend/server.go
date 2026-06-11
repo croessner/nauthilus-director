@@ -59,14 +59,15 @@ type Status struct {
 
 // Options configures a deterministic fake backend instance.
 type Options struct {
-	Capabilities         []string
-	NonFinalBDATStatus   []Status
-	FinalStatus          map[string]Status
-	FinalStatusLimit     int
-	RequireProxyProtocol bool
-	TLSConfig            *tls.Config
-	TLSMode              string
-	HoldFinal            <-chan struct{}
+	Capabilities          []string
+	NonFinalBDATStatus    []Status
+	FinalStatus           map[string]Status
+	FinalStatusLimit      int
+	RequireProxyProtocol  bool
+	TLSConfig             *tls.Config
+	TLSMode               string
+	HoldFinal             <-chan struct{}
+	DetectCommandBatching bool
 }
 
 // BDATChunk records one byte-counted backend payload boundary.
@@ -79,13 +80,14 @@ type BDATChunk struct {
 
 // Observation records one backend transaction at protocol boundaries only.
 type Observation struct {
-	Commands      []string
-	Recipients    []string
-	Body          string
-	UsedDATA      bool
-	UsedBDAT      bool
-	BDATChunks    []BDATChunk
-	FinalComplete bool
+	Commands       []string
+	Recipients     []string
+	Body           string
+	UsedDATA       bool
+	UsedBDAT       bool
+	BDATChunks     []BDATChunk
+	FinalComplete  bool
+	CommandBatched bool
 }
 
 // Server owns one fake LMTP backend listener.
@@ -106,6 +108,7 @@ type connectionState struct {
 	usedBDAT        bool
 	bdatChunks      []BDATChunk
 	nonFinalBDATs   int
+	commandBatched  bool
 	transactionSeen bool
 	recorded        bool
 }
@@ -151,6 +154,21 @@ func (s *Server) ExpectObservation(t testing.TB) Observation {
 	}
 
 	return Observation{}
+}
+
+// AssertNoObservation verifies the backend did not receive an envelope transaction.
+func (s *Server) AssertNoObservation(t testing.TB, wait time.Duration) {
+	t.Helper()
+
+	if wait <= 0 {
+		wait = 200 * time.Millisecond
+	}
+
+	select {
+	case observation := <-s.observations:
+		t.Fatalf("unexpected fake LMTP backend observation: %#v", observation)
+	case <-time.After(wait):
+	}
 }
 
 // ExpectProxyProtocolHeader verifies a required outbound PROXY preface arrived.
@@ -299,6 +317,9 @@ func (s *Server) handleLine(conn net.Conn, reader *bufio.Reader, state *connecti
 		return conn, reader, true
 	case commandMAIL:
 		state.beginTransaction()
+		if s.options.DetectCommandBatching && s.commandQueuedBeforeReply(conn, reader) {
+			state.commandBatched = true
+		}
 		_, _ = io.WriteString(conn, "250 2.1.0 sender ok\r\n")
 	case commandRCPT:
 		recipient := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "RCPT TO:"))
@@ -313,6 +334,22 @@ func (s *Server) handleLine(conn net.Conn, reader *bufio.Reader, state *connecti
 	}
 
 	return conn, reader, false
+}
+
+// commandQueuedBeforeReply detects backend command batching without consuming bytes.
+func (s *Server) commandQueuedBeforeReply(conn net.Conn, reader *bufio.Reader) bool {
+	if reader.Buffered() > 0 {
+		return true
+	}
+
+	_ = conn.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
+	defer func() { _ = conn.SetReadDeadline(time.Time{}) }()
+
+	if _, err := reader.Peek(1); err == nil {
+		return true
+	}
+
+	return reader.Buffered() > 0
 }
 
 // writeLHLO advertises the configured backend capability set.
@@ -454,13 +491,14 @@ func (s *Server) recordObservation(state *connectionState, finalComplete bool) {
 
 	state.recorded = true
 	s.observations <- Observation{
-		Commands:      append([]string(nil), state.commands...),
-		Recipients:    append([]string(nil), state.recipients...),
-		Body:          state.body.String(),
-		UsedDATA:      state.usedDATA,
-		UsedBDAT:      state.usedBDAT,
-		BDATChunks:    append([]BDATChunk(nil), state.bdatChunks...),
-		FinalComplete: finalComplete,
+		Commands:       append([]string(nil), state.commands...),
+		Recipients:     append([]string(nil), state.recipients...),
+		Body:           state.body.String(),
+		UsedDATA:       state.usedDATA,
+		UsedBDAT:       state.usedBDAT,
+		BDATChunks:     append([]BDATChunk(nil), state.bdatChunks...),
+		FinalComplete:  finalComplete,
+		CommandBatched: state.commandBatched,
 	}
 }
 

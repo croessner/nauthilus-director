@@ -1603,6 +1603,128 @@ func TestLMTPCapabilitiesNormalizeStableWireForms(t *testing.T) {
 	}
 }
 
+// TestLMTPCapabilityFilterNormalizesStableWireForms protects deterministic deny policy inputs.
+func TestLMTPCapabilityFilterNormalizesStableWireForms(t *testing.T) {
+	cfg := DefaultConfig()
+	entry := cfg.Director.Listeners["lmtp"]
+	entry.LMTP.Capabilities = []string{lmtpCapabilitySMTPUTF8}
+	entry.LMTP.CapabilityFilter.Deny = []string{
+		" chunking ",
+		" 8bitmime ",
+		" auth ",
+		" size ",
+		" pipelining ",
+		"CHUNKING",
+	}
+	cfg.Director.Listeners["lmtp"] = entry
+
+	normalized := cfg.Normalize()
+	got := normalized.Director.Listeners["lmtp"].LMTP.CapabilityFilter.Deny
+	want := []string{lmtpCapabilityCHUNKING, lmtpCapability8BITMIME, lmtpCapabilityAuth, lmtpCapabilitySIZE, lmtpCapabilityPIPELINING}
+
+	if !slices.Equal(got, want) {
+		t.Fatalf("LMTP capability deny filter = %v, want %v", got, want)
+	}
+	if err := NewLoader().Validate(normalized); err != nil {
+		t.Fatalf("Validate rejected normalized deny filter: %v", err)
+	}
+}
+
+// TestLMTPValidationAcceptsSafeCapabilityFilterDeny verifies policy-only backend suppressions.
+func TestLMTPValidationAcceptsSafeCapabilityFilterDeny(t *testing.T) {
+	cfg := DefaultConfig()
+	entry := cfg.Director.Listeners["lmtp"]
+	entry.LMTP.CapabilityFilter.Deny = []string{
+		lmtpCapabilityCHUNKING,
+		lmtpCapability8BITMIME,
+		lmtpCapabilitySIZE,
+		lmtpCapabilityPIPELINING,
+	}
+	cfg.Director.Listeners["lmtp"] = entry
+
+	if err := NewLoader().Validate(cfg); err != nil {
+		t.Fatalf("Validate rejected safe deny filter: %v", err)
+	}
+}
+
+// TestLMTPValidationRejectsUnsupportedCapabilityFilterDeny keeps deny policy bounded.
+func TestLMTPValidationRejectsUnsupportedCapabilityFilterDeny(t *testing.T) {
+	cfg := DefaultConfig()
+	entry := cfg.Director.Listeners["lmtp"]
+	entry.LMTP.CapabilityFilter.Deny = []string{"BINARYMIME"}
+	cfg.Director.Listeners["lmtp"] = entry
+
+	expectValidationError(t, cfg, "capability_filter.deny contains unsupported capability BINARYMIME")
+}
+
+// TestLMTPValidationRejectsCommandNamesInCapabilityFilterDeny keeps commands outside policy filters.
+func TestLMTPValidationRejectsCommandNamesInCapabilityFilterDeny(t *testing.T) {
+	for _, command := range []string{"MAIL", "RCPT", "DATA", "RSET", "NOOP", "QUIT", "BDAT", "LHLO"} {
+		t.Run(command, func(t *testing.T) {
+			cfg := DefaultConfig()
+			entry := cfg.Director.Listeners["lmtp"]
+			entry.LMTP.CapabilityFilter.Deny = []string{command}
+			cfg.Director.Listeners["lmtp"] = entry
+
+			expectValidationError(t, cfg, "capability_filter.deny contains LMTP command name "+command)
+		})
+	}
+}
+
+// TestLMTPValidationRejectsMalformedCapabilityFilterDeny fails closed on ambiguous inputs.
+func TestLMTPValidationRejectsMalformedCapabilityFilterDeny(t *testing.T) {
+	tests := map[string]string{
+		"empty":          "",
+		"comma":          "CHUNKING,8BITMIME",
+		"auth mechanism": "AUTH PLAIN",
+		"auth equals":    "AUTH=PLAIN",
+		"size value":     "SIZE 1234",
+	}
+
+	for name, deny := range tests {
+		t.Run(name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			entry := cfg.Director.Listeners["lmtp"]
+			entry.LMTP.CapabilityFilter.Deny = []string{deny}
+			cfg.Director.Listeners["lmtp"] = entry
+
+			expectValidationError(t, cfg, "capability_filter.deny")
+		})
+	}
+}
+
+// TestLMTPValidationRejectsCapabilityFilterOverlap prevents contradictory operator intent.
+func TestLMTPValidationRejectsCapabilityFilterOverlap(t *testing.T) {
+	tests := map[string]struct {
+		capabilities []string
+		deny         []string
+		want         string
+	}{
+		"direct": {
+			capabilities: []string{lmtpCapabilitySMTPUTF8},
+			deny:         []string{lmtpCapabilitySMTPUTF8},
+			want:         "capability_filter.deny overlaps director.listeners.lmtp.lmtp.capabilities on SMTPUTF8",
+		},
+		"auth whole": {
+			capabilities: []string{"AUTH PLAIN"},
+			deny:         []string{lmtpCapabilityAuth},
+			want:         "capability_filter.deny overlaps director.listeners.lmtp.lmtp.capabilities on AUTH",
+		},
+	}
+
+	for name, testCase := range tests {
+		t.Run(name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			entry := cfg.Director.Listeners["lmtp"]
+			entry.LMTP.Capabilities = testCase.capabilities
+			entry.LMTP.CapabilityFilter.Deny = testCase.deny
+			cfg.Director.Listeners["lmtp"] = entry
+
+			expectValidationError(t, cfg, testCase.want)
+		})
+	}
+}
+
 // TestLMTPValidationAcceptsEnhancedStatusCodes verifies frontend-owned enhanced replies may be advertised.
 func TestLMTPValidationAcceptsEnhancedStatusCodes(t *testing.T) {
 	cfg := DefaultConfig()
@@ -1642,14 +1764,118 @@ func TestDefaultLMTPCapabilitiesAdvertiseEnhancedStatusCodes(t *testing.T) {
 	}
 }
 
+// TestDefaultLMTPSizePolicyIsDisabled verifies SIZE has no generated frontend limit.
+func TestDefaultLMTPSizePolicyIsDisabled(t *testing.T) {
+	cfg := DefaultConfig()
+	for _, listenerName := range []string{"lmtp", "lmtps"} {
+		listener := cfg.Director.Listeners[listenerName]
+		if listener.LMTP == nil {
+			t.Fatalf("%s LMTP config is nil", listenerName)
+		}
+
+		if got := listener.LMTP.Size.MaxMessageBytes; got != 0 {
+			t.Fatalf("%s size.max_message_bytes = %d, want disabled zero", listenerName, got)
+		}
+	}
+
+	if err := NewLoader().Validate(cfg); err != nil {
+		t.Fatalf("Validate rejected disabled default LMTP size policy: %v", err)
+	}
+}
+
+// TestLMTPSizePolicyExplicitZeroValidates keeps zero as the disabled operator value.
+func TestLMTPSizePolicyExplicitZeroValidates(t *testing.T) {
+	cfg := DefaultConfig()
+	entry := cfg.Director.Listeners["lmtp"]
+	entry.LMTP.Size.MaxMessageBytes = 0
+	cfg.Director.Listeners["lmtp"] = entry
+
+	if err := NewLoader().Validate(cfg); err != nil {
+		t.Fatalf("Validate rejected explicit disabled LMTP size policy: %v", err)
+	}
+}
+
+// TestLMTPSizePolicyPositiveValidates accepts fixed frontend limits.
+func TestLMTPSizePolicyPositiveValidates(t *testing.T) {
+	cfg := DefaultConfig()
+	entry := cfg.Director.Listeners["lmtp"]
+	entry.LMTP.Size.MaxMessageBytes = 52_428_800
+	cfg.Director.Listeners["lmtp"] = entry
+
+	if err := NewLoader().Validate(cfg); err != nil {
+		t.Fatalf("Validate rejected positive LMTP size policy: %v", err)
+	}
+}
+
+// TestLMTPValidationAcceptsSIZEWithPositivePolicy verifies SIZE is tied to listener limits.
+func TestLMTPValidationAcceptsSIZEWithPositivePolicy(t *testing.T) {
+	cfg := DefaultConfig()
+	entry := cfg.Director.Listeners["lmtp"]
+	entry.LMTP.Capabilities = []string{lmtpCapabilitySIZE}
+	entry.LMTP.Size.MaxMessageBytes = 52_428_800
+	cfg.Director.Listeners["lmtp"] = entry
+
+	if err := NewLoader().Validate(cfg); err != nil {
+		t.Fatalf("Validate rejected SIZE with positive listener maximum: %v", err)
+	}
+}
+
+// TestLMTPValidationRejectsSIZEWithoutPositivePolicy keeps SIZE disabled without a fixed maximum.
+func TestLMTPValidationRejectsSIZEWithoutPositivePolicy(t *testing.T) {
+	cfg := DefaultConfig()
+	entry := cfg.Director.Listeners["lmtp"]
+	entry.LMTP.Capabilities = []string{lmtpCapabilitySIZE}
+	entry.LMTP.Size.MaxMessageBytes = 0
+	cfg.Director.Listeners["lmtp"] = entry
+
+	expectValidationError(t, cfg, "requires positive size.max_message_bytes when SIZE is configured")
+}
+
+// TestLMTPSizePolicyRejectsInvalidValues keeps malformed limits fail-closed.
+func TestLMTPSizePolicyRejectsInvalidValues(t *testing.T) {
+	cfg := DefaultConfig()
+	entry := cfg.Director.Listeners["lmtp"]
+	entry.LMTP.Size.MaxMessageBytes = -1
+	cfg.Director.Listeners["lmtp"] = entry
+
+	expectValidationError(t, cfg, "director.listeners.lmtp.lmtp.size.max_message_bytes must not be negative")
+
+	path := writeConfigFile(t, t.TempDir(), "overflow-size.yaml", `director:
+  listeners:
+    lmtp:
+      lmtp:
+        size:
+          max_message_bytes: 9223372036854775808
+`)
+	_, err := NewLoader().LoadFile(path)
+	if err == nil {
+		t.Fatal("LoadFile accepted overflowing LMTP size policy")
+	}
+	if !strings.Contains(err.Error(), "max_message_bytes") {
+		t.Fatalf("overflow error = %q, want max_message_bytes path", err.Error())
+	}
+}
+
+// TestLMTPValidationAcceptsConfiguredPipelining verifies frontend command pipelining is implemented.
+func TestLMTPValidationAcceptsConfiguredPipelining(t *testing.T) {
+	cfg := DefaultConfig()
+	entry := cfg.Director.Listeners["lmtp"]
+	entry.LMTP.Capabilities = append(entry.LMTP.Capabilities, lmtpCapabilityPIPELINING)
+	cfg.Director.Listeners["lmtp"] = entry
+
+	if err := NewLoader().Validate(cfg); err != nil {
+		t.Fatalf("Validate returned error for configured PIPELINING: %v", err)
+	}
+}
+
 // TestLMTPValidationRejectsUnsupportedCapabilities keeps desired listener surface bounded.
 func TestLMTPValidationRejectsUnsupportedCapabilities(t *testing.T) {
 	cfg := DefaultConfig()
 	entry := cfg.Director.Listeners["lmtp"]
-	entry.LMTP.Capabilities = append(entry.LMTP.Capabilities, "PIPELINING")
+	entry.LMTP.Capabilities = append(entry.LMTP.Capabilities, "BINARYMIME")
 	cfg.Director.Listeners["lmtp"] = entry
 
-	expectValidationError(t, cfg, "contains unsupported capability PIPELINING")
+	expectValidationError(t, cfg, "contains unsupported capability BINARYMIME")
 }
 
 // TestLMTPValidationAcceptsConfiguredChunking verifies validation allows mediated BDAT support.

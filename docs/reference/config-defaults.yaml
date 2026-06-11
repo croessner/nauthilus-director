@@ -586,6 +586,8 @@ director:
                     - ENHANCEDSTATUSCODES
                     - STARTTLS
                     - AUTH PLAIN LOGIN XOAUTH2 OAUTHBEARER
+                capability_filter:
+                    deny: []
                 client_auth:
                     authority: default
                     mechanisms:
@@ -597,6 +599,8 @@ director:
                         identity_source: subject_common_name
                         satisfies_required: false
                     required: true
+                size:
+                    max_message_bytes: 0
             network: tcp
             protocol: lmtp
             proxy_protocol:
@@ -622,6 +626,8 @@ director:
                     - SMTPUTF8
                     - ENHANCEDSTATUSCODES
                     - AUTH PLAIN LOGIN XOAUTH2 OAUTHBEARER
+                capability_filter:
+                    deny: []
                 client_auth:
                     authority: default
                     mechanisms:
@@ -633,6 +639,8 @@ director:
                         identity_source: subject_common_name
                         satisfies_required: false
                     required: true
+                size:
+                    max_message_bytes: 0
             network: tcp
             protocol: lmtp
             proxy_protocol:

@@ -55,13 +55,14 @@ const (
 
 // HealthState carries one secret-safe backend health observation.
 type HealthState struct {
-	Enabled      bool
-	Status       HealthStatus
-	ReasonClass  string
-	Capabilities CapabilitySet
-	CheckedAt    time.Time
-	ExpiresAt    time.Time
-	Generation   string
+	Enabled         bool
+	Status          HealthStatus
+	ReasonClass     string
+	Capabilities    CapabilitySet
+	CapabilityFacts CapabilityFacts
+	CheckedAt       time.Time
+	ExpiresAt       time.Time
+	Generation      string
 }
 
 // HealthOwnershipRequest describes one fenced health-owner lease request.
@@ -102,9 +103,10 @@ type HealthCheckRequest struct {
 
 // HealthCheckResult is a secret-safe backend health check outcome.
 type HealthCheckResult struct {
-	Healthy      bool
-	ReasonClass  string
-	Capabilities CapabilitySet
+	Healthy         bool
+	ReasonClass     string
+	Capabilities    CapabilitySet
+	CapabilityFacts CapabilityFacts
 }
 
 // HealthChecker performs protocol-specific backend health checks.
@@ -184,6 +186,17 @@ func (s HealthState) Normalize(now time.Time) (HealthState, error) {
 
 	s.ReasonClass = strings.TrimSpace(s.ReasonClass)
 	s.Capabilities = s.Capabilities.Normalize()
+
+	capabilityFacts, err := s.CapabilityFacts.Normalize()
+	if err != nil {
+		return HealthState{}, err
+	}
+
+	s.CapabilityFacts = capabilityFacts
+	if s.CapabilityFacts.Size().Supported {
+		s.Capabilities.Add(sizeCapabilityName)
+	}
+
 	s.Generation = strings.TrimSpace(s.Generation)
 
 	return s, nil
@@ -525,6 +538,14 @@ func (r *HealthRunner) storeLocal(candidate Backend, result HealthCheckResult) H
 	state := tracker.Observe(result.Healthy, result.ReasonClass, now, r.config.StateTTL)
 	if result.Healthy {
 		state.Capabilities = result.Capabilities.Normalize()
+
+		capabilityFacts, err := result.CapabilityFacts.Normalize()
+		if err == nil {
+			state.CapabilityFacts = capabilityFacts
+			if state.CapabilityFacts.Size().Supported {
+				state.Capabilities.Add(sizeCapabilityName)
+			}
+		}
 	}
 
 	previous := r.local[identifier]

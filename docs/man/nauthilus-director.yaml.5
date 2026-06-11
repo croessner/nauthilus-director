@@ -383,6 +383,58 @@ The configured capability list is a desired surface, not a blind backend mirror:
 CHUNKING and 8BITMIME are advertised only when the Director implements the
 frontend behavior and fresh backend-pool health proof shows every backend member
 supports the matching extension.
+The configured
+.B capabilities
+list is a positive frontend allowlist: omitted LMTP extensions are not
+advertised and their frontend parameters or commands fail closed.
+.B capability_filter.deny
+is a listener-scoped hard deny for whole capability names. Denied capabilities
+are not advertised and are not consumed from backend-pool or selected-backend
+capability proof for that listener. Disable frontend
+.B BDAT
+and backend BDAT delivery optimization through
+.B CHUNKING
+rather than by listing command names.
+.B size.max_message_bytes
+is the listener-owned fixed LMTP message-size policy. A positive value is
+required before
+.B SIZE
+can be configured and advertised. Runtime
+.B LHLO
+advertises
+.B SIZE
+with the effective maximum only when listener policy permits it and every
+eligible backend has fresh
+.B SIZE
+proof; the effective maximum is the lower of the listener value and any
+backend-pool maximum. If
+.B SIZE
+is omitted, denied or not advertised in the current session,
+.B MAIL FROM
+with
+.B SIZE=<n>
+fails closed. Accepted declarations are forwarded on backend
+.B MAIL FROM
+only to selected backends that advertised
+.BR SIZE ,
+and the Director does not synthesize a backend
+.B SIZE=
+parameter when the frontend omitted one.
+.B DATA
+and
+.B BDAT
+bodies are counted against the same effective maximum and permanent size
+failures stop backend delivery without queueing, retry scheduling, bounces or
+message spooling.
+.B PIPELINING
+is a frontend ordered-reply capability. It permits clients to group frontend
+commands, but it does not make the Director batch
+.BR MAIL ,
+.BR RCPT ,
+.B DATA
+or
+.B BDAT
+commands to the selected backend.
 Peer authentication verifies the submitting LMTP peer; it is separate from
 recipient routing and does not authenticate the mailbox recipient.
 .PP

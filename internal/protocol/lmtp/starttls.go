@@ -84,5 +84,7 @@ func (s *Session) resetAfterSTARTTLS() {
 	s.effectiveCapabilities = nil
 	s.chunkingAdvertised = false
 	s.eightBitAdvertised = false
+	s.sizeAdvertised = false
+	s.effectiveSizeBytes = 0
 	s.transaction.reset()
 }

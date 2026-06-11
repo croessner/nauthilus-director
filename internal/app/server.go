@@ -95,6 +95,12 @@ type protocolHealthChecker struct {
 
 type backendCapabilityReader interface {
 	PoolSupportsCapability(ctx context.Context, backendPool string, capability string) (bool, error)
+	PoolSupportsSize(ctx context.Context, backendPool string) (backend.PoolSizeProof, error)
+}
+
+type lmtpSizeProofReader struct {
+	source backendCapabilityReader
+	denied []string
 }
 
 // CheckBackend dispatches health checks to the matching protocol checker.
@@ -659,11 +665,15 @@ func lmtpSessionHandler(
 ) listener.SessionHandler {
 	var (
 		listenerCapabilities []string
+		capabilityFilterDeny []string
+		maxMessageBytes      int64
 		peerAuth             config.LMTPClientAuthConfig
 	)
 
 	if options.Config.LMTP != nil {
 		listenerCapabilities = options.Config.LMTP.Capabilities
+		capabilityFilterDeny = options.Config.LMTP.CapabilityFilter.Deny
+		maxMessageBytes = options.Config.LMTP.Size.MaxMessageBytes
 		peerAuth = options.Config.LMTP.ClientAuth
 	}
 
@@ -679,6 +689,8 @@ func lmtpSessionHandler(
 		DefaultShard:            options.DefaultShard,
 		TLSMode:                 options.Config.TLS.Mode,
 		Capabilities:            listenerCapabilities,
+		CapabilityFilterDeny:    capabilityFilterDeny,
+		MaxMessageBytes:         maxMessageBytes,
 		PreauthTimeout:          options.Timeouts.Preauth.Std(),
 		AuthTimeout:             options.Timeouts.Auth.Std(),
 		BackendConnectTimeout:   options.Timeouts.BackendConnect.Std(),
@@ -700,7 +712,8 @@ func lmtpSessionHandler(
 		PlacementService:        placementService,
 		BackendConnector:        lmtp.NewTCPBackendConnector(nil),
 		PlacementGate:           placementGate,
-		BackendCapabilities:     lmtpBackendCapabilities(capabilityReader, options.Config.BackendPool, "CHUNKING", "8BITMIME"),
+		BackendCapabilities:     lmtpBackendCapabilities(capabilityReader, options.Config.BackendPool, capabilityFilterDeny, "CHUNKING", "8BITMIME"),
+		BackendSizeProof:        lmtpSizeProofReader{source: capabilityReader, denied: capabilityFilterDeny},
 		RecipientLookupRequired: true,
 		Observability:           options.Observability,
 		MTLSPeerAuth: lmtp.MTLSPeerAuthConfig{
@@ -824,15 +837,16 @@ func pop3SessionHandler(
 }
 
 // lmtpBackendCapabilities returns mediated capabilities with fresh backend-pool proof.
-func lmtpBackendCapabilities(capabilities backendCapabilityReader, backendPool string, desired ...string) []string {
+func lmtpBackendCapabilities(capabilities backendCapabilityReader, backendPool string, denied []string, desired ...string) []string {
 	if capabilities == nil {
 		return nil
 	}
 
+	policy := lmtp.NewCapabilityPolicy(nil, denied)
 	allowedCapabilities := make([]string, 0, len(desired))
 	for _, capability := range desired {
 		capability = strings.ToUpper(strings.TrimSpace(capability))
-		if capability == "" {
+		if capability == "" || policy.Denies(capability) {
 			continue
 		}
 
@@ -845,6 +859,15 @@ func lmtpBackendCapabilities(capabilities backendCapabilityReader, backendPool s
 	}
 
 	return allowedCapabilities
+}
+
+// PoolSupportsSize returns listener-filtered backend-pool SIZE proof.
+func (r lmtpSizeProofReader) PoolSupportsSize(ctx context.Context, backendPool string) (backend.PoolSizeProof, error) {
+	if r.source == nil || lmtp.NewCapabilityPolicy(nil, r.denied).Denies("SIZE") {
+		return backend.PoolSizeProof{}, nil
+	}
+
+	return r.source.PoolSupportsSize(ctx, backendPool)
 }
 
 // imapListenerOptions extracts IMAP-specific values from a listener config.

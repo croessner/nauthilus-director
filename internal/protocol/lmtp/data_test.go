@@ -129,6 +129,40 @@ func TestBackendBDATBodyStreamDATAOmitsTerminator(t *testing.T) {
 	})
 }
 
+// TestMessageSizeCounterCountsDecodedDATABytes verifies DATA accounting follows transfer decoding.
+func TestMessageSizeCounterCountsDecodedDATABytes(t *testing.T) {
+	counter := newMessageSizeCounter(10)
+
+	if err := counter.CountDATA([]byte("hello\r\n")); err != nil {
+		t.Fatalf("CountDATA plain line returned error: %v", err)
+	}
+
+	if err := counter.CountDATA([]byte("..\r\n")); err != nil {
+		t.Fatalf("CountDATA dot-stuffed line returned error: %v", err)
+	}
+
+	if err := counter.CountDATA([]byte("x\r\n")); !errors.Is(err, errMessageSizeExceeded) {
+		t.Fatalf("CountDATA overflow error = %v, want size exceeded", err)
+	}
+}
+
+// TestMessageSizeCounterCountsBDATAnnouncedSizes verifies BDAT accounting uses chunk sizes.
+func TestMessageSizeCounterCountsBDATAnnouncedSizes(t *testing.T) {
+	counter := newMessageSizeCounter(5)
+
+	if err := counter.CountBDAT(2); err != nil {
+		t.Fatalf("CountBDAT first chunk returned error: %v", err)
+	}
+
+	if err := counter.CountBDAT(3); err != nil {
+		t.Fatalf("CountBDAT exact maximum returned error: %v", err)
+	}
+
+	if err := counter.CountBDAT(1); !errors.Is(err, errMessageSizeExceeded) {
+		t.Fatalf("CountBDAT overflow error = %v, want size exceeded", err)
+	}
+}
+
 // TestBackendBDATBodyFinishEmptySendsFinalEmptyPayload verifies BDAT 0 LAST behavior.
 func TestBackendBDATBodyFinishEmptySendsFinalEmptyPayload(t *testing.T) {
 	sender := newRecordingBDATPayloadSender()

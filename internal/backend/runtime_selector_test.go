@@ -777,10 +777,110 @@ func TestPoolCapabilityPolicyFailsClosed(t *testing.T) {
 	cfg := config.DefaultConfig()
 	registry := mustStaticRegistry(t, cfg)
 
+	if !NewCapabilitySet("chunking", "8bitmime", "STARTTLS").Has("CHUNKING") {
+		t.Fatal("CapabilitySet.Has(\"CHUNKING\") = false, want true")
+	}
+
 	for _, capability := range []string{"CHUNKING", "8BITMIME"} {
 		t.Run(capability, func(t *testing.T) {
 			testPoolCapabilityPolicy(t, now, registry, capability)
 		})
+	}
+}
+
+// TestPoolSizeProofFailsClosed verifies pool-wide structured SIZE capability proof.
+func TestPoolSizeProofFailsClosed(t *testing.T) {
+	now := time.Date(2026, 6, 11, 12, 0, 0, 0, time.UTC)
+	cfg := config.DefaultConfig()
+	registry := mustStaticRegistry(t, cfg)
+
+	for _, testCase := range poolSizeProofTestCases(now) {
+		t.Run(testCase.name, func(t *testing.T) {
+			assertPoolSizeProof(t, registry, now, testCase)
+		})
+	}
+}
+
+type poolSizeProofTestCase struct {
+	name        string
+	snapshots   RuntimeSnapshotReader
+	wantSupport bool
+	wantMaximum bool
+	maximum     uint64
+	wantErr     bool
+}
+
+// poolSizeProofTestCases returns the fail-closed pool SIZE proof matrix.
+func poolSizeProofTestCases(now time.Time) []poolSizeProofTestCase {
+	sizeSupport := sizeSnapshot(now, time.Minute, SizeCapabilityFact{Supported: true})
+	sizeLimitSmall := sizeSnapshot(now, time.Minute, SizeCapabilityFact{Supported: true, HasMaximum: true, MaximumBytes: 1024})
+	sizeLimitLarge := sizeSnapshot(now, time.Minute, SizeCapabilityFact{Supported: true, HasMaximum: true, MaximumBytes: 4096})
+
+	return []poolSizeProofTestCase{
+		{
+			name:        "all backends support size without maximum",
+			snapshots:   fakeSnapshots{testBackendIDLMTP: sizeSupport, testBackendIDBLMTP: sizeSupport},
+			wantSupport: true,
+		},
+		{
+			name:        "minimum positive maximum wins",
+			snapshots:   fakeSnapshots{testBackendIDLMTP: sizeLimitLarge, testBackendIDBLMTP: sizeLimitSmall},
+			wantSupport: true,
+			wantMaximum: true,
+			maximum:     1024,
+		},
+		{
+			name:        "zero means no backend maximum",
+			snapshots:   fakeSnapshots{testBackendIDLMTP: sizeSnapshot(now, time.Minute, SizeCapabilityFact{Supported: true, HasMaximum: true}), testBackendIDBLMTP: sizeSupport},
+			wantSupport: true,
+		},
+		{
+			name:      "missing data",
+			snapshots: fakeSnapshots{testBackendIDLMTP: sizeSupport},
+		},
+		{
+			name:      "unhealthy data",
+			snapshots: fakeSnapshots{testBackendIDLMTP: sizeSupport, testBackendIDBLMTP: unhealthySizeSnapshot(now)},
+		},
+		{
+			name:      "stale data",
+			snapshots: fakeSnapshots{testBackendIDLMTP: sizeSupport, testBackendIDBLMTP: sizeSnapshot(now, -time.Second, SizeCapabilityFact{Supported: true})},
+		},
+		{
+			name:      "mixed structured support",
+			snapshots: fakeSnapshots{testBackendIDLMTP: sizeSupport, testBackendIDBLMTP: capabilitySnapshot(now, time.Minute, "CHUNKING")},
+		},
+		{
+			name:      "token-only size is unsafe",
+			snapshots: fakeSnapshots{testBackendIDLMTP: capabilitySnapshot(now, time.Minute, "SIZE"), testBackendIDBLMTP: capabilitySnapshot(now, time.Minute, "SIZE")},
+		},
+		{
+			name:      "unreadable state fails closed",
+			snapshots: failingSnapshots{},
+			wantErr:   true,
+		},
+	}
+}
+
+// assertPoolSizeProof verifies one pool SIZE proof case.
+func assertPoolSizeProof(t *testing.T, registry Registry, now time.Time, testCase poolSizeProofTestCase) {
+	t.Helper()
+
+	proof, err := PoolSupportsSize(context.Background(), registry, testCase.snapshots, testPoolLMTP, now)
+	if testCase.wantErr {
+		if err == nil {
+			t.Fatal("PoolSupportsSize returned nil error, want failure")
+		}
+
+		return
+	}
+
+	if err != nil {
+		t.Fatalf("PoolSupportsSize returned error: %v", err)
+	}
+
+	if proof.Supported != testCase.wantSupport || proof.HasMaximum != testCase.wantMaximum || proof.MaximumBytes != testCase.maximum {
+		t.Fatalf("PoolSupportsSize = %#v, want support=%v maximum=%v value=%d", proof, testCase.wantSupport, testCase.wantMaximum, testCase.maximum)
 	}
 }
 
@@ -1115,9 +1215,39 @@ func capabilitySnapshot(now time.Time, ttl time.Duration, capabilities ...string
 	}}
 }
 
+// sizeSnapshot creates a healthy test snapshot with structured SIZE capability state.
+func sizeSnapshot(now time.Time, ttl time.Duration, size SizeCapabilityFact) RuntimeSnapshot {
+	var facts CapabilityFacts
+	facts.SetSize(size)
+
+	return RuntimeSnapshot{Health: HealthState{
+		Enabled:         true,
+		Status:          HealthStatusHealthy,
+		Capabilities:    NewCapabilitySet("SIZE"),
+		CapabilityFacts: facts,
+		CheckedAt:       now,
+		ExpiresAt:       now.Add(ttl),
+	}}
+}
+
+// unhealthySizeSnapshot creates a fresh unhealthy snapshot with SIZE facts.
+func unhealthySizeSnapshot(now time.Time) RuntimeSnapshot {
+	snapshot := sizeSnapshot(now, time.Minute, SizeCapabilityFact{Supported: true})
+	snapshot.Health.Status = HealthStatusUnhealthy
+
+	return snapshot
+}
+
 // BackendSnapshot returns the configured runtime snapshot fixture.
 func (s fakeSnapshots) BackendSnapshot(_ context.Context, backendIdentifier string) (RuntimeSnapshot, error) {
 	return s[backendIdentifier], nil
+}
+
+type failingSnapshots struct{}
+
+// BackendSnapshot returns an invalid health status to emulate unreadable state.
+func (failingSnapshots) BackendSnapshot(context.Context, string) (RuntimeSnapshot, error) {
+	return RuntimeSnapshot{Health: HealthState{Enabled: true, Status: "broken"}}, nil
 }
 
 type recordingObservability struct {

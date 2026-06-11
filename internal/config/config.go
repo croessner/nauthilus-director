@@ -393,8 +393,18 @@ type IMAPListenerConfig struct {
 }
 
 type LMTPListenerConfig struct {
-	ClientAuth   LMTPClientAuthConfig `mapstructure:"client_auth" yaml:"client_auth" validate:"required"`
-	Capabilities []string             `mapstructure:"capabilities" yaml:"capabilities"`
+	ClientAuth       LMTPClientAuthConfig       `mapstructure:"client_auth" yaml:"client_auth" validate:"required"`
+	Capabilities     []string                   `mapstructure:"capabilities" yaml:"capabilities"`
+	CapabilityFilter LMTPCapabilityFilterConfig `mapstructure:"capability_filter" yaml:"capability_filter" validate:"required"`
+	Size             LMTPSizeConfig             `mapstructure:"size" yaml:"size" validate:"required"`
+}
+
+type LMTPCapabilityFilterConfig struct {
+	Deny []string `mapstructure:"deny" yaml:"deny"`
+}
+
+type LMTPSizeConfig struct {
+	MaxMessageBytes int64 `mapstructure:"max_message_bytes" yaml:"max_message_bytes"`
 }
 
 type LMTPClientAuthConfig struct {

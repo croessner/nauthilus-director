@@ -3076,6 +3076,48 @@ func TestRedisHealthOwnershipAndFencing(t *testing.T) {
 	if published.Status != backend.HealthStatusHealthy || published.Generation == "" || !published.Capabilities.Has("CHUNKING") {
 		t.Fatalf("published health = %#v", published)
 	}
+
+	assertHealthSizeFact(t, published, 10485760)
+	assertStoredHealthCapabilityFacts(t, client, builder, backendID, "SIZE=10485760")
+
+	readBack, err := store.ReadHealthState(context.Background(), backendID)
+	if err != nil {
+		t.Fatalf("ReadHealthState returned error: %v", err)
+	}
+
+	assertHealthSizeFact(t, readBack, 10485760)
+
+	snapshot, err := store.BackendSnapshot(context.Background(), backendID)
+	if err != nil {
+		t.Fatalf("BackendSnapshot returned error: %v", err)
+	}
+
+	assertHealthSizeFact(t, snapshot.Health, 10485760)
+}
+
+// TestParseHealthStateFieldsHandlesSizeFactCompatibility verifies safe health fact parsing.
+func TestParseHealthStateFieldsHandlesSizeFactCompatibility(t *testing.T) {
+	now := time.Now().UTC()
+	fields := map[string]string{
+		"status":        string(backend.HealthStatusHealthy),
+		"capabilities":  "SIZE,CHUNKING",
+		"checked_at_ms": strconv.FormatInt(now.UnixMilli(), 10),
+		"expires_at_ms": strconv.FormatInt(now.Add(time.Minute).UnixMilli(), 10),
+	}
+
+	tokenOnly, err := parseHealthStateFields(fields)
+	if err != nil {
+		t.Fatalf("parseHealthStateFields token-only returned error: %v", err)
+	}
+
+	if !tokenOnly.Capabilities.Has("SIZE") || tokenOnly.CapabilityFacts.Size().Supported {
+		t.Fatalf("token-only health = %#v, want SIZE token without structured SIZE proof", tokenOnly)
+	}
+
+	fields["capability_facts"] = "SIZE=no"
+	if _, err := parseHealthStateFields(fields); err == nil {
+		t.Fatal("parseHealthStateFields malformed SIZE fact returned nil error")
+	}
 }
 
 // publishTestInstanceHeartbeat records an integration-test instance heartbeat.
@@ -3129,9 +3171,10 @@ func assertStaleHealthPublishRejected(t *testing.T, store *RedisSessionStore, in
 		BackendIdentifier: backendID,
 		FencingToken:      token,
 		State: backend.HealthState{
-			Enabled:      true,
-			Status:       backend.HealthStatusHealthy,
-			Capabilities: backend.NewCapabilitySet("CHUNKING"),
+			Enabled:         true,
+			Status:          backend.HealthStatusHealthy,
+			Capabilities:    backend.NewCapabilitySet("CHUNKING"),
+			CapabilityFacts: testSizeCapabilityFacts(t, 10485760),
 		},
 		TTL: time.Second,
 	})
@@ -3149,9 +3192,10 @@ func publishTestHealthState(t *testing.T, store *RedisSessionStore, instanceID s
 		BackendIdentifier: backendID,
 		FencingToken:      token,
 		State: backend.HealthState{
-			Enabled:      true,
-			Status:       backend.HealthStatusHealthy,
-			Capabilities: backend.NewCapabilitySet("CHUNKING"),
+			Enabled:         true,
+			Status:          backend.HealthStatusHealthy,
+			Capabilities:    backend.NewCapabilitySet("CHUNKING"),
+			CapabilityFacts: testSizeCapabilityFacts(t, 10485760),
 		},
 		TTL: time.Second,
 	})
@@ -3160,6 +3204,49 @@ func publishTestHealthState(t *testing.T, store *RedisSessionStore, instanceID s
 	}
 
 	return published
+}
+
+// testSizeCapabilityFacts creates a structured SIZE fact for integration tests.
+func testSizeCapabilityFacts(t *testing.T, maximum uint64) backend.CapabilityFacts {
+	t.Helper()
+
+	var facts backend.CapabilityFacts
+	facts.SetSize(backend.SizeCapabilityFact{Supported: true, HasMaximum: true, MaximumBytes: maximum})
+
+	return facts
+}
+
+// assertHealthSizeFact verifies the structured SIZE fact survived a health boundary.
+func assertHealthSizeFact(t *testing.T, state backend.HealthState, maximum uint64) {
+	t.Helper()
+
+	got, ok := state.CapabilityFacts.Size().Maximum()
+	if !ok || got != maximum {
+		t.Fatalf("health SIZE maximum = %d ok=%v, want %d true; state=%#v", got, ok, maximum, state)
+	}
+
+	if !state.Capabilities.Has("SIZE") {
+		t.Fatalf("health capabilities = %v, want SIZE token", state.Capabilities.List())
+	}
+}
+
+// assertStoredHealthCapabilityFacts verifies deterministic Redis serialization.
+func assertStoredHealthCapabilityFacts(t *testing.T, client *redis.Client, builder KeyBuilder, backendID string, want string) {
+	t.Helper()
+
+	stateKey, err := builder.HealthStateKey(backendID)
+	if err != nil {
+		t.Fatalf("health keys: %v", err)
+	}
+
+	got, err := client.HGet(context.Background(), stateKey, "capability_facts").Result()
+	if err != nil {
+		t.Fatalf("health capability_facts read: %v", err)
+	}
+
+	if got != want {
+		t.Fatalf("health capability_facts = %q, want %q", got, want)
+	}
 }
 
 // TestRedisCloseReleasesAffinityWithoutGrace verifies configured immediate release behavior.

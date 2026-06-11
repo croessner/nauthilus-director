@@ -94,6 +94,21 @@ func TestLMTPDATAObservationRecordsBackendBodyTransport(t *testing.T) {
 	}
 }
 
+// TestLMTPSizeFailureObservationUsesBoundedReason verifies size failures avoid raw policy details.
+func TestLMTPSizeFailureObservationUsesBoundedReason(t *testing.T) {
+	status := sizeExceededDeliveryStatus()
+
+	resultLabel, reasonClass := deliveryStatusObservation(status)
+	if resultLabel != lmtpObservationResultRejected || reasonClass != lmtpReasonSizeBodyTooLarge {
+		t.Fatalf("size status observation = %q/%q, want rejected/%s", resultLabel, reasonClass, lmtpReasonSizeBodyTooLarge)
+	}
+
+	resultReason := deliveryReasonClass(MessageResult{Statuses: []DeliveryStatus{status}})
+	if resultReason != lmtpReasonSizeBodyTooLarge {
+		t.Fatalf("size delivery reason = %q, want %q", resultReason, lmtpReasonSizeBodyTooLarge)
+	}
+}
+
 // newLMTPObservationRuntime creates an enabled log and metrics runtime for LMTP tests.
 func newLMTPObservationRuntime(t *testing.T) (*observability.Runtime, *bytes.Buffer, *recordingLMTPObservation) {
 	t.Helper()

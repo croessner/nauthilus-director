@@ -42,6 +42,7 @@ import (
 
 const (
 	testBackendAddress       = "127.0.0.1:2424"
+	testBackendLHLODomain    = "mailstore"
 	testBackendPassword      = "backend-secret"
 	testBackendServerName    = "mailstore.example.test"
 	testBackendServiceUser   = "director-lmtp"
@@ -52,6 +53,7 @@ const (
 	testBackendCommandRCPT   = "RCPT TO"
 	testLMTPProxyHeaderV4    = "PROXY TCP4 203.0.113.10 198.51.100.20 42500 24"
 	testLMTPHealthProxyV4    = "PROXY TCP4 10.10.0.1 10.10.0.2 5024 24"
+	testLHLOSizeProse        = testBackendLHLODomain + " says SIZE 10485760"
 )
 
 // TestBackendConnectorHandlesPlaintextModes verifies cleartext LMTP capability discovery.
@@ -334,8 +336,8 @@ func TestLHLOCapabilitiesAreParsedWithoutBannerText(t *testing.T) {
 	response := backendStatusResponse{
 		code: responseStatusOK,
 		lines: []string{
-			"mailstore says CHUNKING and 8BITMIME are words in prose",
-			"AUTH PLAIN LOGIN",
+			"mailstore says CHUNKING, 8BITMIME and SIZE are words in prose",
+			testPlainAuthCapability + " LOGIN",
 			capabilityCHUNKING,
 			capability8BITMIME,
 		},
@@ -349,10 +351,108 @@ func TestLHLOCapabilitiesAreParsedWithoutBannerText(t *testing.T) {
 
 	bannerOnly := lmtpCapabilitiesFromLHLO(backendStatusResponse{
 		code:  responseStatusOK,
-		lines: []string{"mailstore says CHUNKING and 8BITMIME"},
+		lines: []string{"mailstore says CHUNKING, 8BITMIME and SIZE"},
 	})
-	if bannerOnly.Has(capabilityCHUNKING) || bannerOnly.Has(capability8BITMIME) {
-		t.Fatalf("banner-only capabilities = %v, want no CHUNKING or 8BITMIME", bannerOnly.List())
+	if bannerOnly.Has(capabilityCHUNKING) || bannerOnly.Has(capability8BITMIME) || bannerOnly.Has(capabilitySIZE) {
+		t.Fatalf("banner-only capabilities = %v, want no CHUNKING, 8BITMIME or SIZE", bannerOnly.List())
+	}
+}
+
+// TestLHLOSizeCapabilityFacts verifies RFC 1870 backend SIZE advertisement parsing.
+func TestLHLOSizeCapabilityFacts(t *testing.T) {
+	tests := []struct {
+		name          string
+		lines         []string
+		wantSupport   bool
+		wantMaximum   bool
+		maximum       uint64
+		wantChunking  bool
+		want8BitMIME  bool
+		wantAuthPlain bool
+	}{
+		{
+			name:        "size without maximum",
+			lines:       []string{capabilitySIZE},
+			wantSupport: true,
+		},
+		{
+			name:        "size zero has no fixed maximum",
+			lines:       []string{capabilitySIZE + " 0"},
+			wantSupport: true,
+		},
+		{
+			name:        "size positive maximum",
+			lines:       []string{capabilitySIZE + " 10485760"},
+			wantSupport: true,
+			wantMaximum: true,
+			maximum:     10485760,
+		},
+		{
+			name:  "negative size is unsafe",
+			lines: []string{capabilitySIZE + " -1"},
+		},
+		{
+			name:  "malformed size is unsafe",
+			lines: []string{capabilitySIZE + " no"},
+		},
+		{
+			name:  "overflowing size is unsafe",
+			lines: []string{capabilitySIZE + " 18446744073709551616"},
+		},
+		{
+			name:  "extra size parameter is unsafe",
+			lines: []string{capabilitySIZE + " 10 20"},
+		},
+		{
+			name:  "banner prose is ignored",
+			lines: []string{testLHLOSizeProse},
+		},
+		{
+			name:  "non-capability prose is not size support",
+			lines: []string{testBackendLHLODomain, testLHLOSizeProse},
+		},
+		{
+			name:          "token checks continue to work",
+			lines:         []string{testBackendLHLODomain, testPlainAuthCapability, capabilityCHUNKING, capability8BITMIME},
+			wantChunking:  true,
+			want8BitMIME:  true,
+			wantAuthPlain: true,
+		},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			capabilities, facts := lmtpBackendCapabilityFactsFromLHLO(backendStatusResponse{
+				code:  responseStatusOK,
+				lines: testCase.lines,
+			})
+			size := facts.Size()
+
+			if capabilities.Has(capabilitySIZE) != testCase.wantSupport {
+				t.Fatalf("SIZE token support = %v, want %v; capabilities=%v", capabilities.Has(capabilitySIZE), testCase.wantSupport, capabilities.List())
+			}
+
+			if size.Supported != testCase.wantSupport {
+				t.Fatalf("SIZE fact support = %v, want %v", size.Supported, testCase.wantSupport)
+			}
+
+			maximum, ok := size.Maximum()
+			if ok != testCase.wantMaximum || maximum != testCase.maximum {
+				t.Fatalf("SIZE maximum = %d ok=%v, want %d ok=%v", maximum, ok, testCase.maximum, testCase.wantMaximum)
+			}
+
+			if capabilities.Has(capabilityCHUNKING) != testCase.wantChunking {
+				t.Fatalf("CHUNKING support = %v, want %v", capabilities.Has(capabilityCHUNKING), testCase.wantChunking)
+			}
+
+			if capabilities.Has(capability8BITMIME) != testCase.want8BitMIME {
+				t.Fatalf("8BITMIME support = %v, want %v", capabilities.Has(capability8BITMIME), testCase.want8BitMIME)
+			}
+
+			if capabilities.Has(capabilityAUTH+"=PLAIN") != testCase.wantAuthPlain {
+				t.Fatalf("AUTH PLAIN support = %v, want %v", capabilities.Has(capabilityAUTH+"=PLAIN"), testCase.wantAuthPlain)
+			}
+		})
 	}
 }
 
@@ -415,12 +515,19 @@ func TestFrontendDATABodyTransportSelectionUsesSelectedBackendCapabilities(t *te
 	tests := []struct {
 		name         string
 		capabilities []string
+		denied       []string
 		want         backendBodyTransport
 	}{
 		{
 			name:         "backend can chunk",
 			capabilities: []string{capabilityCHUNKING},
 			want:         backendBodyTransportBDAT,
+		},
+		{
+			name:         "listener denied chunking",
+			capabilities: []string{capabilityCHUNKING},
+			denied:       []string{capabilityCHUNKING},
+			want:         backendBodyTransportDATA,
 		},
 		{
 			name: "data fallback",
@@ -431,7 +538,8 @@ func TestFrontendDATABodyTransportSelectionUsesSelectedBackendCapabilities(t *te
 	for _, testCase := range tests {
 		t.Run(testCase.name, func(t *testing.T) {
 			transaction := &backendTransaction{
-				connection: &BackendConnection{capabilities: backend.NewCapabilitySet(testCase.capabilities...)},
+				connection:       &BackendConnection{capabilities: backend.NewCapabilitySet(testCase.capabilities...)},
+				capabilityPolicy: NewCapabilityPolicy(nil, testCase.denied),
 			}
 
 			if got := transaction.frontendDATABodyTransport(); got != testCase.want {
@@ -685,6 +793,33 @@ func TestLightHealthWritesProxyBeforeGreeting(t *testing.T) {
 	})
 	if !result.Healthy || !result.Capabilities.Has(capabilityCHUNKING) {
 		t.Fatalf("health result = %#v, want healthy with CHUNKING", result)
+	}
+
+	dialer.Wait(t)
+}
+
+// TestLightHealthPreservesStructuredSizeFacts verifies health carries SIZE details.
+func TestLightHealthPreservesStructuredSizeFacts(t *testing.T) {
+	dialer := scriptedLMTPBackendDialer(t, func(t *testing.T, conn net.Conn) {
+		reader := bufio.NewReader(conn)
+		writeLMTPBackendLine(t, conn, "220 backend ready")
+		expectLMTPBackendLine(t, reader, "LHLO "+backendLHLOName)
+		writeLMTPBackendLine(t, conn, "250-SIZE 10485760")
+		writeLMTPBackendLine(t, conn, "250 "+capabilityCHUNKING)
+		expectLMTPBackendLine(t, reader, "QUIT")
+		writeLMTPBackendLine(t, conn, "221 2.0.0 bye")
+	})
+
+	result := NewHealthChecker(NewTCPBackendConnector(dialer)).CheckBackend(context.Background(), testLMTPBackendTarget(backendTLSPlaintext), backend.HealthCheckRequest{
+		Timeout: time.Second,
+	})
+	if !result.Healthy || !result.Capabilities.Has(capabilitySIZE) || !result.Capabilities.Has(capabilityCHUNKING) {
+		t.Fatalf("health result = %#v, want healthy SIZE and CHUNKING", result)
+	}
+
+	maximum, ok := result.CapabilityFacts.Size().Maximum()
+	if !ok || maximum != 10485760 {
+		t.Fatalf("health SIZE maximum = %d ok=%v, want 10485760 true", maximum, ok)
 	}
 
 	dialer.Wait(t)

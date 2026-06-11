@@ -61,9 +61,11 @@ type bdatCommand struct {
 }
 
 type mailCommand struct {
-	wirePath     string
-	smtpUTF8     bool
-	body8BitMIME bool
+	wirePath            string
+	smtpUTF8            bool
+	body8BitMIME        bool
+	declaredSizeBytes   int64
+	declaredSizePresent bool
 }
 
 // readLine reads one bounded line from the frontend stream.
@@ -171,6 +173,7 @@ func parseMailCommand(command frontendCommand) (mailCommand, error) {
 
 	parsed := mailCommand{wirePath: path}
 	bodySeen := false
+	sizeSeen := false
 
 	for parameter := range strings.FieldsSeq(tail) {
 		switch {
@@ -192,6 +195,20 @@ func parseMailCommand(command frontendCommand) (mailCommand, error) {
 			}
 
 			parsed.body8BitMIME = true
+		case isMailSizeParameter(parameter):
+			if sizeSeen {
+				return mailCommand{}, fmt.Errorf("%w: duplicate SIZE parameter", ErrMalformedCommand)
+			}
+
+			sizeSeen = true
+
+			size, err := parseMailSizeParameter(parameter)
+			if err != nil {
+				return mailCommand{}, err
+			}
+
+			parsed.declaredSizeBytes = size
+			parsed.declaredSizePresent = true
 		default:
 			return mailCommand{}, fmt.Errorf("%w: unsupported MAIL parameter", ErrMalformedCommand)
 		}
@@ -207,11 +224,39 @@ func isMailBodyParameter(parameter string) bool {
 	return ok && strings.EqualFold(key, "BODY")
 }
 
+// isMailSizeParameter reports whether a MAIL parameter uses the SIZE key.
+func isMailSizeParameter(parameter string) bool {
+	key, _, ok := strings.Cut(parameter, "=")
+
+	return ok && strings.EqualFold(key, capabilitySIZE)
+}
+
 // mailBodyParameterValue returns the raw BODY value from one syntactically keyed parameter.
 func mailBodyParameterValue(parameter string) string {
 	_, value, _ := strings.Cut(parameter, "=")
 
 	return value
+}
+
+// parseMailSizeParameter returns one non-negative bounded RFC 1870 size value.
+func parseMailSizeParameter(parameter string) (int64, error) {
+	_, value, ok := strings.Cut(parameter, "=")
+	if !ok || value == "" {
+		return 0, fmt.Errorf("%w: malformed SIZE parameter", ErrMalformedCommand)
+	}
+
+	for index := 0; index < len(value); index++ {
+		if value[index] < '0' || value[index] > '9' {
+			return 0, fmt.Errorf("%w: malformed SIZE parameter", ErrMalformedCommand)
+		}
+	}
+
+	size, err := strconv.ParseInt(value, 10, 63)
+	if err != nil || size < 0 {
+		return 0, fmt.Errorf("%w: malformed SIZE parameter", ErrMalformedCommand)
+	}
+
+	return size, nil
 }
 
 // splitCommandPath extracts one bracketed path and returns trailing parameters.

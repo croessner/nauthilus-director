@@ -501,7 +501,9 @@ func defaultLMTPListener(serviceName string, address string, tlsMode string, cer
 					IdentitySource: "subject_common_name",
 				},
 			},
-			Capabilities: capabilities,
+			Capabilities:     capabilities,
+			CapabilityFilter: LMTPCapabilityFilterConfig{Deny: []string{}},
+			Size:             LMTPSizeConfig{},
 		},
 	}
 }

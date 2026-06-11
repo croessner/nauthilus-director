@@ -40,8 +40,9 @@ const (
 )
 
 type backendTransaction struct {
-	connection *BackendConnection
-	target     backend.Backend
+	connection       *BackendConnection
+	target           backend.Backend
+	capabilityPolicy CapabilityPolicy
 }
 
 // backendForwardingEnabled reports whether this session should deliver to real LMTP backends.
@@ -111,11 +112,13 @@ func (s *Session) ensureBackendTransaction(ctx context.Context, target backend.B
 	connectSpan.End(lmtpObservationResultOK, lmtpReasonOK)
 
 	transaction := &backendTransaction{
-		connection: connection,
-		target:     target,
+		connection:       connection,
+		target:           target,
+		capabilityPolicy: s.capabilityPolicy,
 	}
 
-	if err := transaction.sendMAIL(s.transaction.mailFrom, s.transaction.smtpUTF8, s.transaction.body8BitMIME); err != nil {
+	sizeDeclared := s.sizeAdvertised && s.transaction.declaredSizePresent
+	if err := transaction.sendMAIL(s.transaction.mailFrom, s.transaction.smtpUTF8, s.transaction.body8BitMIME, sizeDeclared, s.transaction.declaredSizeBytes); err != nil {
 		_ = transaction.close("mail_error")
 
 		return err
@@ -183,7 +186,12 @@ func (t *backendTransaction) sameTarget(target backend.Backend) bool {
 
 // supportsChunking reports whether the selected backend transaction can use BDAT.
 func (t *backendTransaction) supportsChunking() bool {
-	return t != nil && t.connection != nil && t.connection.supportsChunking()
+	return t != nil && !t.capabilityPolicy.Denies(capabilityCHUNKING) && t.connection != nil && t.connection.supportsChunking()
+}
+
+// supportsSizeDeclaration reports whether selected-backend SIZE proof permits forwarding.
+func (t *backendTransaction) supportsSizeDeclaration(declaredSizeBytes int64) bool {
+	return t != nil && !t.capabilityPolicy.Denies(capabilitySIZE) && t.connection != nil && t.connection.supportsSizeDeclaration(declaredSizeBytes)
 }
 
 // frontendDATABodyTransport selects the preferred backend transport for DATA bodies.
@@ -196,7 +204,19 @@ func (t *backendTransaction) frontendDATABodyTransport() backendBodyTransport {
 }
 
 // sendMAIL forwards accepted frontend sender parameters to the selected backend.
-func (t *backendTransaction) sendMAIL(wirePath string, smtpUTF8 bool, body8BitMIME bool) error {
+func (t *backendTransaction) sendMAIL(wirePath string, smtpUTF8 bool, body8BitMIME bool, declaredSizePresent bool, declaredSizeBytes int64) error {
+	if smtpUTF8 && t.capabilityPolicy.Denies(capabilitySMTPUTF8) {
+		return fmt.Errorf("%w: listener policy denied smtputf8", ErrBackendProtocol)
+	}
+
+	if body8BitMIME && t.capabilityPolicy.Denies(capability8BITMIME) {
+		return fmt.Errorf("%w: listener policy denied 8bitmime", ErrBackendProtocol)
+	}
+
+	if declaredSizePresent && !t.supportsSizeDeclaration(declaredSizeBytes) {
+		return fmt.Errorf("%w: selected backend size proof unavailable", ErrBackendProtocol)
+	}
+
 	command := "MAIL FROM:" + wirePath
 	if smtpUTF8 {
 		command += " " + capabilitySMTPUTF8
@@ -204,6 +224,10 @@ func (t *backendTransaction) sendMAIL(wirePath string, smtpUTF8 bool, body8BitMI
 
 	if body8BitMIME {
 		command += " BODY=" + capability8BITMIME
+	}
+
+	if declaredSizePresent {
+		command += " " + capabilitySIZE + "=" + fmt.Sprintf("%d", declaredSizeBytes)
 	}
 
 	response, err := t.connection.commandResponse(command)

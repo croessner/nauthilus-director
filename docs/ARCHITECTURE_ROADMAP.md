@@ -775,10 +775,13 @@ LMTP must return per-recipient status. Multi-recipient routing must be safe, exp
 LMTP `LHLO` output is the effective configured frontend surface. Omitted
 capabilities disable the related extension behavior for that session:
 `STARTTLS` is not accepted when not advertised, `AUTH` mechanisms are not
-inferred from peer-auth config, `CHUNKING` is required for `BDAT`, and
-`SMTPUTF8` is required before accepting the `MAIL FROM` `SMTPUTF8` parameter or
-SMTPUTF8-only envelope paths. Unsupported or backend-unsafe capabilities fail
-closed before sockets bind or before they are advertised.
+inferred from peer-auth config, `CHUNKING` is required for `BDAT`, `SIZE` is
+required before accepting `MAIL FROM SIZE=<n>`, and `SMTPUTF8` is required before
+accepting the `MAIL FROM` `SMTPUTF8` parameter or SMTPUTF8-only envelope paths.
+`PIPELINING` is a frontend ordered-reply capability only and does not enable
+backend command batching. Unsupported, denied or backend-unsafe capabilities fail
+closed before sockets bind, before they are advertised or before selected-backend
+delivery uses the extension.
 
 Frontend LMTP `CHUNKING` advertisement is listener policy. Backend body
 transport is selected separately for the chosen backend after its `LHLO`
@@ -1485,6 +1488,15 @@ advertisement remains listener policy, while backend `BDAT` delivery is selected
 per chosen backend capability and remains fail-closed when that capability is
 absent. Public fake-lane and Docker interop evidence lives in
 `docs/specs/implementation/M8_LMTP_BACKEND_CHUNKING_FOLLOWUP.md`.
+
+The M8 LMTP SIZE and PIPELINING follow-up is complete. `SIZE` advertisement now
+requires a positive listener limit, the listener allowlist, the deny filter and
+fresh backend-pool proof; accepted `MAIL FROM SIZE=<n>` declarations are forwarded
+only to selected backends that advertise `SIZE`, and DATA/BDAT body enforcement
+fails closed without queueing or spooling. `PIPELINING` is documented and tested
+as a frontend ordered-reply contract without backend command batching. Completion
+evidence lives in
+`docs/specs/implementation/M8_LMTP_SIZE_AND_PIPELINING_FOLLOWUP.md`.
 
 - hardened production Docker image and Docker smoke proof
 - restrictive systemd unit and reload path through `nauthilus-directorctl reload`

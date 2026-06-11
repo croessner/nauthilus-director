@@ -240,6 +240,581 @@ func Test8BITMIMECapabilityGatesMailBodyParameter(t *testing.T) {
 	t.Run("coexists with smtputf8", test8BITMIMECoexistsWithSMTPUTF8)
 }
 
+// TestLHLOUsesCapabilitiesAsPositiveAllowlist verifies backend proof cannot advertise omitted entries.
+func TestLHLOUsesCapabilitiesAsPositiveAllowlist(t *testing.T) {
+	config := testSessionConfig()
+	config.TLSMode = TLSModeImplicit
+	config.Capabilities = []string{capabilitySMTPUTF8}
+	config.BackendCapabilities = []string{capability8BITMIME, capabilityCHUNKING}
+
+	harness := startLMTPHarness(t, config)
+	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+	harness.write(t, "LHLO submitter.example\r\n")
+	harness.expectLine(t, "250-nauthilus-director\r\n")
+	harness.expectLine(t, "250 SMTPUTF8\r\n")
+}
+
+// TestCapabilityDenyFilterSuppressesLHLO verifies listener policy wins over backend proof.
+func TestCapabilityDenyFilterSuppressesLHLO(t *testing.T) {
+	config := testSessionConfig()
+	config.TLSMode = TLSModeImplicit
+	config.Capabilities = []string{capabilitySMTPUTF8, capability8BITMIME, capabilityCHUNKING, capabilityEnhancedStatusCodes}
+	config.BackendCapabilities = []string{capability8BITMIME, capabilityCHUNKING}
+	config.CapabilityFilterDeny = []string{capabilitySMTPUTF8, capability8BITMIME, capabilityCHUNKING}
+
+	harness := startLMTPHarness(t, config)
+	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+	harness.write(t, "LHLO submitter.example\r\n")
+	harness.expectLine(t, "250-nauthilus-director\r\n")
+	harness.expectLine(t, "250 ENHANCEDSTATUSCODES\r\n")
+}
+
+// TestCapabilityDenyFilterRejectsSMTPUTF8EnvelopeUse verifies denied UTF-8 paths fail closed.
+func TestCapabilityDenyFilterRejectsSMTPUTF8EnvelopeUse(t *testing.T) {
+	t.Run("mail parameter", func(t *testing.T) {
+		config := testSessionConfig()
+		config.TLSMode = TLSModeImplicit
+		config.Capabilities = []string{capabilitySMTPUTF8}
+		config.CapabilityFilterDeny = []string{capabilitySMTPUTF8}
+
+		harness := startLMTPHarness(t, config)
+		harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+		harness.write(t, "LHLO submitter.example\r\n")
+		harness.expectLine(t, "250 nauthilus-director\r\n")
+		harness.write(t, "MAIL FROM:<sender@example.test> SMTPUTF8\r\n")
+		harness.expectLine(t, "501 5.5.4 Invalid MAIL command\r\n")
+	})
+
+	t.Run("unicode path", func(t *testing.T) {
+		config := testSessionConfig()
+		config.TLSMode = TLSModeImplicit
+		config.Capabilities = []string{capabilitySMTPUTF8}
+		config.CapabilityFilterDeny = []string{capabilitySMTPUTF8}
+
+		harness := startLMTPHarness(t, config)
+		harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+		harness.write(t, "LHLO submitter.example\r\n")
+		harness.expectLine(t, "250 nauthilus-director\r\n")
+		harness.write(t, "MAIL FROM:<"+testUnicodeSender+">\r\n")
+		harness.expectLine(t, "501 5.5.4 Invalid MAIL command\r\n")
+	})
+}
+
+// TestCapabilityDenyFilterRejects8BITMIMEUse verifies denied BODY=8BITMIME cannot start delivery.
+func TestCapabilityDenyFilterRejects8BITMIMEUse(t *testing.T) {
+	config := test8BITMIMEConfig()
+	config.CapabilityFilterDeny = []string{capability8BITMIME}
+
+	harness := startLMTPHarness(t, config)
+	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+	harness.write(t, "LHLO submitter.example\r\n")
+	harness.expectLine(t, "250 nauthilus-director\r\n")
+	harness.write(t, "MAIL FROM:<sender@example.test> BODY=8BITMIME\r\n")
+	harness.expectLine(t, "501 5.5.4 Invalid MAIL command\r\n")
+}
+
+// TestCapabilityDenyFilterRejectsFrontendBDAT verifies CHUNKING denial disables frontend BDAT.
+func TestCapabilityDenyFilterRejectsFrontendBDAT(t *testing.T) {
+	config := testChunkingConfig()
+	config.CapabilityFilterDeny = []string{capabilityCHUNKING}
+
+	harness := startLMTPHarness(t, config)
+	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+	harness.write(t, "LHLO submitter.example\r\n")
+	harness.expectLine(t, "250 nauthilus-director\r\n")
+	harness.write(t, "MAIL FROM:<sender@example.test>\r\n")
+	harness.expectLine(t, "250 2.0.0 Sender accepted\r\n")
+	harness.write(t, "RCPT TO:<recipient@example.test>\r\n")
+	harness.expectLine(t, "250 2.0.0 Recipient accepted\r\n")
+	harness.write(t, "BDAT 0 LAST\r\n")
+	harness.expectLine(t, "502 5.5.1 BDAT is not available\r\n")
+}
+
+// TestCapabilityDenyFilterRemovesBackendCapabilityInput verifies backend proof is listener-filtered.
+func TestCapabilityDenyFilterRemovesBackendCapabilityInput(t *testing.T) {
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	config := testSessionConfig()
+	config.Capabilities = []string{capability8BITMIME, capabilityCHUNKING}
+	config.BackendCapabilities = []string{capability8BITMIME, capabilityCHUNKING}
+	config.CapabilityFilterDeny = []string{capability8BITMIME}
+
+	session, err := NewSession(config, server)
+	if err != nil {
+		t.Fatalf("NewSession returned error: %v", err)
+	}
+
+	if containsCapability(session.backendSafeCapabilities, capability8BITMIME) {
+		t.Fatalf("backend-safe capabilities = %v, want denied 8BITMIME removed", session.backendSafeCapabilities)
+	}
+
+	if !containsCapability(session.backendSafeCapabilities, capabilityCHUNKING) {
+		t.Fatalf("backend-safe capabilities = %v, want CHUNKING preserved", session.backendSafeCapabilities)
+	}
+}
+
+// TestSIZECapabilityAdvertisesEffectiveMaximum verifies LHLO renders the current fixed limit.
+func TestSIZECapabilityAdvertisesEffectiveMaximum(t *testing.T) {
+	tests := map[string]struct {
+		listenerMaximum int64
+		proof           backend.PoolSizeProof
+		want            string
+	}{
+		"listener maximum": {
+			listenerMaximum: 52_428_800,
+			proof:           backend.PoolSizeProof{Supported: true},
+			want:            "250 SIZE 52428800\r\n",
+		},
+		"backend lower maximum": {
+			listenerMaximum: 52_428_800,
+			proof:           backend.PoolSizeProof{Supported: true, HasMaximum: true, MaximumBytes: 10_485_760},
+			want:            "250 SIZE 10485760\r\n",
+		},
+		"backend higher maximum": {
+			listenerMaximum: 1024,
+			proof:           backend.PoolSizeProof{Supported: true, HasMaximum: true, MaximumBytes: 4096},
+			want:            "250 SIZE 1024\r\n",
+		},
+		"backend zero maximum means no fixed backend lowering": {
+			listenerMaximum: 2048,
+			proof:           backend.PoolSizeProof{Supported: true, HasMaximum: true, MaximumBytes: 0},
+			want:            "250 SIZE 2048\r\n",
+		},
+	}
+
+	for name, testCase := range tests {
+		t.Run(name, func(t *testing.T) {
+			config := testSIZEConfig(testCase.listenerMaximum, testCase.proof)
+
+			harness := startLMTPHarness(t, config)
+			harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+			harness.write(t, "LHLO submitter.example\r\n")
+			harness.expectLine(t, "250-nauthilus-director\r\n")
+			harness.expectLine(t, testCase.want)
+		})
+	}
+}
+
+// TestSIZECapabilityOmittedWithoutSafeProof verifies config alone never advertises SIZE.
+func TestSIZECapabilityOmittedWithoutSafeProof(t *testing.T) {
+	tests := map[string]func() SessionConfig{
+		"missing proof reader": func() SessionConfig {
+			config := testSessionConfig()
+			config.TLSMode = TLSModeImplicit
+			config.Capabilities = []string{capabilitySIZE}
+			config.MaxMessageBytes = 1024
+
+			return config
+		},
+		"unsupported proof": func() SessionConfig {
+			return testSIZEConfig(1024, backend.PoolSizeProof{})
+		},
+		"unavailable proof": func() SessionConfig {
+			config := testSIZEConfig(1024, backend.PoolSizeProof{Supported: true})
+			config.BackendSizeProof = &fakeBackendSizeProofReader{err: errors.New("redis unavailable")}
+
+			return config
+		},
+		"denied": func() SessionConfig {
+			config := testSIZEConfig(1024, backend.PoolSizeProof{Supported: true})
+			config.CapabilityFilterDeny = []string{capabilitySIZE}
+
+			return config
+		},
+	}
+
+	for name, makeConfig := range tests {
+		t.Run(name, func(t *testing.T) {
+			harness := startLMTPHarness(t, makeConfig())
+			harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+			harness.write(t, "LHLO submitter.example\r\n")
+			harness.expectLine(t, "250 nauthilus-director\r\n")
+			harness.write(t, "MAIL FROM:<sender@example.test> SIZE=42\r\n")
+			harness.expectLine(t, "501 5.5.4 Invalid MAIL command\r\n")
+		})
+	}
+}
+
+// TestMAILSIZERequiresCurrentSessionAdvertisement verifies SIZE is a negotiated MAIL parameter.
+func TestMAILSIZERequiresCurrentSessionAdvertisement(t *testing.T) {
+	t.Run("before lhlo", func(t *testing.T) {
+		config := testSIZEConfig(1024, backend.PoolSizeProof{Supported: true})
+
+		harness := startLMTPHarness(t, config)
+		harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+		harness.write(t, "MAIL FROM:<sender@example.test> SIZE=42\r\n")
+		harness.expectLine(t, "503 5.5.1 Send LHLO first\r\n")
+	})
+
+	t.Run("after lhlo without size", func(t *testing.T) {
+		config := testSessionConfig()
+		config.TLSMode = TLSModeImplicit
+		config.Capabilities = []string{capabilitySMTPUTF8}
+
+		harness := startLMTPHarness(t, config)
+		harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+		harness.write(t, "LHLO submitter.example\r\n")
+		harness.expectLine(t, "250-nauthilus-director\r\n")
+		harness.expectLine(t, "250 SMTPUTF8\r\n")
+		harness.write(t, "MAIL FROM:<sender@example.test> SIZE=42\r\n")
+		harness.expectLine(t, "501 5.5.4 Invalid MAIL command\r\n")
+	})
+}
+
+// TestMAILSIZEAcceptedWhenAdvertisedAndWithinMaximum verifies accepted declared size state.
+func TestMAILSIZEAcceptedWhenAdvertisedAndWithinMaximum(t *testing.T) {
+	config := testSIZEConfig(1024, backend.PoolSizeProof{Supported: true})
+
+	harness := startLMTPHarness(t, config)
+	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+	harness.write(t, "LHLO submitter.example\r\n")
+	harness.expectLine(t, "250-nauthilus-director\r\n")
+	harness.expectLine(t, "250 SIZE 1024\r\n")
+	harness.write(t, "MAIL FROM:<sender@example.test> SIZE=42\r\n")
+	harness.expectLine(t, "250 2.0.0 Sender accepted\r\n")
+
+	if !harness.session.transaction.declaredSizePresent || harness.session.transaction.declaredSizeBytes != 42 {
+		t.Fatalf("transaction declared size = %d present=%v, want 42 true", harness.session.transaction.declaredSizeBytes, harness.session.transaction.declaredSizePresent)
+	}
+}
+
+// TestMAILSIZEZeroIsAccepted verifies RFC 1870 empty-message declarations are valid.
+func TestMAILSIZEZeroIsAccepted(t *testing.T) {
+	config := testSIZEConfig(1024, backend.PoolSizeProof{Supported: true})
+
+	harness := startLMTPHarness(t, config)
+	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+	harness.write(t, "LHLO submitter.example\r\n")
+	harness.expectLine(t, "250-nauthilus-director\r\n")
+	harness.expectLine(t, "250 SIZE 1024\r\n")
+	harness.write(t, "MAIL FROM:<sender@example.test> SIZE=0\r\n")
+	harness.expectLine(t, "250 2.0.0 Sender accepted\r\n")
+
+	if !harness.session.transaction.declaredSizePresent || harness.session.transaction.declaredSizeBytes != 0 {
+		t.Fatalf("transaction declared size = %d present=%v, want 0 true", harness.session.transaction.declaredSizeBytes, harness.session.transaction.declaredSizePresent)
+	}
+}
+
+// TestMAILSIZERejectsMalformedParameters verifies parser failures stay deterministic.
+func TestMAILSIZERejectsMalformedParameters(t *testing.T) {
+	for _, parameter := range []string{
+		"SIZE=42 SIZE=43",
+		"SIZE=",
+		"SIZE=-1",
+		"SIZE=1.5",
+		"SIZE=18446744073709551616",
+	} {
+		t.Run(parameter, func(t *testing.T) {
+			config := testSIZEConfig(1024, backend.PoolSizeProof{Supported: true})
+
+			harness := startLMTPHarness(t, config)
+			harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+			harness.write(t, "LHLO submitter.example\r\n")
+			harness.drainLHLO(t)
+			harness.write(t, "MAIL FROM:<sender@example.test> "+parameter+"\r\n")
+			harness.expectLine(t, "501 5.5.4 Invalid MAIL command\r\n")
+		})
+	}
+}
+
+// TestMAILSIZERejectsOversizeBeforePlacement verifies declared oversize has no backend side effects.
+func TestMAILSIZERejectsOversizeBeforePlacement(t *testing.T) {
+	identity := identityLookuperForRecipients(map[string]string{testRecipientSingle: testPlacementShardA})
+	resolver := &recordingRoutingResolver{}
+	store := &recordingDeliveryStore{}
+	selector := &recordingBackendSelector{}
+	connector := &recordingLMTPBackendConnector{}
+	config := placementSessionConfig(identity, resolver, store, selector)
+	config.Capabilities = []string{capabilitySIZE}
+	config.MaxMessageBytes = 1024
+	config.BackendSizeProof = &fakeBackendSizeProofReader{proof: backend.PoolSizeProof{Supported: true}}
+	config.BackendConnector = connector
+
+	harness := startLMTPHarness(t, config)
+	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+	harness.write(t, "LHLO submitter.example\r\n")
+	harness.expectLine(t, "250-nauthilus-director\r\n")
+	harness.expectLine(t, "250 SIZE 1024\r\n")
+	harness.write(t, "MAIL FROM:<sender@example.test> SIZE=1025\r\n")
+	harness.expectLine(t, "552 5.3.4 Message size exceeds fixed maximum message size\r\n")
+
+	store.assertOpened(t, 0)
+	store.assertReserved(t, 0)
+	store.assertAttached(t, 0)
+
+	if selector.requestCount() != 0 {
+		t.Fatalf("selector calls = %d, want none", selector.requestCount())
+	}
+
+	if connector.requestCount() != 0 {
+		t.Fatalf("backend connect requests = %d, want none", connector.requestCount())
+	}
+}
+
+// TestMAILSIZECoexistsWithSMTPUTF8And8BITMIME verifies parameter order is deterministic.
+func TestMAILSIZECoexistsWithSMTPUTF8And8BITMIME(t *testing.T) {
+	parameters := []string{
+		"SMTPUTF8 BODY=8BITMIME SIZE=42",
+		"SIZE=42 SMTPUTF8 BODY=8BITMIME",
+		"BODY=8BITMIME SIZE=42 SMTPUTF8",
+	}
+
+	for _, parameter := range parameters {
+		t.Run(parameter, func(t *testing.T) {
+			config := testSIZEConfig(1024, backend.PoolSizeProof{Supported: true})
+			config.Capabilities = []string{capabilitySMTPUTF8, capability8BITMIME, capabilitySIZE}
+			config.BackendCapabilities = []string{capability8BITMIME}
+
+			harness := startLMTPHarness(t, config)
+			harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+			harness.write(t, "LHLO submitter.example\r\n")
+			harness.expectLine(t, "250-nauthilus-director\r\n")
+			harness.expectLine(t, "250-SMTPUTF8\r\n")
+			harness.expectLine(t, "250-8BITMIME\r\n")
+			harness.expectLine(t, "250 SIZE 1024\r\n")
+			harness.write(t, "MAIL FROM:<"+testUnicodeSender+"> "+parameter+"\r\n")
+			harness.expectLine(t, "250 2.0.0 Sender accepted\r\n")
+
+			if !harness.session.transaction.smtpUTF8 || !harness.session.transaction.body8BitMIME ||
+				!harness.session.transaction.declaredSizePresent || harness.session.transaction.declaredSizeBytes != 42 {
+				t.Fatalf("transaction state = %#v, want SMTPUTF8, BODY=8BITMIME and SIZE=42", harness.session.transaction)
+			}
+		})
+	}
+}
+
+// TestPIPELININGCapabilityAdvertisesOnlyWhenConfiguredAndNotDenied verifies the frontend policy gate.
+func TestPIPELININGCapabilityAdvertisesOnlyWhenConfiguredAndNotDenied(t *testing.T) {
+	t.Run("configured", func(t *testing.T) {
+		config := testPipeliningConfig()
+
+		harness := startLMTPHarness(t, config)
+		harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+		harness.write(t, "LHLO submitter.example\r\n")
+		harness.expectLine(t, "250-nauthilus-director\r\n")
+		harness.expectLine(t, "250 PIPELINING\r\n")
+	})
+
+	t.Run("omitted", func(t *testing.T) {
+		config := testSessionConfig()
+		config.TLSMode = TLSModeImplicit
+		config.Capabilities = nil
+
+		harness := startLMTPHarness(t, config)
+		harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+		harness.write(t, "LHLO submitter.example\r\n")
+		harness.expectLine(t, "250 nauthilus-director\r\n")
+	})
+
+	t.Run("denied", func(t *testing.T) {
+		config := testPipeliningConfig()
+		config.CapabilityFilterDeny = []string{capabilityPIPELINING}
+
+		harness := startLMTPHarness(t, config)
+		harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+		harness.write(t, "LHLO submitter.example\r\n")
+		harness.expectLine(t, "250 nauthilus-director\r\n")
+	})
+}
+
+// TestPipelinedMAILRCPTDATARepliesInOrder proves grouped transaction commands keep reply order.
+func TestPipelinedMAILRCPTDATARepliesInOrder(t *testing.T) {
+	sink := &recordingMessageSink{}
+	config := testPipeliningConfig()
+	config.MessageSink = sink
+
+	harness := startLMTPHarness(t, config)
+	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+	harness.write(t, "LHLO submitter.example\r\n")
+	harness.expectLine(t, "250-nauthilus-director\r\n")
+	harness.expectLine(t, "250 PIPELINING\r\n")
+	harness.write(t, strings.Join([]string{
+		"MAIL FROM:<sender@example.test>",
+		"RCPT TO:<first@example.test>",
+		"RCPT TO:<second@example.test>",
+		"DATA",
+		"",
+	}, "\r\n"))
+	harness.expectLine(t, "250 2.0.0 Sender accepted\r\n")
+	harness.expectLine(t, "250 2.0.0 Recipient accepted\r\n")
+	harness.expectLine(t, "250 2.0.0 Recipient accepted\r\n")
+	harness.expectLine(t, "354 2.0.0 End data with <CR><LF>.<CR><LF>\r\n")
+	harness.write(t, "body\r\n.\r\n")
+	harness.expectLine(t, "250 2.0.0 Message accepted\r\n")
+
+	snapshot := sink.singleSnapshot(t)
+	if len(snapshot.Recipients) != 2 {
+		t.Fatalf("recipient count = %d, want two accepted pipelined recipients", len(snapshot.Recipients))
+	}
+}
+
+// TestPipelinedRCPTFailureKeepsFollowingCommands proves same-backend failures do not drop queued input.
+func TestPipelinedRCPTFailureKeepsFollowingCommands(t *testing.T) {
+	identity := identityLookuperForRecipients(map[string]string{
+		testRecipientFirst:  testPlacementShardA,
+		testRecipientSecond: testPlacementShardB,
+	})
+	resolver := &recordingRoutingResolver{}
+	store := &recordingDeliveryStore{}
+	selector := &recordingBackendSelector{backendForShard: map[string]string{testPlacementShardB: testPlacementBackendB}}
+	sink := &recordingMessageSink{}
+	config := placementSessionConfig(identity, resolver, store, selector)
+	config.Capabilities = []string{capabilityPIPELINING}
+	config.MessageSink = sink
+
+	harness := startLMTPHarness(t, config)
+	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+	harness.write(t, "LHLO submitter.example\r\n")
+	harness.expectLine(t, "250-nauthilus-director\r\n")
+	harness.expectLine(t, "250 PIPELINING\r\n")
+	harness.write(t, strings.Join([]string{
+		"MAIL FROM:<sender@example.test>",
+		"RCPT TO:<first@example.test>",
+		"RCPT TO:<second@example.test>",
+		"DATA",
+		"",
+	}, "\r\n"))
+	harness.expectLine(t, "250 2.0.0 Sender accepted\r\n")
+	harness.expectLine(t, "250 2.0.0 Recipient accepted\r\n")
+	harness.expectLine(t, "451 4.3.2 Recipient must be retried separately\r\n")
+	harness.expectLine(t, "354 2.0.0 End data with <CR><LF>.<CR><LF>\r\n")
+	harness.write(t, "body\r\n.\r\n")
+	harness.expectLine(t, "250 2.0.0 Message accepted\r\n")
+
+	snapshot := sink.singleSnapshot(t)
+	if len(snapshot.Recipients) != 1 || snapshot.Recipients[0].WirePath != "<first@example.test>" {
+		t.Fatalf("accepted recipients = %#v, want only first recipient after pipelined failure", snapshot.Recipients)
+	}
+
+	store.assertClosed(t, 2)
+}
+
+// TestPipelinedDATAWithNoAcceptedRecipientsStaysInCommandMode proves DATA failure consumes no body.
+func TestPipelinedDATAWithNoAcceptedRecipientsStaysInCommandMode(t *testing.T) {
+	identity := &recordingIdentityLookuper{results: map[string]nauthilus.AuthResult{
+		testRecipientSingle: {Decision: nauthilus.DecisionRejected},
+	}}
+	resolver := &recordingRoutingResolver{}
+	store := &recordingDeliveryStore{}
+	selector := &recordingBackendSelector{}
+	sink := &recordingMessageSink{}
+	config := placementSessionConfig(identity, resolver, store, selector)
+	config.Capabilities = []string{capabilityPIPELINING}
+	config.MessageSink = sink
+
+	harness := startLMTPHarness(t, config)
+	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+	harness.write(t, "LHLO submitter.example\r\n")
+	harness.expectLine(t, "250-nauthilus-director\r\n")
+	harness.expectLine(t, "250 PIPELINING\r\n")
+	harness.write(t, strings.Join([]string{
+		"MAIL FROM:<sender@example.test>",
+		"RCPT TO:<recipient@example.test>",
+		"DATA",
+		"",
+	}, "\r\n"))
+	harness.expectLine(t, "250 2.0.0 Sender accepted\r\n")
+	harness.expectLine(t, "451 4.3.0 Recipient lookup temporarily unavailable\r\n")
+	harness.expectLine(t, "503 5.5.1 Need recipient before message body\r\n")
+	harness.write(t, "NOOP\r\n")
+	harness.expectLine(t, "250 2.0.0 OK\r\n")
+
+	if sink.finishCount() != 0 || sink.bodyString() != "" {
+		t.Fatalf("sink finish/body = %d/%q, want no body accepted", sink.finishCount(), sink.bodyString())
+	}
+}
+
+// TestPipelinedRSETMAILRCPTPreservesResetSemantics verifies reset boundaries inside a command group.
+func TestPipelinedRSETMAILRCPTPreservesResetSemantics(t *testing.T) {
+	sink := &recordingMessageSink{}
+	config := testPipeliningConfig()
+	config.MessageSink = sink
+
+	harness := startLMTPHarness(t, config)
+	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+	harness.write(t, "LHLO submitter.example\r\n")
+	harness.expectLine(t, "250-nauthilus-director\r\n")
+	harness.expectLine(t, "250 PIPELINING\r\n")
+	harness.write(t, strings.Join([]string{
+		"MAIL FROM:<first-sender@example.test>",
+		"RCPT TO:<first@example.test>",
+		"RSET",
+		"MAIL FROM:<second-sender@example.test>",
+		"RCPT TO:<second@example.test>",
+		"DATA",
+		"",
+	}, "\r\n"))
+	harness.expectLine(t, "250 2.0.0 Sender accepted\r\n")
+	harness.expectLine(t, "250 2.0.0 Recipient accepted\r\n")
+	harness.expectLine(t, "250 2.0.0 Transaction reset\r\n")
+	harness.expectLine(t, "250 2.0.0 Sender accepted\r\n")
+	harness.expectLine(t, "250 2.0.0 Recipient accepted\r\n")
+	harness.expectLine(t, "354 2.0.0 End data with <CR><LF>.<CR><LF>\r\n")
+	harness.write(t, "body\r\n.\r\n")
+	harness.expectLine(t, "250 2.0.0 Message accepted\r\n")
+
+	snapshot := sink.singleSnapshot(t)
+	if len(snapshot.Recipients) != 1 || snapshot.Recipients[0].WirePath != "<second@example.test>" {
+		t.Fatalf("accepted recipients = %#v, want reset transaction recipient", snapshot.Recipients)
+	}
+}
+
+// TestQueuedPlaintextCommandsAfterSTARTTLSFailClosed verifies queued plaintext cannot continue delivery.
+func TestQueuedPlaintextCommandsAfterSTARTTLSFailClosed(t *testing.T) {
+	harness := startLMTPHarness(t, testSessionConfig())
+	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+	harness.write(t, "LHLO submitter.example\r\n")
+	harness.expectLine(t, "250-nauthilus-director\r\n")
+	harness.expectLine(t, "250-SMTPUTF8\r\n")
+	harness.expectLine(t, "250 STARTTLS\r\n")
+	harness.write(t, "STARTTLS\r\nMAIL FROM:<sender@example.test>\r\nNOOP\r\n")
+	harness.expectLine(t, "220 2.0.0 Ready to start TLS\r\n")
+	harness.expectLine(t, "503 5.5.1 Send LHLO first\r\n")
+	harness.expectLine(t, "503 5.5.1 Send LHLO first\r\n")
+}
+
+// TestQueuedCommandsAfterFailedAUTHDoNotBypassPeerAuth verifies failed AUTH gates queued transactions.
+func TestQueuedCommandsAfterFailedAUTHDoNotBypassPeerAuth(t *testing.T) {
+	config := testPipeliningConfig()
+	config.RequirePeerAuth = true
+	config.Authenticator = &recordingAuthenticator{result: nauthilus.AuthResult{Decision: nauthilus.DecisionRejected}}
+	config.Capabilities = []string{capabilityPIPELINING, testPlainAuthCapability}
+	config.PeerAuthMechanisms = []string{mechanismPlain}
+
+	harness := startLMTPHarness(t, config)
+	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+	harness.write(t, "LHLO submitter.example\r\n")
+	harness.expectLine(t, "250-nauthilus-director\r\n")
+	harness.expectLine(t, "250-PIPELINING\r\n")
+	harness.expectLine(t, "250 AUTH PLAIN\r\n")
+	harness.write(t, strings.Join([]string{
+		"AUTH PLAIN " + plainPayload(testSubmitterIdentity, testPeerPassword),
+		"MAIL FROM:<sender@example.test>",
+		"DATA",
+		"",
+	}, "\r\n"))
+	harness.expectLine(t, "535 5.7.8 Authentication credentials invalid\r\n")
+	harness.expectLine(t, "530 5.7.0 Authentication required\r\n")
+	harness.expectLine(t, "530 5.7.0 Authentication required\r\n")
+	harness.write(t, "NOOP\r\n")
+	harness.expectLine(t, "250 2.0.0 OK\r\n")
+}
+
+// TestCHUNKINGAndPIPELININGAdvertiseTogether verifies independent capability policy.
+func TestCHUNKINGAndPIPELININGAdvertiseTogether(t *testing.T) {
+	config := testChunkingConfig()
+	config.Capabilities = []string{capabilityCHUNKING, capabilityPIPELINING}
+
+	harness := startLMTPHarness(t, config)
+	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+	harness.write(t, "LHLO submitter.example\r\n")
+	harness.expectLine(t, "250-nauthilus-director\r\n")
+	harness.expectLine(t, "250-CHUNKING\r\n")
+	harness.expectLine(t, "250 PIPELINING\r\n")
+}
+
 // testSMTPUTF8ParameterWithoutCapability verifies explicit opt-in needs advertisement.
 func testSMTPUTF8ParameterWithoutCapability(t *testing.T) {
 	config := testSessionConfig()
@@ -960,6 +1535,158 @@ func TestDATATerminatorStreamsIncrementally(t *testing.T) {
 	if sink.maxWriteBytes() >= len(testDataBody) {
 		t.Fatalf("max write size = %d, DATA appears whole-buffered", sink.maxWriteBytes())
 	}
+}
+
+// TestDATAExactSizeLimitSucceeds verifies decoded DATA bytes can match the fixed limit.
+func TestDATAExactSizeLimitSucceeds(t *testing.T) {
+	sink := &recordingMessageSink{}
+	config := testSIZEConfig(5, backend.PoolSizeProof{Supported: true})
+	config.MessageSink = sink
+
+	harness := startLMTPHarness(t, config)
+	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+	harness.write(t, "LHLO submitter.example\r\n")
+	harness.expectLine(t, "250-nauthilus-director\r\n")
+	harness.expectLine(t, "250 SIZE 5\r\n")
+	harness.write(t, "MAIL FROM:<sender@example.test> SIZE=1\r\n")
+	harness.expectLine(t, "250 2.0.0 Sender accepted\r\n")
+	harness.write(t, "RCPT TO:<recipient@example.test>\r\n")
+	harness.expectLine(t, "250 2.0.0 Recipient accepted\r\n")
+	harness.write(t, "DATA\r\n")
+	harness.expectLine(t, "354 2.0.0 End data with <CR><LF>.<CR><LF>\r\n")
+	harness.write(t, "abc\r\n.\r\n")
+	harness.expectLine(t, "250 2.0.0 Message accepted\r\n")
+
+	if got := sink.bodyString(); got != "abc\r\n" {
+		t.Fatalf("DATA body = %q, want CRLF-preserved content", got)
+	}
+}
+
+// TestDATACRLFBytesCountTowardSizeLimit verifies line endings are message bytes.
+func TestDATACRLFBytesCountTowardSizeLimit(t *testing.T) {
+	sink := &recordingMessageSink{}
+	config := testSIZEConfig(3, backend.PoolSizeProof{Supported: true})
+	config.MessageSink = sink
+
+	harness := startLMTPHarness(t, config)
+	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+	harness.write(t, "LHLO submitter.example\r\n")
+	harness.expectLine(t, "250-nauthilus-director\r\n")
+	harness.expectLine(t, "250 SIZE 3\r\n")
+	harness.write(t, "MAIL FROM:<sender@example.test> SIZE=3\r\n")
+	harness.expectLine(t, "250 2.0.0 Sender accepted\r\n")
+	harness.write(t, "RCPT TO:<recipient@example.test>\r\n")
+	harness.expectLine(t, "250 2.0.0 Recipient accepted\r\n")
+	harness.write(t, "DATA\r\n")
+	harness.expectLine(t, "354 2.0.0 End data with <CR><LF>.<CR><LF>\r\n")
+	harness.write(t, "abc\r\n.\r\n")
+	harness.expectLine(t, "552 5.3.4 Message size exceeds fixed maximum message size\r\n")
+	harness.write(t, "NOOP\r\n")
+	harness.expectLine(t, "250 2.0.0 OK\r\n")
+
+	if sink.finishCount() != 0 || sink.abortCount() != 1 {
+		t.Fatalf("sink finish/abort = %d/%d, want 0/1", sink.finishCount(), sink.abortCount())
+	}
+}
+
+// TestDATADotStuffedBytesCountAfterUnstuffing verifies DATA dot transparency.
+func TestDATADotStuffedBytesCountAfterUnstuffing(t *testing.T) {
+	sink := &recordingMessageSink{}
+	config := testSIZEConfig(3, backend.PoolSizeProof{Supported: true})
+	config.MessageSink = sink
+
+	harness := startLMTPHarness(t, config)
+	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+	harness.write(t, "LHLO submitter.example\r\n")
+	harness.expectLine(t, "250-nauthilus-director\r\n")
+	harness.expectLine(t, "250 SIZE 3\r\n")
+	harness.write(t, "MAIL FROM:<sender@example.test>\r\n")
+	harness.expectLine(t, "250 2.0.0 Sender accepted\r\n")
+	harness.write(t, "RCPT TO:<recipient@example.test>\r\n")
+	harness.expectLine(t, "250 2.0.0 Recipient accepted\r\n")
+	harness.write(t, "DATA\r\n")
+	harness.expectLine(t, "354 2.0.0 End data with <CR><LF>.<CR><LF>\r\n")
+	harness.write(t, "..\r\n.\r\n")
+	harness.expectLine(t, "250 2.0.0 Message accepted\r\n")
+
+	if got := sink.bodyString(); got != ".\r\n" {
+		t.Fatalf("DATA body = %q, want dot-unstuffed content", got)
+	}
+}
+
+// TestDATATerminatorDoesNotCountTowardSizeLimit verifies DATA framing is separate.
+func TestDATATerminatorDoesNotCountTowardSizeLimit(t *testing.T) {
+	sink := &recordingMessageSink{}
+	config := testSIZEConfig(1, backend.PoolSizeProof{Supported: true})
+	config.MessageSink = sink
+
+	harness := startLMTPHarness(t, config)
+	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+	harness.write(t, "LHLO submitter.example\r\n")
+	harness.expectLine(t, "250-nauthilus-director\r\n")
+	harness.expectLine(t, "250 SIZE 1\r\n")
+	harness.write(t, "MAIL FROM:<sender@example.test> SIZE=0\r\n")
+	harness.expectLine(t, "250 2.0.0 Sender accepted\r\n")
+	harness.write(t, "RCPT TO:<recipient@example.test>\r\n")
+	harness.expectLine(t, "250 2.0.0 Recipient accepted\r\n")
+	harness.write(t, "DATA\r\n")
+	harness.expectLine(t, "354 2.0.0 End data with <CR><LF>.<CR><LF>\r\n")
+	harness.write(t, ".\r\n")
+	harness.expectLine(t, "250 2.0.0 Message accepted\r\n")
+}
+
+// TestBDATActualSizeEnforcesEffectiveMaximum verifies exact chunk-size accounting and drains.
+func TestBDATActualSizeEnforcesEffectiveMaximum(t *testing.T) {
+	t.Run("exact maximum succeeds", func(t *testing.T) {
+		sink := &recordingMessageSink{}
+		config := testSIZEConfig(5, backend.PoolSizeProof{Supported: true})
+		config.Capabilities = []string{capabilityCHUNKING, capabilitySIZE}
+		config.BackendCapabilities = []string{capabilityCHUNKING}
+		config.MessageSink = sink
+
+		harness := startLMTPHarness(t, config)
+		harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+		harness.write(t, "LHLO submitter.example\r\n")
+		harness.expectLine(t, "250-nauthilus-director\r\n")
+		harness.expectLine(t, "250-CHUNKING\r\n")
+		harness.expectLine(t, "250 SIZE 5\r\n")
+		harness.write(t, "MAIL FROM:<sender@example.test> SIZE=1\r\n")
+		harness.expectLine(t, "250 2.0.0 Sender accepted\r\n")
+		harness.write(t, "RCPT TO:<recipient@example.test>\r\n")
+		harness.expectLine(t, "250 2.0.0 Recipient accepted\r\n")
+		harness.write(t, "BDAT 5 LAST\r\nhello")
+		harness.expectLine(t, "250 2.0.0 Message accepted\r\n")
+
+		if got := sink.bodyString(); got != "hello" {
+			t.Fatalf("BDAT body = %q, want exact payload", got)
+		}
+	})
+
+	t.Run("oversize drains failed payload and keeps command mode", func(t *testing.T) {
+		sink := &recordingMessageSink{}
+		config := testSIZEConfig(5, backend.PoolSizeProof{Supported: true})
+		config.Capabilities = []string{capabilityCHUNKING, capabilitySIZE}
+		config.BackendCapabilities = []string{capabilityCHUNKING}
+		config.MessageSink = sink
+
+		harness := startLMTPHarness(t, config)
+		harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+		harness.write(t, "LHLO submitter.example\r\n")
+		harness.expectLine(t, "250-nauthilus-director\r\n")
+		harness.expectLine(t, "250-CHUNKING\r\n")
+		harness.expectLine(t, "250 SIZE 5\r\n")
+		harness.write(t, "MAIL FROM:<sender@example.test> SIZE=1\r\n")
+		harness.expectLine(t, "250 2.0.0 Sender accepted\r\n")
+		harness.write(t, "RCPT TO:<recipient@example.test>\r\n")
+		harness.expectLine(t, "250 2.0.0 Recipient accepted\r\n")
+		harness.write(t, "BDAT 6 LAST\r\nsecretNOOP\r\n")
+		harness.expectLine(t, "552 5.3.4 Message size exceeds fixed maximum message size\r\n")
+		harness.expectLine(t, "250 2.0.0 OK\r\n")
+
+		if sink.bodyString() != "" || sink.finishCount() != 0 {
+			t.Fatalf("sink body/finish = %q/%d, want empty/0", sink.bodyString(), sink.finishCount())
+		}
+	})
 }
 
 // TestRecipientPlacementUsesIdentityRoutingAndPreservesWirePath verifies recipient placement facts.
@@ -1766,7 +2493,7 @@ func TestBackendDATAUsesBDATWhenBackendAdvertisesChunking(t *testing.T) {
 	store := &recordingDeliveryStore{}
 	selector := &recordingBackendSelector{}
 	dialer := scriptedLMTPBackendDialer(t, func(t *testing.T, conn net.Conn) {
-		reader := greetChunkingTransactionBackend(t, conn)
+		reader := greetChunkingSizedTransactionBackend(t, conn, "5")
 		expectLMTPBackendLine(t, reader, "MAIL FROM:<sender@example.test>")
 		writeLMTPBackendLine(t, conn, "250 2.1.0 sender ok")
 		expectLMTPBackendLine(t, reader, "RCPT TO:<recipient@example.test>")
@@ -1794,6 +2521,155 @@ func TestBackendDATAUsesBDATWhenBackendAdvertisesChunking(t *testing.T) {
 	dialer.Wait(t)
 }
 
+// TestBackendDATAOversizeThroughBDATClosesBackend verifies size failure stops DATA-to-BDAT forwarding.
+func TestBackendDATAOversizeThroughBDATClosesBackend(t *testing.T) {
+	identity := identityLookuperForRecipients(map[string]string{
+		testRecipientSingle: testPlacementShardA,
+	})
+	resolver := &recordingRoutingResolver{}
+	store := &recordingDeliveryStore{}
+	selector := &recordingBackendSelector{}
+	dialer := scriptedLMTPBackendDialer(t, func(t *testing.T, conn net.Conn) {
+		reader := greetChunkingSizedTransactionBackend(t, conn, "5")
+		expectLMTPBackendLine(t, reader, "MAIL FROM:<sender@example.test> SIZE=1")
+		writeLMTPBackendLine(t, conn, "250 2.1.0 sender ok")
+		expectLMTPBackendLine(t, reader, "RCPT TO:<recipient@example.test>")
+		writeLMTPBackendLine(t, conn, "250 2.1.5 recipient ok")
+
+		if err := conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+			t.Fatalf("set backend read deadline: %v", err)
+		}
+
+		line, err := reader.ReadString('\n')
+		if err == nil {
+			t.Fatalf("backend received unexpected command after DATA size failure: %q", strings.TrimRight(line, "\r\n"))
+		}
+
+		var netErr net.Error
+		if errors.As(err, &netErr) && netErr.Timeout() {
+			t.Fatal("backend stream was not closed after DATA size failure")
+		}
+	})
+	config := backendForwardingSessionConfig(identity, resolver, store, selector, dialer)
+	config.Capabilities = []string{capabilitySIZE}
+	config.MaxMessageBytes = 5
+	config.BackendSizeProof = &fakeBackendSizeProofReader{proof: backend.PoolSizeProof{Supported: true}}
+
+	harness := startLMTPHarness(t, config)
+	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+	harness.write(t, "LHLO submitter.example\r\n")
+	harness.expectLine(t, "250-nauthilus-director\r\n")
+	harness.expectLine(t, "250 SIZE 5\r\n")
+	harness.write(t, "MAIL FROM:<sender@example.test> SIZE=1\r\n")
+	harness.expectLine(t, "250 2.0.0 Sender accepted\r\n")
+	harness.write(t, "RCPT TO:<recipient@example.test>\r\n")
+	harness.expectLine(t, "250 2.0.0 Recipient accepted\r\n")
+	harness.write(t, "DATA\r\n")
+	harness.expectLine(t, "354 2.0.0 End data with <CR><LF>.<CR><LF>\r\n")
+	harness.write(t, "abc\r\nz\r\n.\r\n")
+	harness.expectLine(t, "552 5.3.4 Message size exceeds fixed maximum message size\r\n")
+	harness.write(t, "NOOP\r\n")
+	harness.expectLine(t, "250 2.0.0 OK\r\n")
+
+	store.assertClosed(t, 1)
+	dialer.Wait(t)
+}
+
+// TestBackendDATAOversizeFallbackClosesBackend verifies backend DATA is aborted on size failure.
+func TestBackendDATAOversizeFallbackClosesBackend(t *testing.T) {
+	identity := identityLookuperForRecipients(map[string]string{
+		testRecipientSingle: testPlacementShardA,
+	})
+	resolver := &recordingRoutingResolver{}
+	store := &recordingDeliveryStore{}
+	selector := &recordingBackendSelector{}
+	dialer := scriptedLMTPBackendDialer(t, func(t *testing.T, conn net.Conn) {
+		reader := greetSizedTransactionBackend(t, conn, "5")
+		expectLMTPBackendLine(t, reader, "MAIL FROM:<sender@example.test> SIZE=1")
+		writeLMTPBackendLine(t, conn, "250 2.1.0 sender ok")
+		expectLMTPBackendLine(t, reader, "RCPT TO:<recipient@example.test>")
+		writeLMTPBackendLine(t, conn, "250 2.1.5 recipient ok")
+		expectLMTPBackendLine(t, reader, "DATA")
+		writeLMTPBackendLine(t, conn, "354 2.0.0 send data")
+
+		if err := conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+			t.Fatalf("set backend read deadline: %v", err)
+		}
+
+		line, err := reader.ReadString('\n')
+		if err == nil {
+			t.Fatalf("backend received unexpected DATA after size failure: %q", strings.TrimRight(line, "\r\n"))
+		}
+
+		var netErr net.Error
+		if errors.As(err, &netErr) && netErr.Timeout() {
+			t.Fatal("backend DATA stream was not closed after size failure")
+		}
+	})
+	config := backendForwardingSessionConfig(identity, resolver, store, selector, dialer)
+	config.Capabilities = []string{capabilitySIZE}
+	config.MaxMessageBytes = 5
+	config.BackendSizeProof = &fakeBackendSizeProofReader{proof: backend.PoolSizeProof{Supported: true}}
+
+	harness := startLMTPHarness(t, config)
+	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+	harness.write(t, "LHLO submitter.example\r\n")
+	harness.expectLine(t, "250-nauthilus-director\r\n")
+	harness.expectLine(t, "250 SIZE 5\r\n")
+	harness.write(t, "MAIL FROM:<sender@example.test> SIZE=1\r\n")
+	harness.expectLine(t, "250 2.0.0 Sender accepted\r\n")
+	harness.write(t, "RCPT TO:<recipient@example.test>\r\n")
+	harness.expectLine(t, "250 2.0.0 Recipient accepted\r\n")
+	harness.write(t, "DATA\r\n")
+	harness.expectLine(t, "354 2.0.0 End data with <CR><LF>.<CR><LF>\r\n")
+	harness.write(t, "abc\r\nz\r\n.\r\n")
+	harness.expectLine(t, "552 5.3.4 Message size exceeds fixed maximum message size\r\n")
+
+	store.assertClosed(t, 1)
+	dialer.Wait(t)
+}
+
+// TestBackendDATADeniedChunkingFallsBackToDATA verifies listener policy disables backend BDAT optimization.
+func TestBackendDATADeniedChunkingFallsBackToDATA(t *testing.T) {
+	identity := identityLookuperForRecipients(map[string]string{
+		testRecipientSingle: testPlacementShardA,
+	})
+	resolver := &recordingRoutingResolver{}
+	store := &recordingDeliveryStore{}
+	selector := &recordingBackendSelector{}
+	dialer := scriptedLMTPBackendDialer(t, func(t *testing.T, conn net.Conn) {
+		reader := greetChunkingSizedTransactionBackend(t, conn, "5")
+		expectLMTPBackendLine(t, reader, "MAIL FROM:<sender@example.test>")
+		writeLMTPBackendLine(t, conn, "250 2.1.0 sender ok")
+		expectLMTPBackendLine(t, reader, "RCPT TO:<recipient@example.test>")
+		writeLMTPBackendLine(t, conn, "250 2.1.5 recipient ok")
+		expectLMTPBackendLine(t, reader, "DATA")
+		writeLMTPBackendLine(t, conn, "354 2.0.0 send data")
+		expectLMTPBackendLine(t, reader, "line-one")
+		expectLMTPBackendLine(t, reader, "..line-two")
+		expectLMTPBackendLine(t, reader, ".")
+		writeLMTPBackendLine(t, conn, "250 2.1.5 delivered")
+	})
+	config := backendForwardingSessionConfig(identity, resolver, store, selector, dialer)
+	config.CapabilityFilterDeny = []string{capabilityCHUNKING}
+
+	harness := startLMTPHarness(t, config)
+	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+	harness.write(t, "LHLO submitter.example\r\n")
+	harness.drainLHLO(t)
+	harness.write(t, "MAIL FROM:<sender@example.test>\r\n")
+	harness.expectLine(t, "250 2.0.0 Sender accepted\r\n")
+	harness.write(t, "RCPT TO:<recipient@example.test>\r\n")
+	harness.expectLine(t, "250 2.0.0 Recipient accepted\r\n")
+	harness.write(t, "DATA\r\n")
+	harness.expectLine(t, "354 2.0.0 End data with <CR><LF>.<CR><LF>\r\n")
+	harness.write(t, "line-one\r\n..line-two\r\n.\r\n")
+	harness.expectLine(t, "250 2.1.5 Message accepted\r\n")
+
+	store.assertClosed(t, 1)
+	dialer.Wait(t)
+}
+
 // TestBackendDATAEmptyBodyUsesBDATZeroLast verifies empty DATA converts to a final empty BDAT.
 func TestBackendDATAEmptyBodyUsesBDATZeroLast(t *testing.T) {
 	identity := identityLookuperForRecipients(map[string]string{
@@ -1803,7 +2679,7 @@ func TestBackendDATAEmptyBodyUsesBDATZeroLast(t *testing.T) {
 	store := &recordingDeliveryStore{}
 	selector := &recordingBackendSelector{}
 	dialer := scriptedLMTPBackendDialer(t, func(t *testing.T, conn net.Conn) {
-		reader := greetChunkingTransactionBackend(t, conn)
+		reader := greetChunkingSizedTransactionBackend(t, conn, "5")
 		expectLMTPBackendLine(t, reader, "MAIL FROM:<sender@example.test>")
 		writeLMTPBackendLine(t, conn, "250 2.1.0 sender ok")
 		expectLMTPBackendLine(t, reader, "RCPT TO:<recipient@example.test>")
@@ -2303,6 +3179,200 @@ func TestBackendBDATWithoutSelectedChunkingTempfailsAndClosesBackend(t *testing.
 	dialer.Wait(t)
 }
 
+// TestBackendBDATOversizeDrainsAndStopsForwarding verifies oversized frontend BDAT never reaches backend.
+func TestBackendBDATOversizeDrainsAndStopsForwarding(t *testing.T) {
+	identity := identityLookuperForRecipients(map[string]string{
+		testRecipientSingle: testPlacementShardA,
+	})
+	resolver := &recordingRoutingResolver{}
+	store := &recordingDeliveryStore{}
+	selector := &recordingBackendSelector{}
+	dialer := scriptedLMTPBackendDialer(t, func(t *testing.T, conn net.Conn) {
+		reader := greetChunkingSizedTransactionBackend(t, conn, "5")
+		expectLMTPBackendLine(t, reader, "MAIL FROM:<sender@example.test> SIZE=1")
+		writeLMTPBackendLine(t, conn, "250 2.1.0 sender ok")
+		expectLMTPBackendLine(t, reader, "RCPT TO:<recipient@example.test>")
+		writeLMTPBackendLine(t, conn, "250 2.1.5 recipient ok")
+
+		if err := conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+			t.Fatalf("set backend read deadline: %v", err)
+		}
+
+		line, err := reader.ReadString('\n')
+		if err == nil {
+			t.Fatalf("backend received unexpected command after BDAT size failure: %q", strings.TrimRight(line, "\r\n"))
+		}
+
+		var netErr net.Error
+		if errors.As(err, &netErr) && netErr.Timeout() {
+			t.Fatal("backend stream was not closed after BDAT size failure")
+		}
+	})
+	config := backendForwardingSessionConfig(identity, resolver, store, selector, dialer)
+	config.Capabilities = []string{capabilityCHUNKING, capabilitySIZE}
+	config.BackendCapabilities = []string{capabilityCHUNKING}
+	config.MaxMessageBytes = 5
+	config.BackendSizeProof = &fakeBackendSizeProofReader{proof: backend.PoolSizeProof{Supported: true}}
+
+	harness := startLMTPHarness(t, config)
+	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+	harness.write(t, "LHLO submitter.example\r\n")
+	harness.expectLine(t, "250-nauthilus-director\r\n")
+	harness.expectLine(t, "250-CHUNKING\r\n")
+	harness.expectLine(t, "250 SIZE 5\r\n")
+	harness.write(t, "MAIL FROM:<sender@example.test> SIZE=1\r\n")
+	harness.expectLine(t, "250 2.0.0 Sender accepted\r\n")
+	harness.write(t, "RCPT TO:<recipient@example.test>\r\n")
+	harness.expectLine(t, "250 2.0.0 Recipient accepted\r\n")
+	harness.write(t, "BDAT 6 LAST\r\nsecretNOOP\r\n")
+	harness.expectLine(t, "552 5.3.4 Message size exceeds fixed maximum message size\r\n")
+	harness.expectLine(t, "250 2.0.0 OK\r\n")
+
+	store.assertClosed(t, 1)
+	dialer.Wait(t)
+}
+
+// TestPipelinedBDATChunksKeepFramingAndFinalOrdering verifies adjacent chunks remain byte-exact.
+func TestPipelinedBDATChunksKeepFramingAndFinalOrdering(t *testing.T) {
+	identity := identityLookuperForRecipients(map[string]string{
+		testRecipientFirst:  testPlacementShardA,
+		testRecipientSecond: testPlacementShardA,
+	})
+	resolver := &recordingRoutingResolver{}
+	store := &recordingDeliveryStore{}
+	selector := &recordingBackendSelector{}
+	dialer := scriptedLMTPBackendDialer(t, func(t *testing.T, conn net.Conn) {
+		reader := greetChunkingTransactionBackend(t, conn)
+		expectLMTPBackendLine(t, reader, "MAIL FROM:<sender@example.test>")
+		writeLMTPBackendLine(t, conn, "250 2.1.0 sender ok")
+		expectLMTPBackendLine(t, reader, "RCPT TO:<first@example.test>")
+		writeLMTPBackendLine(t, conn, "250 2.1.5 first ok")
+		expectLMTPBackendLine(t, reader, "RCPT TO:<second@example.test>")
+		writeLMTPBackendLine(t, conn, "250 2.1.5 second ok")
+		expectLMTPBackendLine(t, reader, "BDAT 5")
+		expectLMTPBackendBytes(t, reader, "hello")
+		writeLMTPBackendLine(t, conn, "250 2.0.0 chunk ok")
+		expectLMTPBackendLine(t, reader, "BDAT 5 LAST")
+		expectLMTPBackendBytes(t, reader, "world")
+		writeLMTPBackendLine(t, conn, "250 2.1.5 delivered")
+		writeLMTPBackendLine(t, conn, "451 4.2.0 temporary policy detail")
+	})
+	config := backendForwardingSessionConfig(identity, resolver, store, selector, dialer)
+	config.Capabilities = []string{capabilityCHUNKING, capabilityPIPELINING}
+	config.BackendCapabilities = []string{capabilityCHUNKING}
+
+	harness := startLMTPHarness(t, config)
+	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+	harness.write(t, "LHLO submitter.example\r\n")
+	harness.expectLine(t, "250-nauthilus-director\r\n")
+	harness.expectLine(t, "250-CHUNKING\r\n")
+	harness.expectLine(t, "250 PIPELINING\r\n")
+	harness.write(t, strings.Join([]string{
+		"MAIL FROM:<sender@example.test>",
+		"RCPT TO:<first@example.test>",
+		"RCPT TO:<second@example.test>",
+		"",
+	}, "\r\n"))
+	harness.expectLine(t, "250 2.0.0 Sender accepted\r\n")
+	harness.expectLine(t, "250 2.0.0 Recipient accepted\r\n")
+	harness.expectLine(t, "250 2.0.0 Recipient accepted\r\n")
+	harness.write(t, "BDAT 5\r\nhelloBDAT 5 LAST\r\nworld")
+	harness.expectLine(t, "250 2.0.0 Message accepted\r\n")
+	harness.expectLine(t, "250 2.1.5 Message accepted\r\n")
+	harness.expectLine(t, "451 4.2.0 Message delivery temporarily failed\r\n")
+
+	store.assertClosed(t, 2)
+	dialer.Wait(t)
+}
+
+// TestPipelinedFailedBDATDrainsQueuedChunksAndStopsBackend verifies failed chunks cannot desynchronize.
+func TestPipelinedFailedBDATDrainsQueuedChunksAndStopsBackend(t *testing.T) {
+	identity := identityLookuperForRecipients(map[string]string{
+		testRecipientSingle: testPlacementShardA,
+	})
+	resolver := &recordingRoutingResolver{}
+	store := &recordingDeliveryStore{}
+	selector := &recordingBackendSelector{}
+	dialer := scriptedLMTPBackendDialer(t, func(t *testing.T, conn net.Conn) {
+		reader := greetChunkingSizedTransactionBackend(t, conn, "5")
+		expectLMTPBackendLine(t, reader, "MAIL FROM:<sender@example.test> SIZE=1")
+		writeLMTPBackendLine(t, conn, "250 2.1.0 sender ok")
+		expectLMTPBackendLine(t, reader, "RCPT TO:<recipient@example.test>")
+		writeLMTPBackendLine(t, conn, "250 2.1.5 recipient ok")
+
+		if err := conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+			t.Fatalf("set backend read deadline: %v", err)
+		}
+
+		line, err := reader.ReadString('\n')
+		if err == nil {
+			t.Fatalf("backend received unexpected command after failed frontend BDAT: %q", strings.TrimRight(line, "\r\n"))
+		}
+
+		var netErr net.Error
+		if errors.As(err, &netErr) && netErr.Timeout() {
+			t.Fatal("backend stream was not closed after failed frontend BDAT")
+		}
+	})
+	config := backendForwardingSessionConfig(identity, resolver, store, selector, dialer)
+	config.Capabilities = []string{capabilityCHUNKING, capabilitySIZE, capabilityPIPELINING}
+	config.BackendCapabilities = []string{capabilityCHUNKING}
+	config.MaxMessageBytes = 5
+	config.BackendSizeProof = &fakeBackendSizeProofReader{proof: backend.PoolSizeProof{Supported: true}}
+
+	harness := startLMTPHarness(t, config)
+	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+	harness.write(t, "LHLO submitter.example\r\n")
+	harness.expectLine(t, "250-nauthilus-director\r\n")
+	harness.expectLine(t, "250-CHUNKING\r\n")
+	harness.expectLine(t, "250-SIZE 5\r\n")
+	harness.expectLine(t, "250 PIPELINING\r\n")
+	harness.write(t, strings.Join([]string{
+		"MAIL FROM:<sender@example.test> SIZE=1",
+		"RCPT TO:<recipient@example.test>",
+		"",
+	}, "\r\n"))
+	harness.expectLine(t, "250 2.0.0 Sender accepted\r\n")
+	harness.expectLine(t, "250 2.0.0 Recipient accepted\r\n")
+	harness.write(t, "BDAT 6\r\nsecretBDAT 5 LAST\r\nlaterNOOP\r\n")
+	harness.expectLine(t, "552 5.3.4 Message size exceeds fixed maximum message size\r\n")
+	harness.expectLine(t, "503 5.5.1 Send MAIL first\r\n")
+	harness.expectLine(t, "250 2.0.0 OK\r\n")
+
+	store.assertClosed(t, 1)
+	dialer.Wait(t)
+}
+
+// TestPipelinedBDATAfterLASTDrainsPayloadAndReturnsToCommandMode verifies extra body chunks fail safely.
+func TestPipelinedBDATAfterLASTDrainsPayloadAndReturnsToCommandMode(t *testing.T) {
+	sink := &recordingMessageSink{}
+	config := testChunkingConfig()
+	config.Capabilities = []string{capabilityCHUNKING, capabilityPIPELINING}
+	config.MessageSink = sink
+
+	harness := startLMTPHarness(t, config)
+	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+	harness.write(t, "LHLO submitter.example\r\n")
+	harness.expectLine(t, "250-nauthilus-director\r\n")
+	harness.expectLine(t, "250-CHUNKING\r\n")
+	harness.expectLine(t, "250 PIPELINING\r\n")
+	harness.write(t, strings.Join([]string{
+		"MAIL FROM:<sender@example.test>",
+		"RCPT TO:<recipient@example.test>",
+		"",
+	}, "\r\n"))
+	harness.expectLine(t, "250 2.0.0 Sender accepted\r\n")
+	harness.expectLine(t, "250 2.0.0 Recipient accepted\r\n")
+	harness.write(t, "BDAT 0 LAST\r\nBDAT 4 LAST\r\njunkNOOP\r\n")
+	harness.expectLine(t, "250 2.0.0 Message accepted\r\n")
+	harness.expectLine(t, "503 5.5.1 Send MAIL first\r\n")
+	harness.expectLine(t, "250 2.0.0 OK\r\n")
+
+	if sink.finishCount() != 1 {
+		t.Fatalf("finish count = %d, want one completed message", sink.finishCount())
+	}
+}
+
 // TestMidDATAFailureMapsUnknownRecipientsToTemporaryFailure verifies opaque stream failure handling.
 func TestMidDATAFailureMapsUnknownRecipientsToTemporaryFailure(t *testing.T) {
 	secretBody := "opaque-secret-body"
@@ -2469,6 +3539,138 @@ func TestBackendMAILForwardsAccepted8BITMIMEParameter(t *testing.T) {
 	dialer.Wait(t)
 }
 
+// TestBackendMAILForwardsAcceptedSIZEParameter verifies selected-backend SIZE proof and ordering.
+func TestBackendMAILForwardsAcceptedSIZEParameter(t *testing.T) {
+	identity := identityLookuperForRecipients(map[string]string{testRecipientSingle: testPlacementShardA})
+	resolver := &recordingRoutingResolver{}
+	store := &recordingDeliveryStore{}
+	selector := &recordingBackendSelector{}
+	dialer := scriptedLMTPBackendDialer(t, func(t *testing.T, conn net.Conn) {
+		reader := greetSizedTransactionBackend(t, conn, "100")
+		expectLMTPBackendLine(t, reader, "MAIL FROM:<"+testUnicodeSender+"> SMTPUTF8 BODY=8BITMIME SIZE=42")
+		writeLMTPBackendLine(t, conn, "250 2.1.0 sender ok")
+		expectLMTPBackendLine(t, reader, "RCPT TO:<recipient@example.test>")
+		writeLMTPBackendLine(t, conn, "250 2.1.5 recipient ok")
+		expectLMTPBackendLine(t, reader, "DATA")
+		writeLMTPBackendLine(t, conn, "354 2.0.0 data")
+		expectLMTPBackendLine(t, reader, "body")
+		expectLMTPBackendLine(t, reader, ".")
+		writeLMTPBackendLine(t, conn, "250 2.1.5 delivered")
+	})
+	config := backendForwardingSessionConfig(identity, resolver, store, selector, dialer)
+	config.Capabilities = []string{capabilitySMTPUTF8, capability8BITMIME, capabilitySIZE}
+	config.BackendCapabilities = []string{capability8BITMIME}
+	config.MaxMessageBytes = 100
+	config.BackendSizeProof = &fakeBackendSizeProofReader{proof: backend.PoolSizeProof{Supported: true}}
+
+	harness := startLMTPHarness(t, config)
+	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+	harness.write(t, "LHLO submitter.example\r\n")
+	harness.expectLine(t, "250-nauthilus-director\r\n")
+	harness.expectLine(t, "250-SMTPUTF8\r\n")
+	harness.expectLine(t, "250-8BITMIME\r\n")
+	harness.expectLine(t, "250 SIZE 100\r\n")
+	harness.write(t, "MAIL FROM:<"+testUnicodeSender+"> SIZE=42 BODY=8BITMIME SMTPUTF8\r\n")
+	harness.expectLine(t, "250 2.0.0 Sender accepted\r\n")
+	harness.write(t, "RCPT TO:<recipient@example.test>\r\n")
+	harness.expectLine(t, "250 2.0.0 Recipient accepted\r\n")
+	harness.write(t, "DATA\r\n")
+	harness.expectLine(t, "354 2.0.0 End data with <CR><LF>.<CR><LF>\r\n")
+	harness.write(t, "body\r\n.\r\n")
+	harness.expectLine(t, "250 2.1.5 Message accepted\r\n")
+
+	store.assertClosed(t, 1)
+	dialer.Wait(t)
+}
+
+// TestBackendMAILDoesNotSynthesizeSIZEWhenFrontendOmitted keeps backend MAIL declarative only.
+func TestBackendMAILDoesNotSynthesizeSIZEWhenFrontendOmitted(t *testing.T) {
+	identity := identityLookuperForRecipients(map[string]string{testRecipientSingle: testPlacementShardA})
+	resolver := &recordingRoutingResolver{}
+	store := &recordingDeliveryStore{}
+	selector := &recordingBackendSelector{}
+	dialer := scriptedLMTPBackendDialer(t, func(t *testing.T, conn net.Conn) {
+		reader := greetSizedTransactionBackend(t, conn, "100")
+		expectLMTPBackendLine(t, reader, "MAIL FROM:<sender@example.test>")
+		writeLMTPBackendLine(t, conn, "250 2.1.0 sender ok")
+		expectLMTPBackendLine(t, reader, "RCPT TO:<recipient@example.test>")
+		writeLMTPBackendLine(t, conn, "250 2.1.5 recipient ok")
+		expectLMTPBackendLine(t, reader, "DATA")
+		writeLMTPBackendLine(t, conn, "354 2.0.0 data")
+		expectLMTPBackendLine(t, reader, "body")
+		expectLMTPBackendLine(t, reader, ".")
+		writeLMTPBackendLine(t, conn, "250 2.1.5 delivered")
+	})
+	config := backendForwardingSessionConfig(identity, resolver, store, selector, dialer)
+	config.Capabilities = []string{capabilitySIZE}
+	config.MaxMessageBytes = 100
+	config.BackendSizeProof = &fakeBackendSizeProofReader{proof: backend.PoolSizeProof{Supported: true}}
+
+	harness := startLMTPHarness(t, config)
+	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+	harness.write(t, "LHLO submitter.example\r\n")
+	harness.expectLine(t, "250-nauthilus-director\r\n")
+	harness.expectLine(t, "250 SIZE 100\r\n")
+	harness.write(t, "MAIL FROM:<sender@example.test>\r\n")
+	harness.expectLine(t, "250 2.0.0 Sender accepted\r\n")
+	harness.write(t, "RCPT TO:<recipient@example.test>\r\n")
+	harness.expectLine(t, "250 2.0.0 Recipient accepted\r\n")
+	harness.write(t, "DATA\r\n")
+	harness.expectLine(t, "354 2.0.0 End data with <CR><LF>.<CR><LF>\r\n")
+	harness.write(t, "body\r\n.\r\n")
+	harness.expectLine(t, "250 2.1.5 Message accepted\r\n")
+
+	store.assertClosed(t, 1)
+	dialer.Wait(t)
+}
+
+// TestSelectedBackendMissingSIZEFailsBeforeBackendMAIL protects stale pool-proof races.
+func TestSelectedBackendMissingSIZEFailsBeforeBackendMAIL(t *testing.T) {
+	testSelectedBackendSIZEFailure(t, "missing", func(t *testing.T, conn net.Conn) *bufio.Reader {
+		return greetTransactionBackend(t, conn)
+	})
+}
+
+// TestSelectedBackendLowerSIZEFailsBeforeBackendMAIL protects selected-backend limit races.
+func TestSelectedBackendLowerSIZEFailsBeforeBackendMAIL(t *testing.T) {
+	testSelectedBackendSIZEFailure(t, "lower maximum", func(t *testing.T, conn net.Conn) *bufio.Reader {
+		return greetSizedTransactionBackend(t, conn, "5")
+	})
+}
+
+// testSelectedBackendSIZEFailure exercises selected-backend SIZE proof mismatches.
+func testSelectedBackendSIZEFailure(t *testing.T, name string, greet func(*testing.T, net.Conn) *bufio.Reader) {
+	t.Helper()
+
+	t.Run(name, func(t *testing.T) {
+		identity := identityLookuperForRecipients(map[string]string{testRecipientSingle: testPlacementShardA})
+		resolver := &recordingRoutingResolver{}
+		store := &recordingDeliveryStore{}
+		selector := &recordingBackendSelector{}
+		dialer := scriptedLMTPBackendDialer(t, func(t *testing.T, conn net.Conn) {
+			reader := greet(t, conn)
+			assertNoBackendMAILBeforeClose(t, conn, reader)
+		})
+		config := backendForwardingSessionConfig(identity, resolver, store, selector, dialer)
+		config.Capabilities = []string{capabilitySIZE}
+		config.MaxMessageBytes = 10
+		config.BackendSizeProof = &fakeBackendSizeProofReader{proof: backend.PoolSizeProof{Supported: true}}
+
+		harness := startLMTPHarness(t, config)
+		harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+		harness.write(t, "LHLO submitter.example\r\n")
+		harness.expectLine(t, "250-nauthilus-director\r\n")
+		harness.expectLine(t, "250 SIZE 10\r\n")
+		harness.write(t, "MAIL FROM:<sender@example.test> SIZE=6\r\n")
+		harness.expectLine(t, "250 2.0.0 Sender accepted\r\n")
+		harness.write(t, "RCPT TO:<recipient@example.test>\r\n")
+		harness.expectLine(t, testTemporaryDelivery)
+
+		store.assertClosed(t, 1)
+		dialer.Wait(t)
+	})
+}
+
 // assertRecipientLookupContext verifies recipient lookup uses the normalized envelope value.
 func assertRecipientLookupContext(t *testing.T, lookup nauthilus.IdentityLookupRequest) {
 	t.Helper()
@@ -2553,6 +3755,26 @@ func test8BITMIMEConfig() SessionConfig {
 	config.TLSMode = TLSModeImplicit
 	config.Capabilities = []string{capability8BITMIME}
 	config.BackendCapabilities = []string{capability8BITMIME}
+
+	return config
+}
+
+// testPipeliningConfig returns a session config where PIPELINING is advertised.
+func testPipeliningConfig() SessionConfig {
+	config := testSessionConfig()
+	config.TLSMode = TLSModeImplicit
+	config.Capabilities = []string{capabilityPIPELINING}
+
+	return config
+}
+
+// testSIZEConfig returns a session config where SIZE can be proven safe.
+func testSIZEConfig(maxMessageBytes int64, proof backend.PoolSizeProof) SessionConfig {
+	config := testSessionConfig()
+	config.TLSMode = TLSModeImplicit
+	config.Capabilities = []string{capabilitySIZE}
+	config.MaxMessageBytes = maxMessageBytes
+	config.BackendSizeProof = &fakeBackendSizeProofReader{proof: proof}
 
 	return config
 }
@@ -2670,6 +3892,52 @@ func greetChunkingTransactionBackend(t *testing.T, conn net.Conn) *bufio.Reader 
 	return reader
 }
 
+// greetSizedTransactionBackend runs the common backend handshake with SIZE proof.
+func greetSizedTransactionBackend(t *testing.T, conn net.Conn, maximum string) *bufio.Reader {
+	t.Helper()
+
+	reader := bufio.NewReader(conn)
+	writeLMTPBackendLine(t, conn, "220 backend ready")
+	expectLMTPBackendLine(t, reader, "LHLO "+backendLHLOName)
+	writeLMTPBackendLine(t, conn, "250-mailstore")
+	writeLMTPBackendLine(t, conn, "250 SIZE "+maximum)
+
+	return reader
+}
+
+// greetChunkingSizedTransactionBackend runs the common backend handshake with CHUNKING and SIZE proof.
+func greetChunkingSizedTransactionBackend(t *testing.T, conn net.Conn, maximum string) *bufio.Reader {
+	t.Helper()
+
+	reader := bufio.NewReader(conn)
+	writeLMTPBackendLine(t, conn, "220 backend ready")
+	expectLMTPBackendLine(t, reader, "LHLO "+backendLHLOName)
+	writeLMTPBackendLine(t, conn, "250-mailstore")
+	writeLMTPBackendLine(t, conn, "250-"+capabilityCHUNKING)
+	writeLMTPBackendLine(t, conn, "250 SIZE "+maximum)
+
+	return reader
+}
+
+// assertNoBackendMAILBeforeClose proves selected-backend SIZE failure happened pre-envelope.
+func assertNoBackendMAILBeforeClose(t *testing.T, conn net.Conn, reader *bufio.Reader) {
+	t.Helper()
+
+	if err := conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("set backend read deadline: %v", err)
+	}
+
+	line, err := reader.ReadString('\n')
+	if err == nil {
+		t.Fatalf("backend received unexpected command before SIZE failure: %q", strings.TrimRight(line, "\r\n"))
+	}
+
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		t.Fatal("backend stream was not closed after selected-backend SIZE failure")
+	}
+}
+
 // expectLMTPBackendBytes reads exact opaque backend payload bytes.
 func expectLMTPBackendBytes(t *testing.T, reader *bufio.Reader, want string) {
 	t.Helper()
@@ -2690,6 +3958,19 @@ type lmtpHarness struct {
 	reader  *bufio.Reader
 	cancel  context.CancelFunc
 	done    chan error
+}
+
+type fakeBackendSizeProofReader struct {
+	proof backend.PoolSizeProof
+	err   error
+	calls int
+}
+
+// PoolSupportsSize returns fixed backend-pool SIZE proof for frontend tests.
+func (r *fakeBackendSizeProofReader) PoolSupportsSize(context.Context, string) (backend.PoolSizeProof, error) {
+	r.calls++
+
+	return r.proof, r.err
 }
 
 // startLMTPHarness starts a session over an in-memory connection.
@@ -2847,6 +4128,14 @@ func (c *recordingLMTPBackendConnector) singleRequest(t *testing.T) backend.Conn
 	}
 
 	return c.requests[0]
+}
+
+// requestCount returns how often backend connection setup was attempted.
+func (c *recordingLMTPBackendConnector) requestCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return len(c.requests)
 }
 
 // serveMinimalLMTPEnvelopeBackend accepts MAIL and RCPT before waiting for close.
@@ -3722,6 +5011,7 @@ type recordingMessageSink struct {
 	body      strings.Builder
 	max       int
 	finish    int
+	abort     int
 	snapshots []TransactionSnapshot
 }
 
@@ -3761,6 +5051,11 @@ func (s *recordingMessageSink) Finish(context.Context) (MessageResult, error) {
 
 // Abort records no payload and allows the session to close cleanly.
 func (s *recordingMessageSink) Abort(context.Context, string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.abort++
+
 	return nil
 }
 
@@ -3786,6 +5081,14 @@ func (s *recordingMessageSink) finishCount() int {
 	defer s.mu.Unlock()
 
 	return s.finish
+}
+
+// abortCount returns the number of aborted messages.
+func (s *recordingMessageSink) abortCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.abort
 }
 
 // singleSnapshot returns the only recorded transaction snapshot.

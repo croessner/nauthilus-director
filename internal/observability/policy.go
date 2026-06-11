@@ -127,6 +127,7 @@ const (
 	reasonClassRuntimeHardMaintenance = "runtime_hard_maintenance"
 	reasonClassRuntimeOut             = "runtime_out"
 	reasonClassSameBackend            = "same_backend"
+	reasonClassSizeBodyTooLarge       = "size_body_too_large"
 	reasonClassStaticHardMaintenance  = "static_hard_maintenance"
 	reasonClassStaticSoftMaintenance  = "static_soft_maintenance"
 	reasonClassTemporaryFailure       = "temporary_failure"
@@ -331,6 +332,7 @@ var allowedReasonClasses = map[string]struct{}{
 	"shutdown":                        {},
 	"shutdown_timeout":                {},
 	reasonClassSameBackend:            {},
+	reasonClassSizeBodyTooLarge:       {},
 	"script_missing":                  {},
 	"soft_maintenance":                {},
 	"state_failed":                    {},

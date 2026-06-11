@@ -24,6 +24,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/croessner/nauthilus-director/internal/backend"
 	"github.com/croessner/nauthilus-director/internal/config"
 	"github.com/croessner/nauthilus-director/internal/observability"
 	"go.uber.org/fx"
@@ -38,6 +39,7 @@ type recordingFxRecorder struct {
 
 type fakeBackendCapabilityReader struct {
 	allowed map[string]bool
+	size    backend.PoolSizeProof
 	err     error
 }
 
@@ -49,6 +51,11 @@ func (r *recordingFxRecorder) Record(_ context.Context, event observability.Even
 // PoolSupportsCapability returns the configured fake capability decision.
 func (r fakeBackendCapabilityReader) PoolSupportsCapability(_ context.Context, _ string, capability string) (bool, error) {
 	return r.allowed[strings.ToUpper(strings.TrimSpace(capability))], r.err
+}
+
+// PoolSupportsSize returns the configured fake SIZE proof.
+func (r fakeBackendCapabilityReader) PoolSupportsSize(context.Context, string) (backend.PoolSizeProof, error) {
+	return r.size, r.err
 }
 
 // TestFxLoggerFiltersDebugEventsAtInfo verifies Fx wiring chatter stays below info logs.
@@ -79,17 +86,41 @@ func TestFxLoggerFiltersDebugEventsAtInfo(t *testing.T) {
 
 // TestLMTPBackendCapabilityPolicyFailsClosed verifies app wiring suppresses unsafe LMTP extensions.
 func TestLMTPBackendCapabilityPolicyFailsClosed(t *testing.T) {
-	if got := lmtpBackendCapabilities(nil, "lmtp-default", "CHUNKING", "8BITMIME"); len(got) != 0 {
+	if got := lmtpBackendCapabilities(nil, "lmtp-default", nil, "CHUNKING", "8BITMIME"); len(got) != 0 {
 		t.Fatalf("nil capability reader allowed capabilities %v", got)
 	}
 
-	if got := lmtpBackendCapabilities(fakeBackendCapabilityReader{err: errors.New("redis unavailable")}, "lmtp-default", "CHUNKING"); len(got) != 0 {
+	if got := lmtpBackendCapabilities(fakeBackendCapabilityReader{err: errors.New("redis unavailable")}, "lmtp-default", nil, "CHUNKING"); len(got) != 0 {
 		t.Fatalf("capability reader error allowed capabilities %v", got)
 	}
 
 	allowed := fakeBackendCapabilityReader{allowed: map[string]bool{"CHUNKING": true, "8BITMIME": true}}
-	if got := strings.Join(lmtpBackendCapabilities(allowed, "lmtp-default", "CHUNKING", "8BITMIME"), ","); got != "CHUNKING,8BITMIME" {
+	if got := strings.Join(lmtpBackendCapabilities(allowed, "lmtp-default", nil, "CHUNKING", "8BITMIME"), ","); got != "CHUNKING,8BITMIME" {
 		t.Fatalf("fresh backend capability proof allowed %q, want CHUNKING,8BITMIME", got)
+	}
+
+	if got := strings.Join(lmtpBackendCapabilities(allowed, "lmtp-default", []string{"CHUNKING"}, "CHUNKING", "8BITMIME"), ","); got != "8BITMIME" {
+		t.Fatalf("deny-filtered backend capability proof allowed %q, want 8BITMIME", got)
+	}
+}
+
+// TestLMTPBackendSizeProofPolicyFailsClosed verifies app wiring suppresses unsafe SIZE proof.
+func TestLMTPBackendSizeProofPolicyFailsClosed(t *testing.T) {
+	if proof, err := (lmtpSizeProofReader{}).PoolSupportsSize(context.Background(), "lmtp-default"); err != nil || proof.Supported {
+		t.Fatalf("nil size proof reader returned proof=%#v err=%v, want unsupported nil error", proof, err)
+	}
+
+	source := fakeBackendCapabilityReader{size: backend.PoolSizeProof{Supported: true, HasMaximum: true, MaximumBytes: 1024}}
+	if proof, err := (lmtpSizeProofReader{source: source}).PoolSupportsSize(context.Background(), "lmtp-default"); err != nil || !proof.Supported || proof.MaximumBytes != 1024 {
+		t.Fatalf("size proof reader returned proof=%#v err=%v, want maximum 1024", proof, err)
+	}
+
+	if proof, err := (lmtpSizeProofReader{source: source, denied: []string{"SIZE"}}).PoolSupportsSize(context.Background(), "lmtp-default"); err != nil || proof.Supported {
+		t.Fatalf("deny-filtered size proof returned proof=%#v err=%v, want unsupported nil error", proof, err)
+	}
+
+	if proof, err := (lmtpSizeProofReader{source: fakeBackendCapabilityReader{err: errors.New("redis unavailable")}}).PoolSupportsSize(context.Background(), "lmtp-default"); err == nil || proof.Supported {
+		t.Fatalf("erroring size proof returned proof=%#v err=%v, want propagated error", proof, err)
 	}
 }
 

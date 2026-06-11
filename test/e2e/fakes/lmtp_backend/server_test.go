@@ -105,6 +105,35 @@ func TestBDATTranscriptObservationRecordsChunks(t *testing.T) {
 	}
 }
 
+// TestCommandBatchingDetectorRecordsQueuedCommands proves the fake can spot backend pipelining.
+func TestCommandBatchingDetectorRecordsQueuedCommands(t *testing.T) {
+	server := Start(t, Options{DetectCommandBatching: true})
+
+	conn, err := net.DialTimeout("tcp", server.Address(), time.Second)
+	if err != nil {
+		t.Fatalf("dial fake LMTP backend: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	reader := bufio.NewReader(conn)
+	expectBackendTestLine(t, reader, "220 fake LMTP backend ready\r\n")
+	writeBackendTestLine(t, conn, "LHLO client")
+	expectBackendTestLine(t, reader, "250 fake-lmtp-backend\r\n")
+	writeBackendTestRaw(t, conn, "MAIL FROM:<sender@example.test>\r\nRCPT TO:<batched@example.test>\r\n")
+	expectBackendTestLine(t, reader, "250 2.1.0 sender ok\r\n")
+	expectBackendTestLine(t, reader, "250 2.1.5 recipient ok\r\n")
+	writeBackendTestLine(t, conn, "DATA")
+	expectBackendTestLine(t, reader, "354 2.0.0 send data\r\n")
+	writeBackendTestLine(t, conn, "body")
+	writeBackendTestLine(t, conn, ".")
+	expectBackendTestLine(t, reader, "250 2.1.5 delivered\r\n")
+
+	observation := server.ExpectObservation(t)
+	if !observation.CommandBatched {
+		t.Fatalf("observation = %#v, want backend command batching detected", observation)
+	}
+}
+
 // expectBackendTestLine reads one exact backend test line.
 func expectBackendTestLine(t *testing.T, reader *bufio.Reader, want string) {
 	t.Helper()

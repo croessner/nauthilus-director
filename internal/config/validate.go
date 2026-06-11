@@ -1141,7 +1141,10 @@ func validateLMTPListener(path string, listener ListenerConfig, authorities map[
 
 	validatePlaintextLMTPListener(path, listener, *lmtp, problems)
 	validateLMTPClientMTLS(path+".client_auth.mtls", listener, lmtp.ClientAuth, problems)
+	validateLMTPSizePolicy(path+".size", lmtp.Size, problems)
 	validateLMTPCapabilities(path+".capabilities", listener, *lmtp, problems)
+	validateLMTPCapabilityFilter(path+".capability_filter.deny", *lmtp, problems)
+	validateLMTPCapabilityOverlap(path, *lmtp, problems)
 }
 
 // validatePlaintextLMTPListener rejects credential-capable auth on no-TLS LMTP listeners.
@@ -1186,22 +1189,26 @@ func validateLMTPClientMTLS(path string, listener ListenerConfig, auth LMTPClien
 func validateLMTPCapabilities(path string, listener ListenerConfig, lmtp LMTPListenerConfig, problems *[]string) {
 	for _, capability := range lmtp.Capabilities {
 		switch {
-		case capability == "SMTPUTF8":
+		case capability == lmtpCapabilitySMTPUTF8:
 			continue
 		case capability == lmtpCapability8BITMIME:
 			continue
 		case capability == lmtpCapabilityEnhancedStatus:
 			continue
-		case capability == "STARTTLS":
+		case capability == lmtpCapabilitySTARTTLS:
 			if listenerTLSModeIsPlaintext(listener.TLS.Mode) {
 				addProblem(problems, path+" must not advertise STARTTLS for plaintext listener")
 			} else if listener.TLS.Mode != listenerTLSModeStartTLS {
 				addProblem(problems, path+" advertises STARTTLS for non-starttls listener TLS mode")
 			}
-		case capability == "CHUNKING":
+		case capability == lmtpCapabilityCHUNKING:
 			if !lmtpBDATImplemented {
 				addProblem(problems, path+" advertises CHUNKING before BDAT support and backend capability mediation are implemented")
 			}
+		case capability == lmtpCapabilityPIPELINING:
+			continue
+		case capability == lmtpCapabilitySIZE:
+			requirePositiveLMTPSizePolicy(path, lmtp, problems)
 		case strings.HasPrefix(capability, "AUTH "):
 			if listenerTLSModeIsPlaintext(listener.TLS.Mode) {
 				addProblem(problems, path+" must not advertise AUTH for plaintext listener")
@@ -1220,6 +1227,123 @@ func validateLMTPCapabilities(path string, listener ListenerConfig, lmtp LMTPLis
 			addProblem(problems, path+" contains unsupported capability "+capability)
 		}
 	}
+}
+
+// validateLMTPSizePolicy rejects invalid listener-owned message-size policy values.
+func validateLMTPSizePolicy(path string, size LMTPSizeConfig, problems *[]string) {
+	requireNonNegativeInt64(path+".max_message_bytes", size.MaxMessageBytes, problems)
+}
+
+// requirePositiveLMTPSizePolicy enforces the future SIZE advertisement prerequisite.
+func requirePositiveLMTPSizePolicy(path string, lmtp LMTPListenerConfig, problems *[]string) {
+	if lmtp.Size.MaxMessageBytes <= 0 {
+		addProblem(problems, path+" requires positive size.max_message_bytes when SIZE is configured")
+	}
+}
+
+// validateLMTPCapabilityFilter rejects capability-filter entries that cannot be fully enforced.
+func validateLMTPCapabilityFilter(path string, lmtp LMTPListenerConfig, problems *[]string) {
+	for _, capability := range lmtp.CapabilityFilter.Deny {
+		validateLMTPCapabilityFilterEntry(path, capability, problems)
+	}
+}
+
+// validateLMTPCapabilityFilterEntry checks one whole-capability deny token.
+func validateLMTPCapabilityFilterEntry(path string, capability string, problems *[]string) {
+	token := strings.TrimSpace(capability)
+	if token == "" {
+		addProblem(problems, path+" contains empty capability")
+
+		return
+	}
+
+	if strings.Contains(token, ",") {
+		addProblem(problems, path+" contains comma-shaped capability "+token)
+
+		return
+	}
+
+	if strings.Contains(token, "=") {
+		addProblem(problems, path+" contains ambiguous parameterized capability "+token)
+
+		return
+	}
+
+	fields := strings.Fields(token)
+	if len(fields) != 1 {
+		addProblem(problems, path+" contains ambiguous parameterized capability "+token)
+
+		return
+	}
+
+	if lmtpCapabilityFilterRejectsCommand(fields[0]) {
+		addProblem(problems, path+" contains LMTP command name "+fields[0])
+
+		return
+	}
+
+	if !validLMTPCapabilityFilterToken(fields[0]) {
+		addProblem(problems, path+" contains unsupported capability "+fields[0])
+	}
+}
+
+// validateLMTPCapabilityOverlap rejects contradictory allowlist and deny-filter entries.
+func validateLMTPCapabilityOverlap(path string, lmtp LMTPListenerConfig, problems *[]string) {
+	denied := make(map[string]struct{}, len(lmtp.CapabilityFilter.Deny))
+	for _, capability := range lmtp.CapabilityFilter.Deny {
+		if validLMTPCapabilityFilterToken(capability) {
+			denied[capability] = struct{}{}
+		}
+	}
+
+	for _, capability := range lmtp.Capabilities {
+		if _, ok := denied[capability]; ok {
+			addProblem(problems, path+".capability_filter.deny overlaps "+path+".capabilities on "+capability)
+
+			continue
+		}
+
+		if _, ok := denied[lmtpCapabilityAuth]; ok && lmtpCapabilityName(capability) == lmtpCapabilityAuth {
+			addProblem(problems, path+".capability_filter.deny overlaps "+path+".capabilities on "+lmtpCapabilityAuth)
+		}
+	}
+}
+
+// lmtpCapabilityFilterRejectsCommand reports ordinary command names that are not filterable capabilities.
+func lmtpCapabilityFilterRejectsCommand(value string) bool {
+	switch strings.ToUpper(strings.TrimSpace(value)) {
+	case "BDAT", "DATA", "LHLO", "MAIL", "NOOP", "QUIT", "RCPT", "RSET":
+		return true
+	default:
+		return false
+	}
+}
+
+// validLMTPCapabilityFilterToken reports whole LMTP extension names supported by the policy surface.
+func validLMTPCapabilityFilterToken(value string) bool {
+	switch strings.ToUpper(strings.TrimSpace(value)) {
+	case lmtpCapability8BITMIME,
+		lmtpCapabilityAuth,
+		lmtpCapabilityCHUNKING,
+		lmtpCapabilityEnhancedStatus,
+		lmtpCapabilityPIPELINING,
+		lmtpCapabilitySIZE,
+		lmtpCapabilitySMTPUTF8,
+		lmtpCapabilitySTARTTLS:
+		return true
+	default:
+		return false
+	}
+}
+
+// lmtpCapabilityName returns the whole-capability name for overlap checks.
+func lmtpCapabilityName(value string) string {
+	fields := strings.Fields(strings.ToUpper(strings.TrimSpace(value)))
+	if len(fields) == 0 {
+		return ""
+	}
+
+	return fields[0]
 }
 
 // validateLMTPAuthCapability checks AUTH mechanism vocabulary and listener policy consistency.
@@ -1753,6 +1877,13 @@ func requirePositiveInt(path string, value int, problems *[]string) {
 
 // requireNonNegativeInt records a path-specific error for negative integers.
 func requireNonNegativeInt(path string, value int, problems *[]string) {
+	if value < 0 {
+		addProblem(problems, path+" must not be negative")
+	}
+}
+
+// requireNonNegativeInt64 records a path-specific error for negative 64-bit integers.
+func requireNonNegativeInt64(path string, value int64, problems *[]string) {
 	if value < 0 {
 		addProblem(problems, path+" must not be negative")
 	}

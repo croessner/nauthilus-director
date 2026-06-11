@@ -38,6 +38,7 @@ const (
 	responseStatusBadSequence     = "503"
 	responseStatusAuthRequired    = "530"
 	responseStatusAuthRejected    = "535"
+	responseStatusSizeExceeded    = "552"
 
 	enhancedOK               = "2.0.0"
 	enhancedAuthOK           = "2.7.0"
@@ -52,6 +53,7 @@ const (
 	enhancedBadSequence      = "5.5.1"
 	enhancedAuthRequired     = "5.7.0"
 	enhancedAuthRejected     = "5.7.8"
+	enhancedSizeExceeded     = "5.3.4"
 
 	maxResponseTextBytes = 256
 )
@@ -77,6 +79,7 @@ const (
 	malformedMailText        = "Invalid MAIL command"
 	malformedRcptText        = "Invalid RCPT command"
 	recipientLookupText      = "Recipient lookup temporarily unavailable"
+	sizeExceededText         = "Message size exceeds fixed maximum message size"
 	noTLSAuthText            = "Must issue STARTTLS first"
 	noopText                 = "OK"
 	quitText                 = "Bye"

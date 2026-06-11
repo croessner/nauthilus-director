@@ -20,9 +20,12 @@ import (
 	"context"
 	"errors"
 	"io"
+	"strconv"
 	"strings"
 	"time"
 )
+
+var errCommandRejected = errors.New("lmtp: command rejected")
 
 // handleCommand dispatches one parsed LMTP command in wire order.
 func (s *Session) handleCommand(ctx context.Context, command frontendCommand) (commandOutcome, error) {
@@ -101,9 +104,10 @@ func (s *Session) handleLHLO(ctx context.Context, command frontendCommand) error
 		return s.writeEnhanced(responseStatusBadSequence, enhancedBadSequence, "LHLO not allowed during transaction")
 	}
 
-	s.effectiveCapabilities = s.effectiveCapabilitySet()
+	s.effectiveCapabilities = s.effectiveCapabilitySet(ctx)
 	s.chunkingAdvertised = containsCapability(s.effectiveCapabilities, capabilityCHUNKING)
 	s.eightBitAdvertised = containsCapability(s.effectiveCapabilities, capability8BITMIME)
+	s.effectiveSizeBytes, s.sizeAdvertised = s.effectiveSizeMaximumFromCapabilities()
 	s.lhloSeen = true
 	s.recordCommand(ctx, lmtpObservationOperationLHLO, lmtpObservationResultOK, lmtpReasonOK, nil)
 
@@ -126,7 +130,8 @@ func (s *Session) handleMAIL(ctx context.Context, command frontendCommand) error
 	}
 
 	if err := s.requireMAILCapabilities(mail); err != nil {
-		s.recordCommand(ctx, lmtpObservationOperationMAIL, lmtpObservationResultFailure, lmtpReasonParser, nil)
+		result, reason := mailCapabilityFailureObservation(err)
+		s.recordCommand(ctx, lmtpObservationOperationMAIL, result, reason, nil)
 
 		return err
 	}
@@ -141,6 +146,9 @@ func (s *Session) handleMAIL(ctx context.Context, command frontendCommand) error
 	s.transaction.mailFrom = mail.wirePath
 	s.transaction.smtpUTF8 = mail.smtpUTF8
 	s.transaction.body8BitMIME = mail.body8BitMIME
+	s.transaction.declaredSizeBytes = mail.declaredSizeBytes
+	s.transaction.declaredSizePresent = mail.declaredSizePresent
+	s.transaction.sizeCounter = newMessageSizeCounter(s.currentSizeMaximum())
 	ctx = s.beginTransactionObservation(ctx)
 	s.recordCommand(ctx, lmtpObservationOperationMAIL, lmtpObservationResultOK, lmtpReasonOK, nil)
 
@@ -245,7 +253,14 @@ func (s *Session) handleDATA(ctx context.Context, command frontendCommand) error
 		return err
 	}
 
-	writeFailed, err := s.streamDATA(ctx, body)
+	writeFailed, err := s.streamDATA(ctx, s.messageBodyWithSizeCounter(body))
+	if errors.Is(err, errMessageSizeExceeded) {
+		_ = body.Abort(ctx, "size_body_too_large")
+		s.recordDATAStream(ctx, lmtpObservationResultRejected, lmtpReasonSizeBodyTooLarge, statusClass(responseStatusSizeExceeded), time.Since(started))
+
+		return s.finishSizeExceededDelivery(ctx)
+	}
+
 	if err != nil {
 		_ = body.Abort(ctx, "data_stream")
 		s.recordDATAStream(ctx, lmtpObservationResultFailure, lmtpReasonDATA, lmtpStatusClassUnknown, time.Since(started))
@@ -277,12 +292,6 @@ func (s *Session) handleBDAT(ctx context.Context, command frontendCommand) error
 	ctx = s.transactionContext(ctx)
 	started := time.Now()
 
-	if err := s.requireBDATAllowed(command); err != nil {
-		s.recordBDATStream(ctx, lmtpObservationOperationBDATChunk, lmtpObservationResultFailure, lmtpReasonProtocol, lmtpStatusClassUnknown, time.Since(started))
-
-		return err
-	}
-
 	bdat, err := parseBDATCommand(command)
 	if err != nil {
 		s.recordBDATStream(ctx, lmtpObservationOperationBDATChunk, lmtpObservationResultFailure, lmtpReasonParser, lmtpStatusClassUnknown, time.Since(started))
@@ -290,8 +299,34 @@ func (s *Session) handleBDAT(ctx context.Context, command frontendCommand) error
 		return s.writeEnhanced(responseStatusParameter, enhancedParameter, malformedBDATText)
 	}
 
+	if err := s.requireBDATAllowed(command); err != nil {
+		if drainErr := s.discardBDATChunk(bdat.size); drainErr != nil {
+			s.recordBDATStream(ctx, bdatObservationOperation(bdat), lmtpObservationResultFailure, lmtpReasonBDAT, lmtpStatusClassUnknown, time.Since(started))
+			s.resetTransaction(ctx, "bdat_rejected")
+
+			return drainErr
+		}
+
+		s.recordBDATStream(ctx, bdatObservationOperation(bdat), lmtpObservationResultFailure, lmtpReasonProtocol, lmtpStatusClassUnknown, time.Since(started))
+
+		return err
+	}
+
 	if s.backendForwardingEnabled() {
 		return s.handleBackendBDAT(ctx, bdat)
+	}
+
+	if err := s.countBDATChunk(bdat.size); err != nil {
+		if drainErr := s.discardBDATChunk(bdat.size); drainErr != nil {
+			s.recordBDATStream(ctx, bdatObservationOperation(bdat), lmtpObservationResultFailure, lmtpReasonBDAT, lmtpStatusClassUnknown, time.Since(started))
+			s.resetTransaction(ctx, "bdat_stream")
+
+			return drainErr
+		}
+
+		s.recordBDATStream(ctx, bdatObservationOperation(bdat), lmtpObservationResultRejected, lmtpReasonSizeBodyTooLarge, statusClass(responseStatusSizeExceeded), time.Since(started))
+
+		return s.failSizeExceededBDAT(ctx, bdat.last)
 	}
 
 	if s.transaction.body == nil {
@@ -363,37 +398,100 @@ func (s *Session) handleQUIT(command frontendCommand) error {
 	return s.writeEnhanced(responseStatusClosing, enhancedClosing, quitText)
 }
 
+// rejectEnhanced writes a command rejection and stops the current command without closing the session.
+func (s *Session) rejectEnhanced(status string, enhanced string, text string) error {
+	return s.rejectEnhancedWithCause(status, enhanced, text, nil)
+}
+
+// rejectEnhancedWithCause preserves a bounded cause for observability classification.
+func (s *Session) rejectEnhancedWithCause(status string, enhanced string, text string, cause error) error {
+	if err := s.writeEnhanced(status, enhanced, text); err != nil {
+		return err
+	}
+
+	if cause != nil {
+		return errors.Join(errCommandRejected, cause)
+	}
+
+	return errCommandRejected
+}
+
 // requirePeerAuthSatisfied enforces the configured submitter-auth policy.
 func (s *Session) requirePeerAuthSatisfied() error {
 	if !s.requirePeerAuth || s.peerAuthenticated {
 		return nil
 	}
 
-	return s.writeEnhanced(responseStatusAuthRequired, enhancedAuthRequired, authRequiredText)
+	return s.rejectEnhanced(responseStatusAuthRequired, enhancedAuthRequired, authRequiredText)
 }
 
 // requireMAILCapabilities enforces advertised MAIL parameters and path policy.
 func (s *Session) requireMAILCapabilities(mail mailCommand) error {
 	advertised := containsCapability(s.effectiveCapabilities, capabilitySMTPUTF8)
 	if mail.smtpUTF8 && !advertised {
-		return s.writeEnhanced(responseStatusParameter, enhancedParameter, malformedMailText)
+		return s.rejectEnhanced(responseStatusParameter, enhancedParameter, malformedMailText)
 	}
 
 	if mail.body8BitMIME && !s.eightBitAdvertised {
-		return s.writeEnhanced(responseStatusParameter, enhancedParameter, malformedMailText)
+		return s.rejectEnhanced(responseStatusParameter, enhancedParameter, malformedMailText)
+	}
+
+	if mail.declaredSizePresent {
+		if !s.sizeAdvertised {
+			return s.rejectEnhanced(responseStatusParameter, enhancedParameter, malformedMailText)
+		}
+
+		if mail.declaredSizeBytes > s.effectiveSizeBytes {
+			return s.rejectEnhancedWithCause(responseStatusSizeExceeded, enhancedSizeExceeded, sizeExceededText, errMessageSizeExceeded)
+		}
 	}
 
 	if err := validateSMTPUTF8Path(mail.wirePath, advertised && mail.smtpUTF8); err != nil {
-		return s.writeEnhanced(responseStatusParameter, enhancedParameter, malformedMailText)
+		return s.rejectEnhanced(responseStatusParameter, enhancedParameter, malformedMailText)
 	}
 
 	return nil
 }
 
+// mailCapabilityFailureObservation classifies MAIL policy failures without raw envelope data.
+func mailCapabilityFailureObservation(err error) (string, string) {
+	if errors.Is(err, errMessageSizeExceeded) {
+		return lmtpObservationResultRejected, lmtpReasonSizeBodyTooLarge
+	}
+
+	return lmtpObservationResultFailure, lmtpReasonParser
+}
+
+// effectiveSizeMaximumFromCapabilities extracts the current parameterized SIZE line.
+func (s *Session) effectiveSizeMaximumFromCapabilities() (int64, bool) {
+	for _, capability := range s.effectiveCapabilities {
+		fields := strings.Fields(capability)
+		if len(fields) != 2 || !strings.EqualFold(fields[0], capabilitySIZE) {
+			continue
+		}
+
+		maximum, err := strconv.ParseInt(fields[1], 10, 64)
+		if err == nil && maximum > 0 {
+			return maximum, true
+		}
+	}
+
+	return 0, false
+}
+
+// currentSizeMaximum returns the negotiated fixed message size limit for new transactions.
+func (s *Session) currentSizeMaximum() int64 {
+	if !s.sizeAdvertised || s.effectiveSizeBytes <= 0 {
+		return 0
+	}
+
+	return s.effectiveSizeBytes
+}
+
 // requireRecipientSMTPUTF8 enforces transaction-scoped SMTPUTF8 for recipient paths.
 func (s *Session) requireRecipientSMTPUTF8(recipient RecipientPath) error {
 	if err := validateSMTPUTF8Path(recipient.WirePath, s.transaction.smtpUTF8); err != nil {
-		return s.writeEnhanced(responseStatusParameter, enhancedParameter, malformedRcptText)
+		return s.rejectEnhanced(responseStatusParameter, enhancedParameter, malformedRcptText)
 	}
 
 	return nil
@@ -406,15 +504,15 @@ func (s *Session) requireMessageBodyAllowed(command frontendCommand) error {
 	}
 
 	if err := validateNoArguments(command); err != nil {
-		return s.writeEnhanced(responseStatusParameter, enhancedParameter, "Invalid DATA command")
+		return s.rejectEnhanced(responseStatusParameter, enhancedParameter, "Invalid DATA command")
 	}
 
 	if !s.transaction.mailSeen {
-		return s.writeEnhanced(responseStatusBadSequence, enhancedBadSequence, badSequenceMailText)
+		return s.rejectEnhanced(responseStatusBadSequence, enhancedBadSequence, badSequenceMailText)
 	}
 
 	if s.transaction.recipientCount == 0 {
-		return s.writeEnhanced(responseStatusBadSequence, enhancedBadSequence, badSequenceRecipientText)
+		return s.rejectEnhanced(responseStatusBadSequence, enhancedBadSequence, badSequenceRecipientText)
 	}
 
 	return nil
@@ -427,19 +525,19 @@ func (s *Session) requireBDATAllowed(command frontendCommand) error {
 	}
 
 	if !s.chunkingAdvertised {
-		return s.writeEnhanced(responseStatusUnavailable, enhancedUnavailable, "BDAT is not available")
+		return s.rejectEnhanced(responseStatusUnavailable, enhancedUnavailable, "BDAT is not available")
 	}
 
 	if !s.transaction.mailSeen {
-		return s.writeEnhanced(responseStatusBadSequence, enhancedBadSequence, badSequenceMailText)
+		return s.rejectEnhanced(responseStatusBadSequence, enhancedBadSequence, badSequenceMailText)
 	}
 
 	if s.transaction.recipientCount == 0 {
-		return s.writeEnhanced(responseStatusBadSequence, enhancedBadSequence, badSequenceRecipientText)
+		return s.rejectEnhanced(responseStatusBadSequence, enhancedBadSequence, badSequenceRecipientText)
 	}
 
 	if strings.TrimSpace(command.args) == "" {
-		return s.writeEnhanced(responseStatusParameter, enhancedParameter, malformedBDATText)
+		return s.rejectEnhanced(responseStatusParameter, enhancedParameter, malformedBDATText)
 	}
 
 	return nil
@@ -448,6 +546,8 @@ func (s *Session) requireBDATAllowed(command frontendCommand) error {
 // streamDATA copies dot-terminated DATA lines to the body sink incrementally.
 func (s *Session) streamDATA(ctx context.Context, body MessageBody) (bool, error) {
 	writeFailed := false
+
+	var writeErr error
 
 	for {
 		select {
@@ -462,7 +562,7 @@ func (s *Session) streamDATA(ctx context.Context, body MessageBody) (bool, error
 		}
 
 		if isDataTerminator(line) {
-			return writeFailed, nil
+			return writeFailed, writeErr
 		}
 
 		if writeFailed {
@@ -471,6 +571,10 @@ func (s *Session) streamDATA(ctx context.Context, body MessageBody) (bool, error
 
 		if _, err := writeDATALine(body, line); err != nil {
 			writeFailed = true
+
+			if errors.Is(err, errMessageSizeExceeded) {
+				writeErr = err
+			}
 		}
 	}
 }
@@ -509,6 +613,24 @@ func (s *Session) discardBDATChunk(size int64) error {
 	}
 
 	return nil
+}
+
+// countBDATChunk accounts for a frontend BDAT chunk before any payload forwarding.
+func (s *Session) countBDATChunk(size int64) error {
+	if s.transaction.sizeCounter == nil {
+		return nil
+	}
+
+	return s.transaction.sizeCounter.CountBDAT(size)
+}
+
+// bdatObservationOperation returns the bounded observation operation for one chunk command.
+func bdatObservationOperation(command bdatCommand) string {
+	if command.last {
+		return lmtpObservationOperationBDATComplete
+	}
+
+	return lmtpObservationOperationBDATChunk
 }
 
 // writeMessageResult maps a sink completion result to a bounded LMTP status.

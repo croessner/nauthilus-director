@@ -231,8 +231,17 @@ func validEnhancedStatus(value string, class byte) bool {
 
 // lmtpCapabilitiesFromLHLO extracts extension keywords from a backend LHLO response.
 func lmtpCapabilitiesFromLHLO(response backendStatusResponse) backend.CapabilitySet {
-	var capabilities backend.CapabilitySet
+	capabilities, _ := lmtpBackendCapabilityFactsFromLHLO(response)
 
+	return capabilities
+}
+
+// lmtpBackendCapabilityFactsFromLHLO extracts extension keywords and structured facts from LHLO.
+func lmtpBackendCapabilityFactsFromLHLO(response backendStatusResponse) (backend.CapabilitySet, backend.CapabilityFacts) {
+	var (
+		capabilities backend.CapabilitySet
+		facts        backend.CapabilityFacts
+	)
 	for index, line := range response.lines {
 		fields := strings.Fields(line)
 		if len(fields) == 0 {
@@ -251,18 +260,24 @@ func lmtpCapabilitiesFromLHLO(response backendStatusResponse) backend.Capability
 			for _, mechanism := range fields[1:] {
 				capabilities.Add(capabilityAUTH + "=" + mechanism)
 			}
+		case capabilitySIZE:
+			size, ok := backend.ParseSizeCapabilityFact(fields[1:])
+			if ok {
+				capabilities.Add(capabilitySIZE)
+				facts.SetSize(size)
+			}
 		default:
 			capabilities.Add(keyword)
 		}
 	}
 
-	return capabilities
+	return capabilities, facts
 }
 
 // knownLHLOCapability recognizes extension keywords without trusting prose text.
 func knownLHLOCapability(keyword string) bool {
 	switch strings.ToUpper(strings.TrimSpace(keyword)) {
-	case capability8BITMIME, capabilityAUTH, capabilityCHUNKING, capabilityEnhancedStatusCodes, "PIPELINING", "SIZE", capabilitySMTPUTF8, capabilitySTARTTLS:
+	case capability8BITMIME, capabilityAUTH, capabilityCHUNKING, capabilityEnhancedStatusCodes, capabilityPIPELINING, capabilitySIZE, capabilitySMTPUTF8, capabilitySTARTTLS:
 		return true
 	default:
 		return strings.HasPrefix(keyword, capabilityAUTH+"=")
