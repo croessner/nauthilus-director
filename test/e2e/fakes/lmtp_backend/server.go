@@ -60,19 +60,32 @@ type Status struct {
 // Options configures a deterministic fake backend instance.
 type Options struct {
 	Capabilities         []string
+	NonFinalBDATStatus   []Status
 	FinalStatus          map[string]Status
+	FinalStatusLimit     int
 	RequireProxyProtocol bool
 	TLSConfig            *tls.Config
 	TLSMode              string
 	HoldFinal            <-chan struct{}
 }
 
+// BDATChunk records one byte-counted backend payload boundary.
+type BDATChunk struct {
+	Command string
+	Size    int64
+	Last    bool
+	Payload string
+}
+
 // Observation records one backend transaction at protocol boundaries only.
 type Observation struct {
-	Commands   []string
-	Recipients []string
-	Body       string
-	UsedBDAT   bool
+	Commands      []string
+	Recipients    []string
+	Body          string
+	UsedDATA      bool
+	UsedBDAT      bool
+	BDATChunks    []BDATChunk
+	FinalComplete bool
 }
 
 // Server owns one fake LMTP backend listener.
@@ -86,10 +99,15 @@ type Server struct {
 }
 
 type connectionState struct {
-	commands   []string
-	recipients []string
-	body       strings.Builder
-	usedBDAT   bool
+	commands        []string
+	recipients      []string
+	body            strings.Builder
+	usedDATA        bool
+	usedBDAT        bool
+	bdatChunks      []BDATChunk
+	nonFinalBDATs   int
+	transactionSeen bool
+	recorded        bool
 }
 
 // Start binds a public loopback LMTP backend socket.
@@ -173,9 +191,12 @@ func (s *Server) accept() {
 
 // serve executes a minimal LMTP backend command loop.
 func (s *Server) serve(conn net.Conn) {
-	defer func() { _ = conn.Close() }()
-
 	state := &connectionState{}
+	defer func() {
+		s.recordObservation(state, false)
+		_ = conn.Close()
+	}()
+
 	prepared, ok := s.prepare(conn)
 	if !ok {
 		return
@@ -277,8 +298,7 @@ func (s *Server) handleLine(conn net.Conn, reader *bufio.Reader, state *connecti
 		_, _ = io.WriteString(conn, "221 2.0.0 bye\r\n")
 		return conn, reader, true
 	case commandMAIL:
-		state.recipients = nil
-		state.body.Reset()
+		state.beginTransaction()
 		_, _ = io.WriteString(conn, "250 2.1.0 sender ok\r\n")
 	case commandRCPT:
 		recipient := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "RCPT TO:"))
@@ -332,6 +352,8 @@ func (s *Server) handleSTARTTLS(conn net.Conn) (net.Conn, *bufio.Reader, bool) {
 // handleDATA reads a dot-terminated body and emits per-recipient final statuses.
 func (s *Server) handleDATA(conn net.Conn, reader *bufio.Reader, state *connectionState) {
 	_, _ = io.WriteString(conn, "354 2.0.0 send data\r\n")
+	state.usedDATA = true
+
 	for {
 		line, err := reader.ReadString('\n')
 		if err != nil {
@@ -355,16 +377,21 @@ func (s *Server) handleBDAT(conn net.Conn, reader *bufio.Reader, state *connecti
 	}
 
 	state.usedBDAT = true
+	chunk := BDATChunk{Command: strings.TrimSpace(line), Size: size, Last: last}
 	if size > 0 {
 		payload := make([]byte, int(size))
 		if _, err := io.ReadFull(reader, payload); err != nil {
 			return
 		}
 		state.body.Write(payload)
+		chunk.Payload = string(payload)
 	}
+	state.bdatChunks = append(state.bdatChunks, chunk)
 
 	if !last {
-		_, _ = io.WriteString(conn, "250 2.0.0 chunk ok\r\n")
+		status := s.nonFinalBDATStatus(state)
+		_, _ = fmt.Fprintf(conn, "%s %s %s\r\n", status.Code, status.Enhanced, status.Text)
+
 		return
 	}
 
@@ -377,16 +404,63 @@ func (s *Server) writeFinalStatuses(conn net.Conn, state *connectionState) {
 		<-s.options.HoldFinal
 	}
 
-	for _, recipient := range state.recipients {
+	recipients := state.recipients
+	finalComplete := true
+	if s.options.FinalStatusLimit > 0 && s.options.FinalStatusLimit < len(recipients) {
+		recipients = recipients[:s.options.FinalStatusLimit]
+		finalComplete = false
+	}
+
+	for _, recipient := range recipients {
 		status := s.finalStatus(recipient)
 		_, _ = fmt.Fprintf(conn, "%s %s %s\r\n", status.Code, status.Enhanced, status.Text)
 	}
 
+	s.recordObservation(state, finalComplete)
+	if !finalComplete {
+		_ = conn.Close()
+	}
+}
+
+// nonFinalBDATStatus returns the configured intermediate chunk reply.
+func (s *Server) nonFinalBDATStatus(state *connectionState) Status {
+	index := state.nonFinalBDATs
+	state.nonFinalBDATs++
+
+	if index < len(s.options.NonFinalBDATStatus) {
+		return normalizeStatus(s.options.NonFinalBDATStatus[index])
+	}
+
+	return Status{Code: "250", Enhanced: "2.0.0", Text: "chunk ok"}
+}
+
+// beginTransaction resets per-message observation state after MAIL FROM.
+func (s *connectionState) beginTransaction() {
+	s.recipients = nil
+	s.body.Reset()
+	s.usedDATA = false
+	s.usedBDAT = false
+	s.bdatChunks = nil
+	s.nonFinalBDATs = 0
+	s.transactionSeen = true
+	s.recorded = false
+}
+
+// recordObservation publishes one transaction transcript once.
+func (s *Server) recordObservation(state *connectionState, finalComplete bool) {
+	if state == nil || !state.transactionSeen || state.recorded {
+		return
+	}
+
+	state.recorded = true
 	s.observations <- Observation{
-		Commands:   append([]string(nil), state.commands...),
-		Recipients: append([]string(nil), state.recipients...),
-		Body:       state.body.String(),
-		UsedBDAT:   state.usedBDAT,
+		Commands:      append([]string(nil), state.commands...),
+		Recipients:    append([]string(nil), state.recipients...),
+		Body:          state.body.String(),
+		UsedDATA:      state.usedDATA,
+		UsedBDAT:      state.usedBDAT,
+		BDATChunks:    append([]BDATChunk(nil), state.bdatChunks...),
+		FinalComplete: finalComplete,
 	}
 }
 

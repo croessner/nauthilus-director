@@ -429,7 +429,9 @@ director:
         capabilities:
           # Capabilities are the desired listener surface. Runtime advertisement
           # is mediated by implemented command support, TLS state, auth policy
-          # and backend-pool capabilities. CHUNKING requires full BDAT support;
+          # and backend-pool capabilities. CHUNKING controls frontend BDAT
+          # availability; selected backend CHUNKING is evaluated separately and
+          # may enable backend BDAT delivery for frontend DATA or BDAT.
           # 8BITMIME requires BODY=8BITMIME parsing and backend-safe forwarding.
           - SMTPUTF8
           - ENHANCEDSTATUSCODES
@@ -477,7 +479,9 @@ director:
         capabilities:
           # Capabilities are the desired listener surface. Runtime advertisement
           # is mediated by implemented command support, TLS state, auth policy
-          # and backend-pool capabilities. CHUNKING requires full BDAT support;
+          # and backend-pool capabilities. CHUNKING controls frontend BDAT
+          # availability; selected backend CHUNKING is evaluated separately and
+          # may enable backend BDAT delivery for frontend DATA or BDAT.
           # 8BITMIME requires BODY=8BITMIME parsing and backend-safe forwarding.
           - SMTPUTF8
           - ENHANCEDSTATUSCODES

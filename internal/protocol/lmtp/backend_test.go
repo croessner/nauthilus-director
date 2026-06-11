@@ -356,6 +356,137 @@ func TestLHLOCapabilitiesAreParsedWithoutBannerText(t *testing.T) {
 	}
 }
 
+// TestBackendConnectionSupportsChunkingFromSelectedLHLOCapabilities verifies the selected backend gate.
+func TestBackendConnectionSupportsChunkingFromSelectedLHLOCapabilities(t *testing.T) {
+	tests := []struct {
+		name         string
+		lhloLine     string
+		wantChunking bool
+	}{
+		{
+			name:         "advertised",
+			lhloLine:     "250 chunking",
+			wantChunking: true,
+		},
+		{
+			name:     "not advertised",
+			lhloLine: "250 8BITMIME",
+		},
+		{
+			name:     "banner prose",
+			lhloLine: "250 mailstore mentions CHUNKING",
+		},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			dialer := scriptedLMTPBackendDialer(t, func(t *testing.T, conn net.Conn) {
+				reader := bufio.NewReader(conn)
+				writeLMTPBackendLine(t, conn, "220 backend ready")
+				expectLMTPBackendLine(t, reader, "LHLO "+backendLHLOName)
+				writeLMTPBackendLine(t, conn, testCase.lhloLine)
+			})
+
+			connection, err := NewTCPBackendConnector(dialer).Connect(
+				context.Background(),
+				testLMTPBackendConnectRequest(testLMTPBackendTarget(backendTLSPlaintext)),
+			)
+			if err != nil {
+				t.Fatalf("Connect returned error: %v", err)
+			}
+			defer func() { _ = connection.Conn().Close() }()
+
+			if got := connection.supportsChunking(); got != testCase.wantChunking {
+				t.Fatalf("connection supportsChunking = %v, want %v", got, testCase.wantChunking)
+			}
+
+			transaction := &backendTransaction{connection: connection}
+			if got := transaction.supportsChunking(); got != testCase.wantChunking {
+				t.Fatalf("transaction supportsChunking = %v, want %v", got, testCase.wantChunking)
+			}
+
+			dialer.Wait(t)
+		})
+	}
+}
+
+// TestFrontendDATABodyTransportSelectionUsesSelectedBackendCapabilities verifies DATA transport intent.
+func TestFrontendDATABodyTransportSelectionUsesSelectedBackendCapabilities(t *testing.T) {
+	tests := []struct {
+		name         string
+		capabilities []string
+		want         backendBodyTransport
+	}{
+		{
+			name:         "backend can chunk",
+			capabilities: []string{capabilityCHUNKING},
+			want:         backendBodyTransportBDAT,
+		},
+		{
+			name: "data fallback",
+			want: backendBodyTransportDATA,
+		},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			transaction := &backendTransaction{
+				connection: &BackendConnection{capabilities: backend.NewCapabilitySet(testCase.capabilities...)},
+			}
+
+			if got := transaction.frontendDATABodyTransport(); got != testCase.want {
+				t.Fatalf("frontend DATA transport = %q, want %q", got, testCase.want)
+			}
+		})
+	}
+}
+
+// TestBackendTransactionSendBDATPayloadWritesExactWireAndStatuses verifies payload helper semantics.
+func TestBackendTransactionSendBDATPayloadWritesExactWireAndStatuses(t *testing.T) {
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	transaction := &backendTransaction{connection: newBackendConnection(client)}
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+
+		reader := bufio.NewReader(server)
+		expectLMTPBackendLine(t, reader, "BDAT 4")
+		expectLMTPBackendBytes(t, reader, "body")
+		writeLMTPBackendLine(t, server, "250 2.0.0 chunk ok")
+		expectLMTPBackendLine(t, reader, "BDAT 0 LAST")
+		writeLMTPBackendLine(t, server, "250 2.1.5 delivered")
+		writeLMTPBackendLine(t, server, "451 4.2.0 delayed")
+	}()
+
+	chunkResult, err := transaction.sendBDATPayload([]byte("body"), false, 2)
+	if err != nil {
+		t.Fatalf("sendBDATPayload non-final returned error: %v", err)
+	}
+
+	if len(chunkResult.Statuses) != 1 || chunkResult.Statuses[0].Status != responseStatusOK {
+		t.Fatalf("non-final result = %#v, want accepted chunk", chunkResult)
+	}
+
+	finalResult, err := transaction.sendBDATPayload(nil, true, 2)
+	if err != nil {
+		t.Fatalf("sendBDATPayload final returned error: %v", err)
+	}
+
+	if len(finalResult.Statuses) != 2 {
+		t.Fatalf("final statuses = %d, want 2", len(finalResult.Statuses))
+	}
+
+	if finalResult.Statuses[0].Status != responseStatusOK || finalResult.Statuses[1].Status != responseStatusTemporary {
+		t.Fatalf("final result = %#v, want accepted then temporary", finalResult)
+	}
+
+	waitForBackendAuthScript(t, done)
+}
+
 // TestSASLBackendAuthRequiresCredentialsAndVerifiedTLS checks fail-closed SASL policy.
 func TestSASLBackendAuthRequiresCredentialsAndVerifiedTLS(t *testing.T) {
 	connection := &BackendConnection{capabilities: backend.NewCapabilitySet(capabilityAUTH + "=PLAIN")}

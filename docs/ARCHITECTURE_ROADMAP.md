@@ -780,6 +780,14 @@ inferred from peer-auth config, `CHUNKING` is required for `BDAT`, and
 SMTPUTF8-only envelope paths. Unsupported or backend-unsafe capabilities fail
 closed before sockets bind or before they are advertised.
 
+Frontend LMTP `CHUNKING` advertisement is listener policy. Backend body
+transport is selected separately for the chosen backend after its `LHLO`
+capabilities are known. A selected backend that advertises `CHUNKING` may receive
+backend `BDAT` for frontend `DATA` or frontend `BDAT` transactions; a selected
+backend without `CHUNKING` receives backend `DATA` for frontend `DATA`, and
+frontend `BDAT` fails closed without backend `BDAT` writes unless a later
+BDAT-to-DATA converter is explicitly specified.
+
 ## 13. Sieve / ManageSieve design
 
 Sieve itself is the mail filtering language, but clients usually talk to a ManageSieve service to upload and manage Sieve scripts. For this project, `nauthilus-director` should not execute Sieve scripts. It should proxy ManageSieve to the correct backend.
@@ -1390,7 +1398,11 @@ interop lane are in place. The detailed M5 completion evidence lives in
 `docs/specs/implementation/M5_CROSS_PROTOCOL_BACKEND_AFFINITY_FOLLOWUP.md` and
 `docs/specs/implementation/M5_BACKEND_PROXY_PROTOCOL_FOLLOWUP.md`. The
 plaintext/no-auth and capability follow-up is also complete with evidence in
-`docs/specs/implementation/M5_LMTP_PLAINTEXT_AND_CAPABILITY_FOLLOWUP.md`.
+`docs/specs/implementation/M5_LMTP_PLAINTEXT_AND_CAPABILITY_FOLLOWUP.md`. The
+backend CHUNKING follow-up is complete with fake-backend transcript proof for
+backend DATA fallback, selected-backend BDAT delivery for frontend DATA and
+BDAT, frontend/backend capability independence and fail-closed non-CHUNKING
+gates in `docs/specs/implementation/M8_LMTP_BACKEND_CHUNKING_FOLLOWUP.md`.
 
 - production-ready LMTP and LMTPS entrypoints within the M5 scope
 - LMTP state machine with DATA and BDAT handling
@@ -1467,6 +1479,12 @@ allowlists. The feature does not add routing authority, backend selection,
 runtime REST or CLI mutation surfaces, or Nauthilus DTO/protobuf fields. Detailed
 completion evidence lives in
 `docs/specs/implementation/M8_LISTENER_AUTHORITY_CONTEXT_FOLLOWUP.md`.
+
+The M8 LMTP backend CHUNKING follow-up is complete. Frontend `CHUNKING`
+advertisement remains listener policy, while backend `BDAT` delivery is selected
+per chosen backend capability and remains fail-closed when that capability is
+absent. Public fake-lane and Docker interop evidence lives in
+`docs/specs/implementation/M8_LMTP_BACKEND_CHUNKING_FOLLOWUP.md`.
 
 - hardened production Docker image and Docker smoke proof
 - restrictive systemd unit and reload path through `nauthilus-directorctl reload`

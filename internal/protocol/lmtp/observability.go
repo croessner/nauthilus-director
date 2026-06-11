@@ -91,6 +91,7 @@ const (
 
 const (
 	lmtpObsFieldBackendIdentifier = "backend_identifier"
+	lmtpObsFieldBackendBody       = "backend_body_transport"
 	lmtpObsFieldBackendNode       = "backend_node"
 	lmtpObsFieldBackendPool       = "backend_pool"
 	lmtpObsFieldListener          = "listener"
@@ -205,11 +206,17 @@ func (s *Session) recordDeliveryHoldClose(ctx context.Context, result string, re
 	})
 }
 
-// recordDATAStream emits DATA forwarding completion metrics and events.
-func (s *Session) recordDATAStream(ctx context.Context, result string, reason string, statusClass string, duration time.Duration) {
-	s.recordObservation(ctx, observability.EventLMTPDataStream, observability.TraceBoundaryLMTPTransaction, lmtpObservationOperationDATA, result, reason, map[string]string{
+// recordDATAStream emits DATA forwarding completion metrics and backend transport diagnostics.
+func (s *Session) recordDATAStream(ctx context.Context, result string, reason string, statusClass string, duration time.Duration, transports ...backendBodyTransport) {
+	fields := map[string]string{
 		lmtpObsFieldStatusClass: normalizeStatusClass(statusClass),
-	}, duration)
+	}
+
+	if transport := backendBodyTransportField(transports...); transport != "" {
+		fields[lmtpObsFieldBackendBody] = transport
+	}
+
+	s.recordObservation(ctx, observability.EventLMTPDataStream, observability.TraceBoundaryLMTPTransaction, lmtpObservationOperationDATA, result, reason, fields, duration)
 }
 
 // recordBDATStream emits BDAT chunk or completion forwarding metrics and events.
@@ -643,6 +650,20 @@ func normalizeStatusClass(value string) string {
 	}
 
 	return value
+}
+
+// backendBodyTransportField returns the tiny allowlisted backend DATA body transport value.
+func backendBodyTransportField(transports ...backendBodyTransport) string {
+	if len(transports) == 0 {
+		return ""
+	}
+
+	switch transports[0] {
+	case backendBodyTransportDATA, backendBodyTransportBDAT:
+		return string(transports[0])
+	default:
+		return ""
+	}
 }
 
 // addrString returns address text only so the shared policy can collapse it.

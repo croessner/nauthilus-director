@@ -427,8 +427,31 @@ and
 .BR tls.key .
 LMTP health checks use the same backend TLS and auth policy as real LMTP
 sessions, then stop before envelope or message-body commands.
-BDAT forwarding is available only when the configured frontend capability and
-backend capability boundary allow CHUNKING.
+Frontend
+.B CHUNKING
+advertisement is listener policy and is required before accepting frontend
+.B BDAT .
+Backend
+.B CHUNKING
+usage is selected separately from the chosen backend's
+.B LHLO
+capabilities. A CHUNKING-capable backend may receive backend
+.B BDAT
+for either frontend
+.B DATA
+or frontend
+.B BDAT
+transactions. When the selected backend does not advertise
+.BR CHUNKING ,
+frontend
+.B DATA
+falls back to backend
+.B DATA
+and frontend
+.B BDAT
+fails closed without backend
+.B BDAT
+writes.
 BODY=8BITMIME is accepted only when 8BITMIME was advertised in the current
 LHLO response and is forwarded to the selected backend without inspecting,
 rewriting or downgrading DATA or BDAT payload bytes.

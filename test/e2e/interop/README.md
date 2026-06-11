@@ -56,7 +56,10 @@ The current lane has five scenarios:
   public sockets and `nauthilus-directorctl`. The Director does not copy
   backend transcripts into frontend `LHLO`; listener config expresses the
   desired `CHUNKING` surface, and fresh health state for every LMTP backend in
-  the pool must prove the capability before the frontend advertises it.
+  the pool must prove the capability before the frontend advertises it. Backend
+  BDAT transport is still selected per chosen backend capability; the
+  deterministic fake-service lane owns transcript-level edge coverage such as
+  DATA-to-BDAT conversion, DATA fallback and backend BDAT rejection.
 - one production `nauthilus-director` process proxying public ManageSieve
   STARTTLS traffic to real Dovecot ManageSieve backends. The scenario proves
   frontend auth through fake Nauthilus OIDC caller auth, Dovecot master-user backend auth,

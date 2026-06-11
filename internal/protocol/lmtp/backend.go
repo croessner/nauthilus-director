@@ -198,6 +198,11 @@ func (c *BackendConnection) Capabilities() []string {
 	return c.capabilities.List()
 }
 
+// supportsChunking reports selected-backend CHUNKING support from LHLO state.
+func (c *BackendConnection) supportsChunking() bool {
+	return c != nil && c.capabilities.Has(capabilityCHUNKING)
+}
+
 // Connect dials, negotiates configured TLS, and collects backend LHLO capabilities.
 func (c *TCPBackendConnector) Connect(
 	ctx context.Context,

@@ -32,6 +32,13 @@ const (
 	backendCloseRSET             = "rset"
 )
 
+type backendBodyTransport string
+
+const (
+	backendBodyTransportBDAT backendBodyTransport = "bdat"
+	backendBodyTransportDATA backendBodyTransport = "data"
+)
+
 type backendTransaction struct {
 	connection *BackendConnection
 	target     backend.Backend
@@ -174,6 +181,20 @@ func (t *backendTransaction) sameTarget(target backend.Backend) bool {
 		strings.TrimSpace(t.target.BackendNode) == strings.TrimSpace(target.BackendNode)
 }
 
+// supportsChunking reports whether the selected backend transaction can use BDAT.
+func (t *backendTransaction) supportsChunking() bool {
+	return t != nil && t.connection != nil && t.connection.supportsChunking()
+}
+
+// frontendDATABodyTransport selects the preferred backend transport for DATA bodies.
+func (t *backendTransaction) frontendDATABodyTransport() backendBodyTransport {
+	if t.supportsChunking() {
+		return backendBodyTransportBDAT
+	}
+
+	return backendBodyTransportDATA
+}
+
 // sendMAIL forwards accepted frontend sender parameters to the selected backend.
 func (t *backendTransaction) sendMAIL(wirePath string, smtpUTF8 bool, body8BitMIME bool) error {
 	command := "MAIL FROM:" + wirePath
@@ -241,12 +262,7 @@ func (t *backendTransaction) finishDATA(recipientCount int) MessageResult {
 
 // sendBDATChunk forwards one byte-counted chunk and reads the expected backend reply.
 func (t *backendTransaction) sendBDATChunk(reader io.Reader, chunk bdatCommand, recipientCount int) (MessageResult, error) {
-	command := fmt.Sprintf("%s %d", commandBDAT, chunk.size)
-	if chunk.last {
-		command += " LAST"
-	}
-
-	if _, err := fmt.Fprintf(t.connection.writer, "%s\r\n", command); err != nil {
+	if _, err := fmt.Fprintf(t.connection.writer, "%s\r\n", formatBDATCommand(chunk.size, chunk.last)); err != nil {
 		return MessageResult{}, err
 	}
 
@@ -275,6 +291,63 @@ func (t *backendTransaction) sendBDATChunk(reader io.Reader, chunk bdatCommand, 
 	}
 
 	return t.readFinalStatuses(recipientCount), nil
+}
+
+// sendBDATPayload forwards one backend-owned payload and reads the matching reply.
+func (t *backendTransaction) sendBDATPayload(payload []byte, last bool, recipientCount int) (MessageResult, error) {
+	if t == nil || t.connection == nil || t.connection.writer == nil {
+		return MessageResult{}, fmt.Errorf("%w: backend transaction unavailable", ErrBackendProtocol)
+	}
+
+	if _, err := fmt.Fprintf(t.connection.writer, "%s\r\n", formatBDATCommand(int64(len(payload)), last)); err != nil {
+		_ = t.close("bdat_stream")
+
+		return MessageResult{}, err
+	}
+
+	if len(payload) > 0 {
+		written, err := t.connection.writer.Write(payload)
+		if err != nil {
+			_ = t.close("bdat_stream")
+
+			return MessageResult{}, err
+		}
+
+		if written != len(payload) {
+			_ = t.close("bdat_stream")
+
+			return MessageResult{}, io.ErrShortWrite
+		}
+	}
+
+	if err := t.connection.writer.Flush(); err != nil {
+		_ = t.close("bdat_stream")
+
+		return MessageResult{}, err
+	}
+
+	if !last {
+		response, err := t.connection.readResponse()
+		if err != nil {
+			_ = t.close("bdat_stream")
+
+			return MessageResult{}, err
+		}
+
+		return MessageResult{Statuses: []DeliveryStatus{deliveryStatusFromBackend(response, backendReplyContextBDAT)}}, nil
+	}
+
+	return t.readFinalStatuses(recipientCount), nil
+}
+
+// formatBDATCommand builds the exact backend BDAT command line without CRLF.
+func formatBDATCommand(size int64, last bool) string {
+	command := fmt.Sprintf("%s %d", commandBDAT, size)
+	if last {
+		command += " LAST"
+	}
+
+	return command
 }
 
 // readFinalStatuses reads backend final replies without desynchronizing recipient order.

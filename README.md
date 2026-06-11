@@ -59,6 +59,8 @@ routing facts, but it does not choose concrete director backends.
 - IMAP and IMAPS pre-authentication, placement and transparent proxy handoff
 - POP3 and POP3S pre-authentication, placement and transparent proxy handoff
 - LMTP and LMTPS delivery routing with recipient-aware placement
+- LMTP backend DATA fallback and backend BDAT delivery selected per backend
+  CHUNKING capability
 - ManageSieve and implicit-TLS Sieve proxying with safe authentication gates
 - Redis-backed session affinity and active session coordination
 - Runtime control for listeners, backends, sessions, users and route lookups

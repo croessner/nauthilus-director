@@ -493,6 +493,24 @@ func (s *Session) copyBDATChunk(body MessageBody, size int64) error {
 	return nil
 }
 
+// discardBDATChunk drains an unsupported frontend BDAT payload to keep framing aligned.
+func (s *Session) discardBDATChunk(size int64) error {
+	if size == 0 {
+		return nil
+	}
+
+	written, err := io.CopyN(io.Discard, s.reader, size)
+	if err != nil {
+		return err
+	}
+
+	if written != size {
+		return io.ErrUnexpectedEOF
+	}
+
+	return nil
+}
+
 // writeMessageResult maps a sink completion result to a bounded LMTP status.
 func (s *Session) writeMessageResult(result MessageResult) error {
 	if len(result.Statuses) > 0 {

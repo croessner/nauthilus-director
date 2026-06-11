@@ -19,6 +19,7 @@ package lmtp
 import (
 	"bytes"
 	"context"
+	"net"
 	"strings"
 	"sync"
 	"testing"
@@ -62,6 +63,35 @@ func TestLMTPObservabilityKeepsRecipientsCredentialsAndContentOut(t *testing.T) 
 	assertLMTPObservationLogs(t, output.String())
 	assertLMTPObservationMetrics(t, runtime)
 	assertLMTPObservationEvents(t, recorder.snapshot())
+}
+
+// TestLMTPDATAObservationRecordsBackendBodyTransport verifies bounded DATA transport diagnostics.
+func TestLMTPDATAObservationRecordsBackendBodyTransport(t *testing.T) {
+	server, client := net.Pipe()
+	defer func() { _ = server.Close() }()
+	defer func() { _ = client.Close() }()
+
+	recorder := &recordingLMTPObservation{}
+	session := &Session{
+		conn:          server,
+		observability: recorder,
+	}
+
+	session.recordDATAStream(context.Background(), lmtpObservationResultOK, lmtpReasonOK, lmtpStatusClass2xx, 0, backendBodyTransportDATA)
+	session.recordDATAStream(context.Background(), lmtpObservationResultOK, lmtpReasonOK, lmtpStatusClass2xx, 0, backendBodyTransportBDAT)
+	session.recordDATAStream(context.Background(), lmtpObservationResultOK, lmtpReasonOK, lmtpStatusClass2xx, 0, backendBodyTransport("recipient@example.test"))
+
+	events := recorder.snapshot()
+	if len(events) != 3 {
+		t.Fatalf("DATA stream events = %d, want 3", len(events))
+	}
+
+	assertDATAStreamTransportObservation(t, events[0], string(backendBodyTransportDATA))
+	assertDATAStreamTransportObservation(t, events[1], string(backendBodyTransportBDAT))
+
+	if got := events[2].LogFields[lmtpObsFieldBackendBody]; got != "" {
+		t.Fatalf("invalid backend body transport was recorded as %q", got)
+	}
 }
 
 // newLMTPObservationRuntime creates an enabled log and metrics runtime for LMTP tests.
@@ -145,6 +175,36 @@ func assertLMTPObservationEvents(t *testing.T, events []observability.Event) {
 		for _, attr := range attributes {
 			assertLMTPObservationTextSafe(t, attr.Value.AsString())
 		}
+	}
+}
+
+// assertDATAStreamTransportObservation verifies transport is log/trace-only and bounded.
+func assertDATAStreamTransportObservation(t *testing.T, event observability.Event, want string) {
+	t.Helper()
+
+	if event.Name != observability.EventLMTPDataStream {
+		t.Fatalf("event name = %q, want DATA stream", event.Name)
+	}
+
+	if got := event.LogFields[lmtpObsFieldBackendBody]; got != want {
+		t.Fatalf("backend body transport = %q, want %q", got, want)
+	}
+
+	if got := event.MetricLabels[lmtpObsFieldBackendBody]; got != "" {
+		t.Fatalf("backend body transport was added to metric labels as %q", got)
+	}
+
+	attributes := observability.TraceAttributesForEvent(event)
+	found := false
+
+	for _, attr := range attributes {
+		if string(attr.Key) == lmtpObsFieldBackendBody && attr.Value.AsString() == want {
+			found = true
+		}
+	}
+
+	if !found {
+		t.Fatalf("trace attributes missing backend body transport %q: %#v", want, attributes)
 	}
 }
 

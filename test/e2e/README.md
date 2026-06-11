@@ -23,6 +23,10 @@ The default lane is fake-service based and deterministic:
 - deterministic fake LMTP backend under `test/e2e/fakes/lmtp_backend/`
 - public loopback sockets for frontend IMAP, LMTP, LMTPS, STARTTLS, implicit
   TLS and fake backend handoff
+- fake LMTP backend wire transcripts for DATA-to-DATA fallback,
+  DATA-to-BDAT delivery, frontend/backend CHUNKING independence, BDAT gating,
+  dot-unstuffing, CRLF preservation, empty and multi-chunk bodies, rejected
+  backend chunks and final recipient status ordering
 - CLI commands through `nauthilus-directorctl` when the control API exists
 - REST calls through the control listener when `runtime.servers.control` is
   runnable from the server binary

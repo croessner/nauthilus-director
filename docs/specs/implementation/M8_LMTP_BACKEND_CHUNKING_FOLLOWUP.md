@@ -1,10 +1,10 @@
 # M8 LMTP Backend CHUNKING Follow-up
 
-Status: proposed follow-up after M8. This document records a post-M8 LMTP
-transport optimization for `nauthilus-director`. It is intentionally specified
-as a follow-up because M8 production hardening is already complete and because
-this work changes mail-protocol forwarding behavior rather than production
-packaging, control-plane authentication or deployment hardening.
+Status: completed follow-up after M8. This document records a post-M8 LMTP
+transport optimization for `nauthilus-director`. It is intentionally tracked as
+a follow-up because M8 production hardening is already complete and because this
+work changes mail-protocol forwarding behavior rather than production packaging,
+control-plane authentication or deployment hardening.
 
 The implementation may be completed after M8 without reopening the M5 LMTP
 production milestone. The goal is to make backend LMTP delivery more efficient
@@ -379,3 +379,48 @@ This follow-up is complete when:
 - backend BDAT failures fail closed with safe temporary delivery statuses;
 - observability remains bounded and secret-safe;
 - `make guardrails` or the documented deterministic proof target passes.
+
+## Completion Evidence
+
+Completed on 2026-06-11 with public-boundary proof through the production
+`nauthilus-director` binary and fake LMTP backend transcripts. The fake backend
+records backend `DATA` use, backend `BDAT` commands, chunk sizes, `LAST`
+markers, payload bytes and whether final recipient status sets completed; it
+does not queue, retry, bounce or persist delivered message bodies.
+
+Proof coverage:
+
+- `TestServerBinaryPublicLMTPBackendDATAFallbackTranscript` proves frontend
+  `DATA` falls back to backend `DATA` when the selected backend omits
+  `CHUNKING`, and proves that backend `BDAT` is not sent in that case.
+- `TestServerBinaryPublicLMTPBackendBDATWithoutFrontendChunking` proves frontend
+  `DATA` can be delivered as backend `BDAT` when the selected backend advertises
+  `CHUNKING`, even when the frontend listener does not advertise `CHUNKING`.
+- `TestServerBinaryPublicLMTPBackendBDATConversionEdges` proves DATA
+  dot-unstuffing, CRLF preservation, `BDAT 0 LAST` for an empty body and
+  deterministic multi-chunk transfer for a large body.
+- `TestServerBinaryPublicLMTPBackendBDATNonFinalRejectionFailsClosed` proves a
+  rejected non-final backend `BDAT` fails closed with a safe frontend temporary
+  status and an incomplete backend transcript.
+- `TestServerBinaryPublicLMTPBackendBDATFinalStatusOrdering` proves final
+  backend recipient statuses are returned in original accepted-recipient order.
+- `TestServerBinaryPublicLMTPBackendBDATIncompleteStatusesFailClosed` proves an
+  incomplete final backend status set is converted to safe temporary frontend
+  status for missing recipients.
+- `TestServerBinaryPublicLMTPBackendBDATGateForFrontendBDAT` proves frontend
+  `BDAT` is not forwarded as backend `BDAT` when the selected backend omits
+  `CHUNKING`, even if the frontend listener advertises `CHUNKING`.
+
+Command evidence:
+
+- `go test -mod=vendor ./internal/protocol/lmtp` passed.
+- `go test -mod=vendor ./test/e2e/fakes/lmtp_backend` passed.
+- `NAUTHILUS_DIRECTOR_E2E_SERVER_BINARY=/private/tmp/nauthilus-director-e2e/nauthilus-director go test -mod=vendor -count=1 ./test/e2e -run 'TestServerBinaryPublicLMTPBackend(DATAFallbackTranscript|BDATWithoutFrontendChunking|BDATConversionEdges|BDATNonFinalRejectionFailsClosed|BDATFinalStatusOrdering|BDATIncompleteStatusesFailClosed|BDATGateForFrontendBDAT)$'`
+  passed.
+- `make check-docs`, `make test`, `make race`, `make e2e`,
+  `make build-check`, `make guardrails` and `make e2e-interop` passed locally.
+
+Operator-facing documentation was reconciled in the target config comments,
+config manpage and E2E documentation. Generated config references were not
+regenerated because this follow-up did not change typed config, defaults or
+config metadata.

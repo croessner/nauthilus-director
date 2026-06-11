@@ -183,7 +183,7 @@ func TestServerBinaryPublicLMTPBearerPeerIntrospectionFlow(t *testing.T) {
 	}
 	deliverLMTPMessage(t, xoauth2, e2eLMTPRecipientA, "lmtp-xoauth2-delivery-body")
 	xoauth2.Close()
-	assertLMTPBackendObservation(t, fakeLMTPA.ExpectObservation(t), []string{lmtpPath(e2eLMTPRecipientA)}, false)
+	assertLMTPBackendObservation(t, fakeLMTPA.ExpectObservation(t), []string{lmtpPath(e2eLMTPRecipientA)}, true)
 
 	backchannelBeforeAuth = authority.RequestCount()
 	beforeAuth = authority.SASLBearerIntrospectionCount()
@@ -194,7 +194,7 @@ func TestServerBinaryPublicLMTPBearerPeerIntrospectionFlow(t *testing.T) {
 	}
 	deliverLMTPMessage(t, oauthbearer, e2eLMTPRecipientASecond, "lmtp-oauthbearer-delivery-body")
 	oauthbearer.Close()
-	assertLMTPBackendObservation(t, fakeLMTPA.ExpectObservation(t), []string{lmtpPath(e2eLMTPRecipientASecond)}, false)
+	assertLMTPBackendObservation(t, fakeLMTPA.ExpectObservation(t), []string{lmtpPath(e2eLMTPRecipientASecond)}, true)
 	expectNoAuthorityRequestMethod(t, authority, e2eLMTPProtocol, "xoauth2")
 	expectNoAuthorityRequestMethod(t, authority, e2eLMTPProtocol, "oauthbearer")
 	assertLMTPProcessOutputSafe(t, process.output.String())
@@ -242,6 +242,196 @@ func TestServerBinaryPublicLMTPChunkingSuppression(t *testing.T) {
 	assertLMTPHasCapability(t, capabilities, "SMTPUTF8")
 	assertLMTPNoCapability(t, capabilities, "CHUNKING")
 	assertLMTPProcessOutputSafe(t, process.output.String())
+}
+
+// TestServerBinaryPublicLMTPBackendDATAFallbackTranscript proves non-CHUNKING backends receive DATA.
+func TestServerBinaryPublicLMTPBackendDATAFallbackTranscript(t *testing.T) {
+	fixture := startLMTPBackendChunkingFixture(t, lmtpBackendChunkingFixtureOptions{})
+	client := authenticatedLMTPClient(t, fixture.address)
+	defer client.Close()
+
+	body := "fallback-one\r\n..fallback-dot\r\n..\r\n"
+	deliverLMTPDATA(t, client, []string{e2eLMTPRecipientA}, body)
+
+	observation := fixture.fakeLMTPA.ExpectObservation(t)
+	assertLMTPBackendObservation(t, observation, []string{lmtpPath(e2eLMTPRecipientA)}, false)
+	assertBackendDATAWire(t, observation, body)
+	assertNoBackendBDATWire(t, observation)
+	assertLMTPProcessOutputSafe(t, fixture.process.output.String())
+}
+
+// TestServerBinaryPublicLMTPBackendBDATWithoutFrontendChunking proves backend transport independence.
+func TestServerBinaryPublicLMTPBackendBDATWithoutFrontendChunking(t *testing.T) {
+	fixture := startLMTPBackendChunkingFixture(t, lmtpBackendChunkingFixtureOptions{
+		BackendCapabilities:     []string{"CHUNKING"},
+		HealthCapabilities:      []string{"CHUNKING"},
+		DisableFrontendChunking: true,
+	})
+	client := authenticatedLMTPClientWithoutFrontendChunking(t, fixture.address)
+	defer client.Close()
+
+	body := "chunk-proof-one\r\n..chunk-proof-dot\r\n..\r\n"
+	deliverLMTPDATA(t, client, []string{e2eLMTPRecipientA}, body)
+
+	observation := fixture.fakeLMTPA.ExpectObservation(t)
+	assertLMTPBackendObservation(t, observation, []string{lmtpPath(e2eLMTPRecipientA)}, true)
+	assertBackendBDATWire(t, observation, "chunk-proof-one\r\n.chunk-proof-dot\r\n.\r\n")
+	assertLMTPProcessOutputSafe(t, fixture.process.output.String())
+}
+
+// TestServerBinaryPublicLMTPBackendBDATConversionEdges proves empty and multi-chunk DATA conversion.
+func TestServerBinaryPublicLMTPBackendBDATConversionEdges(t *testing.T) {
+	fixture := startLMTPBackendChunkingFixture(t, lmtpBackendChunkingFixtureOptions{
+		BackendCapabilities: []string{"CHUNKING"},
+		HealthCapabilities:  []string{"CHUNKING"},
+	})
+
+	emptyClient := authenticatedLMTPClient(t, fixture.address)
+	deliverLMTPDATA(t, emptyClient, []string{e2eLMTPRecipientA}, "")
+	emptyClient.Close()
+
+	emptyObservation := fixture.fakeLMTPA.ExpectObservation(t)
+	assertLMTPBackendObservation(t, emptyObservation, []string{lmtpPath(e2eLMTPRecipientA)}, true)
+	assertBackendBDATChunks(t, emptyObservation, []lmtpbackend.BDATChunk{
+		{Command: "BDAT 0 LAST", Last: true},
+	})
+
+	largeBody := largeLMTPBody()
+	largeClient := authenticatedLMTPClient(t, fixture.address)
+	deliverLMTPDATA(t, largeClient, []string{e2eLMTPRecipientA}, largeBody)
+	largeClient.Close()
+
+	largeObservation := fixture.fakeLMTPA.ExpectObservation(t)
+	assertLMTPBackendObservation(t, largeObservation, []string{lmtpPath(e2eLMTPRecipientA)}, true)
+	assertBackendBDATBody(t, largeObservation, largeBody)
+	if len(largeObservation.BDATChunks) < 2 {
+		t.Fatalf("large DATA backend chunks = %d, want multiple BDAT chunks", len(largeObservation.BDATChunks))
+	}
+	if largeObservation.BDATChunks[0].Size != 65536 || largeObservation.BDATChunks[0].Last {
+		t.Fatalf("first large BDAT chunk = %#v, want non-final 64 KiB chunk", largeObservation.BDATChunks[0])
+	}
+	if !largeObservation.BDATChunks[len(largeObservation.BDATChunks)-1].Last {
+		t.Fatalf("last large BDAT chunk = %#v, want LAST", largeObservation.BDATChunks[len(largeObservation.BDATChunks)-1])
+	}
+	assertLMTPProcessOutputSafe(t, fixture.process.output.String())
+}
+
+// TestServerBinaryPublicLMTPBackendBDATNonFinalRejectionFailsClosed proves rejected chunks stop delivery.
+func TestServerBinaryPublicLMTPBackendBDATNonFinalRejectionFailsClosed(t *testing.T) {
+	fixture := startLMTPBackendChunkingFixture(t, lmtpBackendChunkingFixtureOptions{
+		BackendCapabilities:  []string{"CHUNKING"},
+		HealthCapabilities:   []string{"CHUNKING"},
+		NonFinalBDATStatuses: []lmtpbackend.Status{{Code: "451", Enhanced: "4.3.0", Text: "chunk rejected"}},
+	})
+	client := authenticatedLMTPClient(t, fixture.address)
+	defer client.Close()
+
+	client.WriteLine("MAIL FROM:<sender@example.test>")
+	client.ExpectLine("250 2.0.0 Sender accepted\r\n")
+	client.WriteLine("RCPT TO:<" + e2eLMTPRecipientA + ">")
+	client.ExpectLine("250 2.0.0 Recipient accepted\r\n")
+	client.WriteLine("DATA")
+	client.ExpectLine("354 2.0.0 End data with <CR><LF>.<CR><LF>\r\n")
+	client.WriteRaw(largeLMTPBody() + ".\r\n")
+	client.ExpectLine("451 4.3.0 Message delivery temporarily failed\r\n")
+
+	observation := fixture.fakeLMTPA.ExpectObservation(t)
+	assertLMTPBackendObservation(t, observation, []string{lmtpPath(e2eLMTPRecipientA)}, true)
+	if observation.FinalComplete {
+		t.Fatal("backend observation completed after rejected non-final BDAT")
+	}
+	if len(observation.BDATChunks) != 1 || observation.BDATChunks[0].Last {
+		t.Fatalf("BDAT chunks after rejection = %#v, want one non-final chunk", observation.BDATChunks)
+	}
+	assertLMTPProcessOutputSafe(t, fixture.process.output.String())
+}
+
+// TestServerBinaryPublicLMTPBackendBDATFinalStatusOrdering proves recipient outcomes stay ordered.
+func TestServerBinaryPublicLMTPBackendBDATFinalStatusOrdering(t *testing.T) {
+	fixture := startLMTPBackendChunkingFixture(t, lmtpBackendChunkingFixtureOptions{
+		BackendCapabilities: []string{"CHUNKING"},
+		HealthCapabilities:  []string{"CHUNKING"},
+		FinalStatus: map[string]lmtpbackend.Status{
+			lmtpPath(e2eLMTPRecipientASecond): {Code: "451", Enhanced: "4.2.0", Text: "temporary policy"},
+		},
+	})
+	client := authenticatedLMTPClient(t, fixture.address)
+	defer client.Close()
+
+	body := "status-order-proof\r\n"
+	client.WriteLine("MAIL FROM:<sender@example.test>")
+	client.ExpectLine("250 2.0.0 Sender accepted\r\n")
+	client.WriteLine("RCPT TO:<" + e2eLMTPRecipientA + ">")
+	client.ExpectLine("250 2.0.0 Recipient accepted\r\n")
+	client.WriteLine("RCPT TO:<" + e2eLMTPRecipientASecond + ">")
+	client.ExpectLine("250 2.0.0 Recipient accepted\r\n")
+	client.WriteLine("DATA")
+	client.ExpectLine("354 2.0.0 End data with <CR><LF>.<CR><LF>\r\n")
+	client.WriteRaw(body + ".\r\n")
+	client.ExpectLine("250 2.1.5 Message accepted\r\n")
+	client.ExpectLine("451 4.2.0 Message delivery temporarily failed\r\n")
+
+	observation := fixture.fakeLMTPA.ExpectObservation(t)
+	assertLMTPBackendObservation(t, observation, []string{lmtpPath(e2eLMTPRecipientA), lmtpPath(e2eLMTPRecipientASecond)}, true)
+	assertBackendBDATWire(t, observation, body)
+	if !observation.FinalComplete {
+		t.Fatal("backend observation did not complete final status ordering proof")
+	}
+	assertLMTPProcessOutputSafe(t, fixture.process.output.String())
+}
+
+// TestServerBinaryPublicLMTPBackendBDATIncompleteStatusesFailClosed proves missing outcomes become temporary.
+func TestServerBinaryPublicLMTPBackendBDATIncompleteStatusesFailClosed(t *testing.T) {
+	fixture := startLMTPBackendChunkingFixture(t, lmtpBackendChunkingFixtureOptions{
+		BackendCapabilities: []string{"CHUNKING"},
+		HealthCapabilities:  []string{"CHUNKING"},
+		FinalStatusLimit:    1,
+	})
+	client := authenticatedLMTPClient(t, fixture.address)
+	defer client.Close()
+
+	body := "incomplete-status-proof\r\n"
+	client.WriteLine("MAIL FROM:<sender@example.test>")
+	client.ExpectLine("250 2.0.0 Sender accepted\r\n")
+	client.WriteLine("RCPT TO:<" + e2eLMTPRecipientA + ">")
+	client.ExpectLine("250 2.0.0 Recipient accepted\r\n")
+	client.WriteLine("RCPT TO:<" + e2eLMTPRecipientASecond + ">")
+	client.ExpectLine("250 2.0.0 Recipient accepted\r\n")
+	client.WriteLine("DATA")
+	client.ExpectLine("354 2.0.0 End data with <CR><LF>.<CR><LF>\r\n")
+	client.WriteRaw(body + ".\r\n")
+	client.ExpectLine("250 2.1.5 Message accepted\r\n")
+	client.ExpectLine("451 4.3.0 Message delivery temporarily failed\r\n")
+
+	observation := fixture.fakeLMTPA.ExpectObservation(t)
+	assertLMTPBackendObservation(t, observation, []string{lmtpPath(e2eLMTPRecipientA), lmtpPath(e2eLMTPRecipientASecond)}, true)
+	if observation.FinalComplete {
+		t.Fatal("backend observation completed despite intentionally missing final statuses")
+	}
+	assertLMTPProcessOutputSafe(t, fixture.process.output.String())
+}
+
+// TestServerBinaryPublicLMTPBackendBDATGateForFrontendBDAT proves unsupported backend CHUNKING blocks BDAT writes.
+func TestServerBinaryPublicLMTPBackendBDATGateForFrontendBDAT(t *testing.T) {
+	fixture := startLMTPBackendChunkingFixture(t, lmtpBackendChunkingFixtureOptions{
+		HealthCapabilities: []string{"CHUNKING"},
+	})
+	client := authenticatedLMTPClient(t, fixture.address)
+	defer client.Close()
+
+	client.WriteLine("MAIL FROM:<sender@example.test>")
+	client.ExpectLine("250 2.0.0 Sender accepted\r\n")
+	client.WriteLine("RCPT TO:<" + e2eLMTPRecipientA + ">")
+	client.ExpectLine("250 2.0.0 Recipient accepted\r\n")
+	client.WriteRaw("BDAT 5 LAST\r\nhello")
+	client.ExpectLine("451 4.3.0 Message delivery temporarily failed\r\n")
+	client.WriteLine("NOOP")
+	client.ExpectLine("250 2.0.0 OK\r\n")
+
+	observation := fixture.fakeLMTPA.ExpectObservation(t)
+	assertLMTPBackendObservation(t, observation, []string{lmtpPath(e2eLMTPRecipientA)}, false)
+	assertNoBackendBDATWire(t, observation)
+	assertLMTPProcessOutputSafe(t, fixture.process.output.String())
 }
 
 // TestServerBinaryPublicPlaintextLMTPNoAuthFlow proves auth-free plaintext LMTP through public sockets.
@@ -308,7 +498,7 @@ func TestServerBinaryPublicPlaintextLMTPNoAuthFlow(t *testing.T) {
 	client.ExpectLine("354 2.0.0 End data with <CR><LF>.<CR><LF>\r\n")
 	client.WriteRaw("plaintext-body\r\n.\r\n")
 	client.ExpectLine("250 2.1.5 Message accepted\r\n")
-	assertLMTPBackendObservation(t, fakeLMTPA.ExpectObservation(t), []string{lmtpPath(e2eLMTPRecipientA)}, false)
+	assertLMTPBackendObservation(t, fakeLMTPA.ExpectObservation(t), []string{lmtpPath(e2eLMTPRecipientA)}, true)
 	assertLMTPProcessOutputSafe(t, process.output.String())
 }
 
@@ -444,7 +634,7 @@ func TestServerBinaryPublicLMTPBackendProxyProtocolFlow(t *testing.T) {
 	client.ExpectLine("354 2.0.0 End data with <CR><LF>.<CR><LF>\r\n")
 	client.WriteRaw(e2eLMTPMessageSecret + "\r\n.\r\n")
 	client.ExpectLine("250 2.1.5 Message accepted\r\n")
-	assertLMTPBackendObservation(t, fakeLMTPA.ExpectObservation(t), []string{lmtpPath(e2eLMTPRecipientA)}, false)
+	assertLMTPBackendObservation(t, fakeLMTPA.ExpectObservation(t), []string{lmtpPath(e2eLMTPRecipientA)}, true)
 	assertProxyProtocolHeader(t, fakeLMTPA.ExpectProxyProtocolHeader(t))
 	assertLMTPProcessOutputSafe(t, process.output.String())
 }
@@ -530,7 +720,7 @@ func exerciseStartTLSLMTPFlow(
 	client.ExpectLine("250 2.1.5 Message accepted\r\n")
 	client.ExpectLine("250 2.1.5 Message accepted\r\n")
 	observation := fakeLMTPA.ExpectObservation(t)
-	assertLMTPBackendObservation(t, observation, []string{lmtpPath(e2eLMTPRecipientA), lmtpPath(e2eLMTPRecipientASecond)}, false)
+	assertLMTPBackendObservation(t, observation, []string{lmtpPath(e2eLMTPRecipientA), lmtpPath(e2eLMTPRecipientASecond)}, true)
 	if !strings.Contains(observation.Body, e2eLMTPMessageSecret) {
 		t.Fatalf("fake backend did not receive DATA body")
 	}
@@ -598,7 +788,7 @@ func exerciseLMTPSMTLSPeerAuth(t *testing.T, address string, bundle lmtpPeerTLSB
 	client.WriteRaw("mtls-body\r\n.\r\n")
 	client.ExpectLine("250 2.1.5 Message accepted\r\n")
 	observation := fakeLMTPA.ExpectObservation(t)
-	assertLMTPBackendObservation(t, observation, []string{lmtpPath(e2eLMTPRecipientA)}, false)
+	assertLMTPBackendObservation(t, observation, []string{lmtpPath(e2eLMTPRecipientA)}, true)
 }
 
 // exerciseLMTPMaintenanceEffects proves soft maintenance preserves accepted transactions and excludes new ones.
@@ -616,7 +806,7 @@ func exerciseLMTPMaintenanceEffects(t *testing.T, address string, controlURL str
 	client.ExpectLine("354 2.0.0 End data with <CR><LF>.<CR><LF>\r\n")
 	client.WriteRaw("maintenance-body\r\n.\r\n")
 	client.ExpectLine("250 2.1.5 Message accepted\r\n")
-	assertLMTPBackendObservation(t, fakeLMTPA.ExpectObservation(t), []string{lmtpPath(e2eLMTPRecipientA)}, false)
+	assertLMTPBackendObservation(t, fakeLMTPA.ExpectObservation(t), []string{lmtpPath(e2eLMTPRecipientA)}, true)
 
 	rejected := authenticatedLMTPClient(t, address)
 	defer rejected.Close()
@@ -712,6 +902,7 @@ type lmtpProcessConfigOptions struct {
 	LMTPBackendDeepHealth       map[string]bool
 	LMTPListenerTLSMode         string
 	LMTPExtraCapabilities       []string
+	LMTPDisableChunking         bool
 	LMTPPeerAuthMechanisms      []string
 	TLS                         lmtpPeerTLSBundle
 	DisableLMTPPeerAuth         bool
@@ -744,8 +935,8 @@ func writeLMTPProcessConfig(t *testing.T, options lmtpProcessConfigOptions) stri
 	}
 	lmtpPeerAuthRequired := !options.DisableLMTPPeerAuth
 	lmtpPeerAuthMechanisms := configuredLMTPPeerAuthMechanisms(options)
-	lmtpCapabilities := lmtpListenerCapabilities(lmtpListenerTLSMode, lmtpPeerAuthMechanisms, options.LMTPExtraCapabilities)
-	lmtpsCapabilities := lmtpListenerCapabilities("implicit", lmtpPeerAuthMechanisms, options.LMTPExtraCapabilities)
+	lmtpCapabilities := lmtpListenerCapabilities(lmtpListenerTLSMode, lmtpPeerAuthMechanisms, options.LMTPExtraCapabilities, !options.LMTPDisableChunking)
+	lmtpsCapabilities := lmtpListenerCapabilities("implicit", lmtpPeerAuthMechanisms, options.LMTPExtraCapabilities, !options.LMTPDisableChunking)
 	backendRetentionTTL := strings.TrimSpace(options.BackendRetentionTTL)
 	if backendRetentionTTL == "" {
 		backendRetentionTTL = "15m"
@@ -1093,7 +1284,7 @@ func configuredLMTPPeerAuthMechanisms(options lmtpProcessConfigOptions) []string
 }
 
 // lmtpListenerCapabilities renders desired frontend capabilities for one LMTP listener.
-func lmtpListenerCapabilities(tlsMode string, mechanisms []string, extra []string) []string {
+func lmtpListenerCapabilities(tlsMode string, mechanisms []string, extra []string, enableChunking bool) []string {
 	capabilities := []string{"SMTPUTF8", "ENHANCEDSTATUSCODES"}
 	if strings.EqualFold(tlsMode, "starttls") {
 		capabilities = append(capabilities, "STARTTLS")
@@ -1101,7 +1292,9 @@ func lmtpListenerCapabilities(tlsMode string, mechanisms []string, extra []strin
 	if len(mechanisms) > 0 {
 		capabilities = append(capabilities, "AUTH "+strings.ToUpper(strings.Join(mechanisms, " ")))
 	}
-	capabilities = append(capabilities, "CHUNKING")
+	if enableChunking {
+		capabilities = append(capabilities, "CHUNKING")
+	}
 
 	return append(capabilities, extra...)
 }
@@ -1139,6 +1332,111 @@ func publishHealthyLMTPBackends(t *testing.T, fixture redisSessionFixture, backe
 			t.Fatalf("PublishHealthState %s: %v", backendID, err)
 		}
 	}
+}
+
+type lmtpBackendChunkingFixtureOptions struct {
+	BackendCapabilities     []string
+	HealthCapabilities      []string
+	DisableFrontendChunking bool
+	FinalStatus             map[string]lmtpbackend.Status
+	FinalStatusLimit        int
+	NonFinalBDATStatuses    []lmtpbackend.Status
+}
+
+type lmtpBackendChunkingFixture struct {
+	address   string
+	process   *directorProcess
+	fakeLMTPA *lmtpbackend.Server
+}
+
+// startLMTPBackendChunkingFixture starts a real Director binary with fake LMTP backends.
+func startLMTPBackendChunkingFixture(t *testing.T, options lmtpBackendChunkingFixtureOptions) lmtpBackendChunkingFixture {
+	t.Helper()
+
+	binary := e2eServerBinary(t)
+	redisFixture := startValkeySessionStore(t)
+	authority := startLMTPAuthority(t, lmtpAuthorityIdentities())
+	tlsBundle := writeLMTPPeerTLSBundle(t)
+	fakeLMTPA := lmtpbackend.Start(t, lmtpbackend.Options{
+		Capabilities:       options.BackendCapabilities,
+		FinalStatus:        options.FinalStatus,
+		FinalStatusLimit:   options.FinalStatusLimit,
+		NonFinalBDATStatus: options.NonFinalBDATStatuses,
+	})
+	fakeLMTPB := lmtpbackend.Start(t, lmtpbackend.Options{Capabilities: options.BackendCapabilities})
+	fakeIMAPA := startFakeIMAPBackend(t, fakeBackendOptions{})
+	fakeIMAPB := startFakeIMAPBackend(t, fakeBackendOptions{})
+	lmtpAddress := loopbackAddress(t)
+	lmtpsAddress := loopbackAddress(t)
+	imapAddress := loopbackAddress(t)
+	controlAddress := loopbackAddress(t)
+	publishHealthyLMTPBackends(t, redisFixture, []string{e2eLMTPBackendAID, e2eLMTPBackendBID}, options.HealthCapabilities...)
+	configPath := writeLMTPProcessConfig(t, lmtpProcessConfigOptions{
+		RedisAddress:        redisFixture.addr,
+		AuthorityURL:        authority.URL(),
+		LMTPAddress:         lmtpAddress,
+		LMTPSAddress:        lmtpsAddress,
+		IMAPAddress:         imapAddress,
+		ControlAddress:      controlAddress,
+		LMTPDisableChunking: options.DisableFrontendChunking,
+		LMTPBackends:        map[string]string{e2eLMTPBackendAID: fakeLMTPA.Address(), e2eLMTPBackendBID: fakeLMTPB.Address()},
+		IMAPBackends:        map[string]string{e2eBackendAID: fakeIMAPA.Address(), e2eBackendBID: fakeIMAPB.Address()},
+		TLS:                 tlsBundle,
+	})
+	process := startDirectorProcess(t, binary, configPath)
+	waitForLMTPGreeting(t, lmtpAddress, process)
+
+	return lmtpBackendChunkingFixture{
+		address:   lmtpAddress,
+		process:   process,
+		fakeLMTPA: fakeLMTPA,
+	}
+}
+
+// authenticatedLMTPClientWithoutFrontendChunking verifies CHUNKING is absent before AUTH.
+func authenticatedLMTPClientWithoutFrontendChunking(t *testing.T, address string) *lmtpClient {
+	t.Helper()
+
+	client := dialLMTP(t, address)
+	client.ExpectLine("220 2.0.0 nauthilus-director LMTP ready\r\n")
+	client.WriteLine("LHLO no-frontend-chunking.example")
+	capabilities := client.ReadResponse()
+	assertLMTPHasCapability(t, capabilities, "STARTTLS")
+	assertLMTPNoCapability(t, capabilities, "CHUNKING")
+	client.WriteLine("STARTTLS")
+	client.ExpectLine("220 2.0.0 Ready to start TLS\r\n")
+	client.UpgradeTLS(&tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12})
+	client.WriteLine("LHLO no-frontend-chunking.example")
+	capabilities = client.ReadResponse()
+	assertLMTPHasCapability(t, capabilities, "AUTH PLAIN")
+	assertLMTPNoCapability(t, capabilities, "CHUNKING")
+	client.WriteLine("AUTH PLAIN " + plainLMTPPayload(e2eLMTPSubmitter, e2ePassword))
+	client.ExpectLine("235 2.7.0 Authentication successful\r\n")
+
+	return client
+}
+
+// deliverLMTPDATA sends a DATA transaction through an authenticated public LMTP client.
+func deliverLMTPDATA(t *testing.T, client *lmtpClient, recipients []string, body string) {
+	t.Helper()
+
+	client.WriteLine("MAIL FROM:<sender@example.test>")
+	client.ExpectLine("250 2.0.0 Sender accepted\r\n")
+	for _, recipient := range recipients {
+		client.WriteLine("RCPT TO:<" + recipient + ">")
+		client.ExpectLine("250 2.0.0 Recipient accepted\r\n")
+	}
+	client.WriteLine("DATA")
+	client.ExpectLine("354 2.0.0 End data with <CR><LF>.<CR><LF>\r\n")
+	client.WriteRaw(body + ".\r\n")
+	for range recipients {
+		client.ExpectLine("250 2.1.5 Message accepted\r\n")
+	}
+}
+
+// largeLMTPBody returns a deterministic body that crosses the backend BDAT chunk boundary.
+func largeLMTPBody() string {
+	return strings.Repeat(strings.Repeat("a", 1022)+"\r\n", 65) + "large-proof-tail\r\n"
 }
 
 type lmtpAuthorityIdentity struct {
@@ -1500,6 +1798,78 @@ func assertLMTPBackendObservation(t *testing.T, observation lmtpbackend.Observat
 	}
 }
 
+// assertBackendDATAWire verifies backend DATA was the only body transport.
+func assertBackendDATAWire(t *testing.T, observation lmtpbackend.Observation, wantBody string) {
+	t.Helper()
+
+	if !observation.UsedDATA {
+		t.Fatalf("backend did not receive DATA: %#v", observation)
+	}
+	if observation.Body != wantBody {
+		t.Fatalf("backend DATA body length = %d, want %d", len(observation.Body), len(wantBody))
+	}
+	if !slices.Contains(observation.Commands, "DATA") {
+		t.Fatalf("backend commands = %v, want DATA", observation.Commands)
+	}
+}
+
+// assertBackendBDATWire verifies backend BDAT was the only body transport and bytes match.
+func assertBackendBDATWire(t *testing.T, observation lmtpbackend.Observation, wantBody string) {
+	t.Helper()
+
+	if observation.UsedDATA {
+		t.Fatalf("backend received DATA during BDAT proof: %#v", observation)
+	}
+	assertBackendBDATBody(t, observation, wantBody)
+	if len(observation.BDATChunks) == 0 {
+		t.Fatal("backend BDAT transcript has no chunks")
+	}
+	if !observation.BDATChunks[len(observation.BDATChunks)-1].Last {
+		t.Fatalf("backend BDAT chunks = %#v, want final LAST chunk", observation.BDATChunks)
+	}
+}
+
+// assertBackendBDATBody verifies converted payload bytes without printing the body.
+func assertBackendBDATBody(t *testing.T, observation lmtpbackend.Observation, wantBody string) {
+	t.Helper()
+
+	if !observation.UsedBDAT {
+		t.Fatalf("backend did not receive BDAT: %#v", observation)
+	}
+	if observation.Body != wantBody {
+		t.Fatalf("backend BDAT body length = %d, want %d", len(observation.Body), len(wantBody))
+	}
+}
+
+// assertBackendBDATChunks verifies exact backend BDAT chunk metadata.
+func assertBackendBDATChunks(t *testing.T, observation lmtpbackend.Observation, want []lmtpbackend.BDATChunk) {
+	t.Helper()
+
+	if len(observation.BDATChunks) != len(want) {
+		t.Fatalf("backend BDAT chunks = %#v, want %#v", observation.BDATChunks, want)
+	}
+	for index := range want {
+		got := observation.BDATChunks[index]
+		if got.Command != want[index].Command || got.Size != want[index].Size || got.Last != want[index].Last || got.Payload != want[index].Payload {
+			t.Fatalf("backend BDAT chunk %d = %#v, want %#v", index, got, want[index])
+		}
+	}
+}
+
+// assertNoBackendBDATWire verifies no backend BDAT command or payload was observed.
+func assertNoBackendBDATWire(t *testing.T, observation lmtpbackend.Observation) {
+	t.Helper()
+
+	if observation.UsedBDAT || len(observation.BDATChunks) > 0 {
+		t.Fatalf("backend unexpectedly received BDAT chunks: %#v", observation.BDATChunks)
+	}
+	for _, command := range observation.Commands {
+		if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(command)), "BDAT") {
+			t.Fatalf("backend unexpectedly received BDAT command %q", command)
+		}
+	}
+}
+
 // equalStringSlices compares two ordered string slices.
 func equalStringSlices(left []string, right []string) bool {
 	if len(left) != len(right) {
@@ -1636,6 +2006,11 @@ func assertLMTPProcessOutputSafe(t *testing.T, output string) {
 		"lmtp-oauthbearer-delivery-body",
 		"maintenance-body",
 		"mtls-body",
+		"fallback-one",
+		"chunk-proof-one",
+		"large-proof-tail",
+		"status-order-proof",
+		"incomplete-status-proof",
 	} {
 		if strings.Contains(output, forbidden) {
 			t.Fatalf("process output leaked LMTP value %q: %s", forbidden, output)

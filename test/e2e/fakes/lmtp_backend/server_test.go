@@ -60,6 +60,49 @@ func TestScriptedFinalStatusesAreDeterministic(t *testing.T) {
 	if len(observation.Recipients) != 2 || observation.Recipients[0] != "<temp@example.test>" || observation.Recipients[1] != "<perm@example.test>" {
 		t.Fatalf("recipients = %#v", observation.Recipients)
 	}
+	if !observation.UsedDATA || observation.UsedBDAT || !observation.FinalComplete {
+		t.Fatalf("observation = %#v, want complete DATA transaction", observation)
+	}
+}
+
+// TestBDATTranscriptObservationRecordsChunks proves the fake exposes backend wire chunks.
+func TestBDATTranscriptObservationRecordsChunks(t *testing.T) {
+	server := Start(t, Options{
+		Capabilities:       []string{"CHUNKING"},
+		NonFinalBDATStatus: []Status{{Code: "451", Enhanced: "4.3.0", Text: "chunk rejected"}},
+	})
+
+	conn, err := net.DialTimeout("tcp", server.Address(), time.Second)
+	if err != nil {
+		t.Fatalf("dial fake LMTP backend: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	reader := bufio.NewReader(conn)
+	expectBackendTestLine(t, reader, "220 fake LMTP backend ready\r\n")
+	writeBackendTestLine(t, conn, "LHLO client")
+	expectBackendTestLine(t, reader, "250-fake-lmtp-backend\r\n")
+	expectBackendTestLine(t, reader, "250 CHUNKING\r\n")
+	writeBackendTestLine(t, conn, "MAIL FROM:<sender@example.test>")
+	expectBackendTestLine(t, reader, "250 2.1.0 sender ok\r\n")
+	writeBackendTestLine(t, conn, "RCPT TO:<temp@example.test>")
+	expectBackendTestLine(t, reader, "250 2.1.5 recipient ok\r\n")
+	writeBackendTestLine(t, conn, "BDAT 4")
+	writeBackendTestRaw(t, conn, "body")
+	expectBackendTestLine(t, reader, "451 4.3.0 chunk rejected\r\n")
+	_ = conn.Close()
+
+	observation := server.ExpectObservation(t)
+	if !observation.UsedBDAT || observation.UsedDATA || observation.FinalComplete {
+		t.Fatalf("observation = %#v, want incomplete BDAT transaction", observation)
+	}
+	if len(observation.BDATChunks) != 1 {
+		t.Fatalf("BDAT chunks = %#v, want one chunk", observation.BDATChunks)
+	}
+	chunk := observation.BDATChunks[0]
+	if chunk.Command != "BDAT 4" || chunk.Size != 4 || chunk.Last || chunk.Payload != "body" {
+		t.Fatalf("BDAT chunk = %#v, want exact non-final payload", chunk)
+	}
 }
 
 // expectBackendTestLine reads one exact backend test line.
@@ -81,5 +124,14 @@ func writeBackendTestLine(t *testing.T, conn net.Conn, line string) {
 
 	if _, err := conn.Write([]byte(line + "\r\n")); err != nil {
 		t.Fatalf("write backend line %q: %v", line, err)
+	}
+}
+
+// writeBackendTestRaw writes payload bytes without adding protocol framing.
+func writeBackendTestRaw(t *testing.T, conn net.Conn, payload string) {
+	t.Helper()
+
+	if _, err := conn.Write([]byte(payload)); err != nil {
+		t.Fatalf("write backend payload %q: %v", payload, err)
 	}
 }
