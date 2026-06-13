@@ -5,7 +5,7 @@
 name: ${COMPOSE_PROJECT_NAME:-nauthilus-director-demo}
 
 x-nauthilus-service: &nauthilus-service
-  image: ${NAUTHILUS_IMAGE:-ghcr.io/croessner/nauthilus:v3.0.0-rc.5}
+  image: ${NAUTHILUS_IMAGE:-ghcr.io/croessner/nauthilus:v3.0.0}
   depends_on:
     grpc-tls:
       condition: service_completed_successfully
