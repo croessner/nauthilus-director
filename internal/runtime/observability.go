@@ -76,8 +76,9 @@ type ServiceOption func(*serviceOptions)
 
 // serviceOptions carries shared runtime service dependencies.
 type serviceOptions struct {
-	recorder      observability.Recorder
-	reloadApplier SafeReloadApplier
+	recorder                 observability.Recorder
+	reloadApplier            SafeReloadApplier
+	backendPinRequiredScopes []UserBackendPinScope
 }
 
 // WithObservabilityRecorder wires a secret-safe runtime event recorder.
@@ -91,6 +92,13 @@ func WithObservabilityRecorder(recorder observability.Recorder) ServiceOption {
 func WithSafeReloadApplier(applier SafeReloadApplier) ServiceOption {
 	return func(options *serviceOptions) {
 		options.reloadApplier = applier
+	}
+}
+
+// WithUserBackendPinRequiredScopes wires active config-derived backend-pin scopes.
+func WithUserBackendPinRequiredScopes(scopes []UserBackendPinScope) ServiceOption {
+	return func(options *serviceOptions) {
+		options.backendPinRequiredScopes = normalizeUserBackendPinScopes(scopes)
 	}
 }
 

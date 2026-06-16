@@ -171,6 +171,7 @@ func TestRouteLookupReportsSieveBackendPinContexts(t *testing.T) {
 		snapshots    map[string]backend.RuntimeSnapshot
 		shard        string
 		wantSelected string
+		wantPresent  bool
 		wantApplied  bool
 		wantReason   string
 		wantFail     bool
@@ -183,26 +184,29 @@ func TestRouteLookupReportsSieveBackendPinContexts(t *testing.T) {
 				Protocol:          routeLookupProtocolSieve,
 				BackendPool:       routeLookupPoolSieve,
 				ShardTag:          routeLookupShardB,
+				BackendNode:       "mailstore-b-node-1",
 				Generation:        "sieve-pin-1",
 			},
 			shard:        routeLookupShardB,
 			wantSelected: routeLookupBackendBSieve,
+			wantPresent:  true,
 			wantApplied:  true,
 			wantReason:   routeLookupBackendPinApplied,
 		},
 		{
-			name: "mismatched",
+			name: "other protocol",
 			pin: state.UserBackendPinRecord{
 				Present:           true,
 				BackendIdentifier: routeLookupBackendA,
 				Protocol:          routeLookupProtocol,
 				BackendPool:       routeLookupDefaultPool,
 				ShardTag:          routeLookupShardA,
+				BackendNode:       "mailstore-a-node-1",
 				Generation:        "imap-pin-1",
 			},
 			shard:        routeLookupShardA,
 			wantSelected: routeLookupBackendASieve,
-			wantReason:   routeLookupBackendPinMismatch,
+			wantReason:   routeLookupBackendPinOtherScopes,
 		},
 		{
 			name: "unusable",
@@ -212,6 +216,7 @@ func TestRouteLookupReportsSieveBackendPinContexts(t *testing.T) {
 				Protocol:          routeLookupProtocolSieve,
 				BackendPool:       routeLookupPoolSieve,
 				ShardTag:          routeLookupShardA,
+				BackendNode:       "mailstore-a-node-1",
 				Generation:        "sieve-pin-2",
 			},
 			snapshots: map[string]backend.RuntimeSnapshot{
@@ -221,9 +226,10 @@ func TestRouteLookupReportsSieveBackendPinContexts(t *testing.T) {
 					},
 				},
 			},
-			shard:      routeLookupShardA,
-			wantReason: string(backend.EffectiveExclusionRuntimeOut),
-			wantFail:   true,
+			shard:       routeLookupShardA,
+			wantPresent: true,
+			wantReason:  string(backend.EffectiveExclusionRuntimeOut),
+			wantFail:    true,
 		},
 	}
 
@@ -248,8 +254,8 @@ func TestRouteLookupReportsSieveBackendPinContexts(t *testing.T) {
 				t.Fatalf("response selected/fail = %q/%t, want %q/%t", response.SelectedBackend, response.FailClosed, test.wantSelected, test.wantFail)
 			}
 
-			if response.BackendPin.Applied != test.wantApplied || response.BackendPin.ReasonClass != test.wantReason {
-				t.Fatalf("backend pin = %#v, want applied=%t reason=%s", response.BackendPin, test.wantApplied, test.wantReason)
+			if response.BackendPin.Present != test.wantPresent || response.BackendPin.Applied != test.wantApplied || response.BackendPin.ReasonClass != test.wantReason {
+				t.Fatalf("backend pin = %#v, want present=%t applied=%t reason=%s", response.BackendPin, test.wantPresent, test.wantApplied, test.wantReason)
 			}
 
 			assertNoRouteLookupMutations(t, store)
@@ -265,6 +271,7 @@ func TestRouteLookupReportsPOP3BackendPinContexts(t *testing.T) {
 		snapshots    map[string]backend.RuntimeSnapshot
 		shard        string
 		wantSelected string
+		wantPresent  bool
 		wantApplied  bool
 		wantReason   string
 		wantFail     bool
@@ -277,26 +284,29 @@ func TestRouteLookupReportsPOP3BackendPinContexts(t *testing.T) {
 				Protocol:          routeLookupProtocolPOP3,
 				BackendPool:       routeLookupPoolPOP3,
 				ShardTag:          routeLookupShardB,
+				BackendNode:       "mailstore-b-node-1",
 				Generation:        "pop3-pin-1",
 			},
 			shard:        routeLookupShardB,
 			wantSelected: routeLookupBackendBPOP3,
+			wantPresent:  true,
 			wantApplied:  true,
 			wantReason:   routeLookupBackendPinApplied,
 		},
 		{
-			name: "mismatched",
+			name: "other protocol",
 			pin: state.UserBackendPinRecord{
 				Present:           true,
 				BackendIdentifier: routeLookupBackendA,
 				Protocol:          routeLookupProtocol,
 				BackendPool:       routeLookupDefaultPool,
 				ShardTag:          routeLookupShardA,
+				BackendNode:       "mailstore-a-node-1",
 				Generation:        "imap-pin-1",
 			},
 			shard:        routeLookupShardA,
 			wantSelected: routeLookupBackendAPOP3,
-			wantReason:   routeLookupBackendPinMismatch,
+			wantReason:   routeLookupBackendPinOtherScopes,
 		},
 		{
 			name: "unusable",
@@ -306,6 +316,7 @@ func TestRouteLookupReportsPOP3BackendPinContexts(t *testing.T) {
 				Protocol:          routeLookupProtocolPOP3,
 				BackendPool:       routeLookupPoolPOP3,
 				ShardTag:          routeLookupShardA,
+				BackendNode:       "mailstore-a-node-1",
 				Generation:        "pop3-pin-2",
 			},
 			snapshots: map[string]backend.RuntimeSnapshot{
@@ -315,9 +326,10 @@ func TestRouteLookupReportsPOP3BackendPinContexts(t *testing.T) {
 					},
 				},
 			},
-			shard:      routeLookupShardA,
-			wantReason: string(backend.EffectiveExclusionRuntimeOut),
-			wantFail:   true,
+			shard:       routeLookupShardA,
+			wantPresent: true,
+			wantReason:  string(backend.EffectiveExclusionRuntimeOut),
+			wantFail:    true,
 		},
 	}
 
@@ -342,8 +354,8 @@ func TestRouteLookupReportsPOP3BackendPinContexts(t *testing.T) {
 				t.Fatalf("response selected/fail = %q/%t, want %q/%t", response.SelectedBackend, response.FailClosed, test.wantSelected, test.wantFail)
 			}
 
-			if response.BackendPin.Applied != test.wantApplied || response.BackendPin.ReasonClass != test.wantReason {
-				t.Fatalf("backend pin = %#v, want applied=%t reason=%s", response.BackendPin, test.wantApplied, test.wantReason)
+			if response.BackendPin.Present != test.wantPresent || response.BackendPin.Applied != test.wantApplied || response.BackendPin.ReasonClass != test.wantReason {
+				t.Fatalf("backend pin = %#v, want present=%t applied=%t reason=%s", response.BackendPin, test.wantPresent, test.wantApplied, test.wantReason)
 			}
 
 			assertNoRouteLookupMutations(t, store)
@@ -366,7 +378,8 @@ func TestRouteLookupUsesResolverSelectorAndReadOnlyAffinity(t *testing.T) {
 			ActiveHolderCount:  2,
 		},
 	}
-	service := newRouteLookupTestService(t, store, false)
+	recorder := &recordingRuntimeObservation{}
+	service := newRouteLookupTestService(t, store, false, recorder)
 
 	response, err := service.Lookup(context.Background(), RouteLookupRequest{
 		Protocol:        routeLookupProtocol,
@@ -456,7 +469,8 @@ func TestRouteLookupReportsRetainedBackendBinding(t *testing.T) {
 			ServerTime:         time.Now().UTC(),
 		},
 	}
-	service := newRouteLookupTestService(t, store, false)
+	recorder := &recordingRuntimeObservation{}
+	service := newRouteLookupTestService(t, store, false, recorder)
 
 	response, err := service.Lookup(context.Background(), RouteLookupRequest{
 		Protocol:        routeLookupProtocol,
@@ -493,7 +507,8 @@ func TestRouteLookupFailClosesWhenBoundBackendNodeLacksProtocol(t *testing.T) {
 			ServerTime:    time.Now().UTC(),
 		},
 	}
-	service := newRouteLookupTestService(t, store, false)
+	recorder := &recordingRuntimeObservation{}
+	service := newRouteLookupTestService(t, store, false, recorder)
 
 	response, err := service.Lookup(context.Background(), RouteLookupRequest{
 		Protocol:        routeLookupProtocol,
@@ -692,6 +707,28 @@ func assertRouteLookupObservationLabels(t *testing.T, recorder *recordingRuntime
 	return event
 }
 
+// assertRouteLookupMetricLabelsSafe verifies high-cardinality pin facts stay out of labels.
+func assertRouteLookupMetricLabelsSafe(t *testing.T, event observability.Event) {
+	t.Helper()
+
+	for _, forbidden := range []string{
+		runtimeObservationFieldBackendID,
+		runtimeObservationFieldBackendNode,
+		runtimeObservationFieldUserHash,
+		"username",
+		"recipient",
+		"session_id",
+		"trace_id",
+		"request_id",
+		"client_ip",
+		"raw_error",
+	} {
+		if _, ok := event.MetricLabels[forbidden]; ok {
+			t.Fatalf("metric labels contain forbidden %q: %#v", forbidden, event.MetricLabels)
+		}
+	}
+}
+
 // assertActiveUserHoldContext verifies diagnostic hold deferral facts.
 func assertActiveUserHoldContext(t *testing.T, response RouteLookupResponse) {
 	t.Helper()
@@ -745,10 +782,12 @@ func TestRouteLookupReportsAppliedBackendPinContext(t *testing.T) {
 			Protocol:          routeLookupProtocol,
 			BackendPool:       routeLookupDefaultPool,
 			ShardTag:          routeLookupShardA,
+			BackendNode:       "mailstore-a-node-1",
 			Generation:        "pin-1",
 		},
 	}
-	service := newRouteLookupTestService(t, store, false)
+	recorder := &recordingRuntimeObservation{}
+	service := newRouteLookupTestService(t, store, false, recorder)
 
 	response, err := service.Lookup(context.Background(), RouteLookupRequest{
 		Protocol:   routeLookupProtocol,
@@ -767,6 +806,78 @@ func TestRouteLookupReportsAppliedBackendPinContext(t *testing.T) {
 
 	if !response.BackendPin.Present || !response.BackendPin.Applied || response.BackendPin.ReasonClass != routeLookupBackendPinApplied {
 		t.Fatalf("backend pin = %#v, want applied context", response.BackendPin)
+	}
+	if response.BackendPin.BackendNode != "mailstore-a-node-1" || response.BackendPin.ScopeCount != 1 {
+		t.Fatalf("backend pin = %#v, want backend-node and scope count context", response.BackendPin)
+	}
+
+	event := assertRouteLookupObservationLabels(t, recorder, observability.EventUserBackendPin, operationRouteLookup, routeLookupBackendPinApplied, "applied")
+	assertRouteLookupMetricLabelsSafe(t, event)
+
+	assertNoRouteLookupMutations(t, store)
+}
+
+// TestRouteLookupReportsAppliedBackendPinWithOtherScopes verifies aggregate pin diagnostics stay bounded.
+func TestRouteLookupReportsAppliedBackendPinWithOtherScopes(t *testing.T) {
+	store := &countingRouteState{
+		backendPins: []state.UserBackendPinRecord{
+			{
+				Present:           true,
+				BackendIdentifier: routeLookupBackendA,
+				Protocol:          routeLookupProtocol,
+				BackendPool:       routeLookupDefaultPool,
+				ShardTag:          routeLookupShardA,
+				BackendNode:       "mailstore-a-node-1",
+				Generation:        "pin-imap",
+			},
+			{
+				Present:           true,
+				BackendIdentifier: routeLookupBackendALMTP,
+				Protocol:          routeLookupProtocolLMTP,
+				BackendPool:       routeLookupPoolLMTP,
+				ShardTag:          routeLookupShardA,
+				BackendNode:       "mailstore-a-node-1",
+				Generation:        "pin-lmtp",
+			},
+			{
+				Present:           true,
+				BackendIdentifier: routeLookupBackendASieve,
+				Protocol:          routeLookupProtocolSieve,
+				BackendPool:       routeLookupPoolSieve,
+				ShardTag:          routeLookupShardA,
+				BackendNode:       "mailstore-a-node-1",
+				Generation:        "pin-sieve",
+			},
+		},
+	}
+	recorder := &recordingRuntimeObservation{}
+	service := newRouteLookupTestService(t, store, false, recorder)
+
+	response, err := service.Lookup(context.Background(), RouteLookupRequest{
+		Protocol:   routeLookupProtocol,
+		AccountKey: routeLookupAccount,
+		Attributes: map[string][]string{
+			routeLookupAttributeShard: {routeLookupShardA},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Lookup returned error: %v", err)
+	}
+
+	if !response.BackendPin.Present || !response.BackendPin.Applied || response.BackendPin.ScopeCount != 3 {
+		t.Fatalf("backend pin = %#v, want applied matching pin with aggregate count", response.BackendPin)
+	}
+
+	if response.BackendPin.CurrentScopeUnpinned {
+		t.Fatalf("backend pin = %#v, want current scope pinned", response.BackendPin)
+	}
+
+	wantOther := []RouteLookupBackendPinScope{
+		{Protocol: routeLookupProtocolLMTP, BackendPool: routeLookupPoolLMTP},
+		{Protocol: routeLookupProtocolSieve, BackendPool: routeLookupPoolSieve},
+	}
+	if fmt.Sprintf("%#v", response.BackendPin.OtherScopes) != fmt.Sprintf("%#v", wantOther) {
+		t.Fatalf("other scopes = %#v, want %#v", response.BackendPin.OtherScopes, wantOther)
 	}
 
 	assertNoRouteLookupMutations(t, store)
@@ -791,11 +902,13 @@ func TestRouteLookupDefersBackendPinDuringActiveAffinity(t *testing.T) {
 			Protocol:          routeLookupProtocol,
 			BackendPool:       routeLookupDefaultPool,
 			ShardTag:          routeLookupShardA,
+			BackendNode:       "mailstore-a-node-1",
 			Strategy:          string(MoveStrategyDrainExisting),
 			Generation:        "pin-active",
 		},
 	}
-	service := newRouteLookupTestService(t, store, false)
+	recorder := &recordingRuntimeObservation{}
+	service := newRouteLookupTestService(t, store, false, recorder)
 
 	response, err := service.Lookup(context.Background(), RouteLookupRequest{
 		Protocol:        routeLookupProtocol,
@@ -829,10 +942,12 @@ func TestRouteLookupReportsBackendPinScopeMismatch(t *testing.T) {
 			Protocol:          routeLookupProtocolLMTP,
 			BackendPool:       routeLookupPoolLMTP,
 			ShardTag:          routeLookupShardA,
+			BackendNode:       "mailstore-a-node-1",
 			Generation:        "pin-2",
 		},
 	}
-	service := newRouteLookupTestService(t, store, false)
+	recorder := &recordingRuntimeObservation{}
+	service := newRouteLookupTestService(t, store, false, recorder)
 
 	response, err := service.Lookup(context.Background(), RouteLookupRequest{
 		Protocol:   routeLookupProtocol,
@@ -845,9 +960,18 @@ func TestRouteLookupReportsBackendPinScopeMismatch(t *testing.T) {
 		t.Fatalf("Lookup returned error: %v", err)
 	}
 
-	if !response.BackendPin.Present || response.BackendPin.Applied || response.BackendPin.ReasonClass != routeLookupBackendPinMismatch {
-		t.Fatalf("backend pin = %#v, want mismatch context", response.BackendPin)
+	if response.BackendPin.Present || response.BackendPin.Applied || !response.BackendPin.CurrentScopeUnpinned || response.BackendPin.ReasonClass != routeLookupBackendPinOtherScopes {
+		t.Fatalf("backend pin = %#v, want other-scope context", response.BackendPin)
 	}
+	if response.BackendPin.ScopeCount != 1 || len(response.BackendPin.OtherScopes) != 1 || response.BackendPin.OtherScopes[0].Protocol != routeLookupProtocolLMTP {
+		t.Fatalf("backend pin = %#v, want bounded LMTP other-scope diagnostics", response.BackendPin)
+	}
+	if response.SelectedBackend != routeLookupBackendA {
+		t.Fatalf("selected backend = %q, want normal IMAP placement", response.SelectedBackend)
+	}
+
+	event := assertRouteLookupObservationLabels(t, recorder, observability.EventUserBackendPin, operationRouteLookup, routeLookupBackendPinOtherScopes, "diagnostic")
+	assertRouteLookupMetricLabelsSafe(t, event)
 
 	assertNoRouteLookupMutations(t, store)
 }
@@ -861,10 +985,12 @@ func TestRouteLookupReportsBackendPinShardMismatch(t *testing.T) {
 			Protocol:          routeLookupProtocol,
 			BackendPool:       routeLookupDefaultPool,
 			ShardTag:          routeLookupShardB,
+			BackendNode:       "mailstore-b-node-1",
 			Generation:        "pin-shard-mismatch",
 		},
 	}
-	service := newRouteLookupTestService(t, store, false)
+	recorder := &recordingRuntimeObservation{}
+	service := newRouteLookupTestService(t, store, false, recorder)
 
 	response, err := service.Lookup(context.Background(), RouteLookupRequest{
 		Protocol:   routeLookupProtocol,
@@ -897,6 +1023,7 @@ func TestRouteLookupReportsBackendPinExclusion(t *testing.T) {
 			Protocol:          routeLookupProtocol,
 			BackendPool:       routeLookupDefaultPool,
 			ShardTag:          routeLookupShardA,
+			BackendNode:       "mailstore-a-node-1",
 			Generation:        "pin-3",
 		},
 		snapshots: map[string]backend.RuntimeSnapshot{
@@ -907,7 +1034,8 @@ func TestRouteLookupReportsBackendPinExclusion(t *testing.T) {
 			},
 		},
 	}
-	service := newRouteLookupTestService(t, store, false)
+	recorder := &recordingRuntimeObservation{}
+	service := newRouteLookupTestService(t, store, false, recorder)
 
 	response, err := service.Lookup(context.Background(), RouteLookupRequest{
 		Protocol:   routeLookupProtocol,
@@ -923,6 +1051,9 @@ func TestRouteLookupReportsBackendPinExclusion(t *testing.T) {
 	if !response.FailClosed || response.BackendPin.Applied || response.BackendPin.ReasonClass != string(backend.EffectiveExclusionRuntimeOut) {
 		t.Fatalf("response = %#v, want fail-closed runtime_out pin exclusion", response)
 	}
+
+	event := assertRouteLookupObservationLabels(t, recorder, observability.EventUserBackendPin, operationRouteLookup, string(backend.EffectiveExclusionRuntimeOut), runtimeObservationResultFailClosed)
+	assertRouteLookupMetricLabelsSafe(t, event)
 
 	assertNoRouteLookupMutations(t, store)
 }
@@ -944,6 +1075,7 @@ func TestRouteLookupReportsBackendPinMismatchAgainstRetainedBinding(t *testing.T
 			Protocol:          routeLookupProtocol,
 			BackendPool:       routeLookupDefaultPool,
 			ShardTag:          routeLookupShardA,
+			BackendNode:       "mailstore-b-node-1",
 			Strategy:          string(MoveStrategyKickExisting),
 			Generation:        "pin-retained",
 		},
@@ -1498,6 +1630,10 @@ func assertNoRouteLookupMutations(t *testing.T, store *countingRouteState) {
 		store.reapBackendCalls != 0 ||
 		store.setBackendCalls != 0 ||
 		store.clearBackendCalls != 0 ||
+		store.backendPinSetCalls != 0 ||
+		store.backendPinsSetCalls != 0 ||
+		store.backendPinClearCalls != 0 ||
+		store.backendPinsClearCalls != 0 ||
 		store.userHoldSetCalls != 0 ||
 		store.userHoldClearCalls != 0 ||
 		store.waitForPlacementCalls != 0 {
@@ -1510,6 +1646,7 @@ type countingRouteState struct {
 	snapshots     map[string]backend.RuntimeSnapshot
 	affinity      state.AffinityRecord
 	backendPin    state.UserBackendPinRecord
+	backendPins   []state.UserBackendPinRecord
 	backendPinErr error
 	userHold      state.UserHoldRecord
 	userHoldErr   error
@@ -1517,6 +1654,10 @@ type countingRouteState struct {
 	backendSnapshotCalls  int
 	lookupAffinityCalls   int
 	backendPinGetCalls    int
+	backendPinSetCalls    int
+	backendPinsSetCalls   int
+	backendPinClearCalls  int
+	backendPinsClearCalls int
 	userHoldCheckCalls    int
 	userHoldSetCalls      int
 	userHoldClearCalls    int
@@ -1623,19 +1764,57 @@ func (s *countingRouteState) LookupAffinity(_ context.Context, _ state.AffinityK
 	return s.affinity, nil
 }
 
-// GetUserBackendPin records a read-only backend-pin lookup.
-func (s *countingRouteState) GetUserBackendPin(_ context.Context, request state.UserBackendPinGetRequest) (state.UserBackendPinRecord, error) {
+// ListUserBackendPins records a read-only backend-pin set lookup.
+func (s *countingRouteState) ListUserBackendPins(_ context.Context, request state.UserBackendPinsListRequest) (state.UserBackendPinsRecord, error) {
 	s.backendPinGetCalls++
 	if s.backendPinErr != nil {
-		return state.UserBackendPinRecord{}, s.backendPinErr
+		return state.UserBackendPinsRecord{}, s.backendPinErr
 	}
 
-	pin := s.backendPin
-	if pin.Key == (state.AffinityKey{}) {
-		pin.Key = request.Key
+	pins := append([]state.UserBackendPinRecord(nil), s.backendPins...)
+	if len(pins) == 0 && s.backendPin != (state.UserBackendPinRecord{}) {
+		pins = append(pins, s.backendPin)
 	}
 
-	return pin, nil
+	for index := range pins {
+		if pins[index].Key == (state.AffinityKey{}) {
+			pins[index].Key = request.Key
+		}
+	}
+
+	return state.UserBackendPinsRecord{
+		Present: len(pins) > 0,
+		Key:     request.Key,
+		Pins:    pins,
+	}, nil
+}
+
+// SetUserBackendPin records an unexpected single-scope backend-pin mutation path.
+func (s *countingRouteState) SetUserBackendPin(context.Context, state.UserBackendPinSetRequest) (state.UserBackendPinRecord, error) {
+	s.backendPinSetCalls++
+
+	return state.UserBackendPinRecord{}, nil
+}
+
+// SetUserBackendPins records an unexpected multi-scope backend-pin mutation path.
+func (s *countingRouteState) SetUserBackendPins(context.Context, state.UserBackendPinsSetRequest) (state.UserBackendPinsRecord, error) {
+	s.backendPinsSetCalls++
+
+	return state.UserBackendPinsRecord{}, nil
+}
+
+// ClearUserBackendPin records an unexpected single-scope backend-pin clear path.
+func (s *countingRouteState) ClearUserBackendPin(context.Context, state.UserBackendPinClearRequest) (state.UserBackendPinRecord, error) {
+	s.backendPinClearCalls++
+
+	return state.UserBackendPinRecord{}, nil
+}
+
+// ClearUserBackendPins records an unexpected aggregate backend-pin clear path.
+func (s *countingRouteState) ClearUserBackendPins(context.Context, state.UserBackendPinsClearRequest) (state.UserBackendPinsRecord, error) {
+	s.backendPinsClearCalls++
+
+	return state.UserBackendPinsRecord{}, nil
 }
 
 // CheckUserHold records a read-only placement-hold lookup.

@@ -14,7 +14,7 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-//nolint:dupl,funlen,goconst // Placement matrix cases intentionally mirror protocol directions.
+//nolint:dupl,funlen,goconst,wsl_v5 // Placement matrix cases intentionally mirror protocol directions.
 package placement
 
 import (
@@ -28,27 +28,41 @@ import (
 )
 
 const (
-	placementAccountKey       = "alice@example.test"
-	placementBackendA         = "mailstore-a-imap"
-	placementBackendALMTP     = "mailstore-a-lmtp"
-	placementBackendAPOP3     = "mailstore-a-pop3"
-	placementBackendASieve    = "mailstore-a-sieve"
-	placementBackendB         = "mailstore-b-imap"
-	placementBackendBPOP3     = "mailstore-b-pop3"
-	placementBackendBSieve    = "mailstore-b-sieve"
-	placementBackendSameShard = "mailstore-a-other-imap"
-	placementNodeA            = "mailstore-a-node"
-	placementNodeB            = "mailstore-b-node"
-	placementNodeSameShard    = "mailstore-a-other-node"
-	placementPool             = "imap-default"
-	placementPOP3Pool         = "pop3-default"
-	placementPOP3Protocol     = "pop3"
-	placementProtocol         = "imap"
-	placementShardA           = "mailstore-a"
-	placementShardB           = "mailstore-b"
-	placementSievePool        = "sieve-default"
-	placementSieveProtocol    = "sieve"
-	placementTenant           = "blue"
+	placementAccountKey         = "alice@example.test"
+	placementBackendA           = "mailstore-a-imap"
+	placementBackendALMTP       = "mailstore-a-lmtp"
+	placementBackendAPOP3       = "mailstore-a-pop3"
+	placementBackendASieve      = "mailstore-a-sieve"
+	placementBackendB           = "mailstore-b-imap"
+	placementBackendBPOP3       = "mailstore-b-pop3"
+	placementBackendBSieve      = "mailstore-b-sieve"
+	placementBackendCanaryIMAP  = "mailstack-canary-imap"
+	placementBackendCanaryLMTP  = "mailstack-canary-lmtp"
+	placementBackendCanaryPOP3  = "mailstack-canary-pop3"
+	placementBackendCanarySieve = "mailstack-canary-sieve"
+	placementBackendNode2IMAP   = "node2-imap"
+	placementBackendNode2LMTP   = "node2-lmtp"
+	placementBackendNode2POP3   = "node2-pop3"
+	placementBackendNode2Sieve  = "node2-sieve"
+	placementBackendSameShard   = "mailstore-a-other-imap"
+	placementCanaryNode         = "mailstack-canary"
+	placementCanaryShard        = "mailstack-canary"
+	placementLMTPPool           = "lmtp-default"
+	placementLMTPProtocol       = "lmtp"
+	placementNodeA              = "mailstore-a-node"
+	placementNodeB              = "mailstore-b-node"
+	placementNode2              = "node2"
+	placementNode2Shard         = "node2"
+	placementNodeSameShard      = "mailstore-a-other-node"
+	placementPool               = "imap-default"
+	placementPOP3Pool           = "pop3-default"
+	placementPOP3Protocol       = "pop3"
+	placementProtocol           = "imap"
+	placementShardA             = "mailstore-a"
+	placementShardB             = "mailstore-b"
+	placementSievePool          = "sieve-default"
+	placementSieveProtocol      = "sieve"
+	placementTenant             = "blue"
 )
 
 // TestServiceReusesActiveBackendNodeForSession verifies bound-node reuse precedes normal selection.
@@ -301,6 +315,44 @@ func TestServiceReusesRetainedLMTPBindingForSieveSession(t *testing.T) {
 	}
 }
 
+// TestServiceAppliesMatchingIMAPBackendPin verifies normal-weight pins stay scoped.
+func TestServiceAppliesMatchingIMAPBackendPin(t *testing.T) {
+	store := &placementStoreFixture{
+		pin: state.UserBackendPinRecord{
+			Present:           true,
+			Key:               placementKey(),
+			BackendIdentifier: placementBackendB,
+			Protocol:          placementProtocol,
+			BackendPool:       placementPool,
+			ShardTag:          placementShardB,
+			BackendNode:       placementNodeB,
+		},
+	}
+	selector := &placementSelectorFixture{registry: placementRegistryFixture()}
+	service := mustPlacementService(t, selector, store)
+
+	lease, err := service.PlaceSession(context.Background(), placementRequest("imap-pinned", placementShardB))
+	if err != nil {
+		t.Fatalf("PlaceSession returned error: %v", err)
+	}
+
+	if selector.lastSelect.OperatorBackendIdentifier != placementBackendB {
+		t.Fatalf("operator backend = %q, want matching IMAP pin", selector.lastSelect.OperatorBackendIdentifier)
+	}
+
+	if lease.Backend().Backend.Identifier != placementBackendB {
+		t.Fatalf("selected backend = %q, want pinned IMAP backend", lease.Backend().Backend.Identifier)
+	}
+
+	if got := lease.Binding().Source; got != BindingSourceOperatorBackendPin {
+		t.Fatalf("binding source = %q, want %q", got, BindingSourceOperatorBackendPin)
+	}
+
+	if store.reserveCalls != 1 || store.attachCalls != 1 {
+		t.Fatalf("reserve/attach calls = %d/%d, want 1/1", store.reserveCalls, store.attachCalls)
+	}
+}
+
 // TestServiceAppliesMatchingSieveBackendPin verifies Sieve pins stay protocol and pool scoped.
 func TestServiceAppliesMatchingSieveBackendPin(t *testing.T) {
 	store := &placementStoreFixture{
@@ -311,6 +363,7 @@ func TestServiceAppliesMatchingSieveBackendPin(t *testing.T) {
 			Protocol:          placementSieveProtocol,
 			BackendPool:       placementSievePool,
 			ShardTag:          placementShardB,
+			BackendNode:       placementNodeB,
 		},
 	}
 	selector := &placementSelectorFixture{registry: placementRegistryFixture()}
@@ -480,6 +533,7 @@ func TestServiceAppliesMatchingPOP3BackendPin(t *testing.T) {
 			Protocol:          placementPOP3Protocol,
 			BackendPool:       placementPOP3Pool,
 			ShardTag:          placementShardB,
+			BackendNode:       placementNodeB,
 		},
 	}
 	selector := &placementSelectorFixture{registry: placementRegistryFixture()}
@@ -529,6 +583,312 @@ func TestServiceIgnoresCrossProtocolBackendPinForPOP3(t *testing.T) {
 
 	if lease.Backend().Backend.Identifier != placementBackendAPOP3 {
 		t.Fatalf("selected backend = %q, want normal POP3 backend", lease.Backend().Backend.Identifier)
+	}
+}
+
+// TestServiceReadsOnlyMatchingBackendPinScope verifies placement requests a scoped pin read.
+func TestServiceReadsOnlyMatchingBackendPinScope(t *testing.T) {
+	registry := placementRegistryFixture()
+	store := &placementStoreFixture{
+		pins: []state.UserBackendPinRecord{
+			placementBackendPinFromRegistry(t, registry, placementBackendB),
+			placementBackendPinFromRegistry(t, registry, placementBackendBSieve),
+		},
+	}
+	selector := &placementSelectorFixture{registry: registry}
+	service := mustPlacementService(t, selector, store)
+
+	lease, err := service.PlaceSession(context.Background(), placementSieveRequest("sieve-scoped-read", placementShardB))
+	if err != nil {
+		t.Fatalf("PlaceSession returned error: %v", err)
+	}
+
+	if store.pinReadCalls != 1 {
+		t.Fatalf("pin read calls = %d, want 1", store.pinReadCalls)
+	}
+
+	if store.lastPinRead.Protocol != placementSieveProtocol || store.lastPinRead.BackendPool != placementSievePool {
+		t.Fatalf("pin read scope = %s/%s, want %s/%s", store.lastPinRead.Protocol, store.lastPinRead.BackendPool, placementSieveProtocol, placementSievePool)
+	}
+
+	if lease.Backend().Backend.Identifier != placementBackendBSieve {
+		t.Fatalf("selected backend = %q, want scoped Sieve pin", lease.Backend().Backend.Identifier)
+	}
+}
+
+// TestServiceIgnoresOtherProtocolBackendPinsForAllProtocols verifies non-matching pins stay diagnostic state only.
+func TestServiceIgnoresOtherProtocolBackendPinsForAllProtocols(t *testing.T) {
+	registry := placementRegistryFixture()
+
+	tests := []struct {
+		name        string
+		request     Request
+		place       func(context.Context, *Service, Request) (LeaseHandle, error)
+		pins        []state.UserBackendPinRecord
+		wantBackend string
+	}{
+		{
+			name:    "imap ignores non-imap pins",
+			request: placementRequest("ignore-imap", placementShardA),
+			place: func(ctx context.Context, service *Service, request Request) (LeaseHandle, error) {
+				return service.PlaceSession(ctx, request)
+			},
+			pins: []state.UserBackendPinRecord{
+				placementBackendPinFromRegistry(t, registry, placementBackendBSieve),
+				placementBackendPinFromRegistry(t, registry, placementBackendALMTP),
+				placementBackendPinFromRegistry(t, registry, placementBackendBPOP3),
+			},
+			wantBackend: placementBackendA,
+		},
+		{
+			name:    "sieve ignores non-sieve pins",
+			request: placementSieveRequest("ignore-sieve", placementShardA),
+			place: func(ctx context.Context, service *Service, request Request) (LeaseHandle, error) {
+				return service.PlaceSession(ctx, request)
+			},
+			pins: []state.UserBackendPinRecord{
+				placementBackendPinFromRegistry(t, registry, placementBackendB),
+				placementBackendPinFromRegistry(t, registry, placementBackendALMTP),
+				placementBackendPinFromRegistry(t, registry, placementBackendBPOP3),
+			},
+			wantBackend: placementBackendASieve,
+		},
+		{
+			name:    "lmtp ignores non-lmtp pins",
+			request: placementDeliveryRequest("ignore-lmtp", placementShardA),
+			place: func(ctx context.Context, service *Service, request Request) (LeaseHandle, error) {
+				return service.PlaceDeliveryHold(ctx, request)
+			},
+			pins: []state.UserBackendPinRecord{
+				placementBackendPinFromRegistry(t, registry, placementBackendB),
+				placementBackendPinFromRegistry(t, registry, placementBackendBSieve),
+				placementBackendPinFromRegistry(t, registry, placementBackendBPOP3),
+			},
+			wantBackend: placementBackendALMTP,
+		},
+		{
+			name:    "pop3 ignores non-pop3 pins",
+			request: placementPOP3Request("ignore-pop3", placementShardA),
+			place: func(ctx context.Context, service *Service, request Request) (LeaseHandle, error) {
+				return service.PlaceSession(ctx, request)
+			},
+			pins: []state.UserBackendPinRecord{
+				placementBackendPinFromRegistry(t, registry, placementBackendB),
+				placementBackendPinFromRegistry(t, registry, placementBackendBSieve),
+				placementBackendPinFromRegistry(t, registry, placementBackendALMTP),
+			},
+			wantBackend: placementBackendAPOP3,
+		},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			store := &placementStoreFixture{pins: testCase.pins}
+			selector := &placementSelectorFixture{registry: registry}
+			service := mustPlacementService(t, selector, store)
+
+			lease, err := testCase.place(context.Background(), service, testCase.request)
+			if err != nil {
+				t.Fatalf("placement returned error: %v", err)
+			}
+
+			if selector.lastSelect.OperatorBackendIdentifier != "" {
+				t.Fatalf("operator backend = %q, want non-matching pins ignored", selector.lastSelect.OperatorBackendIdentifier)
+			}
+
+			if lease.Backend().Backend.Identifier != testCase.wantBackend {
+				t.Fatalf("selected backend = %q, want %q", lease.Backend().Backend.Identifier, testCase.wantBackend)
+			}
+		})
+	}
+}
+
+// TestServiceRejectsMatchingBackendPinFactMismatches verifies stale scoped facts fail closed.
+func TestServiceRejectsMatchingBackendPinFactMismatches(t *testing.T) {
+	tests := []struct {
+		name     string
+		registry func() *placementRegistry
+		pin      state.UserBackendPinRecord
+	}{
+		{
+			name:     "selected shard mismatch",
+			registry: placementRegistryFixture,
+			pin: state.UserBackendPinRecord{
+				Present:           true,
+				Key:               placementKey(),
+				BackendIdentifier: placementBackendB,
+				Protocol:          placementProtocol,
+				BackendPool:       placementPool,
+				ShardTag:          placementShardB,
+				BackendNode:       placementNodeB,
+			},
+		},
+		{
+			name:     "stored backend node mismatch",
+			registry: placementRegistryFixture,
+			pin: state.UserBackendPinRecord{
+				Present:           true,
+				Key:               placementKey(),
+				BackendIdentifier: placementBackendA,
+				Protocol:          placementProtocol,
+				BackendPool:       placementPool,
+				ShardTag:          placementShardA,
+				BackendNode:       placementNodeB,
+			},
+		},
+		{
+			name:     "target protocol mismatch",
+			registry: placementRegistryFixture,
+			pin: state.UserBackendPinRecord{
+				Present:           true,
+				Key:               placementKey(),
+				BackendIdentifier: placementBackendALMTP,
+				Protocol:          placementProtocol,
+				BackendPool:       placementPool,
+				ShardTag:          placementShardA,
+				BackendNode:       placementNodeA,
+			},
+		},
+		{
+			name: "target backend pool mismatch",
+			registry: func() *placementRegistry {
+				registry := placementRegistryFixture()
+				registry.backends["mailstore-a-imap-alt"] = placementBackendWithProtocol("mailstore-a-imap-alt", placementNodeA, placementShardA, placementProtocol, "imap-alt")
+
+				return registry
+			},
+			pin: state.UserBackendPinRecord{
+				Present:           true,
+				Key:               placementKey(),
+				BackendIdentifier: "mailstore-a-imap-alt",
+				Protocol:          placementProtocol,
+				BackendPool:       placementPool,
+				ShardTag:          placementShardA,
+				BackendNode:       placementNodeA,
+			},
+		},
+		{
+			name:     "configured backend missing",
+			registry: placementRegistryFixture,
+			pin: state.UserBackendPinRecord{
+				Present:           true,
+				Key:               placementKey(),
+				BackendIdentifier: "missing-imap",
+				Protocol:          placementProtocol,
+				BackendPool:       placementPool,
+				ShardTag:          placementShardA,
+				BackendNode:       placementNodeA,
+			},
+		},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			registry := testCase.registry()
+			store := &placementStoreFixture{pin: testCase.pin}
+			selector := &placementSelectorFixture{registry: registry}
+			service := mustPlacementService(t, selector, store)
+
+			_, err := service.PlaceSession(context.Background(), placementRequest("stale-pin", placementShardA))
+			if err == nil {
+				t.Fatal("PlaceSession returned nil error, want stale pin rejection")
+			}
+
+			if selector.selectCalls != 0 || selector.nodeCalls != 0 {
+				t.Fatalf("selector calls select=%d node=%d, want fail before selection", selector.selectCalls, selector.nodeCalls)
+			}
+
+			if len(store.opened) != 0 {
+				t.Fatalf("store opened %d session(s), want fail before mutation", len(store.opened))
+			}
+		})
+	}
+}
+
+// TestServiceRetainsScopedPinsForWeightZeroCanaryMove reproduces the overwritten canary pin flow.
+func TestServiceRetainsScopedPinsForWeightZeroCanaryMove(t *testing.T) {
+	tests := []struct {
+		name        string
+		request     Request
+		place       func(context.Context, *Service, Request) (LeaseHandle, error)
+		wantBackend string
+	}{
+		{
+			name:    "imap",
+			request: placementRequest("canary-imap", placementNode2Shard),
+			place: func(ctx context.Context, service *Service, request Request) (LeaseHandle, error) {
+				return service.PlaceSession(ctx, request)
+			},
+			wantBackend: placementBackendCanaryIMAP,
+		},
+		{
+			name:    "sieve",
+			request: placementSieveRequest("canary-sieve", placementNode2Shard),
+			place: func(ctx context.Context, service *Service, request Request) (LeaseHandle, error) {
+				return service.PlaceSession(ctx, request)
+			},
+			wantBackend: placementBackendCanarySieve,
+		},
+		{
+			name:    "lmtp",
+			request: placementDeliveryRequest("canary-lmtp", placementNode2Shard),
+			place: func(ctx context.Context, service *Service, request Request) (LeaseHandle, error) {
+				return service.PlaceDeliveryHold(ctx, request)
+			},
+			wantBackend: placementBackendCanaryLMTP,
+		},
+		{
+			name:    "pop3",
+			request: placementPOP3Request("canary-pop3", placementNode2Shard),
+			place: func(ctx context.Context, service *Service, request Request) (LeaseHandle, error) {
+				return service.PlaceSession(ctx, request)
+			},
+			wantBackend: placementBackendCanaryPOP3,
+		},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			registry := placementCanaryRegistryFixture()
+			selector, err := backend.NewStaticSelector(registry, backend.SelectionPolicy{DefaultShard: placementNode2Shard})
+			if err != nil {
+				t.Fatalf("NewStaticSelector returned error: %v", err)
+			}
+
+			store := &placementStoreFixture{
+				affinity: state.AffinityRecord{
+					Key:             placementKey(),
+					Present:         true,
+					MoveTargetShard: placementCanaryShard,
+					MoveStrategy:    moveStrategyNew,
+					BindingStatus:   state.BindingStatusNone,
+				},
+				pins: []state.UserBackendPinRecord{
+					placementBackendPinFromRegistry(t, registry, placementBackendCanaryIMAP),
+					placementBackendPinFromRegistry(t, registry, placementBackendCanarySieve),
+					placementBackendPinFromRegistry(t, registry, placementBackendCanaryLMTP),
+					placementBackendPinFromRegistry(t, registry, placementBackendCanaryPOP3),
+				},
+			}
+
+			service, err := NewService(registry, selector, store)
+			if err != nil {
+				t.Fatalf("NewService returned error: %v", err)
+			}
+
+			lease, err := testCase.place(context.Background(), service, testCase.request)
+			if err != nil {
+				t.Fatalf("placement with scoped %s canary pin returned error: %v", testCase.name, err)
+			}
+
+			if lease.Backend().Backend.Identifier != testCase.wantBackend {
+				t.Fatalf("selected backend = %q, want %q", lease.Backend().Backend.Identifier, testCase.wantBackend)
+			}
+
+			if got := lease.Binding().Source; got != BindingSourceOperatorBackendPin {
+				t.Fatalf("binding source = %q, want %q", got, BindingSourceOperatorBackendPin)
+			}
+		})
 	}
 }
 
@@ -592,6 +952,7 @@ func TestServiceRejectsPinOutsideBoundBackendNode(t *testing.T) {
 			Protocol:          placementProtocol,
 			BackendPool:       placementPool,
 			ShardTag:          placementShardB,
+			BackendNode:       placementNodeB,
 		},
 	}
 	service := mustPlacementService(t, &placementSelectorFixture{registry: placementRegistryFixture()}, store)
@@ -774,9 +1135,55 @@ func placementRegistryFixture() *placementRegistry {
 	}
 }
 
+// placementCanaryRegistryFixture returns the observed node2 and weight-zero canary topology.
+func placementCanaryRegistryFixture() *placementRegistry {
+	return &placementRegistry{
+		backends: map[string]backend.Backend{
+			placementBackendNode2IMAP:   placementBackendWithProtocol(placementBackendNode2IMAP, placementNode2, placementNode2Shard, placementProtocol, placementPool),
+			placementBackendNode2Sieve:  placementBackendWithProtocol(placementBackendNode2Sieve, placementNode2, placementNode2Shard, placementSieveProtocol, placementSievePool),
+			placementBackendNode2LMTP:   placementBackendWithProtocol(placementBackendNode2LMTP, placementNode2, placementNode2Shard, placementLMTPProtocol, placementLMTPPool),
+			placementBackendNode2POP3:   placementBackendWithProtocol(placementBackendNode2POP3, placementNode2, placementNode2Shard, placementPOP3Protocol, placementPOP3Pool),
+			placementBackendCanaryIMAP:  placementWeightZeroBackend(placementBackendCanaryIMAP, placementCanaryNode, placementCanaryShard, placementProtocol, placementPool),
+			placementBackendCanarySieve: placementWeightZeroBackend(placementBackendCanarySieve, placementCanaryNode, placementCanaryShard, placementSieveProtocol, placementSievePool),
+			placementBackendCanaryLMTP:  placementWeightZeroBackend(placementBackendCanaryLMTP, placementCanaryNode, placementCanaryShard, placementLMTPProtocol, placementLMTPPool),
+			placementBackendCanaryPOP3:  placementWeightZeroBackend(placementBackendCanaryPOP3, placementCanaryNode, placementCanaryShard, placementPOP3Protocol, placementPOP3Pool),
+		},
+	}
+}
+
+// placementBackendPinFromRegistry derives stored pin facts from the backend registry.
+func placementBackendPinFromRegistry(t *testing.T, registry backend.Registry, backendID string) state.UserBackendPinRecord {
+	t.Helper()
+
+	entry, err := registry.Lookup(context.Background(), backendID)
+	if err != nil {
+		t.Fatalf("Lookup(%s) returned error: %v", backendID, err)
+	}
+
+	facts := entry.PlacementFacts()
+
+	return state.UserBackendPinRecord{
+		Present:           true,
+		Key:               placementKey(),
+		BackendIdentifier: facts.BackendIdentifier,
+		Protocol:          facts.Protocol,
+		BackendPool:       facts.BackendPool,
+		ShardTag:          facts.EffectiveShard,
+		BackendNode:       facts.BackendNode,
+	}
+}
+
 // placementBackend returns one configured backend fixture.
 func placementBackend(identifier string, node string, shard string) backend.Backend {
 	return placementBackendWithProtocol(identifier, node, shard, placementProtocol, placementPool)
+}
+
+// placementWeightZeroBackend returns one canary backend excluded from normal placement.
+func placementWeightZeroBackend(identifier string, node string, shard string, protocol string, pool string) backend.Backend {
+	entry := placementBackendWithProtocol(identifier, node, shard, protocol, pool)
+	entry.Weight = 0
+
+	return entry
 }
 
 // placementBackendWithProtocol returns one configured backend fixture for a protocol.
@@ -798,9 +1205,12 @@ type placementStoreFixture struct {
 	affinity      state.AffinityRecord
 	closeAffinity state.AffinityRecord
 	pin           state.UserBackendPinRecord
+	pins          []state.UserBackendPinRecord
 	opened        []state.SessionRecord
 	attachments   []state.SessionBackendAttachment
 	attachErr     error
+	lastPinRead   state.UserBackendPinGetRequest
+	pinReadCalls  int
 	reserveCalls  int
 	releaseCalls  int
 	attachCalls   int
@@ -852,7 +1262,23 @@ func (s *placementStoreFixture) GetUserBackendPin(
 	_ context.Context,
 	request state.UserBackendPinGetRequest,
 ) (state.UserBackendPinRecord, error) {
-	if !s.pin.Present {
+	s.lastPinRead = request
+	s.pinReadCalls++
+
+	if len(s.pins) > 0 {
+		for _, candidate := range s.pins {
+			if pinMatchesProtocolPool(candidate, request.Protocol, request.BackendPool) {
+				pin := candidate
+				pin.Key = request.Key
+
+				return pin, nil
+			}
+		}
+
+		return state.UserBackendPinRecord{Key: request.Key}, nil
+	}
+
+	if !s.pin.Present || !pinMatchesProtocolPool(s.pin, request.Protocol, request.BackendPool) {
 		return state.UserBackendPinRecord{Key: request.Key}, nil
 	}
 
@@ -1045,9 +1471,20 @@ func (r *placementRegistry) LookupInBackendNode(_ context.Context, request backe
 	return backend.Backend{}, placementBackendError("backend node endpoint missing")
 }
 
-// Pool returns the single IMAP backend pool fixture.
+// Pool returns the backend pool fixture for the requested protocol scope.
 func (r *placementRegistry) Pool(_ context.Context, name string) (backend.Pool, error) {
-	return backend.Pool{Name: name, Protocol: placementProtocol, Selector: "rendezvous_hash", Backends: []string{placementBackendA, placementBackendB}}, nil
+	switch name {
+	case placementPool:
+		return backend.Pool{Name: name, Protocol: placementProtocol, Selector: "rendezvous_hash", Backends: []string{placementBackendA, placementBackendB, placementBackendNode2IMAP, placementBackendCanaryIMAP}}, nil
+	case placementSievePool:
+		return backend.Pool{Name: name, Protocol: placementSieveProtocol, Selector: "rendezvous_hash", Backends: []string{placementBackendASieve, placementBackendBSieve, placementBackendNode2Sieve, placementBackendCanarySieve}}, nil
+	case placementPOP3Pool:
+		return backend.Pool{Name: name, Protocol: placementPOP3Protocol, Selector: "rendezvous_hash", Backends: []string{placementBackendAPOP3, placementBackendBPOP3, placementBackendNode2POP3, placementBackendCanaryPOP3}}, nil
+	case placementLMTPPool:
+		return backend.Pool{Name: name, Protocol: placementLMTPProtocol, Selector: "rendezvous_hash", Backends: []string{placementBackendALMTP, placementBackendNode2LMTP, placementBackendCanaryLMTP}}, nil
+	default:
+		return backend.Pool{}, placementBackendError("pool missing")
+	}
 }
 
 // placementSelectionResult wraps a backend fixture as a successful selection.

@@ -417,4 +417,5 @@ NAUTHILUS_DIRECTOR_INTEROP_BACKEND_ADDR="${mapped_by_name[default_a]}" \
 	NAUTHILUS_DIRECTOR_E2E_SERVER_BINARY="$tmpdir/nauthilus-director" \
 	"$go_cmd" test -mod=vendor -tags=interop -count=1 -run 'TestDovecot(CredentialReplayInterop|ClusterRuntimeInterop|LMTPInterop|ManageSieveInterop|POP3Interop)' ./test/e2e
 
+printf 'SKIP e2e-interop multi-protocol backend-node pin proof: current Docker topology does not expose one canary backend node with matching IMAP, ManageSieve and LMTP services\n'
 printf 'ok e2e-interop: OIDC Bearer caller-auth proof, real server binary, six Dovecot IMAP backends, Dovecot LMTP backend, Dovecot ManageSieve and POP3 backends when available, swaks-to-Postfix submitter, curl IMAP delivery proof, health ownership, cluster affinity and runtime control passed\n'

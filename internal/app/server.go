@@ -377,8 +377,18 @@ func provideControlHandle(
 		return controlHandle{}, nil
 	}
 
+	backendPinScopes, err := userBackendPinScopesFromDirectorConfig(cfg.Director)
+	if err != nil {
+		return controlHandle{}, err
+	}
+
 	runtimeReader := runtimectl.NewRedisRuntimeReader(store)
-	userBackendPinService := runtimectl.NewUserBackendPinService(store, registry, runtimectl.WithObservabilityRecorder(recorder))
+	userBackendPinService := runtimectl.NewUserBackendPinService(
+		store,
+		registry,
+		runtimectl.WithObservabilityRecorder(recorder),
+		runtimectl.WithUserBackendPinRequiredScopes(backendPinScopes),
+	)
 	handler := rest.NewServer(rest.Options{
 		Version:        options.Version,
 		ConfigPath:     options.ConfigPath,
@@ -416,6 +426,24 @@ func provideControlHandle(
 	}
 
 	return controlHandle{server: server}, nil
+}
+
+// userBackendPinScopesFromDirectorConfig adapts listener-derived scopes for runtime pin resolution.
+func userBackendPinScopesFromDirectorConfig(director config.DirectorConfig) ([]runtimectl.UserBackendPinScope, error) {
+	scopes, err := director.BackendPinRequiredScopes()
+	if err != nil {
+		return nil, err
+	}
+
+	converted := make([]runtimectl.UserBackendPinScope, 0, len(scopes))
+	for _, scope := range scopes {
+		converted = append(converted, runtimectl.UserBackendPinScope{
+			Protocol:    scope.Protocol,
+			BackendPool: scope.BackendPool,
+		})
+	}
+
+	return converted, nil
 }
 
 // registerObservabilityLifecycle starts observability first and flushes it last.

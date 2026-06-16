@@ -91,6 +91,10 @@ func (s *RuntimeSelector) SelectInBackendNode(ctx context.Context, request NodeS
 		return result, nil
 	}
 
+	if request.OperatorBackendIdentifier != "" {
+		return SelectionResult{}, err
+	}
+
 	if !s.backendNodeFailoverAllowed(effective[0]) {
 		return SelectionResult{}, err
 	}

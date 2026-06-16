@@ -1846,6 +1846,7 @@ func recipientPlacementReleaseGate(
 				Protocol:          protocolLMTP,
 				BackendPool:       testPlacementPool,
 				ShardTag:          testPlacementShardB,
+				BackendNode:       "mailstore-b-node-1",
 			})
 
 			return runtimectl.PlacementGateResult{
@@ -1904,6 +1905,7 @@ func TestRecipientPlacementUsesScopedLMTPBackendPin(t *testing.T) {
 			Protocol:          protocolLMTP,
 			BackendPool:       testPlacementPool,
 			ShardTag:          testPlacementShardB,
+			BackendNode:       "mailstore-b-node-1",
 		},
 	}
 	selector := &recordingBackendSelector{}
@@ -1935,8 +1937,8 @@ func TestRecipientPlacementUsesScopedLMTPBackendPin(t *testing.T) {
 	store.assertClosed(t, 1)
 }
 
-// TestRecipientPlacementIgnoresCrossShardBackendPin verifies LMTP pins cannot move shards.
-func TestRecipientPlacementIgnoresCrossShardBackendPin(t *testing.T) {
+// TestRecipientPlacementRejectsCrossShardBackendPin verifies stale LMTP pins fail closed.
+func TestRecipientPlacementRejectsCrossShardBackendPin(t *testing.T) {
 	identity := identityLookuperForRecipients(map[string]string{
 		testRecipientSingle: testPlacementShardA,
 	})
@@ -1948,6 +1950,7 @@ func TestRecipientPlacementIgnoresCrossShardBackendPin(t *testing.T) {
 			Protocol:          protocolLMTP,
 			BackendPool:       testPlacementPool,
 			ShardTag:          testPlacementShardB,
+			BackendNode:       "mailstore-b-node-1",
 		},
 	}
 	selector := &recordingBackendSelector{}
@@ -1960,20 +1963,14 @@ func TestRecipientPlacementIgnoresCrossShardBackendPin(t *testing.T) {
 	harness.write(t, "MAIL FROM:<sender@example.test>\r\n")
 	harness.expectLine(t, "250 2.0.0 Sender accepted\r\n")
 	harness.write(t, "RCPT TO:<recipient@example.test>\r\n")
-	harness.expectLine(t, "250 2.0.0 Recipient accepted\r\n")
-	harness.write(t, "DATA\r\n")
-	harness.expectLine(t, "354 2.0.0 End data with <CR><LF>.<CR><LF>\r\n")
-	harness.write(t, "line-one\r\n.\r\n")
-	harness.expectLine(t, "250 2.0.0 Message accepted\r\n")
+	harness.expectLine(t, "451 4.3.0 Recipient lookup temporarily unavailable\r\n")
 
-	request := selector.firstRequest(t)
-	if request.OperatorBackendIdentifier != "" || request.ShardTag != testPlacementShardA {
-		t.Fatalf("selection request = %#v, want routed shard without cross-shard pin", request)
+	if selector.requestCount() != 0 {
+		t.Fatalf("selector requests = %d, want stale pin rejection before selection", selector.requestCount())
 	}
 
-	if open := store.singleOpen(t); open.ShardTag != testPlacementShardA {
-		t.Fatalf("delivery hold shard = %q, want routing shard", open.ShardTag)
-	}
+	store.assertOpened(t, 0)
+	store.assertAttached(t, 0)
 }
 
 // TestRecipientPlacementIgnoresIMAPBackendPin verifies cross-protocol pins do not leak.

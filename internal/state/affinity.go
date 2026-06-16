@@ -212,25 +212,60 @@ type UserClearRequest struct {
 	Actor            string
 }
 
-// UserBackendPinSetRequest describes an atomic user backend-pin mutation.
+// UserBackendPinScope contains the bounded selector facts for one pin scope.
+type UserBackendPinScope struct {
+	BackendIdentifier string
+	Protocol          string
+	BackendPool       string
+	ShardTag          string
+	BackendNode       string
+}
+
+// UserBackendPinSetRequest describes an atomic single-scope backend-pin mutation.
 type UserBackendPinSetRequest struct {
 	Key               AffinityKey
 	BackendIdentifier string
 	Protocol          string
 	BackendPool       string
 	ShardTag          string
+	BackendNode       string
 	Strategy          string
 	Reason            string
 	Actor             string
 }
 
-// UserBackendPinGetRequest describes one backend-pin read by affinity key.
+// UserBackendPinsSetRequest describes an atomic multi-scope backend-pin mutation.
+type UserBackendPinsSetRequest struct {
+	Key      AffinityKey
+	Pins     []UserBackendPinScope
+	Strategy string
+	Reason   string
+	Actor    string
+}
+
+// UserBackendPinGetRequest describes one scoped backend-pin read by affinity key.
 type UserBackendPinGetRequest struct {
+	Key         AffinityKey
+	Protocol    string
+	BackendPool string
+}
+
+// UserBackendPinsListRequest describes a deterministic backend-pin set read.
+type UserBackendPinsListRequest struct {
 	Key AffinityKey
 }
 
-// UserBackendPinClearRequest describes an atomic backend-pin clear mutation.
+// UserBackendPinClearRequest describes an atomic single-scope backend-pin clear mutation.
 type UserBackendPinClearRequest struct {
+	Key         AffinityKey
+	Protocol    string
+	BackendPool string
+	Reason      string
+	Actor       string
+}
+
+// UserBackendPinsClearRequest describes an atomic all-scope backend-pin clear mutation.
+type UserBackendPinsClearRequest struct {
 	Key    AffinityKey
 	Reason string
 	Actor  string
@@ -292,7 +327,23 @@ type UserBackendPinRecord struct {
 	Protocol           string
 	BackendPool        string
 	ShardTag           string
+	BackendNode        string
 	Strategy           string
+	Generation         string
+	Reason             string
+	Actor              string
+	ActiveSessionCount int
+	UpdatedAt          time.Time
+	ServerTime         time.Time
+	Legacy             bool
+}
+
+// UserBackendPinsRecord describes a deterministic Redis-backed backend-pin set.
+type UserBackendPinsRecord struct {
+	Present            bool
+	Status             string
+	Key                AffinityKey
+	Pins               []UserBackendPinRecord
 	Generation         string
 	ActiveSessionCount int
 	ServerTime         time.Time

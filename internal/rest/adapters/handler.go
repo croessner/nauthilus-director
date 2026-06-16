@@ -88,7 +88,7 @@ type UserReader interface {
 
 // UserBackendPinReader exposes user backend-pin state to REST adapters.
 type UserBackendPinReader interface {
-	GetUserBackendPin(ctx context.Context, request runtime.GetUserBackendPinRequest) (runtime.UserBackendPinReadResult, error)
+	ListUserBackendPins(ctx context.Context, request runtime.ListUserBackendPinsRequest) (runtime.UserBackendPinsReadResult, error)
 }
 
 // UserHoldReader exposes user placement-hold state to REST adapters.
@@ -110,8 +110,9 @@ type UserMutator interface {
 
 // UserBackendPinMutator exposes user backend-pin mutations to REST adapters.
 type UserBackendPinMutator interface {
-	SetUserBackendPin(ctx context.Context, request runtime.SetUserBackendPinRequest) (runtime.UserBackendPinMutationResult, error)
+	SetUserBackendPinTarget(ctx context.Context, request runtime.SetUserBackendPinTargetRequest) (runtime.UserBackendPinsMutationResult, error)
 	ClearUserBackendPin(ctx context.Context, request runtime.ClearUserBackendPinRequest) (runtime.UserBackendPinMutationResult, error)
+	ClearUserBackendPins(ctx context.Context, request runtime.ClearUserBackendPinsRequest) (runtime.UserBackendPinsMutationResult, error)
 }
 
 // UserHoldMutator exposes user placement-hold mutations to REST adapters.
@@ -717,7 +718,7 @@ func (h *Handler) SetUserAffinity(ctx context.Context, request generated.SetUser
 	return generated.SetUserAffinity202JSONResponse(accepted()), nil
 }
 
-// ClearUserBackendPin removes one concrete user backend pin with an audit reason.
+// ClearUserBackendPin removes scoped or aggregate user backend pins with an audit reason.
 func (h *Handler) ClearUserBackendPin(ctx context.Context, request generated.ClearUserBackendPinRequestObject) (generated.ClearUserBackendPinResponseObject, error) {
 	if request.Body == nil {
 		return generated.ClearUserBackendPindefaultJSONResponse{StatusCode: http.StatusBadRequest, Body: h.problem(http.StatusBadRequest, "invalid_request", "request body is required", "ClearUserBackendPin")}, nil
@@ -732,10 +733,31 @@ func (h *Handler) ClearUserBackendPin(ctx context.Context, request generated.Cle
 		return generated.ClearUserBackendPindefaultJSONResponse{StatusCode: http.StatusServiceUnavailable, Body: h.runtimeUnavailable("ClearUserBackendPin")}, nil
 	}
 
+	protocol := strings.ToLower(strings.TrimSpace(request.Body.Protocol))
+	backendPool := strings.TrimSpace(request.Body.BackendPool)
+
+	if protocol == "" && backendPool == "" {
+		if _, err := h.userBackendPinMutator.ClearUserBackendPins(ctx, runtime.ClearUserBackendPinsRequest{
+			Key:    parseUserKey(request.UserKey),
+			Reason: reason,
+			Actor:  actorFromContext(ctx),
+		}); err != nil {
+			return generated.ClearUserBackendPindefaultJSONResponse{StatusCode: statusForError(err), Body: h.problemFromError("ClearUserBackendPin", err)}, nil
+		}
+
+		return generated.ClearUserBackendPin202JSONResponse(accepted()), nil
+	}
+
+	if protocol == "" || backendPool == "" {
+		return generated.ClearUserBackendPindefaultJSONResponse{StatusCode: http.StatusBadRequest, Body: h.problem(http.StatusBadRequest, "invalid_request", "backend pin scope incomplete", "ClearUserBackendPin")}, nil
+	}
+
 	if _, err := h.userBackendPinMutator.ClearUserBackendPin(ctx, runtime.ClearUserBackendPinRequest{
-		Key:    parseUserKey(request.UserKey),
-		Reason: reason,
-		Actor:  actorFromContext(ctx),
+		Key:         parseUserKey(request.UserKey),
+		Protocol:    protocol,
+		BackendPool: backendPool,
+		Reason:      reason,
+		Actor:       actorFromContext(ctx),
 	}); err != nil {
 		return generated.ClearUserBackendPindefaultJSONResponse{StatusCode: statusForError(err), Body: h.problemFromError("ClearUserBackendPin", err)}, nil
 	}
@@ -743,7 +765,7 @@ func (h *Handler) ClearUserBackendPin(ctx context.Context, request generated.Cle
 	return generated.ClearUserBackendPin202JSONResponse(accepted()), nil
 }
 
-// GetUserBackendPin returns one deterministic backend-pin read model.
+// GetUserBackendPin returns the aggregate backend-pin read model.
 func (h *Handler) GetUserBackendPin(ctx context.Context, request generated.GetUserBackendPinRequestObject) (generated.GetUserBackendPinResponseObject, error) {
 	key := parseUserKey(request.UserKey)
 
@@ -751,23 +773,34 @@ func (h *Handler) GetUserBackendPin(ctx context.Context, request generated.GetUs
 		return generated.GetUserBackendPindefaultJSONResponse{StatusCode: http.StatusServiceUnavailable, Body: h.runtimeUnavailable("GetUserBackendPin")}, nil
 	}
 
-	result, err := h.userBackendPinReader.GetUserBackendPin(ctx, runtime.GetUserBackendPinRequest{Key: key})
+	result, err := h.userBackendPinReader.ListUserBackendPins(ctx, runtime.ListUserBackendPinsRequest{Key: key})
 	if err != nil {
 		return generated.GetUserBackendPindefaultJSONResponse{StatusCode: statusForError(err), Body: h.problemFromError("GetUserBackendPin", err)}, nil
 	}
 
-	return generated.GetUserBackendPin200JSONResponse(userBackendPin(result.Pin, key)), nil
+	return generated.GetUserBackendPin200JSONResponse(userBackendPins(result.Pins, key)), nil
 }
 
-// SetUserBackendPin stores one concrete backend pin through the runtime domain.
+// SetUserBackendPin stores concrete or backend-node pins through the runtime domain.
 func (h *Handler) SetUserBackendPin(ctx context.Context, request generated.SetUserBackendPinRequestObject) (generated.SetUserBackendPinResponseObject, error) {
 	if request.Body == nil {
 		return generated.SetUserBackendPindefaultJSONResponse{StatusCode: http.StatusBadRequest, Body: h.problem(http.StatusBadRequest, "invalid_request", "request body is required", "SetUserBackendPin")}, nil
 	}
 
 	backendIdentifier := strings.TrimSpace(request.Body.Backend)
-	if backendIdentifier == "" {
-		return generated.SetUserBackendPindefaultJSONResponse{StatusCode: http.StatusBadRequest, Body: h.problem(http.StatusBadRequest, "invalid_request", "backend required", "SetUserBackendPin")}, nil
+	backendNode := strings.TrimSpace(request.Body.BackendNode)
+	protocol := strings.ToLower(strings.TrimSpace(request.Body.Protocol))
+	backendPool := strings.TrimSpace(request.Body.BackendPool)
+
+	switch {
+	case backendIdentifier == "" && backendNode == "":
+		return generated.SetUserBackendPindefaultJSONResponse{StatusCode: http.StatusBadRequest, Body: h.problem(http.StatusBadRequest, "invalid_request", "backend or backend_node required", "SetUserBackendPin")}, nil
+	case backendIdentifier != "" && backendNode != "":
+		return generated.SetUserBackendPindefaultJSONResponse{StatusCode: http.StatusBadRequest, Body: h.problem(http.StatusBadRequest, "invalid_request", "exactly one backend target required", "SetUserBackendPin")}, nil
+	case backendIdentifier != "" && (protocol != "" || backendPool != ""):
+		return generated.SetUserBackendPindefaultJSONResponse{StatusCode: http.StatusBadRequest, Body: h.problem(http.StatusBadRequest, "invalid_request", "backend scope filters require backend_node", "SetUserBackendPin")}, nil
+	case backendNode != "" && backendPool != "" && protocol == "":
+		return generated.SetUserBackendPindefaultJSONResponse{StatusCode: http.StatusBadRequest, Body: h.problem(http.StatusBadRequest, "invalid_request", "protocol required for backend_pool", "SetUserBackendPin")}, nil
 	}
 
 	reason := strings.TrimSpace(request.Body.Reason)
@@ -784,9 +817,12 @@ func (h *Handler) SetUserBackendPin(ctx context.Context, request generated.SetUs
 		return generated.SetUserBackendPindefaultJSONResponse{StatusCode: http.StatusServiceUnavailable, Body: h.runtimeUnavailable("SetUserBackendPin")}, nil
 	}
 
-	if _, err := h.userBackendPinMutator.SetUserBackendPin(ctx, runtime.SetUserBackendPinRequest{
+	if _, err := h.userBackendPinMutator.SetUserBackendPinTarget(ctx, runtime.SetUserBackendPinTargetRequest{
 		Key:               parseUserKey(request.UserKey),
 		BackendIdentifier: backendIdentifier,
+		BackendNode:       backendNode,
+		Protocol:          protocol,
+		BackendPool:       backendPool,
 		Strategy:          runtime.MoveStrategy(strategy),
 		Reason:            reason,
 		Actor:             actorFromContext(ctx),
@@ -1538,15 +1574,39 @@ func routeLookupResponse(result runtime.RouteLookupResponse) generated.RouteLook
 
 // routeLookupBackendPin adapts operator backend-pin diagnostics into generated DTOs.
 func routeLookupBackendPin(pin runtime.RouteLookupBackendPinState) generated.RouteLookupBackendPin {
+	scopeCount := pin.ScopeCount
+	currentScopeUnpinned := pin.CurrentScopeUnpinned
+
 	return generated.RouteLookupBackendPin{
-		Applied:     pin.Applied,
-		Backend:     stringPtrIfNotEmpty(pin.BackendID),
-		BackendPool: stringPtrIfNotEmpty(pin.BackendPool),
-		Present:     pin.Present,
-		Protocol:    stringPtrIfNotEmpty(pin.Protocol),
-		Reason:      pin.ReasonClass,
-		ShardTag:    stringPtrIfNotEmpty(pin.EffectiveShard),
+		Applied:              pin.Applied,
+		Backend:              stringPtrIfNotEmpty(pin.BackendID),
+		BackendNode:          stringPtrIfNotEmpty(pin.BackendNode),
+		BackendPool:          stringPtrIfNotEmpty(pin.BackendPool),
+		CurrentScopeUnpinned: &currentScopeUnpinned,
+		OtherScopes:          routeLookupBackendPinScopes(pin.OtherScopes),
+		Present:              pin.Present,
+		Protocol:             stringPtrIfNotEmpty(pin.Protocol),
+		Reason:               pin.ReasonClass,
+		ScopeCount:           &scopeCount,
+		ShardTag:             stringPtrIfNotEmpty(pin.EffectiveShard),
 	}
+}
+
+// routeLookupBackendPinScopes adapts bounded other-scope diagnostics.
+func routeLookupBackendPinScopes(scopes []runtime.RouteLookupBackendPinScope) *[]generated.RouteLookupBackendPinScope {
+	if len(scopes) == 0 {
+		return nil
+	}
+
+	otherScopes := make([]generated.RouteLookupBackendPinScope, 0, len(scopes))
+	for _, scope := range scopes {
+		otherScopes = append(otherScopes, generated.RouteLookupBackendPinScope{
+			BackendPool: scope.BackendPool,
+			Protocol:    scope.Protocol,
+		})
+	}
+
+	return &otherScopes
 }
 
 // routeLookupUserHold adapts placement-hold diagnostics into generated DTOs.
@@ -1779,25 +1839,92 @@ func userAffinity(user runtime.UserRuntimeState) generated.UserAffinity {
 	}
 }
 
-// userBackendPin adapts runtime backend-pin state into the generated REST DTO.
-func userBackendPin(pin runtime.UserBackendPin, fallbackKey runtime.UserKey) generated.UserBackendPin {
-	key := pin.Key.Normalize()
+// userBackendPins adapts aggregate runtime backend-pin state into the generated REST DTO.
+func userBackendPins(pins []runtime.UserBackendPin, fallbackKey runtime.UserKey) generated.UserBackendPin {
+	scopedPins := presentBackendPins(pins)
+	sortBackendPins(scopedPins)
+
+	key := backendPinResponseKey(scopedPins, fallbackKey)
+	detail := generated.UserBackendPin{
+		Pins:    backendPinEntries(scopedPins),
+		Present: len(scopedPins) > 0,
+		UserKey: formatUserKey(key),
+	}
+
+	if len(scopedPins) == 1 {
+		applyBackendPinCompatibilityFields(&detail, scopedPins[0])
+	}
+
+	return detail
+}
+
+// presentBackendPins returns only authoritative pins that should appear publicly.
+func presentBackendPins(pins []runtime.UserBackendPin) []runtime.UserBackendPin {
+	scopedPins := make([]runtime.UserBackendPin, 0, len(pins))
+	for _, pin := range pins {
+		if pin.Present {
+			scopedPins = append(scopedPins, pin)
+		}
+	}
+
+	return scopedPins
+}
+
+// sortBackendPins keeps aggregate backend-pin output deterministic.
+func sortBackendPins(pins []runtime.UserBackendPin) {
+	sort.SliceStable(pins, func(left int, right int) bool {
+		if pins[left].Protocol == pins[right].Protocol {
+			if pins[left].BackendPool == pins[right].BackendPool {
+				return pins[left].BackendIdentifier < pins[right].BackendIdentifier
+			}
+
+			return pins[left].BackendPool < pins[right].BackendPool
+		}
+
+		return pins[left].Protocol < pins[right].Protocol
+	})
+}
+
+// backendPinResponseKey chooses the best public key for aggregate read output.
+func backendPinResponseKey(pins []runtime.UserBackendPin, fallbackKey runtime.UserKey) runtime.UserKey {
+	if len(pins) == 0 {
+		return fallbackKey.Normalize()
+	}
+
+	key := pins[0].Key.Normalize()
 	if key.Tenant == "" || key.UserHash == "" {
 		key = fallbackKey.Normalize()
 	}
 
-	detail := generated.UserBackendPin{
-		Present: pin.Present,
-		UserKey: formatUserKey(key),
+	return key
+}
+
+// backendPinEntries adapts every scoped pin into generated entry DTOs.
+func backendPinEntries(pins []runtime.UserBackendPin) []generated.UserBackendPinEntry {
+	entries := make([]generated.UserBackendPinEntry, 0, len(pins))
+	for _, pin := range pins {
+		activeSessionCount := pin.ActiveSessionCount
+		entries = append(entries, generated.UserBackendPinEntry{
+			ActiveSessionCount: &activeSessionCount,
+			Backend:            strings.TrimSpace(pin.BackendIdentifier),
+			BackendNode:        strings.TrimSpace(pin.BackendNode),
+			BackendPool:        strings.TrimSpace(pin.BackendPool),
+			Generation:         stringPtrIfNotEmpty(pin.Generation),
+			Protocol:           strings.TrimSpace(pin.Protocol),
+			ShardTag:           strings.TrimSpace(pin.EffectiveShard),
+			Strategy:           generated.UserMoveRequestStrategy(strings.TrimSpace(string(pin.Strategy))),
+		})
 	}
 
-	if !pin.Present {
-		return detail
-	}
+	return entries
+}
 
+// applyBackendPinCompatibilityFields fills singular fields only for one scoped pin.
+func applyBackendPinCompatibilityFields(detail *generated.UserBackendPin, pin runtime.UserBackendPin) {
 	activeSessionCount := pin.ActiveSessionCount
 	detail.ActiveSessionCount = &activeSessionCount
 	detail.Backend = stringPtrIfNotEmpty(pin.BackendIdentifier)
+	detail.BackendNode = stringPtrIfNotEmpty(pin.BackendNode)
 	detail.BackendPool = stringPtrIfNotEmpty(pin.BackendPool)
 	detail.Generation = stringPtrIfNotEmpty(pin.Generation)
 	detail.Protocol = stringPtrIfNotEmpty(pin.Protocol)
@@ -1807,8 +1934,6 @@ func userBackendPin(pin runtime.UserBackendPin, fallbackKey runtime.UserKey) gen
 		value := generated.UserMoveRequestStrategy(strategy)
 		detail.Strategy = &value
 	}
-
-	return detail
 }
 
 // userHold adapts runtime placement-hold state into the generated REST DTO.
@@ -2157,13 +2282,10 @@ func (emptyRuntimeReader) GetUserAffinity(context.Context, runtime.UserKey) (run
 	return runtime.UserRuntimeState{}, newRuntimeError(runtime.ErrorKindNotFound, "user_affinity", "user affinity not found")
 }
 
-// GetUserBackendPin reports absent backend-pin state when no runtime reader is assembled.
-func (emptyRuntimeReader) GetUserBackendPin(_ context.Context, request runtime.GetUserBackendPinRequest) (runtime.UserBackendPinReadResult, error) {
-	return runtime.UserBackendPinReadResult{
-		Pin: runtime.UserBackendPin{
-			Present: false,
-			Key:     request.Key.Normalize(),
-		},
+// ListUserBackendPins reports absent backend-pin state when no runtime reader is assembled.
+func (emptyRuntimeReader) ListUserBackendPins(_ context.Context, _ runtime.ListUserBackendPinsRequest) (runtime.UserBackendPinsReadResult, error) {
+	return runtime.UserBackendPinsReadResult{
+		Pins: []runtime.UserBackendPin{},
 	}, nil
 }
 

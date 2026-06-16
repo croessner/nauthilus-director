@@ -105,6 +105,7 @@ const (
 	reasonClassBackendNodeUnusable    = "backend_node_unusable"
 	reasonClassBackendPinApplied      = "backend_pin_applied"
 	reasonClassBackendPinMismatch     = "backend_pin_mismatch"
+	reasonClassBackendPinOtherScopes  = "backend_pin_other_scopes"
 	reasonClassBackendProxyConfig     = "backend_proxy_config"
 	reasonClassBackendProxyMissing    = "backend_proxy_missing_address"
 	reasonClassBackendProxyFamily     = "backend_proxy_unsupported_family"
@@ -267,6 +268,7 @@ var allowedReasonClasses = map[string]struct{}{
 	"backend_pin_clear":               {},
 	"backend_pin_excluded":            {},
 	reasonClassBackendPinMismatch:     {},
+	reasonClassBackendPinOtherScopes:  {},
 	"backend_pin_read_failed":         {},
 	"backend_pin_set":                 {},
 	"backend_closed":                  {},

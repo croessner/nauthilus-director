@@ -633,10 +633,15 @@ paths:
       operationId: getUserBackendPin
       tags:
         - users
-      summary: Show backend pin for one user key.
+      summary: Show aggregate backend pins for one user key.
+      description: >
+        Returns zero, one or many scoped backend pins. The singular
+        compatibility fields are populated deterministically from the only pin
+        when exactly one scoped pin is present, and are omitted when no pin or
+        multiple pins are present.
       responses:
         "200":
-          description: User backend pin.
+          description: User backend-pin aggregate state.
           content:
             application/json:
               schema:
@@ -647,7 +652,11 @@ paths:
       operationId: setUserBackendPin
       tags:
         - users
-      summary: Set backend pin for one user key.
+      summary: Set one or more scoped backend pins for one user key.
+      description: >
+        A concrete backend sets one protocol/backend-pool scope. A backend node
+        without protocol and backend_pool resolves all configured scopes for
+        that node; with protocol and backend_pool it resolves one scope.
       requestBody:
         required: true
         content:
@@ -667,7 +676,10 @@ paths:
       operationId: clearUserBackendPin
       tags:
         - users
-      summary: Clear backend pin for one user key.
+      summary: Clear backend pins for one user key.
+      description: >
+        With no protocol and backend_pool this clears every scoped backend pin
+        for the user. With protocol and backend_pool it clears only that scope.
       requestBody:
         required: true
         content:
@@ -1469,12 +1481,43 @@ components:
           type: string
         backend_pool:
           type: string
+        backend_node:
+          type: string
         shard_tag:
           type: string
+        scope_count:
+          type: integer
+          minimum: 0
+          description: Total scoped backend pins known for the user.
+        current_scope_unpinned:
+          type: boolean
+          description: >
+            True when the lookup protocol/backend-pool scope has no matching
+            pin while other scoped pins exist for the same user.
+        other_scopes:
+          type: array
+          description: >
+            Other pinned protocol/backend-pool scopes, without operator reason
+            text or concrete backend identifiers.
+          items:
+            $ref: "#/components/schemas/RouteLookupBackendPinScope"
         applied:
           type: boolean
         reason:
           type: string
+    RouteLookupBackendPinScope:
+      type: object
+      additionalProperties: false
+      required:
+        - protocol
+        - backend_pool
+      properties:
+        protocol:
+          type: string
+          minLength: 1
+        backend_pool:
+          type: string
+          minLength: 1
     RouteLookupBackendSummary:
       type: object
       additionalProperties: false
@@ -1743,23 +1786,111 @@ components:
     UserBackendPin:
       type: object
       additionalProperties: false
+      description: >
+        Compatibility name for aggregate backend-pin state. Singular fields are
+        accepted for deterministic one-pin clients; pins is the authoritative
+        aggregate representation.
       required:
         - present
         - user_key
+        - pins
       properties:
         present:
           type: boolean
         user_key:
           type: string
           minLength: 1
+        pins:
+          type: array
+          items:
+            $ref: "#/components/schemas/UserBackendPinEntry"
         backend:
           type: string
+          description: Compatibility field populated only when one pin exists.
         protocol:
           type: string
+          description: Compatibility field populated only when one pin exists.
         backend_pool:
           type: string
+          description: Compatibility field populated only when one pin exists.
         shard_tag:
           type: string
+          description: Compatibility field populated only when one pin exists.
+        backend_node:
+          type: string
+          description: Compatibility field populated only when one pin exists.
+        strategy:
+          $ref: "#/components/schemas/UserMoveRequestStrategy"
+        generation:
+          type: string
+        active_session_count:
+          type: integer
+          minimum: 0
+    UserBackendPins:
+      type: object
+      additionalProperties: false
+      required:
+        - present
+        - user_key
+        - pins
+      properties:
+        present:
+          type: boolean
+        user_key:
+          type: string
+          minLength: 1
+        pins:
+          type: array
+          items:
+            $ref: "#/components/schemas/UserBackendPinEntry"
+        backend:
+          type: string
+          description: Compatibility field populated only when one pin exists.
+        protocol:
+          type: string
+          description: Compatibility field populated only when one pin exists.
+        backend_pool:
+          type: string
+          description: Compatibility field populated only when one pin exists.
+        shard_tag:
+          type: string
+          description: Compatibility field populated only when one pin exists.
+        backend_node:
+          type: string
+          description: Compatibility field populated only when one pin exists.
+        strategy:
+          $ref: "#/components/schemas/UserMoveRequestStrategy"
+        generation:
+          type: string
+        active_session_count:
+          type: integer
+          minimum: 0
+    UserBackendPinEntry:
+      type: object
+      additionalProperties: false
+      required:
+        - backend
+        - protocol
+        - backend_pool
+        - shard_tag
+        - backend_node
+        - strategy
+      properties:
+        backend:
+          type: string
+          minLength: 1
+        protocol:
+          type: string
+          minLength: 1
+        backend_pool:
+          type: string
+          minLength: 1
+        shard_tag:
+          type: string
+          minLength: 1
+        backend_node:
+          type: string
+          minLength: 1
         strategy:
           $ref: "#/components/schemas/UserMoveRequestStrategy"
         generation:
@@ -1770,14 +1901,42 @@ components:
     UserBackendPinRequest:
       type: object
       additionalProperties: false
+      not:
+        anyOf:
+          - required:
+              - backend
+              - backend_node
+          - allOf:
+              - not:
+                  required:
+                    - backend
+              - not:
+                  required:
+                    - backend_node
       required:
-        - backend
         - strategy
         - reason
       properties:
         backend:
           type: string
           minLength: 1
+          x-go-type-skip-optional-pointer: true
+          description: Concrete backend identifier for one protocol-scoped pin.
+        backend_node:
+          type: string
+          minLength: 1
+          x-go-type-skip-optional-pointer: true
+          description: Backend node resolved to all configured protocol scopes.
+        protocol:
+          type: string
+          minLength: 1
+          x-go-type-skip-optional-pointer: true
+          description: Optional protocol filter for backend-node scoped requests.
+        backend_pool:
+          type: string
+          minLength: 1
+          x-go-type-skip-optional-pointer: true
+          description: Optional backend-pool filter paired with protocol.
         strategy:
           $ref: "#/components/schemas/UserMoveRequestStrategy"
         reason:
@@ -1786,9 +1945,31 @@ components:
     UserBackendPinClearRequest:
       type: object
       additionalProperties: false
+      not:
+        anyOf:
+          - allOf:
+              - required:
+                  - protocol
+              - not:
+                  required:
+                    - backend_pool
+          - allOf:
+              - required:
+                  - backend_pool
+              - not:
+                  required:
+                    - protocol
       required:
         - reason
       properties:
+        protocol:
+          type: string
+          minLength: 1
+          x-go-type-skip-optional-pointer: true
+        backend_pool:
+          type: string
+          minLength: 1
+          x-go-type-skip-optional-pointer: true
         reason:
           type: string
           minLength: 1

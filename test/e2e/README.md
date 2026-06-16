@@ -20,6 +20,8 @@ The default lane is fake-service based and deterministic:
 - scaffolded fake Nauthilus gRPC authority under
   `test/e2e/fakes/nauthilus_grpc/`
 - fake IMAP backend under `test/e2e/fakes/imap_backend/`
+- deterministic fake ManageSieve backend under
+  `test/e2e/fakes/managesieve_backend/`
 - deterministic fake LMTP backend under `test/e2e/fakes/lmtp_backend/`
 - public loopback sockets for frontend IMAP, LMTP, LMTPS, STARTTLS, implicit
   TLS and fake backend handoff
@@ -48,6 +50,16 @@ The default lane is fake-service based and deterministic:
 - listener runtime control proof through `nauthilus-directorctl listeners ...`,
   including process-local soft drain, resume, hard drain with explicit zero
   grace, and public frontend socket observations
+- multi-protocol backend-node pinning proof through the production
+  `nauthilus-director` binary, Valkey, fake Nauthilus, public IMAP,
+  ManageSieve and LMTP sockets, generated REST and `nauthilus-directorctl`.
+  The scenario configures a non-zero `node2` backend node and a weight-zero
+  `mailstack-canary` node for all three protocols, proves normal users avoid
+  the canary backends, sets one `users backend-pin set --backend-node`
+  all-protocol pin after `users move --to-shard`, proves route lookup reports
+  `operator_backend_pin` for all three canary targets, correlates a unique LMTP
+  delivery marker with a later public IMAP backend observation for the same
+  user, clears without protocol and verifies normal placement resumes
 
 Fake services must expose counters or request observations that prove protocol
 mapping, routing, and backend behavior without logging credentials, SASL blobs,
@@ -86,4 +98,10 @@ connections for one user, route lookup, session kill, user kick, user move,
 hard backend drain and affinity clear through public sockets, Redis-backed
 runtime state and `nauthilus-directorctl`. Its LMTP scenario proves
 Postfix-to-Director-to-Dovecot delivery and preserves the real IMAP interop
-lane.
+lane. When the real-peer all-protocol backend-pin proof is available, the lane
+must use the operator mail-flow shape: set the backend-node pin through public
+control APIs, send a unique message through the public delivery/submission path,
+fetch it through public IMAP and verify both operations land on the pinned
+backend node. If Docker or a required protocol peer is unavailable, the lane
+must skip with a stable explicit reason instead of reporting an unavailable
+proof as passed.

@@ -19,6 +19,7 @@ package backend
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/croessner/nauthilus-director/internal/config"
 )
@@ -159,6 +160,40 @@ func TestRuntimeHardMaintenanceExcludesAllNewSessions(t *testing.T) {
 
 	if state.AllowsNewSessions || state.AllowsActivePins {
 		t.Fatalf("runtime hard maintenance did not exclude placement: %#v", state)
+	}
+}
+
+// TestRuntimeSelectorBackendNodeOperatorPinDisablesFailover verifies explicit pins do not move nodes.
+func TestRuntimeSelectorBackendNodeOperatorPinDisablesFailover(t *testing.T) {
+	cfg := sameShardBackendsConfig()
+	now := time.Now()
+	snapshots := fakeSnapshots{
+		testBackendID: {
+			Health: HealthState{
+				Enabled:   true,
+				Status:    HealthStatusUnhealthy,
+				CheckedAt: now,
+				ExpiresAt: now.Add(time.Minute),
+			},
+		},
+		testBackendIDB: {
+			Health: HealthState{
+				Enabled:   true,
+				Status:    HealthStatusHealthy,
+				CheckedAt: now,
+				ExpiresAt: now.Add(time.Minute),
+			},
+		},
+	}
+	policy := healthRuntimeSelectionPolicy(true)
+	policy.AllowHardDownFailover = true
+	selector := mustRuntimeSelector(t, cfg, snapshots, policy)
+	request := defaultNodeSelectionRequest()
+	request.OperatorBackendIdentifier = testBackendID
+
+	_, err := selector.SelectInBackendNode(context.Background(), request)
+	if !IsErrorKind(err, ErrorKindNoBackend) {
+		t.Fatalf("SelectInBackendNode error = %v, want no_backend without failover", err)
 	}
 }
 

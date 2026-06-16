@@ -14,6 +14,7 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
+//nolint:funlen,goconst,gocyclo,wsl_v5 // Redis script fixtures repeat scoped payload values intentionally.
 package state
 
 import (
@@ -36,6 +37,9 @@ import (
 const (
 	testAttachSessionID     = "attach-session"
 	testBackendPool         = "primary"
+	testBackendCanaryIMAP   = "mailstack-canary-imap"
+	testBackendCanaryLMTP   = "mailstack-canary-lmtp"
+	testBackendCanarySieve  = "mailstack-canary-sieve"
 	testBackendIMAP         = "mailstore-a-imap"
 	testBackendLMTP         = "mailstore-a-lmtp"
 	testBackendNodeA        = "mailstore-a-node"
@@ -48,6 +52,7 @@ const (
 	testProtocolIMAP        = "imap"
 	testProtocolLMTP        = "lmtp"
 	testProtocolPOP3        = "pop3"
+	testProtocolSieve       = "sieve"
 	testRedisModeCluster    = "cluster"
 	testExpiredReserve      = "expired-reservation"
 	testForbiddenAddress    = "address"
@@ -2210,6 +2215,202 @@ func TestRedisBackendPinSetGetClearScripts(t *testing.T) {
 	assertBackendPinClearPreservedAffinity(t, store, client, builder, key, sessionID)
 }
 
+// TestRedisBackendPinRetainsSeparateProtocolScopesForOneAffinityKey reproduces the single-record overwrite.
+func TestRedisBackendPinRetainsSeparateProtocolScopesForOneAffinityKey(t *testing.T) {
+	store, client, builder := redisIntegrationStore(t)
+	key := AffinityKey{Tenant: "blue", AccountKey: "pilot@example.org"}
+	scopes := canaryBackendPinScopes()
+
+	t.Run("set stores every protocol scope", func(t *testing.T) {
+		cleanupAffinity(t, client, builder, key)
+
+		for _, scope := range scopes {
+			setBackendPinScopeForTest(t, store, key, scope)
+		}
+
+		assertAffinityPinGroupContainsBackendIDs(t, client, builder, key, backendIDs(scopes)...)
+	})
+
+	t.Run("clear without protocol removes stale single pin", func(t *testing.T) {
+		cleanupAffinity(t, client, builder, key, "post-clear-session")
+
+		for _, scope := range scopes {
+			setBackendPinScopeForTest(t, store, key, scope)
+		}
+
+		if _, err := store.ClearUserBackendPin(context.Background(), UserBackendPinClearRequest{
+			Key:    key,
+			Reason: "mailbox canary done",
+			Actor:  testOperatorActor,
+		}); err != nil {
+			t.Fatalf("ClearUserBackendPin returned error: %v", err)
+		}
+
+		assertAffinityPinGroupOmitsBackendIDs(t, client, builder, key, backendIDs(scopes)...)
+
+		opened, err := store.OpenSession(context.Background(), testSessionRecord(key, "post-clear-session"))
+		if err != nil {
+			t.Fatalf("OpenSession after backend-pin clear returned error: %v", err)
+		}
+
+		if opened.ShardTag != testShardA {
+			t.Fatalf("session shard after backend-pin clear = %q, want normal requested shard %q", opened.ShardTag, testShardA)
+		}
+	})
+}
+
+// TestRedisBackendPinScopedSetListGetClearScripts verifies scoped pin set behavior.
+func TestRedisBackendPinScopedSetListGetClearScripts(t *testing.T) {
+	store, client, builder := redisIntegrationStore(t)
+	key := AffinityKey{Tenant: "blue", AccountKey: "scoped-pins@example.org"}
+	scopes := canaryBackendPinScopes()
+
+	cleanupAffinity(t, client, builder, key)
+	for _, scope := range scopes {
+		setBackendPinScopeForTest(t, store, key, scope)
+	}
+
+	listed, err := store.ListUserBackendPins(context.Background(), UserBackendPinsListRequest{Key: key})
+	if err != nil {
+		t.Fatalf("ListUserBackendPins returned error: %v", err)
+	}
+
+	assertListedBackendPins(t, listed, key, []backendPinScope{scopes[0], scopes[2], scopes[1]})
+
+	read := getBackendPinScopeForTest(t, store, key, scopes[1].protocol, scopes[1].pool)
+	assertBackendPinScopeRecord(t, read, key, scopes[1])
+
+	absent, err := store.GetUserBackendPin(context.Background(), UserBackendPinGetRequest{
+		Key:         key,
+		Protocol:    testProtocolPOP3,
+		BackendPool: "pop3-default",
+	})
+	if err != nil {
+		t.Fatalf("GetUserBackendPin absent scope returned error: %v", err)
+	}
+	if absent.Present || absent.Status != testMissingStatus {
+		t.Fatalf("absent scoped pin = %#v, want missing", absent)
+	}
+
+	cleared, err := store.ClearUserBackendPin(context.Background(), UserBackendPinClearRequest{
+		Key:         key,
+		Protocol:    scopes[1].protocol,
+		BackendPool: scopes[1].pool,
+		Reason:      "sieve canary done",
+		Actor:       testOperatorActor,
+	})
+	if err != nil {
+		t.Fatalf("ClearUserBackendPin scoped returned error: %v", err)
+	}
+	if cleared.Present || cleared.BackendIdentifier != scopes[1].backendID {
+		t.Fatalf("cleared scoped pin = %#v, want removed Sieve metadata", cleared)
+	}
+
+	afterScopedClear, err := store.ListUserBackendPins(context.Background(), UserBackendPinsListRequest{Key: key})
+	if err != nil {
+		t.Fatalf("ListUserBackendPins after scoped clear returned error: %v", err)
+	}
+	assertListedBackendPins(t, afterScopedClear, key, []backendPinScope{scopes[0], scopes[2]})
+
+	allCleared, err := store.ClearUserBackendPins(context.Background(), UserBackendPinsClearRequest{
+		Key:    key,
+		Reason: "mailbox canary done",
+		Actor:  testOperatorActor,
+	})
+	if err != nil {
+		t.Fatalf("ClearUserBackendPins returned error: %v", err)
+	}
+	if allCleared.Status != testClearStatus || len(allCleared.Pins) != 2 {
+		t.Fatalf("all-cleared pins = %#v, want remaining two cleared", allCleared)
+	}
+	assertAffinityPinGroupOmitsBackendIDs(t, client, builder, key, backendIDs(scopes)...)
+}
+
+// TestRedisBackendPinAtomicMultiScopeSetScripts verifies all-or-nothing multi-set behavior.
+func TestRedisBackendPinAtomicMultiScopeSetScripts(t *testing.T) {
+	store, client, builder := redisIntegrationStore(t)
+	key := AffinityKey{Tenant: "blue", AccountKey: "atomic-pins@example.org"}
+	scopes := canaryBackendPinScopes()
+
+	cleanupAffinity(t, client, builder, key)
+
+	written, err := store.SetUserBackendPins(context.Background(), UserBackendPinsSetRequest{
+		Key:      key,
+		Pins:     backendPinScopesForRequest(scopes),
+		Strategy: moveStrategyKickExisting,
+		Reason:   "mailbox canary",
+		Actor:    testOperatorActor,
+	})
+	if err != nil {
+		t.Fatalf("SetUserBackendPins returned error: %v", err)
+	}
+	assertListedBackendPins(t, written, key, []backendPinScope{scopes[0], scopes[2], scopes[1]})
+
+	cleanupAffinity(t, client, builder, key)
+	_, err = store.SetUserBackendPins(context.Background(), UserBackendPinsSetRequest{
+		Key:      key,
+		Pins:     append(backendPinScopesForRequest(scopes[:1]), backendPinScopesForRequest(scopes[:1])...),
+		Strategy: moveStrategyNewSessionsOnly,
+		Reason:   "duplicate scope",
+		Actor:    testOperatorActor,
+	})
+	if !IsRedisErrorKind(err, RedisErrorKindAmbiguousState) {
+		t.Fatalf("SetUserBackendPins duplicate error = %v, want ambiguous_state", err)
+	}
+
+	absent, err := store.ListUserBackendPins(context.Background(), UserBackendPinsListRequest{Key: key})
+	if err != nil {
+		t.Fatalf("ListUserBackendPins after failed multi-set returned error: %v", err)
+	}
+	if absent.Present || len(absent.Pins) != 0 {
+		t.Fatalf("failed multi-set left state = %#v, want absent", absent)
+	}
+}
+
+// TestRedisBackendPinLegacySingleRecordCompatibility verifies narrow legacy reads.
+func TestRedisBackendPinLegacySingleRecordCompatibility(t *testing.T) {
+	store, client, builder := redisIntegrationStore(t)
+	key := AffinityKey{Tenant: "blue", AccountKey: "legacy-pin@example.org"}
+
+	cleanupAffinity(t, client, builder, key)
+	seedLegacyBackendPin(t, client, builder, key)
+
+	read := getBackendPinScopeForTest(t, store, key, testProtocolIMAP, testBackendPool)
+	if !read.Legacy || !read.Present || read.BackendIdentifier != testBackendIMAP || read.BackendNode != "" {
+		t.Fatalf("legacy scoped read = %#v, want unambiguous legacy pin", read)
+	}
+
+	absent, err := store.GetUserBackendPin(context.Background(), UserBackendPinGetRequest{
+		Key:         key,
+		Protocol:    testProtocolLMTP,
+		BackendPool: testBackendPool,
+	})
+	if err != nil {
+		t.Fatalf("GetUserBackendPin legacy absent scope returned error: %v", err)
+	}
+	if absent.Present || absent.Status != testMissingStatus {
+		t.Fatalf("legacy absent scope = %#v, want missing", absent)
+	}
+
+	seedLegacyBackendPin(t, client, builder, key)
+	keys, err := builder.AffinityKeys(key.Tenant, key.AccountKey)
+	if err != nil {
+		t.Fatalf("AffinityKeys returned error: %v", err)
+	}
+	if err := client.HSet(context.Background(), keys.BackendPin, "scopes", "imap|primary").Err(); err != nil {
+		t.Fatalf("seed ambiguous legacy/scoped state: %v", err)
+	}
+
+	_, err = store.GetUserBackendPin(context.Background(), UserBackendPinGetRequest{
+		Key:         key,
+		Protocol:    testProtocolIMAP,
+		BackendPool: testBackendPool,
+	})
+	if !IsRedisErrorKind(err, RedisErrorKindAmbiguousState) {
+		t.Fatalf("ambiguous legacy read error = %v, want ambiguous_state", err)
+	}
+}
+
 // TestRedisBackendPinDoesNotCreateShardOverride verifies pins never move shard affinity.
 func TestRedisBackendPinDoesNotCreateShardOverride(t *testing.T) {
 	store, client, builder := redisIntegrationStore(t)
@@ -2690,6 +2891,7 @@ func setBackendPinForTest(
 		Protocol:          testProtocolIMAP,
 		BackendPool:       testBackendPool,
 		ShardTag:          shard,
+		BackendNode:       backendNodeForShard(shard),
 		Strategy:          strategy,
 		Reason:            reason,
 		Actor:             testOperatorActor,
@@ -2701,6 +2903,228 @@ func setBackendPinForTest(
 	return pinned
 }
 
+// backendPinScope describes one registry-derived canary backend-pin scope.
+type backendPinScope struct {
+	backendID string
+	protocol  string
+	pool      string
+	shard     string
+	node      string
+}
+
+// canaryBackendPinScopes returns the multi-protocol canary pin set used by runtime state tests.
+func canaryBackendPinScopes() []backendPinScope {
+	return []backendPinScope{
+		backendPinScopeFromBackend(backend.Backend{Identifier: testBackendCanaryIMAP, Protocol: testProtocolIMAP, BackendPool: "imap-default", ShardTag: testShardC, BackendNode: "mailstack-canary"}),
+		backendPinScopeFromBackend(backend.Backend{Identifier: testBackendCanarySieve, Protocol: testProtocolSieve, BackendPool: "sieve-default", ShardTag: testShardC, BackendNode: "mailstack-canary"}),
+		backendPinScopeFromBackend(backend.Backend{Identifier: testBackendCanaryLMTP, Protocol: testProtocolLMTP, BackendPool: "lmtp-default", ShardTag: testShardC, BackendNode: "mailstack-canary"}),
+	}
+}
+
+// backendPinScopeFromBackend derives bounded pin facts from one backend entry.
+func backendPinScopeFromBackend(entry backend.Backend) backendPinScope {
+	facts := entry.PlacementFacts()
+
+	return backendPinScope{
+		backendID: facts.BackendIdentifier,
+		protocol:  facts.Protocol,
+		pool:      facts.BackendPool,
+		shard:     facts.EffectiveShard,
+		node:      facts.BackendNode,
+	}
+}
+
+// setBackendPinScopeForTest writes one concrete protocol/backend-pool canary pin.
+func setBackendPinScopeForTest(t *testing.T, store *RedisSessionStore, key AffinityKey, scope backendPinScope) UserBackendPinRecord {
+	t.Helper()
+
+	pinned, err := store.SetUserBackendPin(context.Background(), UserBackendPinSetRequest{
+		Key:               key,
+		BackendIdentifier: scope.backendID,
+		Protocol:          scope.protocol,
+		BackendPool:       scope.pool,
+		ShardTag:          scope.shard,
+		BackendNode:       scope.node,
+		Strategy:          moveStrategyNewSessionsOnly,
+		Reason:            "mailbox canary",
+		Actor:             testOperatorActor,
+	})
+	if err != nil {
+		t.Fatalf("SetUserBackendPin(%s) returned error: %v", scope.backendID, err)
+	}
+
+	return pinned
+}
+
+// backendIDs extracts concrete backend identifiers from canary pin scopes.
+func backendIDs(scopes []backendPinScope) []string {
+	ids := make([]string, 0, len(scopes))
+	for _, scope := range scopes {
+		ids = append(ids, scope.backendID)
+	}
+
+	return ids
+}
+
+// backendPinScopesForRequest adapts fixture scopes into state requests.
+func backendPinScopesForRequest(scopes []backendPinScope) []UserBackendPinScope {
+	pins := make([]UserBackendPinScope, 0, len(scopes))
+	for _, scope := range scopes {
+		pins = append(pins, UserBackendPinScope{
+			BackendIdentifier: scope.backendID,
+			Protocol:          scope.protocol,
+			BackendPool:       scope.pool,
+			ShardTag:          scope.shard,
+			BackendNode:       scope.node,
+		})
+	}
+
+	return pins
+}
+
+// assertListedBackendPins checks deterministic protocol/backend-pool ordering.
+func assertListedBackendPins(t *testing.T, record UserBackendPinsRecord, key AffinityKey, want []backendPinScope) {
+	t.Helper()
+
+	if !record.Present || record.Status != testStatusFound && record.Status != "pinned" || record.Key != key {
+		t.Fatalf("listed backend pins = %#v", record)
+	}
+
+	if len(record.Pins) != len(want) {
+		t.Fatalf("listed backend pin count = %d, want %d: %#v", len(record.Pins), len(want), record.Pins)
+	}
+
+	for index, scope := range want {
+		assertBackendPinScopeRecord(t, record.Pins[index], key, scope)
+	}
+}
+
+// assertBackendPinScopeRecord verifies one scoped backend-pin record.
+func assertBackendPinScopeRecord(t *testing.T, record UserBackendPinRecord, key AffinityKey, scope backendPinScope) {
+	t.Helper()
+
+	if !record.Present ||
+		record.Key != key ||
+		record.BackendIdentifier != scope.backendID ||
+		record.Protocol != scope.protocol ||
+		record.BackendPool != scope.pool ||
+		record.ShardTag != scope.shard ||
+		record.BackendNode != scope.node ||
+		record.Strategy == "" ||
+		record.Generation == "" ||
+		record.UpdatedAt.IsZero() ||
+		record.ServerTime.IsZero() {
+		t.Fatalf("scoped backend pin = %#v, want %#v", record, scope)
+	}
+}
+
+// assertAffinityPinGroupContainsBackendIDs verifies scoped pins survived sequential writes.
+func assertAffinityPinGroupContainsBackendIDs(
+	t *testing.T,
+	client *redis.Client,
+	builder KeyBuilder,
+	key AffinityKey,
+	backendIDs ...string,
+) {
+	t.Helper()
+
+	rendered := strings.Join(affinityPinGroupValues(t, client, builder, key), "\n")
+	for _, backendID := range backendIDs {
+		if !strings.Contains(rendered, backendID) {
+			t.Fatalf("backend pin group values = %q, want retained backend %q", rendered, backendID)
+		}
+	}
+}
+
+// assertAffinityPinGroupOmitsBackendIDs verifies clear-without-protocol removed all pin state.
+func assertAffinityPinGroupOmitsBackendIDs(
+	t *testing.T,
+	client *redis.Client,
+	builder KeyBuilder,
+	key AffinityKey,
+	backendIDs ...string,
+) {
+	t.Helper()
+
+	rendered := strings.Join(affinityPinGroupValues(t, client, builder, key), "\n")
+	for _, backendID := range backendIDs {
+		if strings.Contains(rendered, backendID) {
+			t.Fatalf("backend pin group values = %q, want backend %q cleared", rendered, backendID)
+		}
+	}
+}
+
+// affinityPinGroupValues reads bounded same-affinity values without assuming the future scoped layout.
+func affinityPinGroupValues(t *testing.T, client *redis.Client, builder KeyBuilder, key AffinityKey) []string {
+	t.Helper()
+
+	keys, err := builder.AffinityKeys(key.Tenant, key.AccountKey)
+	if err != nil {
+		t.Fatalf("AffinityKeys returned error: %v", err)
+	}
+
+	pattern := strings.Replace(keys.State, ":state", ":*", 1)
+	redisKeys, err := client.Keys(context.Background(), pattern).Result()
+	if err != nil {
+		t.Fatalf("scan affinity pin group keys: %v", err)
+	}
+
+	values := make([]string, 0)
+	for _, redisKey := range redisKeys {
+		values = append(values, redisKeyValuesForTest(t, client, redisKey)...)
+	}
+
+	return values
+}
+
+// redisKeyValuesForTest returns printable values for the Redis data types used by affinity keys.
+func redisKeyValuesForTest(t *testing.T, client *redis.Client, redisKey string) []string {
+	t.Helper()
+
+	kind, err := client.Type(context.Background(), redisKey).Result()
+	if err != nil {
+		t.Fatalf("read redis key type for %s: %v", redisKey, err)
+	}
+
+	switch kind {
+	case "hash":
+		fields, err := client.HGetAll(context.Background(), redisKey).Result()
+		if err != nil {
+			t.Fatalf("read hash %s: %v", redisKey, err)
+		}
+
+		values := make([]string, 0, len(fields)*2)
+		for field, value := range fields {
+			values = append(values, field, value)
+		}
+
+		return values
+	case "set":
+		values, err := client.SMembers(context.Background(), redisKey).Result()
+		if err != nil {
+			t.Fatalf("read set %s: %v", redisKey, err)
+		}
+
+		return values
+	case "string":
+		value, err := client.Get(context.Background(), redisKey).Result()
+		if err != nil && !errors.Is(err, redis.Nil) {
+			t.Fatalf("read string %s: %v", redisKey, err)
+		}
+
+		return []string{value}
+	case "zset":
+		values, err := client.ZRange(context.Background(), redisKey, 0, -1).Result()
+		if err != nil {
+			t.Fatalf("read zset %s: %v", redisKey, err)
+		}
+
+		return values
+	default:
+		return nil
+	}
+}
+
 // getBackendPinForTest reads one backend-pin fixture.
 func getBackendPinForTest(t *testing.T, store *RedisSessionStore, key AffinityKey) UserBackendPinRecord {
 	t.Helper()
@@ -2708,6 +3132,22 @@ func getBackendPinForTest(t *testing.T, store *RedisSessionStore, key AffinityKe
 	read, err := store.GetUserBackendPin(context.Background(), UserBackendPinGetRequest{Key: key})
 	if err != nil {
 		t.Fatalf("GetUserBackendPin present returned error: %v", err)
+	}
+
+	return read
+}
+
+// getBackendPinScopeForTest reads one scoped backend-pin fixture.
+func getBackendPinScopeForTest(t *testing.T, store *RedisSessionStore, key AffinityKey, protocol string, backendPool string) UserBackendPinRecord {
+	t.Helper()
+
+	read, err := store.GetUserBackendPin(context.Background(), UserBackendPinGetRequest{
+		Key:         key,
+		Protocol:    protocol,
+		BackendPool: backendPool,
+	})
+	if err != nil {
+		t.Fatalf("GetUserBackendPin(%s/%s) returned error: %v", protocol, backendPool, err)
 	}
 
 	return read
@@ -2731,6 +3171,42 @@ func clearBackendPinForTest(t *testing.T, store *RedisSessionStore, key Affinity
 	}
 
 	return cleared
+}
+
+// seedLegacyBackendPin writes the old single-record backend-pin hash shape.
+func seedLegacyBackendPin(t *testing.T, client *redis.Client, builder KeyBuilder, key AffinityKey) {
+	t.Helper()
+
+	keys, err := builder.AffinityKeys(key.Tenant, key.AccountKey)
+	if err != nil {
+		t.Fatalf("AffinityKeys returned error: %v", err)
+	}
+
+	if err := client.Del(context.Background(), keys.BackendPin).Err(); err != nil {
+		t.Fatalf("delete backend pin key: %v", err)
+	}
+
+	now, err := client.Time(context.Background()).Result()
+	if err != nil {
+		t.Fatalf("redis TIME returned error: %v", err)
+	}
+
+	if err := client.HSet(context.Background(), keys.BackendPin,
+		"schema_version", "1",
+		scriptFieldTenant, key.Tenant,
+		scriptFieldAccountKey, key.AccountKey,
+		scriptFieldBackendID, testBackendIMAP,
+		scriptFieldProtocol, testProtocolIMAP,
+		scriptFieldBackendPool, testBackendPool,
+		scriptFieldShardTag, testShardB,
+		scriptFieldStrategy, moveStrategyNewSessionsOnly,
+		scriptFieldGeneration, "7",
+		"reason", "legacy commissioning",
+		"actor", testOperatorActor,
+		scriptFieldUpdatedAtMS, now.UnixMilli(),
+	).Err(); err != nil {
+		t.Fatalf("seed legacy backend pin: %v", err)
+	}
 }
 
 // assertBackendPinClearPreservedAffinity verifies clear does not disturb active shard state.
@@ -2897,11 +3373,25 @@ func assertBackendPinRecord(
 		record.Protocol != testProtocolIMAP ||
 		record.BackendPool != testBackendPool ||
 		record.ShardTag != shard ||
+		record.BackendNode == "" ||
 		record.Strategy != strategy ||
 		record.Generation == "" ||
 		record.ActiveSessionCount != activeCount ||
+		record.UpdatedAt.IsZero() ||
 		record.ServerTime.IsZero() {
 		t.Fatalf("backend pin record = %#v", record)
+	}
+}
+
+// backendNodeForShard returns a bounded node fixture for state-only tests.
+func backendNodeForShard(shard string) string {
+	switch shard {
+	case testShardB:
+		return testBackendNodeB
+	case testShardC:
+		return "mailstore-c-node"
+	default:
+		return testBackendNodeA
 	}
 }
 
@@ -2918,15 +3408,29 @@ func assertStoredBackendPinHash(t *testing.T, client *redis.Client, builder KeyB
 		t.Fatalf("backend pin key = %q, want hash tag %q", keys.BackendPin, keys.HashTag)
 	}
 
+	if strings.Contains(keys.BackendPin, key.AccountKey) || strings.Contains(keys.BackendPin, strings.ToLower(key.AccountKey)) {
+		t.Fatalf("backend pin key %q leaked account key %q", keys.BackendPin, key.AccountKey)
+	}
+
 	fields := client.HGetAll(context.Background(), keys.BackendPin).Val()
+	scope, err := backendPinScopeField(testProtocolIMAP, testBackendPool, "test")
+	if err != nil {
+		t.Fatalf("backend pin scope returned error: %v", err)
+	}
+
+	prefix := "pin:" + scope + ":"
 	for name, want := range map[string]string{
-		scriptFieldTenant:      key.Tenant,
-		scriptFieldAccountKey:  key.AccountKey,
-		scriptFieldBackendID:   testBackendIMAP,
-		scriptFieldProtocol:    testProtocolIMAP,
-		scriptFieldBackendPool: testBackendPool,
-		scriptFieldShardTag:    testShardB,
-		scriptFieldStrategy:    moveStrategyNewSessionsOnly,
+		scriptFieldTenant:               key.Tenant,
+		scriptFieldAccountKey:           key.AccountKey,
+		"scopes":                        scope,
+		prefix + scriptFieldBackendID:   testBackendIMAP,
+		prefix + scriptFieldProtocol:    testProtocolIMAP,
+		prefix + scriptFieldBackendPool: testBackendPool,
+		prefix + scriptFieldShardTag:    testShardB,
+		prefix + scriptFieldBackendNode: testBackendNodeB,
+		prefix + scriptFieldStrategy:    moveStrategyNewSessionsOnly,
+		prefix + scriptFieldGeneration:  fields[scriptFieldGeneration],
+		prefix + scriptFieldUpdatedAtMS: fields[scriptFieldUpdatedAtMS],
 	} {
 		if got := fields[name]; got != want {
 			t.Fatalf("backend pin field %s = %q, want %q in %#v", name, got, want, fields)
@@ -2939,8 +3443,10 @@ func assertStoredBackendPinHash(t *testing.T, client *redis.Client, builder KeyB
 		testForbiddenToken,
 		testForbiddenPrivateKey,
 	} {
-		if _, ok := fields[forbidden]; ok {
-			t.Fatalf("backend pin stored forbidden field %q: %#v", forbidden, fields)
+		for field, value := range fields {
+			if strings.Contains(field, forbidden) || strings.Contains(value, forbidden) {
+				t.Fatalf("backend pin stored forbidden %q in %s=%q: %#v", forbidden, field, value, fields)
+			}
 		}
 	}
 }

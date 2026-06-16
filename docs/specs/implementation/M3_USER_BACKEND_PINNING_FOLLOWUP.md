@@ -10,6 +10,11 @@ This follow-up amends the completed M2/M3 backend runtime and control milestone
 with an operator workflow for binding one user key to one concrete backend for
 controlled canary and commissioning tests.
 
+The later M8 multi-protocol backend-pinning follow-up supersedes this document's
+single-pin storage limit. Concrete-backend pinning remains supported, and the
+current runtime model can also hold multiple protocol/backend-pool-scoped pins
+for the same user.
+
 The current user movement model intentionally targets shards, not concrete
 backends. That keeps normal placement director-owned and avoids turning
 Nauthilus or operator input into the general backend selector. The missing

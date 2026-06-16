@@ -437,13 +437,25 @@ func newUserBackendPinCommand(stdout io.Writer, stderr io.Writer) *cobra.Command
 	set := &cobra.Command{
 		Use:   "set <user-key>",
 		Short: "Set a backend pin for one user",
-		RunE:  cobraHandler(stdout, stderr, application.runUsersBackendPinSet, "backend", "strategy", "reason"),
+		RunE:  cobraHandler(stdout, stderr, application.runUsersBackendPinSet, "backend", "backend-node", "protocol", "backend-pool", "strategy", "reason"),
 	}
 	set.Flags().String("backend", "", "target backend identifier")
+	set.Flags().String("backend-node", "", "target backend node")
+	set.Flags().String("protocol", "", "target protocol for backend-node scope")
+	set.Flags().String("backend-pool", "", "target backend pool for backend-node scope")
 	set.Flags().String("strategy", "", "pin strategy")
 	set.Flags().String("reason", "", "auditable reason")
 	command.AddCommand(set)
-	command.AddCommand(runtimeReasonCommand("clear <user-key>", "Clear the backend pin for one user", stdout, stderr, application.runUsersBackendPinClear))
+
+	clearCmd := &cobra.Command{
+		Use:   "clear <user-key>",
+		Short: "Clear backend pins for one user",
+		RunE:  cobraHandler(stdout, stderr, application.runUsersBackendPinClear, "protocol", "backend-pool", "reason"),
+	}
+	clearCmd.Flags().String("protocol", "", "target protocol scope")
+	clearCmd.Flags().String("backend-pool", "", "target backend pool scope")
+	clearCmd.Flags().String("reason", "", "auditable reason")
+	command.AddCommand(clearCmd)
 
 	return command
 }
@@ -2026,16 +2038,21 @@ func (app application) runUsersBackendPinShow(args []string) int {
 		return app.serverError("users backend-pin show", http.StatusBadGateway, nil)
 	}
 
+	sortBackendPinResponse(response.JSON200)
+
 	return app.writeObject(response.JSON200, func(writer io.Writer) error {
 		writeBackendPinLine(writer, *response.JSON200)
 		return nil
 	})
 }
 
-// runUsersBackendPinSet pins future placements to one concrete backend.
+// runUsersBackendPinSet pins future placements to a concrete backend or backend node.
 func (app application) runUsersBackendPinSet(args []string) int {
 	line, err := parseCommandLine(args, []commandFlag{
 		valueFlag("backend"),
+		valueFlag("backend-node"),
+		valueFlag("protocol"),
+		valueFlag("backend-pool"),
 		valueFlag("strategy"),
 		valueFlag("reason"),
 	})
@@ -2051,11 +2068,23 @@ func (app application) runUsersBackendPinSet(args []string) int {
 	if !ok {
 		return app.usageError("users backend-pin set requires --reason")
 	}
-	backend, ok := requiredValue(line, "backend")
-	if !ok {
-		return app.usageError("users backend-pin set requires --backend")
+	backend := strings.TrimSpace(line.value("backend"))
+	backendNode := strings.TrimSpace(line.value("backend-node"))
+	protocol := strings.ToLower(strings.TrimSpace(line.value("protocol")))
+	backendPool := strings.TrimSpace(line.value("backend-pool"))
+	switch {
+	case backend == "" && backendNode == "":
+		return app.usageError("users backend-pin set requires --backend or --backend-node")
+	case backend != "" && backendNode != "":
+		return app.usageError("users backend-pin set accepts only one of --backend and --backend-node")
+	case backend != "" && (protocol != "" || backendPool != ""):
+		return app.usageError("users backend-pin set scope filters require --backend-node")
+	case backendNode != "" && protocol != "" && backendPool == "":
+		return app.usageError("users backend-pin set requires --backend-pool when --protocol is set")
+	case backendNode != "" && protocol == "" && backendPool != "":
+		return app.usageError("users backend-pin set requires --protocol when --backend-pool is set")
 	}
-	strategy := generated.UserMoveRequestStrategy(line.value("strategy"))
+	strategy := generated.UserMoveRequestStrategy(strings.TrimSpace(line.value("strategy")))
 	if !strategy.Valid() {
 		return app.usageError("backend-pin strategy must be new_sessions_only, kick_existing or drain_existing")
 	}
@@ -2069,9 +2098,12 @@ func (app application) runUsersBackendPinSet(args []string) int {
 	}
 
 	body := generated.SetUserBackendPinJSONRequestBody{
-		Backend:  backend,
-		Reason:   reason,
-		Strategy: strategy,
+		Backend:     backend,
+		BackendNode: backendNode,
+		BackendPool: backendPool,
+		Protocol:    protocol,
+		Reason:      reason,
+		Strategy:    strategy,
 	}
 	response, err := client.SetUserBackendPinWithResponse(ctx, generated.UserKey(userKey), body)
 	if err != nil {
@@ -2081,9 +2113,13 @@ func (app application) runUsersBackendPinSet(args []string) int {
 	return app.handleSetUserBackendPinResponse(response)
 }
 
-// runUsersBackendPinClear clears one user's concrete backend pin.
+// runUsersBackendPinClear clears all backend pins or one scoped backend pin.
 func (app application) runUsersBackendPinClear(args []string) int {
-	line, err := parseCommandLine(args, []commandFlag{valueFlag("reason")})
+	line, err := parseCommandLine(args, []commandFlag{
+		valueFlag("protocol"),
+		valueFlag("backend-pool"),
+		valueFlag("reason"),
+	})
 	if err != nil {
 		return app.usageError("%v", err)
 	}
@@ -2095,6 +2131,14 @@ func (app application) runUsersBackendPinClear(args []string) int {
 	reason, ok := requiredValue(line, "reason")
 	if !ok {
 		return app.usageError("users backend-pin clear requires --reason")
+	}
+	protocol := strings.ToLower(strings.TrimSpace(line.value("protocol")))
+	backendPool := strings.TrimSpace(line.value("backend-pool"))
+	if protocol == "" && backendPool != "" {
+		return app.usageError("users backend-pin clear requires --protocol when --backend-pool is set")
+	}
+	if protocol != "" && backendPool == "" {
+		return app.usageError("users backend-pin clear requires --backend-pool when --protocol is set")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), app.options.Timeout)
@@ -2108,7 +2152,7 @@ func (app application) runUsersBackendPinClear(args []string) int {
 	response, err := client.ClearUserBackendPinWithResponse(
 		ctx,
 		generated.UserKey(userKey),
-		generated.ClearUserBackendPinJSONRequestBody{Reason: reason},
+		generated.ClearUserBackendPinJSONRequestBody{BackendPool: backendPool, Protocol: protocol, Reason: reason},
 	)
 	if err != nil {
 		return app.requestError("users backend-pin clear", err)
@@ -3369,33 +3413,113 @@ func writeUserLine(writer io.Writer, user generated.UserDetail) {
 
 // writeBackendPinLine writes one scriptable backend-pin text row.
 func writeBackendPinLine(writer io.Writer, pin generated.UserBackendPin) {
-	backend := stringPointerValue(pin.Backend)
-	protocol := stringPointerValue(pin.Protocol)
-	backendPool := stringPointerValue(pin.BackendPool)
-	shardTag := stringPointerValue(pin.ShardTag)
-	strategy := ""
-	if pin.Strategy != nil {
-		strategy = string(*pin.Strategy)
-	}
-	generation := stringPointerValue(pin.Generation)
-	activeSessionCount := ""
-	if pin.ActiveSessionCount != nil {
-		activeSessionCount = strconv.Itoa(*pin.ActiveSessionCount)
+	entries := backendPinTextEntries(pin)
+	sort.SliceStable(entries, func(left int, right int) bool {
+		if entries[left].Protocol == entries[right].Protocol {
+			if entries[left].BackendPool == entries[right].BackendPool {
+				return entries[left].Backend < entries[right].Backend
+			}
+
+			return entries[left].BackendPool < entries[right].BackendPool
+		}
+
+		return entries[left].Protocol < entries[right].Protocol
+	})
+
+	if len(entries) == 0 {
+		_, _ = fmt.Fprintf(
+			writer,
+			"user_key=%s present=%t backend=%s backend_node=%s protocol=%s backend_pool=%s shard_tag=%s strategy=%s generation=%s active_session_count=%s\n",
+			fieldValue(pin.UserKey),
+			false,
+			fieldValue(""),
+			fieldValue(""),
+			fieldValue(""),
+			fieldValue(""),
+			fieldValue(""),
+			fieldValue(""),
+			fieldValue(""),
+			fieldValue(""),
+		)
+
+		return
 	}
 
+	for _, entry := range entries {
+		writeBackendPinEntryLine(writer, pin.UserKey, entry)
+	}
+}
+
+// writeBackendPinEntryLine writes one scriptable scoped backend-pin row.
+func writeBackendPinEntryLine(writer io.Writer, userKey string, entry generated.UserBackendPinEntry) {
+	generation := stringPointerValue(entry.Generation)
+	activeSessionCount := ""
+	if entry.ActiveSessionCount != nil {
+		activeSessionCount = strconv.Itoa(*entry.ActiveSessionCount)
+	}
 	_, _ = fmt.Fprintf(
 		writer,
-		"user_key=%s present=%t backend=%s protocol=%s backend_pool=%s shard_tag=%s strategy=%s generation=%s active_session_count=%s\n",
-		fieldValue(pin.UserKey),
-		pin.Present,
-		fieldValue(backend),
-		fieldValue(protocol),
-		fieldValue(backendPool),
-		fieldValue(shardTag),
-		fieldValue(strategy),
+		"user_key=%s present=%t backend=%s backend_node=%s protocol=%s backend_pool=%s shard_tag=%s strategy=%s generation=%s active_session_count=%s\n",
+		fieldValue(userKey),
+		true,
+		fieldValue(entry.Backend),
+		fieldValue(entry.BackendNode),
+		fieldValue(entry.Protocol),
+		fieldValue(entry.BackendPool),
+		fieldValue(entry.ShardTag),
+		fieldValue(string(entry.Strategy)),
 		fieldValue(generation),
 		fieldValue(activeSessionCount),
 	)
+}
+
+// sortBackendPinResponse keeps text and JSON aggregate pin output deterministic.
+func sortBackendPinResponse(pin *generated.UserBackendPin) {
+	if pin == nil {
+		return
+	}
+
+	sort.SliceStable(pin.Pins, func(left int, right int) bool {
+		if pin.Pins[left].Protocol == pin.Pins[right].Protocol {
+			if pin.Pins[left].BackendPool == pin.Pins[right].BackendPool {
+				return pin.Pins[left].Backend < pin.Pins[right].Backend
+			}
+
+			return pin.Pins[left].BackendPool < pin.Pins[right].BackendPool
+		}
+
+		return pin.Pins[left].Protocol < pin.Pins[right].Protocol
+	})
+}
+
+// backendPinTextEntries returns scoped generated entries with compatibility fallback.
+func backendPinTextEntries(pin generated.UserBackendPin) []generated.UserBackendPinEntry {
+	if len(pin.Pins) != 0 {
+		return append([]generated.UserBackendPinEntry(nil), pin.Pins...)
+	}
+	if !pin.Present {
+		return nil
+	}
+
+	return []generated.UserBackendPinEntry{{
+		ActiveSessionCount: pin.ActiveSessionCount,
+		Backend:            stringPointerValue(pin.Backend),
+		BackendNode:        stringPointerValue(pin.BackendNode),
+		BackendPool:        stringPointerValue(pin.BackendPool),
+		Generation:         pin.Generation,
+		Protocol:           stringPointerValue(pin.Protocol),
+		ShardTag:           stringPointerValue(pin.ShardTag),
+		Strategy:           backendPinCompatibilityStrategy(pin.Strategy),
+	}}
+}
+
+// backendPinCompatibilityStrategy unwraps one singular compatibility strategy.
+func backendPinCompatibilityStrategy(strategy *generated.UserMoveRequestStrategy) generated.UserMoveRequestStrategy {
+	if strategy == nil {
+		return ""
+	}
+
+	return *strategy
 }
 
 // writeUserHoldLine writes one scriptable placement-hold text row.
@@ -3542,15 +3666,34 @@ func writeRouteLine(writer io.Writer, route generated.RouteLookupResponse) {
 	pinProtocol := stringPointerValue(route.BackendPin.Protocol)
 	pinPool := stringPointerValue(route.BackendPin.BackendPool)
 	pinShard := stringPointerValue(route.BackendPin.ShardTag)
+	pinNode := stringPointerValue(route.BackendPin.BackendNode)
+	pinScopeCount := ""
+	if route.BackendPin.ScopeCount != nil {
+		pinScopeCount = strconv.Itoa(*route.BackendPin.ScopeCount)
+	}
+	pinCurrentScopeUnpinned := false
+	if route.BackendPin.CurrentScopeUnpinned != nil {
+		pinCurrentScopeUnpinned = *route.BackendPin.CurrentScopeUnpinned
+	}
+	pinOtherScopes := routeBackendPinOtherScopesValue(route.BackendPin.OtherScopes)
+	pinOtherScopeCount := 0
+	if route.BackendPin.OtherScopes != nil {
+		pinOtherScopeCount = len(*route.BackendPin.OtherScopes)
+	}
 	_, _ = fmt.Fprintf(
 		writer,
-		" backend_pin_present=%t backend_pin_applied=%t backend_pin_backend=%s backend_pin_protocol=%s backend_pin_pool=%s backend_pin_shard=%s backend_pin_reason=%s",
+		" backend_pin_present=%t backend_pin_applied=%t backend_pin_backend=%s backend_pin_protocol=%s backend_pin_pool=%s backend_pin_node=%s backend_pin_shard=%s backend_pin_scope_count=%s backend_pin_current_scope_unpinned=%t backend_pin_other_scope_count=%d backend_pin_other_scopes=%s backend_pin_reason=%s",
 		route.BackendPin.Present,
 		route.BackendPin.Applied,
 		fieldValue(pinBackend),
 		fieldValue(pinProtocol),
 		fieldValue(pinPool),
+		fieldValue(pinNode),
 		fieldValue(pinShard),
+		fieldValue(pinScopeCount),
+		pinCurrentScopeUnpinned,
+		pinOtherScopeCount,
+		fieldValue(pinOtherScopes),
 		fieldValue(route.BackendPin.Reason),
 	)
 	holdExpiresAt := timePointerValue(route.UserHold.ExpiresAt)
@@ -3570,6 +3713,29 @@ func writeRouteLine(writer io.Writer, route generated.RouteLookupResponse) {
 		fieldValue(holdGeneration),
 	)
 	_, _ = fmt.Fprintln(writer)
+}
+
+// routeBackendPinOtherScopesValue renders bounded pin scopes deterministically.
+func routeBackendPinOtherScopesValue(scopes *[]generated.RouteLookupBackendPinScope) string {
+	if scopes == nil || len(*scopes) == 0 {
+		return ""
+	}
+
+	ordered := append([]generated.RouteLookupBackendPinScope(nil), (*scopes)...)
+	sort.SliceStable(ordered, func(left int, right int) bool {
+		if ordered[left].Protocol == ordered[right].Protocol {
+			return ordered[left].BackendPool < ordered[right].BackendPool
+		}
+
+		return ordered[left].Protocol < ordered[right].Protocol
+	})
+
+	values := make([]string, 0, len(ordered))
+	for _, scope := range ordered {
+		values = append(values, strings.TrimSpace(scope.Protocol)+"/"+strings.TrimSpace(scope.BackendPool))
+	}
+
+	return strings.Join(values, ",")
 }
 
 // fieldValue quotes text values only when needed for scriptable key-value output.

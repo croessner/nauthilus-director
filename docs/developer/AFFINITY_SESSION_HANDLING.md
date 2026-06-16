@@ -83,12 +83,61 @@ Per-affinity keys share one Redis Cluster hash tag:
 <prefix>:v<schema>:{aff:<affinity_hash>}:session:<session_id>
 ```
 
-`backend_pin` is the authoritative concrete backend override for one affinity
-key. It stores only bounded selector facts derived from the configured backend
-registry: tenant, account key, backend identifier, protocol, backend pool,
-effective shard, strategy, generation, reason, actor and update timestamp. It
-does not store backend addresses, credentials, TLS material, private key paths
-or raw usernames in Redis key names.
+`backend_pin` is the authoritative scoped backend override set for one affinity
+key. The key remains a single hash under the affinity hash tag:
+
+```text
+<prefix>:v<schema>:{aff:<affinity_hash>}:backend_pin
+```
+
+The hash stores common metadata in root fields:
+
+```text
+schema_version
+tenant
+account_key
+generation
+updated_at_ms
+scopes
+```
+
+`scopes` is a newline-separated, lexically sorted list of normalized
+`<protocol>|<backend_pool>` scope names. Each scoped pin stores bounded
+selector and audit facts under fields prefixed by
+`pin:<protocol>|<backend_pool>:`:
+
+```text
+pin:<protocol>|<backend_pool>:backend_id
+pin:<protocol>|<backend_pool>:protocol
+pin:<protocol>|<backend_pool>:backend_pool
+pin:<protocol>|<backend_pool>:shard_tag
+pin:<protocol>|<backend_pool>:backend_node
+pin:<protocol>|<backend_pool>:strategy
+pin:<protocol>|<backend_pool>:generation
+pin:<protocol>|<backend_pool>:reason
+pin:<protocol>|<backend_pool>:actor
+pin:<protocol>|<backend_pool>:updated_at_ms
+```
+
+The model can represent zero, one or many backend pins for the same affinity
+key as long as their protocol/backend-pool scopes differ. It stores only facts
+derived from the configured backend registry and operator audit input: tenant,
+account key, backend identifier, protocol, backend pool, effective shard,
+backend node, strategy, generation, reason, actor and update timestamp. It does
+not store backend addresses, credentials, TLS material, private key paths or
+raw usernames in Redis key names.
+
+Compatibility with the older single-pin hash is intentionally narrow. If a
+hash has the legacy root-level `backend_id`, `protocol`, `backend_pool`,
+`shard_tag`, `strategy` and `generation` fields and no scoped `scopes` field,
+read operations can project it as one legacy scoped pin. The old shape did not
+store `backend_node`, so that field is unavailable on legacy reads. A hash that
+mixes legacy root-level pin fields with scoped fields is ambiguous and fails
+closed. Setting a scoped pin can replace an unambiguous legacy pin only when the
+incoming mutation includes that legacy protocol/backend-pool scope; otherwise
+the mutation fails closed instead of discarding a possibly unrelated pin.
+The Redis schema version is not bumped for this change because the key family
+and hash tag are unchanged and legacy single-pin reads remain deterministic.
 
 `hold` is the authoritative operator placement gate for one affinity key. It
 stores tenant, account key, generation, Redis-server `created_at_ms`,
@@ -99,15 +148,21 @@ read as absent even when their cleanup TTL has not removed the physical hash.
 
 Backend-pin mutations use the same per-affinity key group as user movement:
 
-- `backend_pin_set.lua` writes only the `backend_pin` hash in the authoritative
-  same-slot mutation. It does not create a shard override and does not change
-  active shard affinity. With `kick_existing`, the script increments the active
-  control generation so heartbeats observe `move_generation_changed` and close
-  existing sessions through the controlled runtime path.
-- `backend_pin_get.lua` reads the pin hash and active-session count without
-  refreshing leases or mutating affinity state.
-- `backend_pin_clear.lua` deletes only `backend_pin`. It preserves active
-  sessions, shard affinity and any pending shard override.
+- `backend_pin_set.lua` writes one or more scoped pins in the `backend_pin`
+  hash as one authoritative same-slot mutation. It validates the complete
+  scope set before writing anything. It does not create a shard override and
+  does not change active shard affinity. With `kick_existing`, the script
+  increments the active control generation once so heartbeats observe
+  `move_generation_changed` and close existing sessions through the controlled
+  runtime path.
+- `backend_pin_get.lua` reads either one requested protocol/backend-pool scope
+  or the deterministic scoped pin list. It also reports active-session count
+  without refreshing leases or mutating affinity state. A read for an absent
+  scope returns absent state even when other scopes exist.
+- `backend_pin_clear.lua` clears either one requested protocol/backend-pool
+  scope or every scoped pin for the affinity key as one authoritative same-slot
+  mutation. It preserves active sessions, shard affinity and any pending shard
+  override.
 - `user_hold_set.lua` writes the `hold` hash with Redis-server timestamps and a
   cleanup TTL. It rejects non-positive durations and durations above the
   caller-provided maximum.
@@ -515,11 +570,20 @@ scripts:
 
 - `MoveUser` stores one of `new_sessions_only`, `kick_existing` or
   `drain_existing`.
-- `SetUserBackendPin` stores a concrete backend override plus the backend's
-  derived protocol, backend pool and effective shard. It is runtime state only
-  and never rewrites YAML configuration.
-- `ClearUserBackendPin` deletes the concrete backend override without killing
-  sessions or clearing shard affinity.
+- `SetUserBackendPin` stores one concrete backend override plus the backend's
+  derived protocol, backend pool, effective shard and backend node.
+- `SetUserBackendPins` stores several resolved scoped backend overrides
+  atomically for the affinity key. A duplicate protocol/backend-pool scope or
+  ambiguous legacy state fails closed before partial authoritative state is
+  written.
+- `GetUserBackendPin` reads one placement scope. `ListUserBackendPins` returns
+  the deterministic protocol/backend-pool sorted set for REST, CLI and
+  diagnostics.
+- `ClearUserBackendPin` deletes one scoped backend override without killing
+  sessions or clearing shard affinity. `ClearUserBackendPins` deletes every
+  scoped backend override for the affinity key with the same preservation
+  rules. Backend pins are runtime state only and never rewrite YAML
+  configuration.
 - `SetUserHold` stores a bounded placement hold with expiry computed from Redis
   server time. It is runtime state only and never rewrites YAML configuration.
 - `GetUserHold` and `CheckUserHold` read hold state without waiting, refreshing

@@ -392,11 +392,27 @@ type RouteLookupBackendExclusion struct {
 type RouteLookupBackendPin struct {
 	Applied     bool    `json:"applied"`
 	Backend     *string `json:"backend,omitempty"`
+	BackendNode *string `json:"backend_node,omitempty"`
 	BackendPool *string `json:"backend_pool,omitempty"`
-	Present     bool    `json:"present"`
-	Protocol    *string `json:"protocol,omitempty"`
-	Reason      string  `json:"reason"`
-	ShardTag    *string `json:"shard_tag,omitempty"`
+
+	// CurrentScopeUnpinned True when the lookup protocol/backend-pool scope has no matching pin while other scoped pins exist for the same user.
+	CurrentScopeUnpinned *bool `json:"current_scope_unpinned,omitempty"`
+
+	// OtherScopes Other pinned protocol/backend-pool scopes, without operator reason text or concrete backend identifiers.
+	OtherScopes *[]RouteLookupBackendPinScope `json:"other_scopes,omitempty"`
+	Present     bool                          `json:"present"`
+	Protocol    *string                       `json:"protocol,omitempty"`
+	Reason      string                        `json:"reason"`
+
+	// ScopeCount Total scoped backend pins known for the user.
+	ScopeCount *int    `json:"scope_count,omitempty"`
+	ShardTag   *string `json:"shard_tag,omitempty"`
+}
+
+// RouteLookupBackendPinScope defines model for RouteLookupBackendPinScope.
+type RouteLookupBackendPinScope struct {
+	BackendPool string `json:"backend_pool"`
+	Protocol    string `json:"protocol"`
 }
 
 // RouteLookupBackendSummary defines model for RouteLookupBackendSummary.
@@ -601,29 +617,90 @@ type UserAffinity struct {
 	UserKey            string     `json:"user_key"`
 }
 
-// UserBackendPin defines model for UserBackendPin.
+// UserBackendPin Compatibility name for aggregate backend-pin state. Singular fields are accepted for deterministic one-pin clients; pins is the authoritative aggregate representation.
 type UserBackendPin struct {
-	ActiveSessionCount *int                     `json:"active_session_count,omitempty"`
-	Backend            *string                  `json:"backend,omitempty"`
-	BackendPool        *string                  `json:"backend_pool,omitempty"`
-	Generation         *string                  `json:"generation,omitempty"`
-	Present            bool                     `json:"present"`
-	Protocol           *string                  `json:"protocol,omitempty"`
-	ShardTag           *string                  `json:"shard_tag,omitempty"`
-	Strategy           *UserMoveRequestStrategy `json:"strategy,omitempty"`
-	UserKey            string                   `json:"user_key"`
+	ActiveSessionCount *int `json:"active_session_count,omitempty"`
+
+	// Backend Compatibility field populated only when one pin exists.
+	Backend *string `json:"backend,omitempty"`
+
+	// BackendNode Compatibility field populated only when one pin exists.
+	BackendNode *string `json:"backend_node,omitempty"`
+
+	// BackendPool Compatibility field populated only when one pin exists.
+	BackendPool *string               `json:"backend_pool,omitempty"`
+	Generation  *string               `json:"generation,omitempty"`
+	Pins        []UserBackendPinEntry `json:"pins"`
+	Present     bool                  `json:"present"`
+
+	// Protocol Compatibility field populated only when one pin exists.
+	Protocol *string `json:"protocol,omitempty"`
+
+	// ShardTag Compatibility field populated only when one pin exists.
+	ShardTag *string                  `json:"shard_tag,omitempty"`
+	Strategy *UserMoveRequestStrategy `json:"strategy,omitempty"`
+	UserKey  string                   `json:"user_key"`
 }
 
 // UserBackendPinClearRequest defines model for UserBackendPinClearRequest.
 type UserBackendPinClearRequest struct {
-	Reason string `json:"reason"`
+	BackendPool string `json:"backend_pool,omitempty"`
+	Protocol    string `json:"protocol,omitempty"`
+	Reason      string `json:"reason"`
+}
+
+// UserBackendPinEntry defines model for UserBackendPinEntry.
+type UserBackendPinEntry struct {
+	ActiveSessionCount *int                    `json:"active_session_count,omitempty"`
+	Backend            string                  `json:"backend"`
+	BackendNode        string                  `json:"backend_node"`
+	BackendPool        string                  `json:"backend_pool"`
+	Generation         *string                 `json:"generation,omitempty"`
+	Protocol           string                  `json:"protocol"`
+	ShardTag           string                  `json:"shard_tag"`
+	Strategy           UserMoveRequestStrategy `json:"strategy"`
 }
 
 // UserBackendPinRequest defines model for UserBackendPinRequest.
 type UserBackendPinRequest struct {
-	Backend  string                  `json:"backend"`
+	// Backend Concrete backend identifier for one protocol-scoped pin.
+	Backend string `json:"backend,omitempty"`
+
+	// BackendNode Backend node resolved to all configured protocol scopes.
+	BackendNode string `json:"backend_node,omitempty"`
+
+	// BackendPool Optional backend-pool filter paired with protocol.
+	BackendPool string `json:"backend_pool,omitempty"`
+
+	// Protocol Optional protocol filter for backend-node scoped requests.
+	Protocol string                  `json:"protocol,omitempty"`
 	Reason   string                  `json:"reason"`
 	Strategy UserMoveRequestStrategy `json:"strategy"`
+}
+
+// UserBackendPins defines model for UserBackendPins.
+type UserBackendPins struct {
+	ActiveSessionCount *int `json:"active_session_count,omitempty"`
+
+	// Backend Compatibility field populated only when one pin exists.
+	Backend *string `json:"backend,omitempty"`
+
+	// BackendNode Compatibility field populated only when one pin exists.
+	BackendNode *string `json:"backend_node,omitempty"`
+
+	// BackendPool Compatibility field populated only when one pin exists.
+	BackendPool *string               `json:"backend_pool,omitempty"`
+	Generation  *string               `json:"generation,omitempty"`
+	Pins        []UserBackendPinEntry `json:"pins"`
+	Present     bool                  `json:"present"`
+
+	// Protocol Compatibility field populated only when one pin exists.
+	Protocol *string `json:"protocol,omitempty"`
+
+	// ShardTag Compatibility field populated only when one pin exists.
+	ShardTag *string                  `json:"shard_tag,omitempty"`
+	Strategy *UserMoveRequestStrategy `json:"strategy,omitempty"`
+	UserKey  string                   `json:"user_key"`
 }
 
 // UserDetail defines model for UserDetail.

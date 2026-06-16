@@ -12,6 +12,17 @@ available or when the matching production protocol entrypoint does not exist.
 It must use pinned container images or digests so local and CI runs do not
 drift silently.
 
+Multi-protocol backend-node pinning belongs in this lane when the real-peer
+topology exposes matching IMAP, ManageSieve and LMTP services for one backend
+node. The proof must use public control APIs or `nauthilus-directorctl` to set
+one `users backend-pin set --backend-node` pin, then use the operator mail-flow
+shape: send a unique message through the public delivery/submission path, fetch
+that same message through public IMAP and verify that delivery used the pinned
+node's LMTP service while fetch used the pinned node's IMAP service. If Docker
+or a required real protocol peer is unavailable, the lane must emit a stable
+explicit skip reason and the closeout must report that skip instead of claiming
+the interop proof passed.
+
 Director-to-Nauthilus calls in this lane use a fake Nauthilus issuer that
 publishes OIDC discovery and token endpoints, then requires `Authorization:
 Bearer` on the Nauthilus-compatible HTTP authority endpoint. The fake authority

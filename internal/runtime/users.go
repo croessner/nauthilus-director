@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"maps"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -87,6 +88,13 @@ type UserBackendPinTarget struct {
 	Protocol          string
 	BackendPool       string
 	EffectiveShard    string
+	BackendNode       string
+}
+
+// UserBackendPinScope identifies one active protocol and backend-pool scope.
+type UserBackendPinScope struct {
+	Protocol    string
+	BackendPool string
 }
 
 // UserBackendPin describes one user-scoped concrete backend runtime override.
@@ -97,6 +105,7 @@ type UserBackendPin struct {
 	Protocol           string
 	BackendPool        string
 	EffectiveShard     string
+	BackendNode        string
 	Strategy           MoveStrategy
 	Generation         string
 	ActiveSessionCount int
@@ -163,13 +172,53 @@ type SetUserBackendPinRequest struct {
 	ExpectedGeneration string
 }
 
+// SetUserBackendPinsRequest asks runtime state to atomically store resolved backend pins.
+type SetUserBackendPinsRequest struct {
+	Key                UserKey
+	Targets            []UserBackendPinTarget
+	Strategy           MoveStrategy
+	Reason             string
+	Actor              Actor
+	ExpectedGeneration string
+}
+
+// SetUserBackendPinTargetRequest accepts either a backend or backend-node pin target.
+type SetUserBackendPinTargetRequest struct {
+	Key                UserKey
+	BackendIdentifier  string
+	BackendNode        string
+	Protocol           string
+	BackendPool        string
+	Strategy           MoveStrategy
+	Reason             string
+	Actor              Actor
+	ExpectedGeneration string
+}
+
 // GetUserBackendPinRequest asks runtime state for one affinity key backend pin.
 type GetUserBackendPinRequest struct {
+	Key         UserKey
+	Protocol    string
+	BackendPool string
+}
+
+// ListUserBackendPinsRequest asks runtime state for every backend pin on one affinity key.
+type ListUserBackendPinsRequest struct {
 	Key UserKey
 }
 
 // ClearUserBackendPinRequest asks runtime state to clear one backend pin.
 type ClearUserBackendPinRequest struct {
+	Key                UserKey
+	Protocol           string
+	BackendPool        string
+	Reason             string
+	Actor              Actor
+	ExpectedGeneration string
+}
+
+// ClearUserBackendPinsRequest asks runtime state to clear every backend pin.
+type ClearUserBackendPinsRequest struct {
 	Key                UserKey
 	Reason             string
 	Actor              Actor
@@ -212,11 +261,23 @@ type UserBackendPinReadResult struct {
 	Pin UserBackendPin
 }
 
+// UserBackendPinsReadResult describes a deterministic backend-pin set read outcome.
+type UserBackendPinsReadResult struct {
+	Pins []UserBackendPin
+}
+
 // UserBackendPinMutationResult describes a backend-pin mutation outcome.
 type UserBackendPinMutationResult struct {
 	Pin    UserBackendPin
 	Target UserBackendPinTarget
 	Audit  AuditMetadata
+}
+
+// UserBackendPinsMutationResult describes a multi-scope backend-pin mutation outcome.
+type UserBackendPinsMutationResult struct {
+	Pins    []UserBackendPin
+	Targets []UserBackendPinTarget
+	Audit   AuditMetadata
 }
 
 // SetUserHoldResult describes an audited hold-set outcome.
@@ -292,8 +353,11 @@ type UserStateStore interface {
 // UserBackendPinStateStore persists Redis-backed backend-pin operations.
 type UserBackendPinStateStore interface {
 	SetUserBackendPin(ctx context.Context, request state.UserBackendPinSetRequest) (state.UserBackendPinRecord, error)
+	SetUserBackendPins(ctx context.Context, request state.UserBackendPinsSetRequest) (state.UserBackendPinsRecord, error)
 	GetUserBackendPin(ctx context.Context, request state.UserBackendPinGetRequest) (state.UserBackendPinRecord, error)
+	ListUserBackendPins(ctx context.Context, request state.UserBackendPinsListRequest) (state.UserBackendPinsRecord, error)
 	ClearUserBackendPin(ctx context.Context, request state.UserBackendPinClearRequest) (state.UserBackendPinRecord, error)
+	ClearUserBackendPins(ctx context.Context, request state.UserBackendPinsClearRequest) (state.UserBackendPinsRecord, error)
 }
 
 // UserService coordinates user runtime operations with local session acceleration.
@@ -305,9 +369,10 @@ type UserService struct {
 
 // UserBackendPinService coordinates user backend-pin runtime operations.
 type UserBackendPinService struct {
-	store    UserBackendPinStateStore
-	registry backend.Registry
-	recorder observability.Recorder
+	store          UserBackendPinStateStore
+	registry       backend.Registry
+	recorder       observability.Recorder
+	requiredScopes []UserBackendPinScope
 }
 
 // UserHoldService coordinates user placement holds and local waiters.
@@ -347,7 +412,12 @@ func NewUserBackendPinService(
 ) *UserBackendPinService {
 	applied := applyServiceOptions(options)
 
-	return &UserBackendPinService{store: store, registry: registry, recorder: applied.recorder}
+	return &UserBackendPinService{
+		store:          store,
+		registry:       registry,
+		recorder:       applied.recorder,
+		requiredScopes: applied.backendPinRequiredScopes,
+	}
 }
 
 // NewUserHoldService creates the shared placement-hold service.
@@ -628,6 +698,51 @@ func (s *UserBackendPinService) SetUserBackendPin(
 	}, nil
 }
 
+// SetUserBackendPinTarget resolves an operator backend or backend-node pin request.
+func (s *UserBackendPinService) SetUserBackendPinTarget(
+	ctx context.Context,
+	request SetUserBackendPinTargetRequest,
+) (UserBackendPinsMutationResult, error) {
+	request = request.Normalize()
+	if err := request.Validate(); err != nil {
+		return UserBackendPinsMutationResult{}, err
+	}
+
+	if request.BackendIdentifier != "" {
+		result, err := s.SetUserBackendPin(ctx, SetUserBackendPinRequest{
+			Key:                request.Key,
+			BackendIdentifier:  request.BackendIdentifier,
+			Strategy:           request.Strategy,
+			Reason:             request.Reason,
+			Actor:              request.Actor,
+			ExpectedGeneration: request.ExpectedGeneration,
+		})
+		if err != nil {
+			return UserBackendPinsMutationResult{}, err
+		}
+
+		return UserBackendPinsMutationResult{
+			Pins:    []UserBackendPin{result.Pin},
+			Targets: []UserBackendPinTarget{result.Target},
+			Audit:   result.Audit,
+		}, nil
+	}
+
+	targets, err := s.resolveBackendNodePinTargets(ctx, request)
+	if err != nil {
+		return UserBackendPinsMutationResult{}, err
+	}
+
+	return s.SetUserBackendPins(ctx, SetUserBackendPinsRequest{
+		Key:                request.Key,
+		Targets:            targets,
+		Strategy:           request.Strategy,
+		Reason:             request.Reason,
+		Actor:              request.Actor,
+		ExpectedGeneration: request.ExpectedGeneration,
+	})
+}
+
 // backendPinSetStoreRequest maps validated operator input into store shape.
 func backendPinSetStoreRequest(request SetUserBackendPinRequest, target UserBackendPinTarget) state.UserBackendPinSetRequest {
 	return state.UserBackendPinSetRequest{
@@ -636,9 +751,67 @@ func backendPinSetStoreRequest(request SetUserBackendPinRequest, target UserBack
 		Protocol:          target.Protocol,
 		BackendPool:       target.BackendPool,
 		ShardTag:          target.EffectiveShard,
+		BackendNode:       target.BackendNode,
 		Strategy:          string(request.Strategy),
 		Reason:            request.Reason,
 		Actor:             actorAuditValue(request.Actor),
+	}
+}
+
+// SetUserBackendPins records several resolved scoped backend pins atomically.
+func (s *UserBackendPinService) SetUserBackendPins(
+	ctx context.Context,
+	request SetUserBackendPinsRequest,
+) (UserBackendPinsMutationResult, error) {
+	request.Key = request.Key.Normalize()
+	request.Strategy = MoveStrategy(strings.TrimSpace(string(request.Strategy)))
+
+	if err := request.Validate(); err != nil {
+		return UserBackendPinsMutationResult{}, err
+	}
+
+	if s == nil || s.store == nil {
+		return UserBackendPinsMutationResult{}, newRuntimeError(ErrorKindInvalidRequest, operationUserBackendPinSet, "backend pin store required")
+	}
+
+	record, err := s.store.SetUserBackendPins(ctx, backendPinsSetStoreRequest(request))
+	if err != nil {
+		s.recordBackendPinOperation(ctx, operationUserBackendPinSet, runtimeObservationResultFailure, runtimeObservationReasonBackendPinSet, state.UserBackendPinRecord{Key: request.Key.affinityKey()})
+
+		return UserBackendPinsMutationResult{}, err
+	}
+
+	pins := userBackendPinsFromRecord(record)
+
+	audit, err := userBackendPinsAuditMetadata(AuditOperationUserBackendPinSet, request.Reason, request.Actor, record)
+	if err != nil {
+		return UserBackendPinsMutationResult{}, err
+	}
+
+	s.recordBackendPinOperation(ctx, operationUserBackendPinSet, runtimeObservationResultOK, runtimeObservationReasonBackendPinSet, aggregateBackendPinRecord(record))
+
+	return UserBackendPinsMutationResult{Pins: pins, Targets: request.Targets, Audit: audit}, nil
+}
+
+// backendPinsSetStoreRequest maps resolved pin targets into store shape.
+func backendPinsSetStoreRequest(request SetUserBackendPinsRequest) state.UserBackendPinsSetRequest {
+	pins := make([]state.UserBackendPinScope, 0, len(request.Targets))
+	for _, target := range request.Targets {
+		pins = append(pins, state.UserBackendPinScope{
+			BackendIdentifier: target.BackendIdentifier,
+			Protocol:          target.Protocol,
+			BackendPool:       target.BackendPool,
+			ShardTag:          target.EffectiveShard,
+			BackendNode:       target.BackendNode,
+		})
+	}
+
+	return state.UserBackendPinsSetRequest{
+		Key:      request.Key.affinityKey(),
+		Pins:     pins,
+		Strategy: string(request.Strategy),
+		Reason:   request.Reason,
+		Actor:    actorAuditValue(request.Actor),
 	}
 }
 
@@ -657,7 +830,9 @@ func (s *UserBackendPinService) GetUserBackendPin(
 	}
 
 	record, err := s.store.GetUserBackendPin(ctx, state.UserBackendPinGetRequest{
-		Key: request.Key.affinityKey(),
+		Key:         request.Key.affinityKey(),
+		Protocol:    request.Protocol,
+		BackendPool: request.BackendPool,
 	})
 	if err != nil {
 		s.recordBackendPinOperation(ctx, operationUserBackendPinGet, runtimeObservationResultFailure, "backend_pin_read_failed", state.UserBackendPinRecord{Key: request.Key.affinityKey()})
@@ -668,6 +843,30 @@ func (s *UserBackendPinService) GetUserBackendPin(
 	record = backendPinRecordWithKey(record, request.Key)
 
 	return UserBackendPinReadResult{Pin: userBackendPinFromRecord(record)}, nil
+}
+
+// ListUserBackendPins reads every scoped backend pin without mutating runtime state.
+func (s *UserBackendPinService) ListUserBackendPins(
+	ctx context.Context,
+	request ListUserBackendPinsRequest,
+) (UserBackendPinsReadResult, error) {
+	request.Key = request.Key.Normalize()
+	if err := request.Validate(); err != nil {
+		return UserBackendPinsReadResult{}, err
+	}
+
+	if s == nil || s.store == nil {
+		return UserBackendPinsReadResult{}, newRuntimeError(ErrorKindInvalidRequest, operationUserBackendPinGet, "backend pin store required")
+	}
+
+	record, err := s.store.ListUserBackendPins(ctx, state.UserBackendPinsListRequest{Key: request.Key.affinityKey()})
+	if err != nil {
+		s.recordBackendPinOperation(ctx, operationUserBackendPinGet, runtimeObservationResultFailure, "backend_pin_read_failed", state.UserBackendPinRecord{Key: request.Key.affinityKey()})
+
+		return UserBackendPinsReadResult{}, err
+	}
+
+	return UserBackendPinsReadResult{Pins: userBackendPinsFromRecord(record)}, nil
 }
 
 // ClearUserBackendPin removes the concrete backend override without closing sessions.
@@ -685,9 +884,11 @@ func (s *UserBackendPinService) ClearUserBackendPin(
 	}
 
 	record, err := s.store.ClearUserBackendPin(ctx, state.UserBackendPinClearRequest{
-		Key:    request.Key.affinityKey(),
-		Reason: request.Reason,
-		Actor:  actorAuditValue(request.Actor),
+		Key:         request.Key.affinityKey(),
+		Protocol:    request.Protocol,
+		BackendPool: request.BackendPool,
+		Reason:      request.Reason,
+		Actor:       actorAuditValue(request.Actor),
 	})
 	if err != nil {
 		s.recordBackendPinOperation(ctx, operationUserBackendPinClear, runtimeObservationResultFailure, runtimeObservationReasonBackendPinClear, state.UserBackendPinRecord{Key: request.Key.affinityKey()})
@@ -708,6 +909,45 @@ func (s *UserBackendPinService) ClearUserBackendPin(
 		Pin:    userBackendPinFromRecord(record),
 		Target: backendPinTargetFromRecord(record),
 		Audit:  audit,
+	}, nil
+}
+
+// ClearUserBackendPins removes every backend pin for one affinity key.
+func (s *UserBackendPinService) ClearUserBackendPins(
+	ctx context.Context,
+	request ClearUserBackendPinsRequest,
+) (UserBackendPinsMutationResult, error) {
+	request.Key = request.Key.Normalize()
+	if err := request.Validate(); err != nil {
+		return UserBackendPinsMutationResult{}, err
+	}
+
+	if s == nil || s.store == nil {
+		return UserBackendPinsMutationResult{}, newRuntimeError(ErrorKindInvalidRequest, operationUserBackendPinClear, "backend pin store required")
+	}
+
+	record, err := s.store.ClearUserBackendPins(ctx, state.UserBackendPinsClearRequest{
+		Key:    request.Key.affinityKey(),
+		Reason: request.Reason,
+		Actor:  actorAuditValue(request.Actor),
+	})
+	if err != nil {
+		s.recordBackendPinOperation(ctx, operationUserBackendPinClear, runtimeObservationResultFailure, runtimeObservationReasonBackendPinClear, state.UserBackendPinRecord{Key: request.Key.affinityKey()})
+
+		return UserBackendPinsMutationResult{}, err
+	}
+
+	audit, err := userBackendPinsAuditMetadata(AuditOperationUserBackendPinClear, request.Reason, request.Actor, record)
+	if err != nil {
+		return UserBackendPinsMutationResult{}, err
+	}
+
+	s.recordBackendPinOperation(ctx, operationUserBackendPinClear, runtimeObservationResultOK, runtimeObservationReasonBackendPinClear, aggregateBackendPinRecord(record))
+
+	return UserBackendPinsMutationResult{
+		Pins:    userBackendPinsFromRecord(record),
+		Targets: backendPinTargetsFromRecord(record),
+		Audit:   audit,
 	}, nil
 }
 
@@ -896,13 +1136,111 @@ func (r SetUserBackendPinRequest) Validate() error {
 	return requireReason(operationUserBackendPinSet, r.Reason)
 }
 
+// Normalize returns a backend-pin target request with canonical comparable fields.
+func (r SetUserBackendPinTargetRequest) Normalize() SetUserBackendPinTargetRequest {
+	r.Key = r.Key.Normalize()
+	r.BackendIdentifier = strings.TrimSpace(r.BackendIdentifier)
+	r.BackendNode = strings.TrimSpace(r.BackendNode)
+	r.Protocol = strings.ToLower(strings.TrimSpace(r.Protocol))
+	r.BackendPool = strings.TrimSpace(r.BackendPool)
+	r.Strategy = MoveStrategy(strings.TrimSpace(string(r.Strategy)))
+
+	return r
+}
+
+// Validate checks a backend or backend-node pin request before resolution.
+//
+//nolint:gocyclo // The request grammar enumerates fail-closed operator error classes explicitly.
+func (r SetUserBackendPinTargetRequest) Validate() error {
+	if err := r.Key.Validate(operationUserBackendPinSet); err != nil {
+		return err
+	}
+
+	backendIdentifier := strings.TrimSpace(r.BackendIdentifier)
+	backendNode := strings.TrimSpace(r.BackendNode)
+
+	switch {
+	case backendIdentifier == "" && backendNode == "":
+		return newRuntimeError(ErrorKindInvalidRequest, operationUserBackendPinSet, "backend identifier or backend node required")
+	case backendIdentifier != "" && backendNode != "":
+		return newRuntimeError(ErrorKindInvalidRequest, operationUserBackendPinSet, "exactly one backend target required")
+	case backendIdentifier != "" && (strings.TrimSpace(r.Protocol) != "" || strings.TrimSpace(r.BackendPool) != ""):
+		return newRuntimeError(ErrorKindInvalidRequest, operationUserBackendPinSet, "backend scope filters require backend node")
+	case backendNode != "" && strings.TrimSpace(r.BackendPool) != "" && strings.TrimSpace(r.Protocol) == "":
+		return newRuntimeError(ErrorKindInvalidRequest, operationUserBackendPinSet, "protocol required for backend pool filter")
+	}
+
+	if !validMoveStrategy(r.Strategy) {
+		return newRuntimeError(ErrorKindInvalidRequest, operationUserBackendPinSet, "unsupported move strategy")
+	}
+
+	return requireReason(operationUserBackendPinSet, r.Reason)
+}
+
+// Validate checks resolved multi-scope backend-pin requests before state access.
+func (r SetUserBackendPinsRequest) Validate() error {
+	if err := r.Key.Validate(operationUserBackendPinSet); err != nil {
+		return err
+	}
+
+	if len(r.Targets) == 0 {
+		return newRuntimeError(ErrorKindInvalidRequest, operationUserBackendPinSet, "backend pin target required")
+	}
+
+	if !validMoveStrategy(r.Strategy) {
+		return newRuntimeError(ErrorKindInvalidRequest, operationUserBackendPinSet, "unsupported move strategy")
+	}
+
+	if err := requireReason(operationUserBackendPinSet, r.Reason); err != nil {
+		return err
+	}
+
+	seen := make(map[string]struct{}, len(r.Targets))
+	for _, target := range r.Targets {
+		if err := target.Validate(operationUserBackendPinSet); err != nil {
+			return err
+		}
+
+		scope := strings.ToLower(strings.TrimSpace(target.Protocol)) + "\x00" + strings.TrimSpace(target.BackendPool)
+		if _, ok := seen[scope]; ok {
+			return newRuntimeError(ErrorKindInvalidRequest, operationUserBackendPinSet, "duplicate backend pin scope")
+		}
+
+		seen[scope] = struct{}{}
+	}
+
+	return nil
+}
+
 // Validate checks the backend-pin read request before state access.
 func (r GetUserBackendPinRequest) Validate() error {
+	if err := r.Key.Validate(operationUserBackendPinGet); err != nil {
+		return err
+	}
+
+	return validateBackendPinRequestScope(operationUserBackendPinGet, r.Protocol, r.BackendPool)
+}
+
+// Validate checks the backend-pin set read request before state access.
+func (r ListUserBackendPinsRequest) Validate() error {
 	return r.Key.Validate(operationUserBackendPinGet)
 }
 
 // Validate checks the backend-pin clear request before state access.
 func (r ClearUserBackendPinRequest) Validate() error {
+	if err := r.Key.Validate(operationUserBackendPinClear); err != nil {
+		return err
+	}
+
+	if err := validateBackendPinRequestScope(operationUserBackendPinClear, r.Protocol, r.BackendPool); err != nil {
+		return err
+	}
+
+	return requireReason(operationUserBackendPinClear, r.Reason)
+}
+
+// Validate checks the backend-pin all-clear request before state access.
+func (r ClearUserBackendPinsRequest) Validate() error {
 	if err := r.Key.Validate(operationUserBackendPinClear); err != nil {
 		return err
 	}
@@ -1030,6 +1368,10 @@ func (t UserBackendPinTarget) Validate(operation string) error {
 		return newRuntimeError(ErrorKindUnavailable, operation, "backend target shard required")
 	}
 
+	if strings.TrimSpace(t.BackendNode) == "" {
+		return newRuntimeError(ErrorKindUnavailable, operation, "backend target node required")
+	}
+
 	return nil
 }
 
@@ -1069,6 +1411,138 @@ func validMoveStrategy(strategy MoveStrategy) bool {
 	}
 }
 
+// validateBackendPinRequestScope requires protocol and backend pool together.
+func validateBackendPinRequestScope(operation string, protocol string, backendPool string) error {
+	protocol = strings.TrimSpace(protocol)
+	backendPool = strings.TrimSpace(backendPool)
+
+	if protocol == "" && backendPool == "" {
+		return nil
+	}
+
+	if protocol == "" || backendPool == "" {
+		return newRuntimeError(ErrorKindInvalidRequest, operation, "backend pin scope incomplete")
+	}
+
+	return nil
+}
+
+type userBackendPinScopeKey struct {
+	protocol    string
+	backendPool string
+}
+
+// normalizeUserBackendPinScopes returns deterministic active backend-pin scopes.
+func normalizeUserBackendPinScopes(scopes []UserBackendPinScope) []UserBackendPinScope {
+	normalized := make([]UserBackendPinScope, 0, len(scopes))
+	seen := make(map[userBackendPinScopeKey]struct{}, len(scopes))
+
+	for _, scope := range scopes {
+		candidate := UserBackendPinScope{
+			Protocol:    strings.ToLower(strings.TrimSpace(scope.Protocol)),
+			BackendPool: strings.TrimSpace(scope.BackendPool),
+		}
+		key := backendPinScopeKey(candidate.Protocol, candidate.BackendPool)
+
+		if _, ok := seen[key]; ok {
+			continue
+		}
+
+		seen[key] = struct{}{}
+
+		normalized = append(normalized, candidate)
+	}
+
+	sort.SliceStable(normalized, func(i, j int) bool {
+		if normalized[i].Protocol == normalized[j].Protocol {
+			return normalized[i].BackendPool < normalized[j].BackendPool
+		}
+
+		return normalized[i].Protocol < normalized[j].Protocol
+	})
+
+	return normalized
+}
+
+// backendPinScopeKey normalizes one protocol and backend-pool tuple.
+func backendPinScopeKey(protocol string, backendPool string) userBackendPinScopeKey {
+	return userBackendPinScopeKey{
+		protocol:    strings.ToLower(strings.TrimSpace(protocol)),
+		backendPool: strings.TrimSpace(backendPool),
+	}
+}
+
+// requiredBackendPinScopes returns active scopes or fails closed on invalid setup.
+func (s *UserBackendPinService) requiredBackendPinScopes(operation string) ([]UserBackendPinScope, error) {
+	if s == nil {
+		return nil, newRuntimeError(ErrorKindUnavailable, operation, "backend pin service required")
+	}
+
+	scopes := normalizeUserBackendPinScopes(s.requiredScopes)
+	if len(scopes) == 0 {
+		return nil, newRuntimeError(ErrorKindUnavailable, operation, "backend pin required scopes unavailable")
+	}
+
+	for _, scope := range scopes {
+		if strings.TrimSpace(scope.Protocol) == "" || strings.TrimSpace(scope.BackendPool) == "" {
+			return nil, newRuntimeError(ErrorKindUnavailable, operation, "backend pin required scope invalid")
+		}
+	}
+
+	return scopes, nil
+}
+
+// backendNodeResolutionScopes chooses all or one configured scope for a node request.
+//
+//nolint:gocyclo // Scope selection keeps each invalid operator combination distinct.
+func (s *UserBackendPinService) backendNodeResolutionScopes(request SetUserBackendPinTargetRequest) ([]UserBackendPinScope, error) {
+	scopes, err := s.requiredBackendPinScopes(operationUserBackendPinSet)
+	if err != nil {
+		return nil, err
+	}
+
+	protocol := strings.ToLower(strings.TrimSpace(request.Protocol))
+	backendPool := strings.TrimSpace(request.BackendPool)
+
+	if protocol == "" && backendPool == "" {
+		return scopes, nil
+	}
+
+	if protocol == "" {
+		return nil, newRuntimeError(ErrorKindInvalidRequest, operationUserBackendPinSet, "protocol required for backend pool filter")
+	}
+
+	matches := make([]UserBackendPinScope, 0, len(scopes))
+	for _, scope := range scopes {
+		if scope.Protocol != protocol {
+			continue
+		}
+
+		if backendPool != "" && scope.BackendPool != backendPool {
+			continue
+		}
+
+		matches = append(matches, scope)
+	}
+
+	if backendPool == "" {
+		switch len(matches) {
+		case 0:
+			return nil, newRuntimeError(ErrorKindInvalidRequest, operationUserBackendPinSet, "backend pin protocol scope unavailable")
+		case 1:
+			return matches, nil
+		default:
+			return nil, newRuntimeError(ErrorKindInvalidRequest, operationUserBackendPinSet, "backend pool required for ambiguous protocol")
+		}
+	}
+
+	if len(matches) == 0 {
+		return nil, newRuntimeError(ErrorKindInvalidRequest, operationUserBackendPinSet, "backend pin scope unavailable")
+	}
+
+	return matches, nil
+}
+
 // resolveBackendPinTarget resolves operator input through the configured registry.
 func (s *UserBackendPinService) resolveBackendPinTarget(
 	ctx context.Context,
@@ -1090,6 +1564,75 @@ func (s *UserBackendPinService) resolveBackendPinTarget(
 	}
 
 	return target, nil
+}
+
+// resolveBackendNodePinTargets materializes configured scopes for one backend node.
+//
+//nolint:funlen,gocyclo // Resolution must fail closed for duplicate, missing and cross-shard mappings.
+func (s *UserBackendPinService) resolveBackendNodePinTargets(
+	ctx context.Context,
+	request SetUserBackendPinTargetRequest,
+) ([]UserBackendPinTarget, error) {
+	if s == nil || s.registry == nil {
+		return nil, newRuntimeError(ErrorKindUnavailable, operationUserBackendPinSet, "backend registry required")
+	}
+
+	scopes, err := s.backendNodeResolutionScopes(request)
+	if err != nil {
+		return nil, err
+	}
+
+	entries, err := s.registry.AllBackends(ctx)
+	if err != nil {
+		return nil, runtimeErrorFromBackendRegistry(operationUserBackendPinSet, err)
+	}
+
+	backendNode := strings.TrimSpace(request.BackendNode)
+	targetsByScope := make(map[userBackendPinScopeKey]UserBackendPinTarget)
+	nodeFound := false
+	shardTag := ""
+
+	for _, entry := range entries {
+		target := userBackendPinTargetFromFacts(entry.PlacementFacts())
+		if strings.TrimSpace(target.BackendNode) != backendNode {
+			continue
+		}
+
+		nodeFound = true
+
+		if err := target.Validate(operationUserBackendPinSet); err != nil {
+			return nil, err
+		}
+
+		if shardTag == "" {
+			shardTag = target.EffectiveShard
+		} else if shardTag != target.EffectiveShard {
+			return nil, newRuntimeError(ErrorKindConflict, operationUserBackendPinSet, "backend node maps to multiple shards")
+		}
+
+		scopeKey := backendPinScopeKey(target.Protocol, target.BackendPool)
+		if _, ok := targetsByScope[scopeKey]; ok {
+			return nil, newRuntimeError(ErrorKindConflict, operationUserBackendPinSet, "duplicate backend node protocol pool mapping")
+		}
+
+		targetsByScope[scopeKey] = target
+	}
+
+	if !nodeFound {
+		return nil, newRuntimeError(ErrorKindNotFound, operationUserBackendPinSet, "backend node not found")
+	}
+
+	targets := make([]UserBackendPinTarget, 0, len(scopes))
+	for _, scope := range scopes {
+		target, ok := targetsByScope[backendPinScopeKey(scope.Protocol, scope.BackendPool)]
+		if !ok {
+			return nil, newRuntimeError(ErrorKindConflict, operationUserBackendPinSet, "backend node missing required configured scope")
+		}
+
+		targets = append(targets, target)
+	}
+
+	return targets, nil
 }
 
 // runtimeErrorFromBackendRegistry maps registry failures into runtime control classes.
@@ -1122,6 +1665,7 @@ func userBackendPinTargetFromFacts(facts backend.PlacementFacts) UserBackendPinT
 		Protocol:          strings.TrimSpace(facts.Protocol),
 		BackendPool:       strings.TrimSpace(facts.BackendPool),
 		EffectiveShard:    strings.TrimSpace(facts.EffectiveShard),
+		BackendNode:       strings.TrimSpace(facts.BackendNode),
 	}
 }
 
@@ -1149,6 +1693,10 @@ func backendPinRecordWithTarget(
 
 	if strings.TrimSpace(record.ShardTag) == "" {
 		record.ShardTag = target.EffectiveShard
+	}
+
+	if strings.TrimSpace(record.BackendNode) == "" {
+		record.BackendNode = target.BackendNode
 	}
 
 	if strings.TrimSpace(record.Strategy) == "" {
@@ -1180,11 +1728,22 @@ func userBackendPinFromRecord(record state.UserBackendPinRecord) UserBackendPin 
 		Protocol:           strings.TrimSpace(record.Protocol),
 		BackendPool:        strings.TrimSpace(record.BackendPool),
 		EffectiveShard:     strings.TrimSpace(record.ShardTag),
+		BackendNode:        strings.TrimSpace(record.BackendNode),
 		Strategy:           MoveStrategy(strings.TrimSpace(record.Strategy)),
 		Generation:         strings.TrimSpace(record.Generation),
 		ActiveSessionCount: record.ActiveSessionCount,
-		UpdatedAt:          record.ServerTime,
+		UpdatedAt:          backendPinUpdatedAt(record),
 	}
+}
+
+// userBackendPinsFromRecord maps a deterministic state pin set into runtime pins.
+func userBackendPinsFromRecord(record state.UserBackendPinsRecord) []UserBackendPin {
+	pins := make([]UserBackendPin, 0, len(record.Pins))
+	for _, pin := range record.Pins {
+		pins = append(pins, userBackendPinFromRecord(pin))
+	}
+
+	return pins
 }
 
 // backendPinTargetFromRecord returns bounded target metadata from a stored pin.
@@ -1194,7 +1753,45 @@ func backendPinTargetFromRecord(record state.UserBackendPinRecord) UserBackendPi
 		Protocol:          strings.TrimSpace(record.Protocol),
 		BackendPool:       strings.TrimSpace(record.BackendPool),
 		EffectiveShard:    strings.TrimSpace(record.ShardTag),
+		BackendNode:       strings.TrimSpace(record.BackendNode),
 	}
+}
+
+// backendPinTargetsFromRecord returns bounded target metadata from stored pins.
+func backendPinTargetsFromRecord(record state.UserBackendPinsRecord) []UserBackendPinTarget {
+	targets := make([]UserBackendPinTarget, 0, len(record.Pins))
+	for _, pin := range record.Pins {
+		targets = append(targets, backendPinTargetFromRecord(pin))
+	}
+
+	return targets
+}
+
+// aggregateBackendPinRecord returns bounded metadata for aggregate observations.
+func aggregateBackendPinRecord(record state.UserBackendPinsRecord) state.UserBackendPinRecord {
+	aggregate := state.UserBackendPinRecord{
+		Present:            record.Present,
+		Status:             record.Status,
+		Key:                record.Key,
+		Generation:         record.Generation,
+		ActiveSessionCount: record.ActiveSessionCount,
+		ServerTime:         record.ServerTime,
+	}
+
+	if len(record.Pins) == 1 {
+		aggregate = record.Pins[0]
+	}
+
+	return aggregate
+}
+
+// backendPinUpdatedAt chooses the pin timestamp returned by Redis.
+func backendPinUpdatedAt(record state.UserBackendPinRecord) time.Time {
+	if !record.UpdatedAt.IsZero() {
+		return record.UpdatedAt
+	}
+
+	return record.ServerTime
 }
 
 // checkUserHold reads one placement hold through the shared state boundary.
@@ -1347,6 +1944,24 @@ func userBackendPinAuditMetadata(
 	})
 }
 
+// userBackendPinsAuditMetadata creates secret-safe audit metadata for pin sets.
+func userBackendPinsAuditMetadata(
+	operation AuditOperation,
+	reason string,
+	actor Actor,
+	record state.UserBackendPinsRecord,
+) (AuditMetadata, error) {
+	return NewAuditMetadata(AuditInput{
+		Operation:  operation,
+		Reason:     reason,
+		Actor:      actor,
+		Generation: record.Generation,
+		ServerTime: record.ServerTime,
+		UserHash:   record.Key.AccountKey,
+		Fields:     backendPinsAuditFields(record),
+	})
+}
+
 // userHoldAuditMetadata creates secret-safe audit metadata for placement holds.
 func userHoldAuditMetadata(operation AuditOperation, reason string, actor Actor, hold UserHold) (AuditMetadata, error) {
 	return NewAuditMetadata(AuditInput{
@@ -1394,9 +2009,11 @@ func backendPinAuditFields(record state.UserBackendPinRecord) map[string]string 
 	fields := map[string]string{
 		auditFieldActiveSessionCount: strconv.Itoa(record.ActiveSessionCount),
 		auditFieldBackendIdentifier:  strings.TrimSpace(record.BackendIdentifier),
+		auditFieldBackendNode:        strings.TrimSpace(record.BackendNode),
 		auditFieldBackendPool:        strings.TrimSpace(record.BackendPool),
 		auditFieldEffectiveShard:     strings.TrimSpace(record.ShardTag),
 		auditFieldProtocol:           strings.TrimSpace(record.Protocol),
+		auditFieldScopeCount:         "1",
 		auditFieldStatus:             strings.TrimSpace(record.Status),
 		auditFieldStrategy:           strings.TrimSpace(record.Strategy),
 	}
@@ -1408,6 +2025,70 @@ func backendPinAuditFields(record state.UserBackendPinRecord) map[string]string 
 	}
 
 	return fields
+}
+
+// backendPinsAuditFields returns bounded aggregate backend-pin context.
+func backendPinsAuditFields(record state.UserBackendPinsRecord) map[string]string {
+	fields := map[string]string{
+		auditFieldActiveSessionCount: strconv.Itoa(record.ActiveSessionCount),
+		auditFieldScopeCount:         strconv.Itoa(len(record.Pins)),
+		auditFieldStatus:             strings.TrimSpace(record.Status),
+	}
+
+	switch len(record.Pins) {
+	case 0:
+	case 1:
+		maps.Copy(fields, backendPinAuditFields(record.Pins[0]))
+	default:
+		if backendNode := commonBackendPinField(record.Pins, func(pin state.UserBackendPinRecord) string {
+			return pin.BackendNode
+		}); backendNode != "" {
+			fields[auditFieldBackendNode] = backendNode
+		}
+
+		if strategy := commonBackendPinField(record.Pins, func(pin state.UserBackendPinRecord) string {
+			return pin.Strategy
+		}); strategy != "" {
+			fields[auditFieldStrategy] = strategy
+		}
+
+		if shardTag := commonBackendPinField(record.Pins, func(pin state.UserBackendPinRecord) string {
+			return pin.ShardTag
+		}); shardTag != "" {
+			fields[auditFieldEffectiveShard] = shardTag
+		}
+	}
+
+	for key, value := range fields {
+		if value == "" {
+			delete(fields, key)
+		}
+	}
+
+	return fields
+}
+
+// commonBackendPinField returns a bounded field shared by every pin.
+func commonBackendPinField(pins []state.UserBackendPinRecord, field func(state.UserBackendPinRecord) string) string {
+	common := ""
+
+	for _, pin := range pins {
+		value := strings.TrimSpace(field(pin))
+		if value == "" {
+			return ""
+		}
+
+		if common == "" {
+			common = value
+			continue
+		}
+
+		if common != value {
+			return ""
+		}
+	}
+
+	return common
 }
 
 // boolAuditValue serializes booleans for audit metadata.
@@ -1565,6 +2246,7 @@ func (s *UserBackendPinService) recordBackendPinOperation(
 	eventFields := map[string]string{
 		runtimeObservationFieldActiveSessions:    strconv.Itoa(record.ActiveSessionCount),
 		runtimeObservationFieldBackendID:         strings.TrimSpace(record.BackendIdentifier),
+		runtimeObservationFieldBackendNode:       strings.TrimSpace(record.BackendNode),
 		runtimeObservationFieldBackendPool:       strings.TrimSpace(record.BackendPool),
 		runtimeObservationFieldProtocol:          strings.TrimSpace(record.Protocol),
 		runtimeObservationFieldRuntimeGeneration: strings.TrimSpace(record.Generation),

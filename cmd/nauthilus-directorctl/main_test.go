@@ -14,7 +14,7 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-//nolint:dupl,goconst,wsl_v5 // CLI test tables and fake generated-client responses repeat operator syntax intentionally.
+//nolint:dupl,funlen,goconst,wsl_v5 // CLI test tables and fake generated-client responses repeat operator syntax intentionally.
 package main
 
 import (
@@ -110,10 +110,20 @@ func TestHelpOutputListsCommands(t *testing.T) {
 		t.Fatalf("backend-pin set help exit code %d, want 0; stderr=%q", code, backendPinSetErr.String())
 	}
 	backendPinSetHelp := backendPinSetOut.String()
-	for _, want := range []string{"--backend", "--strategy", "--reason"} {
+	for _, want := range []string{"--backend", "--backend-node", "--protocol", "--backend-pool", "--strategy", "--reason"} {
 		if !strings.Contains(backendPinSetHelp, want) {
 			t.Fatalf("backend-pin set help missing %q:\n%s", want, backendPinSetHelp)
 		}
+	}
+
+	var moveOut, moveErr bytes.Buffer
+	code = run([]string{"users", "move", "--help"}, &moveOut, &moveErr)
+	if code != 0 {
+		t.Fatalf("users move help exit code %d, want 0; stderr=%q", code, moveErr.String())
+	}
+	moveHelp := moveOut.String()
+	if strings.Contains(moveHelp, "--to-backend") || strings.Contains(moveHelp, "backend target") {
+		t.Fatalf("users move help advertised backend-target behavior:\n%s", moveHelp)
 	}
 
 	var holdOut, holdErr bytes.Buffer
@@ -207,7 +217,9 @@ func TestNestedCommandsUseGeneratedClient(t *testing.T) {
 		{name: "users affinity clear", args: []string{"users", "affinity", "clear", "user-a", "--reason", "done"}, wantCalls: []string{"ClearUserAffinity"}},
 		{name: "users backend-pin show", args: []string{"users", "backend-pin", "show", "user-a"}, wantCalls: []string{"GetUserBackendPin"}},
 		{name: "users backend-pin set", args: []string{"users", "backend-pin", "set", "user-a", "--backend", "backend-a", "--strategy", "kick_existing", "--reason", "commission"}, wantCalls: []string{"SetUserBackendPin"}},
+		{name: "users backend-pin set node", args: []string{"users", "backend-pin", "set", "user-a", "--backend-node", "node-a", "--strategy", "new_sessions_only", "--reason", "commission"}, wantCalls: []string{"SetUserBackendPin"}},
 		{name: "users backend-pin clear", args: []string{"users", "backend-pin", "clear", "user-a", "--reason", "done"}, wantCalls: []string{"ClearUserBackendPin"}},
+		{name: "users backend-pin clear scope", args: []string{"users", "backend-pin", "clear", "user-a", "--protocol", "imap", "--backend-pool", "imap-default", "--reason", "done"}, wantCalls: []string{"ClearUserBackendPin"}},
 		{name: "users hold show", args: []string{"users", "hold", "show", "user-a"}, wantCalls: []string{"GetUserHold"}},
 		{name: "users hold set", args: []string{"users", "hold", "set", "user-a", "--duration", "10m", "--reason", "migrate"}, wantCalls: []string{"SetUserHold"}},
 		{name: "users hold clear", args: []string{"users", "hold", "clear", "user-a", "--reason", "done"}, wantCalls: []string{"ClearUserHold"}},
@@ -299,6 +311,50 @@ func TestBackendPinRequestsUseGeneratedDTOs(t *testing.T) {
 	if setFake.setBackendPinRequest.Reason != "commission" {
 		t.Fatalf("reason = %q, want commission", setFake.setBackendPinRequest.Reason)
 	}
+	if setFake.setBackendPinRequest.BackendNode != "" || setFake.setBackendPinRequest.Protocol != "" || setFake.setBackendPinRequest.BackendPool != "" {
+		t.Fatalf("concrete set request carried scope/node fields: %#v", setFake.setBackendPinRequest)
+	}
+
+	nodeFake := newFakeControlClient()
+	stdout, stderr, code = runWithFakeClient([]string{
+		"users", "backend-pin", "set", "user-a",
+		"--backend-node", "node-a",
+		"--strategy", "new_sessions_only",
+		"--reason", "mailbox canary",
+	}, nodeFake)
+	if code != 0 {
+		t.Fatalf("backend-node set returned exit code %d, want 0; stdout=%q stderr=%q", code, stdout, stderr)
+	}
+	if !reflect.DeepEqual(nodeFake.calls, []string{"SetUserBackendPin"}) {
+		t.Fatalf("calls = %#v, want SetUserBackendPin", nodeFake.calls)
+	}
+	if nodeFake.setBackendPinRequest.Backend != "" ||
+		nodeFake.setBackendPinRequest.BackendNode != "node-a" ||
+		nodeFake.setBackendPinRequest.Protocol != "" ||
+		nodeFake.setBackendPinRequest.BackendPool != "" ||
+		nodeFake.setBackendPinRequest.Strategy != generated.NewSessionsOnly ||
+		nodeFake.setBackendPinRequest.Reason != "mailbox canary" {
+		t.Fatalf("backend-node request = %#v, want all-protocol generated DTO", nodeFake.setBackendPinRequest)
+	}
+
+	scopedNodeFake := newFakeControlClient()
+	stdout, stderr, code = runWithFakeClient([]string{
+		"users", "backend-pin", "set", "user-a",
+		"--backend-node", "node-a",
+		"--protocol", "IMAP",
+		"--backend-pool", "imap-default",
+		"--strategy", "new_sessions_only",
+		"--reason", "commission",
+	}, scopedNodeFake)
+	if code != 0 {
+		t.Fatalf("scoped backend-node set returned exit code %d, want 0; stdout=%q stderr=%q", code, stdout, stderr)
+	}
+	if scopedNodeFake.setBackendPinRequest.Backend != "" ||
+		scopedNodeFake.setBackendPinRequest.BackendNode != "node-a" ||
+		scopedNodeFake.setBackendPinRequest.Protocol != "imap" ||
+		scopedNodeFake.setBackendPinRequest.BackendPool != "imap-default" {
+		t.Fatalf("scoped backend-node request = %#v, want scoped generated DTO", scopedNodeFake.setBackendPinRequest)
+	}
 
 	clearFake := newFakeControlClient()
 	stdout, stderr, code = runWithFakeClient([]string{"users", "backend-pin", "clear", "user-a", "--reason", "done"}, clearFake)
@@ -313,6 +369,28 @@ func TestBackendPinRequestsUseGeneratedDTOs(t *testing.T) {
 	}
 	if clearFake.clearBackendPinRequest.Reason != "done" {
 		t.Fatalf("clear reason = %q, want done", clearFake.clearBackendPinRequest.Reason)
+	}
+	if clearFake.clearBackendPinRequest.Protocol != "" || clearFake.clearBackendPinRequest.BackendPool != "" {
+		t.Fatalf("all-clear request = %#v, want unscoped generated DTO", clearFake.clearBackendPinRequest)
+	}
+
+	scopedClearFake := newFakeControlClient()
+	stdout, stderr, code = runWithFakeClient([]string{
+		"users", "backend-pin", "clear", "user-a",
+		"--protocol", "IMAP",
+		"--backend-pool", "imap-default",
+		"--reason", "done",
+	}, scopedClearFake)
+	if code != 0 {
+		t.Fatalf("backend-pin scoped clear returned exit code %d, want 0; stdout=%q stderr=%q", code, stdout, stderr)
+	}
+	if !reflect.DeepEqual(scopedClearFake.calls, []string{"ClearUserBackendPin"}) {
+		t.Fatalf("calls = %#v, want ClearUserBackendPin", scopedClearFake.calls)
+	}
+	if scopedClearFake.clearBackendPinRequest.Protocol != "imap" ||
+		scopedClearFake.clearBackendPinRequest.BackendPool != "imap-default" ||
+		scopedClearFake.clearBackendPinRequest.Reason != "done" {
+		t.Fatalf("scoped clear request = %#v, want scoped generated DTO", scopedClearFake.clearBackendPinRequest)
 	}
 }
 
@@ -384,13 +462,20 @@ func TestBackendPinUsageValidationKeepsRequestsLocal(t *testing.T) {
 		{name: "show missing user", args: []string{"users", "backend-pin", "show"}, wantStderr: "exactly one user key"},
 		{name: "show empty user", args: []string{"users", "backend-pin", "show", ""}, wantStderr: "non-empty user key"},
 		{name: "set missing user", args: []string{"users", "backend-pin", "set", "--backend", "backend-a", "--strategy", "kick_existing", "--reason", "commission"}, wantStderr: "exactly one user key"},
-		{name: "set missing backend", args: []string{"users", "backend-pin", "set", "user-a", "--strategy", "kick_existing", "--reason", "commission"}, wantStderr: "--backend"},
+		{name: "set empty user", args: []string{"users", "backend-pin", "set", "", "--backend", "backend-a", "--strategy", "kick_existing", "--reason", "commission"}, wantStderr: "non-empty user key"},
+		{name: "set missing target", args: []string{"users", "backend-pin", "set", "user-a", "--strategy", "kick_existing", "--reason", "commission"}, wantStderr: "--backend or --backend-node"},
 		{name: "set empty backend", args: []string{"users", "backend-pin", "set", "user-a", "--backend", "", "--strategy", "kick_existing", "--reason", "commission"}, wantStderr: "--backend"},
+		{name: "set both backend targets", args: []string{"users", "backend-pin", "set", "user-a", "--backend", "backend-a", "--backend-node", "node-a", "--strategy", "kick_existing", "--reason", "commission"}, wantStderr: "only one of --backend and --backend-node"},
+		{name: "set concrete backend with scope", args: []string{"users", "backend-pin", "set", "user-a", "--backend", "backend-a", "--protocol", "imap", "--backend-pool", "imap-default", "--strategy", "kick_existing", "--reason", "commission"}, wantStderr: "scope filters require --backend-node"},
 		{name: "set missing reason", args: []string{"users", "backend-pin", "set", "user-a", "--backend", "backend-a", "--strategy", "kick_existing"}, wantStderr: "--reason"},
 		{name: "set unsupported strategy", args: []string{"users", "backend-pin", "set", "user-a", "--backend", "backend-a", "--strategy", "later", "--reason", "commission"}, wantStderr: "new_sessions_only"},
+		{name: "set protocol without pool", args: []string{"users", "backend-pin", "set", "user-a", "--backend-node", "node-a", "--protocol", "imap", "--strategy", "kick_existing", "--reason", "commission"}, wantStderr: "--backend-pool"},
+		{name: "set pool without protocol", args: []string{"users", "backend-pin", "set", "user-a", "--backend-node", "node-a", "--backend-pool", "imap-default", "--strategy", "kick_existing", "--reason", "commission"}, wantStderr: "--protocol"},
 		{name: "clear missing user", args: []string{"users", "backend-pin", "clear", "--reason", "done"}, wantStderr: "exactly one user key"},
 		{name: "clear empty user", args: []string{"users", "backend-pin", "clear", "", "--reason", "done"}, wantStderr: "non-empty user key"},
 		{name: "clear missing reason", args: []string{"users", "backend-pin", "clear", "user-a"}, wantStderr: "--reason"},
+		{name: "clear protocol without pool", args: []string{"users", "backend-pin", "clear", "user-a", "--protocol", "imap", "--reason", "done"}, wantStderr: "--backend-pool"},
+		{name: "clear pool without protocol", args: []string{"users", "backend-pin", "clear", "user-a", "--backend-pool", "imap-default", "--reason", "done"}, wantStderr: "--protocol"},
 	}
 
 	for _, test := range tests {
@@ -1111,6 +1196,77 @@ func TestRouteLookupTextOutputIncludesUserHoldDiagnostics(t *testing.T) {
 	}
 }
 
+// TestRouteLookupTextOutputIncludesBackendPinDiagnostics keeps scoped pin context visible.
+func TestRouteLookupTextOutputIncludesBackendPinDiagnostics(t *testing.T) {
+	fake := newFakeControlClient()
+	pinBackend := "backend-a"
+	pinProtocol := "imap"
+	pinPool := "imap-default"
+	pinNode := "mailstore-a-node-1"
+	pinShard := "shard-a"
+	pinScopeCount := 3
+	pinCurrentScopeUnpinned := false
+	pinOtherScopes := []generated.RouteLookupBackendPinScope{
+		{Protocol: "sieve", BackendPool: "sieve-default"},
+		{Protocol: "lmtp", BackendPool: "lmtp-default"},
+	}
+	fake.routeResponse = &generated.RouteLookupResponse{
+		AffectedBy: generated.RouteLookupEffects{},
+		BackendPin: generated.RouteLookupBackendPin{
+			Applied:              true,
+			Backend:              &pinBackend,
+			BackendNode:          &pinNode,
+			BackendPool:          &pinPool,
+			CurrentScopeUnpinned: &pinCurrentScopeUnpinned,
+			OtherScopes:          &pinOtherScopes,
+			Present:              true,
+			Protocol:             &pinProtocol,
+			Reason:               "backend_pin_applied",
+			ScopeCount:           &pinScopeCount,
+			ShardTag:             &pinShard,
+		},
+		Healthy:         true,
+		Reason:          "operator_backend_pin",
+		SelectedBackend: "backend-a",
+		Source:          "operator_backend_pin",
+		ShardTag:        "shard-a",
+		Routing: generated.RouteLookupRouting{
+			Source: "auth_attribute",
+		},
+		UserHold: generated.RouteLookupUserHold{
+			Reason: "user_hold_absent",
+		},
+	}
+
+	stdout, stderr, code := runWithFakeClient([]string{
+		"route", "lookup",
+		"--protocol", "imap",
+		"--user", "user-a",
+	}, fake)
+	if code != 0 {
+		t.Fatalf("route lookup returned exit code %d, want 0; stderr=%q", code, stderr)
+	}
+
+	for _, want := range []string{
+		"backend_pin_present=true",
+		"backend_pin_applied=true",
+		"backend_pin_backend=backend-a",
+		"backend_pin_protocol=imap",
+		"backend_pin_pool=imap-default",
+		"backend_pin_node=mailstore-a-node-1",
+		"backend_pin_shard=shard-a",
+		"backend_pin_scope_count=3",
+		"backend_pin_current_scope_unpinned=false",
+		"backend_pin_other_scope_count=2",
+		"backend_pin_other_scopes=lmtp/lmtp-default,sieve/sieve-default",
+		"backend_pin_reason=backend_pin_applied",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("route lookup output missing %q:\n%s", want, stdout)
+		}
+	}
+}
+
 // TestHTTPStatusAndUsageExitCodes verifies stable local and remote failure mapping.
 func TestHTTPStatusAndUsageExitCodes(t *testing.T) {
 	fake := newFakeControlClient()
@@ -1225,7 +1381,7 @@ func TestTextAndJSONOutputDeterministic(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("absent backend-pin command returned exit code %d, want 0; stderr=%q", code, stderr)
 	}
-	wantAbsentPinText := "user_key=user-a present=false backend=\"\" protocol=\"\" backend_pool=\"\" shard_tag=\"\" strategy=\"\" generation=\"\" active_session_count=\"\"\n"
+	wantAbsentPinText := "user_key=user-a present=false backend=\"\" backend_node=\"\" protocol=\"\" backend_pool=\"\" shard_tag=\"\" strategy=\"\" generation=\"\" active_session_count=\"\"\n"
 	if stdout != wantAbsentPinText {
 		t.Fatalf("absent backend-pin text output = %q, want %q", stdout, wantAbsentPinText)
 	}
@@ -1237,9 +1393,23 @@ func TestTextAndJSONOutputDeterministic(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("present backend-pin command returned exit code %d, want 0; stderr=%q", code, stderr)
 	}
-	wantPresentPinText := "user_key=user-a present=true backend=backend-a protocol=imap backend_pool=imap-default shard_tag=shard-a strategy=kick_existing generation=pin-gen-a active_session_count=2\n"
+	wantPresentPinText := "user_key=user-a present=true backend=backend-a backend_node=node-a protocol=imap backend_pool=imap-default shard_tag=shard-a strategy=kick_existing generation=pin-gen-a active_session_count=2\n"
 	if stdout != wantPresentPinText {
 		t.Fatalf("present backend-pin text output = %q, want %q", stdout, wantPresentPinText)
+	}
+
+	multiPinFake := newFakeControlClient()
+	multiPin := backendPinsUnsorted()
+	multiPinFake.backendPinResponse = &multiPin
+	stdout, stderr, code = runWithFakeClient([]string{"users", "backend-pin", "show", "user-a"}, multiPinFake)
+	if code != 0 {
+		t.Fatalf("multi backend-pin command returned exit code %d, want 0; stderr=%q", code, stderr)
+	}
+	wantMultiPinText := "user_key=user-a present=true backend=backend-a backend_node=node-a protocol=imap backend_pool=imap-default shard_tag=shard-a strategy=new_sessions_only generation=pin-gen-a active_session_count=2\n" +
+		"user_key=user-a present=true backend=backend-lmtp backend_node=node-a protocol=lmtp backend_pool=lmtp-default shard_tag=shard-a strategy=new_sessions_only generation=pin-gen-lmtp active_session_count=0\n" +
+		"user_key=user-a present=true backend=backend-sieve backend_node=node-a protocol=sieve backend_pool=sieve-default shard_tag=shard-a strategy=new_sessions_only generation=pin-gen-sieve active_session_count=1\n"
+	if stdout != wantMultiPinText {
+		t.Fatalf("multi backend-pin text output = %q, want %q", stdout, wantMultiPinText)
 	}
 
 	jsonPinFake := newFakeControlClient()
@@ -1252,8 +1422,21 @@ func TestTextAndJSONOutputDeterministic(t *testing.T) {
 	wantPinJSON := "{\n" +
 		"  \"active_session_count\": 2,\n" +
 		"  \"backend\": \"backend-a\",\n" +
+		"  \"backend_node\": \"node-a\",\n" +
 		"  \"backend_pool\": \"imap-default\",\n" +
 		"  \"generation\": \"pin-gen-a\",\n" +
+		"  \"pins\": [\n" +
+		"    {\n" +
+		"      \"active_session_count\": 2,\n" +
+		"      \"backend\": \"backend-a\",\n" +
+		"      \"backend_node\": \"node-a\",\n" +
+		"      \"backend_pool\": \"imap-default\",\n" +
+		"      \"generation\": \"pin-gen-a\",\n" +
+		"      \"protocol\": \"imap\",\n" +
+		"      \"shard_tag\": \"shard-a\",\n" +
+		"      \"strategy\": \"kick_existing\"\n" +
+		"    }\n" +
+		"  ],\n" +
 		"  \"present\": true,\n" +
 		"  \"protocol\": \"imap\",\n" +
 		"  \"shard_tag\": \"shard-a\",\n" +
@@ -1601,6 +1784,7 @@ func affinityA() generated.UserAffinity {
 func backendPinA() generated.UserBackendPin {
 	activeSessionCount := 2
 	backend := "backend-a"
+	backendNode := "node-a"
 	backendPool := "imap-default"
 	generation := "pin-gen-a"
 	protocol := "imap"
@@ -1610,13 +1794,74 @@ func backendPinA() generated.UserBackendPin {
 	return generated.UserBackendPin{
 		ActiveSessionCount: &activeSessionCount,
 		Backend:            &backend,
+		BackendNode:        &backendNode,
 		BackendPool:        &backendPool,
 		Generation:         &generation,
-		Present:            true,
-		Protocol:           &protocol,
-		ShardTag:           &shardTag,
-		Strategy:           &strategy,
-		UserKey:            "user-a",
+		Pins: []generated.UserBackendPinEntry{
+			{
+				ActiveSessionCount: &activeSessionCount,
+				Backend:            backend,
+				BackendNode:        backendNode,
+				BackendPool:        backendPool,
+				Generation:         &generation,
+				Protocol:           protocol,
+				ShardTag:           shardTag,
+				Strategy:           strategy,
+			},
+		},
+		Present:  true,
+		Protocol: &protocol,
+		ShardTag: &shardTag,
+		Strategy: &strategy,
+		UserKey:  "user-a",
+	}
+}
+
+// backendPinsUnsorted returns aggregate backend pins in non-output order.
+func backendPinsUnsorted() generated.UserBackendPin {
+	imapActive := 2
+	sieveActive := 1
+	lmtpActive := 0
+	imapGeneration := "pin-gen-a"
+	sieveGeneration := "pin-gen-sieve"
+	lmtpGeneration := "pin-gen-lmtp"
+	strategy := generated.NewSessionsOnly
+
+	return generated.UserBackendPin{
+		Pins: []generated.UserBackendPinEntry{
+			{
+				ActiveSessionCount: &sieveActive,
+				Backend:            "backend-sieve",
+				BackendNode:        "node-a",
+				BackendPool:        "sieve-default",
+				Generation:         &sieveGeneration,
+				Protocol:           "sieve",
+				ShardTag:           "shard-a",
+				Strategy:           strategy,
+			},
+			{
+				ActiveSessionCount: &imapActive,
+				Backend:            "backend-a",
+				BackendNode:        "node-a",
+				BackendPool:        "imap-default",
+				Generation:         &imapGeneration,
+				Protocol:           "imap",
+				ShardTag:           "shard-a",
+				Strategy:           strategy,
+			},
+			{
+				ActiveSessionCount: &lmtpActive,
+				Backend:            "backend-lmtp",
+				BackendNode:        "node-a",
+				BackendPool:        "lmtp-default",
+				Generation:         &lmtpGeneration,
+				Protocol:           "lmtp",
+				ShardTag:           "shard-a",
+				Strategy:           strategy,
+			},
+		},
+		Present: true,
+		UserKey: "user-a",
 	}
 }
 
@@ -2041,7 +2286,7 @@ func (fake *fakeControlClient) ClearUserBackendPinWithResponse(_ context.Context
 // GetUserBackendPinWithResponse records and returns backend-pin state.
 func (fake *fakeControlClient) GetUserBackendPinWithResponse(_ context.Context, userKey generated.UserKey, _ ...generated.RequestEditorFn) (*generated.GetUserBackendPinResponse, error) {
 	fake.record("GetUserBackendPin")
-	pin := generated.UserBackendPin{Present: false, UserKey: string(userKey)}
+	pin := generated.UserBackendPin{Present: false, Pins: []generated.UserBackendPinEntry{}, UserKey: string(userKey)}
 	if fake.backendPinResponse != nil {
 		pin = *fake.backendPinResponse
 	}

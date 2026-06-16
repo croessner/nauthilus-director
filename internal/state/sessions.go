@@ -78,6 +78,8 @@ const (
 	scriptFieldUserSessionsKey    = "user_sessions_key"
 )
 
+const scriptStatusCleared = "cleared"
+
 // RedisSessionStore coordinates active affinity and session leases through Redis scripts.
 type RedisSessionStore struct {
 	client           RedisClient

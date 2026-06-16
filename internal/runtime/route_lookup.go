@@ -37,6 +37,7 @@ const (
 	routeLookupBackendPinApplied      = "backend_pin_applied"
 	routeLookupBackendPinExcluded     = "backend_pin_excluded"
 	routeLookupBackendPinMismatch     = "backend_pin_mismatch"
+	routeLookupBackendPinOtherScopes  = "backend_pin_other_scopes"
 	routeLookupBackendPinReadFailed   = "backend_pin_read_failed"
 	routeLookupBindingSourceNone      = "none"
 	routeLookupReasonBindingMissing   = "backend_node_missing_protocol"
@@ -119,14 +120,24 @@ type RouteLookupAffinityState struct {
 
 // RouteLookupBackendPinState describes read-only operator backend-pin context.
 type RouteLookupBackendPinState struct {
-	Present        bool
-	BackendID      string
-	Protocol       string
-	BackendPool    string
-	EffectiveShard string
-	Strategy       string
-	Applied        bool
-	ReasonClass    string
+	Present              bool
+	BackendID            string
+	Protocol             string
+	BackendPool          string
+	BackendNode          string
+	EffectiveShard       string
+	Strategy             string
+	Applied              bool
+	ReasonClass          string
+	ScopeCount           int
+	OtherScopes          []RouteLookupBackendPinScope
+	CurrentScopeUnpinned bool
+}
+
+// RouteLookupBackendPinScope describes one bounded non-matching pin scope.
+type RouteLookupBackendPinScope struct {
+	Protocol    string
+	BackendPool string
 }
 
 // RouteLookupUserHoldState describes read-only placement-hold context.
@@ -180,7 +191,7 @@ type RouteLookupIdentityLookuper interface {
 
 // RouteLookupBackendPinReader reads backend-pin state without mutating leases.
 type RouteLookupBackendPinReader interface {
-	GetUserBackendPin(ctx context.Context, request state.UserBackendPinGetRequest) (state.UserBackendPinRecord, error)
+	ListUserBackendPins(ctx context.Context, request state.UserBackendPinsListRequest) (state.UserBackendPinsRecord, error)
 }
 
 // RouteLookupBackendNodeSelector resolves bound backend nodes without mutating placement state.
@@ -930,7 +941,7 @@ func (s *RouteLookupService) lookupBackendPin(ctx context.Context, request Route
 	}
 
 	key := routeLookupAffinityKey(result)
-	record, err := s.backendPinRead.GetUserBackendPin(ctx, state.UserBackendPinGetRequest{
+	record, err := s.backendPinRead.ListUserBackendPins(ctx, state.UserBackendPinsListRequest{
 		Key: key,
 	})
 	if err != nil {
@@ -939,7 +950,7 @@ func (s *RouteLookupService) lookupBackendPin(ctx context.Context, request Route
 		return pin, err
 	}
 
-	return routeLookupBackendPinFromRecord(record), nil
+	return routeLookupBackendPinFromRecord(record, request.Protocol, request.BackendPool), nil
 }
 
 // lookupUserHold reads placement-hold context without mutating or waiting.
@@ -1002,22 +1013,80 @@ func routeLookupSelectionRequest(
 	}
 }
 
-// routeLookupBackendPinFromRecord converts stored pin metadata into diagnostics.
-func routeLookupBackendPinFromRecord(record state.UserBackendPinRecord) RouteLookupBackendPinState {
+// routeLookupBackendPinFromRecord converts scoped pin metadata into diagnostics.
+func routeLookupBackendPinFromRecord(record state.UserBackendPinsRecord, protocol string, backendPool string) RouteLookupBackendPinState {
 	pin := RouteLookupBackendPinState{
-		Present:        record.Present,
-		BackendID:      strings.TrimSpace(record.BackendIdentifier),
-		Protocol:       strings.ToLower(strings.TrimSpace(record.Protocol)),
-		BackendPool:    strings.TrimSpace(record.BackendPool),
-		EffectiveShard: strings.TrimSpace(record.ShardTag),
-		Strategy:       strings.TrimSpace(record.Strategy),
-		ReasonClass:    routeLookupBackendPinAbsent,
+		ReasonClass: routeLookupBackendPinAbsent,
 	}
-	if pin.Present {
-		pin.ReasonClass = routeLookupBackendPinMismatch
+
+	records := routeLookupPresentBackendPins(record.Pins)
+	pin.ScopeCount = len(records)
+
+	for _, candidate := range records {
+		scope := RouteLookupBackendPinScope{
+			Protocol:    strings.ToLower(strings.TrimSpace(candidate.Protocol)),
+			BackendPool: strings.TrimSpace(candidate.BackendPool),
+		}
+		if routeLookupScopeMatches(scope.Protocol, scope.BackendPool, protocol, backendPool) {
+			if !pin.Present {
+				pin.Present = true
+				pin.BackendID = strings.TrimSpace(candidate.BackendIdentifier)
+				pin.Protocol = scope.Protocol
+				pin.BackendPool = scope.BackendPool
+				pin.BackendNode = strings.TrimSpace(candidate.BackendNode)
+				pin.EffectiveShard = strings.TrimSpace(candidate.ShardTag)
+				pin.Strategy = strings.TrimSpace(candidate.Strategy)
+				pin.ReasonClass = routeLookupBackendPinMismatch
+			}
+
+			continue
+		}
+
+		pin.OtherScopes = append(pin.OtherScopes, scope)
+	}
+
+	if !pin.Present && pin.ScopeCount > 0 {
+		pin.CurrentScopeUnpinned = true
+		pin.ReasonClass = routeLookupBackendPinOtherScopes
 	}
 
 	return pin
+}
+
+// routeLookupPresentBackendPins filters and orders backend pins for deterministic diagnostics.
+func routeLookupPresentBackendPins(records []state.UserBackendPinRecord) []state.UserBackendPinRecord {
+	pins := make([]state.UserBackendPinRecord, 0, len(records))
+	for _, record := range records {
+		if !record.Present || strings.TrimSpace(record.Protocol) == "" || strings.TrimSpace(record.BackendPool) == "" {
+			continue
+		}
+
+		pins = append(pins, record)
+	}
+
+	sort.SliceStable(pins, func(left int, right int) bool {
+		leftProtocol := strings.ToLower(strings.TrimSpace(pins[left].Protocol))
+		rightProtocol := strings.ToLower(strings.TrimSpace(pins[right].Protocol))
+		if leftProtocol == rightProtocol {
+			leftPool := strings.TrimSpace(pins[left].BackendPool)
+			rightPool := strings.TrimSpace(pins[right].BackendPool)
+			if leftPool == rightPool {
+				return strings.TrimSpace(pins[left].BackendIdentifier) < strings.TrimSpace(pins[right].BackendIdentifier)
+			}
+
+			return leftPool < rightPool
+		}
+
+		return leftProtocol < rightProtocol
+	})
+
+	return pins
+}
+
+// routeLookupScopeMatches checks the protocol/backend-pool selector scope.
+func routeLookupScopeMatches(candidateProtocol string, candidatePool string, protocol string, backendPool string) bool {
+	return strings.EqualFold(strings.TrimSpace(candidateProtocol), strings.TrimSpace(protocol)) &&
+		strings.TrimSpace(candidatePool) == strings.TrimSpace(backendPool)
 }
 
 // routeLookupUserHoldFromRecord converts stored hold metadata into diagnostics.
@@ -1151,7 +1220,11 @@ func routeLookupBackendPinOutcome(
 	selectionErr error,
 ) RouteLookupBackendPinState {
 	if !pin.Present {
-		pin.ReasonClass = routeLookupBackendPinAbsent
+		if pin.CurrentScopeUnpinned {
+			pin.ReasonClass = routeLookupBackendPinOtherScopes
+		} else {
+			pin.ReasonClass = routeLookupBackendPinAbsent
+		}
 
 		return pin
 	}
@@ -1514,9 +1587,11 @@ func (s *RouteLookupService) recordRouteLookup(
 	fields := map[string]string{
 		runtimeObservationFieldAccountKeyPresent: boolAuditValue(strings.TrimSpace(request.AccountKey) != ""),
 		"backend_pin_applied":                    boolAuditValue(response.BackendPin.Applied),
+		"backend_pin_current_scope_unpinned":     boolAuditValue(response.BackendPin.CurrentScopeUnpinned),
 		"backend_pin_present":                    boolAuditValue(response.BackendPin.Present),
+		"backend_pin_scope_count":                strconv.Itoa(response.BackendPin.ScopeCount),
 		runtimeObservationFieldBackendID:         response.BackendPin.BackendID,
-		runtimeObservationFieldBackendNode:       response.Affinity.BackendNode,
+		runtimeObservationFieldBackendNode:       firstNonEmpty(response.BackendPin.BackendNode, response.Affinity.BackendNode),
 		runtimeObservationFieldBackendPool:       request.BackendPool,
 		runtimeObservationFieldListener:          request.ListenerName,
 		runtimeObservationFieldProtocol:          request.Protocol,
@@ -1536,6 +1611,7 @@ func (s *RouteLookupService) recordRouteLookup(
 	}
 
 	recordRuntimeObservation(ctx, s.recorder, observability.EventRouteLookup, observability.TraceBoundaryRESTRequest, operationRouteLookup, result, reasonClass, fields, labels, duration)
+	s.recordRouteLookupBackendPin(ctx, request, response)
 
 	if response.UserHold.PlacementDeferred {
 		s.recordRouteLookupUserHold(ctx, request, response)
@@ -1544,6 +1620,56 @@ func (s *RouteLookupService) recordRouteLookup(
 	for _, state := range response.Backends {
 		s.recordRouteBackendState(ctx, request.Protocol, state)
 	}
+}
+
+// recordRouteLookupBackendPin emits bounded pin diagnostics for selector outcomes.
+func (s *RouteLookupService) recordRouteLookupBackendPin(
+	ctx context.Context,
+	request RouteLookupRequest,
+	response RouteLookupResponse,
+) {
+	if s == nil || (!response.BackendPin.Present && !response.BackendPin.CurrentScopeUnpinned) {
+		return
+	}
+
+	result := runtimeObservationResultOK
+	reasonClass := response.BackendPin.ReasonClass
+	switch {
+	case response.BackendPin.Applied:
+		result = "applied"
+		reasonClass = routeLookupBackendPinApplied
+	case response.BackendPin.CurrentScopeUnpinned:
+		result = "diagnostic"
+		reasonClass = routeLookupBackendPinOtherScopes
+	case response.FailClosed:
+		result = runtimeObservationResultFailClosed
+	case !response.BackendPin.Applied:
+		result = runtimeObservationResultExcluded
+	}
+
+	fields := map[string]string{
+		runtimeObservationFieldAccountKeyPresent: boolAuditValue(strings.TrimSpace(request.AccountKey) != ""),
+		"backend_pin_applied":                    boolAuditValue(response.BackendPin.Applied),
+		"backend_pin_current_scope_unpinned":     boolAuditValue(response.BackendPin.CurrentScopeUnpinned),
+		"backend_pin_other_scope_count":          strconv.Itoa(len(response.BackendPin.OtherScopes)),
+		"backend_pin_scope_count":                strconv.Itoa(response.BackendPin.ScopeCount),
+		runtimeObservationFieldBackendID:         response.BackendPin.BackendID,
+		runtimeObservationFieldBackendNode:       response.BackendPin.BackendNode,
+		runtimeObservationFieldBackendPool:       request.BackendPool,
+		runtimeObservationFieldProtocol:          request.Protocol,
+		runtimeObservationFieldShardTag:          response.BackendPin.EffectiveShard,
+		runtimeObservationFieldUserHash:          response.Routing.AccountKey,
+	}
+
+	labels := map[string]string{
+		runtimeObservationFieldBackendPool: request.BackendPool,
+		runtimeObservationFieldProtocol:    request.Protocol,
+	}
+	if response.Routing.EffectiveShard != "" {
+		labels[runtimeObservationFieldShardTag] = response.Routing.EffectiveShard
+	}
+
+	recordRuntimeObservation(ctx, s.recorder, observability.EventUserBackendPin, observability.TraceBoundaryBackendSelect, operationRouteLookup, result, reasonClass, fields, labels)
 }
 
 // recordRouteLookupUserHold emits the hold-specific effect of one diagnostic lookup.

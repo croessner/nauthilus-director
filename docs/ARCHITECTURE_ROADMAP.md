@@ -1498,6 +1498,18 @@ as a frontend ordered-reply contract without backend command batching. Completio
 evidence lives in
 `docs/specs/implementation/M8_LMTP_SIZE_AND_PIPELINING_FOLLOWUP.md`.
 
+The M8 multi-protocol backend-pinning follow-up is complete. Backend pins are
+runtime Redis state scoped by protocol and backend pool; the existing concrete
+backend workflow remains available, while `users backend-pin set --backend-node`
+can atomically resolve one backend node to every configured listener-backed
+protocol scope. Matching pins bypass only `weight_zero`, all other safety
+exclusions fail closed, route lookup reports scoped context without mutation and
+clear-without-protocol removes every scoped pin for the user. Public fake-service
+E2E proves all-protocol canary pinning across IMAP, ManageSieve and LMTP plus a
+delivery/fetch marker flow through the production binary. Completion evidence
+lives in
+`docs/specs/implementation/M8_MULTI_PROTOCOL_BACKEND_PINNING_FOLLOWUP.md`.
+
 - hardened production Docker image and Docker smoke proof
 - restrictive systemd unit and reload path through `nauthilus-directorctl reload`
 - safe reload semantics shared by REST, CLI and systemd

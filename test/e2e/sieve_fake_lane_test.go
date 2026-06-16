@@ -368,7 +368,15 @@ func exerciseSieveRuntimeControls(
 		"--attribute", "mailShard="+e2eShardTag,
 		"--include-affinity",
 	)
-	assertCLIOutputFields(t, mismatched, "backend_pin_present=true", "backend_pin_applied=false")
+	assertCLIOutputFields(t, mismatched,
+		"backend_pin_present=false",
+		"backend_pin_applied=false",
+		"backend_pin_scope_count=1",
+		"backend_pin_current_scope_unpinned=true",
+		"backend_pin_other_scope_count=1",
+		"backend_pin_other_scopes=imap/imap-default",
+		"backend_pin_reason=backend_pin_other_scopes",
+	)
 	runDirectorctl(t, ctl, controlURL, "users", "backend-pin", "clear", e2eSievePinnedAccount, "--reason", "clear imap mismatch")
 
 	runDirectorctl(t, ctl, controlURL, "users", "backend-pin", "set", e2eSievePinnedAccount,

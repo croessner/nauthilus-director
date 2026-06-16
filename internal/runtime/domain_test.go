@@ -14,12 +14,14 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
+//nolint:goconst,wsl_v5 // Runtime domain fixtures repeat protocol and backend identifiers intentionally.
 package runtime
 
 import (
 	"context"
 	"errors"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -32,6 +34,7 @@ import (
 
 const (
 	runtimeTestBackendIdentifier = "backend-a"
+	runtimeTestBackendNodeA      = "mailstore-a-node-1"
 	runtimeTestBackendPinReason  = "commission backend"
 	runtimeTestFieldBackendID    = "BackendIdentifier"
 	runtimeTestFieldToBackend    = "ToBackend"
@@ -402,6 +405,46 @@ func TestUserBackendPinSetRejectsUnsupportedStrategy(t *testing.T) {
 	}
 }
 
+// TestUserBackendPinTargetRejectsInvalidTargetShape verifies the operator request shape.
+func TestUserBackendPinTargetRejectsInvalidTargetShape(t *testing.T) {
+	userKey := UserKey{Tenant: runtimeTestTenant, UserHash: runtimeTestUserHash}
+	for name, request := range map[string]SetUserBackendPinTargetRequest{
+		"missing target": {
+			Key:      userKey,
+			Strategy: MoveStrategyNewSessionsOnly,
+			Reason:   runtimeTestBackendPinReason,
+		},
+		"both targets": {
+			Key:               userKey,
+			BackendIdentifier: routeLookupBackendA,
+			BackendNode:       runtimeTestBackendNodeA,
+			Strategy:          MoveStrategyNewSessionsOnly,
+			Reason:            runtimeTestBackendPinReason,
+		},
+		"backend with scope filter": {
+			Key:               userKey,
+			BackendIdentifier: routeLookupBackendA,
+			Protocol:          routeLookupProtocol,
+			BackendPool:       routeLookupDefaultPool,
+			Strategy:          MoveStrategyNewSessionsOnly,
+			Reason:            runtimeTestBackendPinReason,
+		},
+		"pool without protocol": {
+			Key:         userKey,
+			BackendNode: runtimeTestBackendNodeA,
+			BackendPool: routeLookupDefaultPool,
+			Strategy:    MoveStrategyNewSessionsOnly,
+			Reason:      runtimeTestBackendPinReason,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := request.Normalize().Validate(); !IsErrorKind(err, ErrorKindInvalidRequest) {
+				t.Fatalf("Validate error = %v, want invalid_request", err)
+			}
+		})
+	}
+}
+
 // TestUserBackendPinClearRejectsMissingReason verifies pin clear requests remain auditable.
 func TestUserBackendPinClearRejectsMissingReason(t *testing.T) {
 	err := ClearUserBackendPinRequest{
@@ -446,7 +489,8 @@ func TestUserBackendPinDerivesTargetFromRegistry(t *testing.T) {
 	if store.setRequest.BackendIdentifier != routeLookupBackendA ||
 		store.setRequest.Protocol != routeLookupProtocol ||
 		store.setRequest.BackendPool != routeLookupDefaultPool ||
-		store.setRequest.ShardTag != routeLookupShardA {
+		store.setRequest.ShardTag != routeLookupShardA ||
+		store.setRequest.BackendNode == "" {
 		t.Fatalf("derived state request = %#v", store.setRequest)
 	}
 
@@ -481,6 +525,401 @@ func TestUserBackendPinUnknownBackendMapsToRuntimeNotFound(t *testing.T) {
 
 	if store.setCalled {
 		t.Fatal("unknown backend should not reach the state boundary")
+	}
+}
+
+// TestUserBackendPinTargetConcreteBackendDerivesOneScopedPin verifies compatibility.
+func TestUserBackendPinTargetConcreteBackendDerivesOneScopedPin(t *testing.T) {
+	registry, err := backend.NewStaticRegistry(config.DefaultConfig().Director)
+	if err != nil {
+		t.Fatalf("NewStaticRegistry returned error: %v", err)
+	}
+
+	store := &recordingBackendPinStateStore{
+		setRecord: backendPinObservationRecord(runtimeTestPinnedStatus, "51", 400),
+	}
+	service := NewUserBackendPinService(store, registry)
+
+	result, err := service.SetUserBackendPinTarget(context.Background(), SetUserBackendPinTargetRequest{
+		Key:               UserKey{Tenant: runtimeTestTenant, UserHash: runtimeTestUserHash},
+		BackendIdentifier: routeLookupBackendA,
+		Strategy:          MoveStrategyNewSessionsOnly,
+		Reason:            runtimeTestBackendPinReason,
+	})
+	if err != nil {
+		t.Fatalf("SetUserBackendPinTarget returned error: %v", err)
+	}
+
+	if !store.setCalled || store.setAllCalled {
+		t.Fatalf("state calls set=%v setAll=%v, want concrete single-scope set", store.setCalled, store.setAllCalled)
+	}
+	if len(result.Targets) != 1 || result.Targets[0].BackendIdentifier != routeLookupBackendA {
+		t.Fatalf("targets = %#v, want one concrete backend target", result.Targets)
+	}
+	if result.Audit.Fields[auditFieldScopeCount] != "1" {
+		t.Fatalf("audit fields = %#v, want scope_count=1", result.Audit.Fields)
+	}
+}
+
+// TestUserBackendPinTargetBackendNodeResolvesConfiguredScopes verifies all-protocol resolution.
+func TestUserBackendPinTargetBackendNodeResolvesConfiguredScopes(t *testing.T) {
+	cfg := config.DefaultConfig()
+	registry, err := backend.NewStaticRegistry(cfg.Director)
+	if err != nil {
+		t.Fatalf("NewStaticRegistry returned error: %v", err)
+	}
+
+	store := &recordingBackendPinStateStore{setRecordsFromRequest: true}
+	service := NewUserBackendPinService(
+		store,
+		registry,
+		WithUserBackendPinRequiredScopes(runtimeBackendPinRequiredScopes(t, cfg.Director)),
+	)
+
+	result, err := service.SetUserBackendPinTarget(context.Background(), SetUserBackendPinTargetRequest{
+		Key:         UserKey{Tenant: runtimeTestTenant, UserHash: runtimeTestUserHash},
+		BackendNode: runtimeTestBackendNodeA,
+		Strategy:    MoveStrategyKickExisting,
+		Reason:      runtimeTestBackendPinReason,
+	})
+	if err != nil {
+		t.Fatalf("SetUserBackendPinTarget returned error: %v", err)
+	}
+
+	if !store.setAllCalled || store.setCalled {
+		t.Fatalf("state calls set=%v setAll=%v, want one atomic multi-scope set", store.setCalled, store.setAllCalled)
+	}
+	if got, want := backendPinSetScopeNames(store.setRequests.Pins), []string{
+		"imap/imap-default/mailstore-a-imap",
+		"lmtp/lmtp-default/mailstore-a-lmtp",
+		"pop3/pop3-default/mailstore-a-pop3",
+		"sieve/sieve-default/mailstore-a-sieve",
+	}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("resolved scopes = %#v, want %#v", got, want)
+	}
+	if len(result.Targets) != 4 || result.Audit.Fields[auditFieldScopeCount] != "4" ||
+		result.Audit.Fields[auditFieldBackendNode] != runtimeTestBackendNodeA {
+		t.Fatalf("result/audit = %#v %#v, want four scoped node pins", result.Targets, result.Audit.Fields)
+	}
+}
+
+// TestUserBackendPinTargetBackendNodeScopedFilterResolvesOnePin verifies scoped node pins.
+func TestUserBackendPinTargetBackendNodeScopedFilterResolvesOnePin(t *testing.T) {
+	cfg := config.DefaultConfig()
+	registry, err := backend.NewStaticRegistry(cfg.Director)
+	if err != nil {
+		t.Fatalf("NewStaticRegistry returned error: %v", err)
+	}
+
+	store := &recordingBackendPinStateStore{setRecordsFromRequest: true}
+	service := NewUserBackendPinService(
+		store,
+		registry,
+		WithUserBackendPinRequiredScopes(runtimeBackendPinRequiredScopes(t, cfg.Director)),
+	)
+
+	_, err = service.SetUserBackendPinTarget(context.Background(), SetUserBackendPinTargetRequest{
+		Key:         UserKey{Tenant: runtimeTestTenant, UserHash: runtimeTestUserHash},
+		BackendNode: runtimeTestBackendNodeA,
+		Protocol:    routeLookupProtocolSieve,
+		BackendPool: routeLookupPoolSieve,
+		Strategy:    MoveStrategyNewSessionsOnly,
+		Reason:      runtimeTestBackendPinReason,
+	})
+	if err != nil {
+		t.Fatalf("SetUserBackendPinTarget returned error: %v", err)
+	}
+
+	if got, want := backendPinSetScopeNames(store.setRequests.Pins), []string{
+		"sieve/sieve-default/mailstore-a-sieve",
+	}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("resolved scopes = %#v, want %#v", got, want)
+	}
+}
+
+// TestUserBackendPinTargetBackendNodeRejectsUnknownNode verifies missing nodes classify as absent.
+func TestUserBackendPinTargetBackendNodeRejectsUnknownNode(t *testing.T) {
+	cfg := config.DefaultConfig()
+	registry, err := backend.NewStaticRegistry(cfg.Director)
+	if err != nil {
+		t.Fatalf("NewStaticRegistry returned error: %v", err)
+	}
+
+	store := &recordingBackendPinStateStore{}
+	service := NewUserBackendPinService(
+		store,
+		registry,
+		WithUserBackendPinRequiredScopes(runtimeBackendPinRequiredScopes(t, cfg.Director)),
+	)
+
+	_, err = service.SetUserBackendPinTarget(context.Background(), SetUserBackendPinTargetRequest{
+		Key:         UserKey{Tenant: runtimeTestTenant, UserHash: runtimeTestUserHash},
+		BackendNode: "missing-node",
+		Strategy:    MoveStrategyNewSessionsOnly,
+		Reason:      runtimeTestBackendPinReason,
+	})
+	if !IsErrorKind(err, ErrorKindNotFound) {
+		t.Fatalf("SetUserBackendPinTarget error = %v, want not_found", err)
+	}
+
+	assertNoBackendPinMutation(t, store)
+}
+
+// TestUserBackendPinTargetBackendNodeRejectsDuplicateScope avoids partial writes.
+func TestUserBackendPinTargetBackendNodeRejectsDuplicateScope(t *testing.T) {
+	store := &recordingBackendPinStateStore{}
+	service := NewUserBackendPinService(
+		store,
+		fakeBackendRegistry{backends: []backend.Backend{
+			fakeBackendPinBackend("node-a-imap-1", "imap", "imap-default", "shard-a", "node-a"),
+			fakeBackendPinBackend("node-a-imap-2", "imap", "imap-default", "shard-a", "node-a"),
+		}},
+		WithUserBackendPinRequiredScopes([]UserBackendPinScope{{Protocol: "imap", BackendPool: "imap-default"}}),
+	)
+
+	_, err := service.SetUserBackendPinTarget(context.Background(), SetUserBackendPinTargetRequest{
+		Key:         UserKey{Tenant: runtimeTestTenant, UserHash: runtimeTestUserHash},
+		BackendNode: "node-a",
+		Strategy:    MoveStrategyNewSessionsOnly,
+		Reason:      runtimeTestBackendPinReason,
+	})
+	if !IsErrorKind(err, ErrorKindConflict) {
+		t.Fatalf("SetUserBackendPinTarget error = %v, want conflict", err)
+	}
+
+	assertNoBackendPinMutation(t, store)
+}
+
+// TestUserBackendPinTargetBackendNodeRejectsMissingRequiredScope avoids partial writes.
+func TestUserBackendPinTargetBackendNodeRejectsMissingRequiredScope(t *testing.T) {
+	cfg := config.DefaultConfig()
+	store := &recordingBackendPinStateStore{}
+	service := NewUserBackendPinService(
+		store,
+		fakeBackendRegistry{backends: []backend.Backend{
+			fakeBackendPinBackend("mailstore-a-imap", "imap", "imap-default", routeLookupShardA, runtimeTestBackendNodeA),
+			fakeBackendPinBackend("mailstore-a-lmtp", "lmtp", "lmtp-default", routeLookupShardA, runtimeTestBackendNodeA),
+			fakeBackendPinBackend("mailstore-a-sieve", "sieve", "sieve-default", routeLookupShardA, runtimeTestBackendNodeA),
+		}},
+		WithUserBackendPinRequiredScopes(runtimeBackendPinRequiredScopes(t, cfg.Director)),
+	)
+
+	_, err := service.SetUserBackendPinTarget(context.Background(), SetUserBackendPinTargetRequest{
+		Key:         UserKey{Tenant: runtimeTestTenant, UserHash: runtimeTestUserHash},
+		BackendNode: runtimeTestBackendNodeA,
+		Strategy:    MoveStrategyNewSessionsOnly,
+		Reason:      runtimeTestBackendPinReason,
+	})
+	if !IsErrorKind(err, ErrorKindConflict) {
+		t.Fatalf("SetUserBackendPinTarget error = %v, want conflict", err)
+	}
+
+	assertNoBackendPinMutation(t, store)
+}
+
+// TestUserBackendPinTargetBackendNodeRejectsCrossShardData avoids unsafe node pins.
+func TestUserBackendPinTargetBackendNodeRejectsCrossShardData(t *testing.T) {
+	store := &recordingBackendPinStateStore{}
+	service := NewUserBackendPinService(
+		store,
+		fakeBackendRegistry{backends: []backend.Backend{
+			fakeBackendPinBackend("node-a-imap", "imap", "imap-default", "shard-a", "node-a"),
+			fakeBackendPinBackend("node-a-sieve", "sieve", "sieve-default", "shard-b", "node-a"),
+		}},
+		WithUserBackendPinRequiredScopes([]UserBackendPinScope{
+			{Protocol: "imap", BackendPool: "imap-default"},
+			{Protocol: "sieve", BackendPool: "sieve-default"},
+		}),
+	)
+
+	_, err := service.SetUserBackendPinTarget(context.Background(), SetUserBackendPinTargetRequest{
+		Key:         UserKey{Tenant: runtimeTestTenant, UserHash: runtimeTestUserHash},
+		BackendNode: "node-a",
+		Strategy:    MoveStrategyNewSessionsOnly,
+		Reason:      runtimeTestBackendPinReason,
+	})
+	if !IsErrorKind(err, ErrorKindConflict) {
+		t.Fatalf("SetUserBackendPinTarget error = %v, want conflict", err)
+	}
+
+	assertNoBackendPinMutation(t, store)
+}
+
+// TestUserBackendPinTargetBackendNodeRejectsInvalidRegistryData fails closed before state.
+func TestUserBackendPinTargetBackendNodeRejectsInvalidRegistryData(t *testing.T) {
+	store := &recordingBackendPinStateStore{}
+	service := NewUserBackendPinService(
+		store,
+		fakeBackendRegistry{backends: []backend.Backend{{
+			Identifier:  "bad-node-imap",
+			Protocol:    "imap",
+			BackendPool: "imap-default",
+			BackendNode: "node-a",
+		}}},
+		WithUserBackendPinRequiredScopes([]UserBackendPinScope{{Protocol: "imap", BackendPool: "imap-default"}}),
+	)
+
+	_, err := service.SetUserBackendPinTarget(context.Background(), SetUserBackendPinTargetRequest{
+		Key:         UserKey{Tenant: runtimeTestTenant, UserHash: runtimeTestUserHash},
+		BackendNode: "node-a",
+		Strategy:    MoveStrategyNewSessionsOnly,
+		Reason:      runtimeTestBackendPinReason,
+	})
+	if !IsErrorKind(err, ErrorKindUnavailable) {
+		t.Fatalf("SetUserBackendPinTarget error = %v, want unavailable", err)
+	}
+
+	assertNoBackendPinMutation(t, store)
+}
+
+// TestUserBackendPinTargetBackendNodeRejectsAmbiguousProtocolFilter requires pool disambiguation.
+func TestUserBackendPinTargetBackendNodeRejectsAmbiguousProtocolFilter(t *testing.T) {
+	store := &recordingBackendPinStateStore{}
+	service := NewUserBackendPinService(
+		store,
+		fakeBackendRegistry{},
+		WithUserBackendPinRequiredScopes([]UserBackendPinScope{
+			{Protocol: "imap", BackendPool: "imap-default"},
+			{Protocol: "imap", BackendPool: "imap-blue"},
+		}),
+	)
+
+	_, err := service.SetUserBackendPinTarget(context.Background(), SetUserBackendPinTargetRequest{
+		Key:         UserKey{Tenant: runtimeTestTenant, UserHash: runtimeTestUserHash},
+		BackendNode: "node-a",
+		Protocol:    "imap",
+		Strategy:    MoveStrategyNewSessionsOnly,
+		Reason:      runtimeTestBackendPinReason,
+	})
+	if !IsErrorKind(err, ErrorKindInvalidRequest) {
+		t.Fatalf("SetUserBackendPinTarget error = %v, want invalid_request", err)
+	}
+
+	assertNoBackendPinMutation(t, store)
+}
+
+// TestUserBackendPinClearWithoutProtocolRemovesEveryScopedPin verifies explicit all-clear.
+func TestUserBackendPinClearWithoutProtocolRemovesEveryScopedPin(t *testing.T) {
+	store := &recordingBackendPinStateStore{
+		clearRecords: state.UserBackendPinsRecord{
+			Status:     runtimeObservationReasonCleared,
+			Generation: "63",
+			ServerTime: time.Unix(500, 0),
+		},
+	}
+	service := NewUserBackendPinService(store, nil)
+
+	_, err := service.ClearUserBackendPins(context.Background(), ClearUserBackendPinsRequest{
+		Key:    UserKey{Tenant: runtimeTestTenant, UserHash: runtimeTestUserHash},
+		Reason: runtimeTestBackendPinReason,
+	})
+	if err != nil {
+		t.Fatalf("ClearUserBackendPins returned error: %v", err)
+	}
+
+	if !store.clearAllCalled || store.clearCalled {
+		t.Fatalf("clear calls scoped=%v all=%v, want all-scope clear", store.clearCalled, store.clearAllCalled)
+	}
+}
+
+// TestUserBackendPinClearWithProtocolAndPoolRemovesOnlyScope verifies scoped clear.
+func TestUserBackendPinClearWithProtocolAndPoolRemovesOnlyScope(t *testing.T) {
+	store := &recordingBackendPinStateStore{
+		clearRecord: backendPinObservationRecord(runtimeObservationReasonCleared, "64", 501),
+	}
+	service := NewUserBackendPinService(store, nil)
+
+	_, err := service.ClearUserBackendPin(context.Background(), ClearUserBackendPinRequest{
+		Key:         UserKey{Tenant: runtimeTestTenant, UserHash: runtimeTestUserHash},
+		Protocol:    routeLookupProtocolSieve,
+		BackendPool: routeLookupPoolSieve,
+		Reason:      runtimeTestBackendPinReason,
+	})
+	if err != nil {
+		t.Fatalf("ClearUserBackendPin returned error: %v", err)
+	}
+
+	if !store.clearCalled || store.clearAllCalled {
+		t.Fatalf("clear calls scoped=%v all=%v, want scoped clear", store.clearCalled, store.clearAllCalled)
+	}
+	if store.clearRequest.Protocol != routeLookupProtocolSieve || store.clearRequest.BackendPool != routeLookupPoolSieve {
+		t.Fatalf("clear request = %#v, want Sieve scope", store.clearRequest)
+	}
+}
+
+// TestUserBackendPinTargetKickExistingUsesOneControlledMutation verifies one generation boundary.
+func TestUserBackendPinTargetKickExistingUsesOneControlledMutation(t *testing.T) {
+	cfg := config.DefaultConfig()
+	registry, err := backend.NewStaticRegistry(cfg.Director)
+	if err != nil {
+		t.Fatalf("NewStaticRegistry returned error: %v", err)
+	}
+
+	store := &recordingBackendPinStateStore{setRecordsFromRequest: true}
+	service := NewUserBackendPinService(
+		store,
+		registry,
+		WithUserBackendPinRequiredScopes(runtimeBackendPinRequiredScopes(t, cfg.Director)),
+	)
+
+	result, err := service.SetUserBackendPinTarget(context.Background(), SetUserBackendPinTargetRequest{
+		Key:         UserKey{Tenant: runtimeTestTenant, UserHash: runtimeTestUserHash},
+		BackendNode: runtimeTestBackendNodeA,
+		Strategy:    MoveStrategyKickExisting,
+		Reason:      runtimeTestBackendPinReason,
+	})
+	if err != nil {
+		t.Fatalf("SetUserBackendPinTarget returned error: %v", err)
+	}
+
+	if !store.setAllCalled || store.setRequests.Strategy != string(MoveStrategyKickExisting) ||
+		result.Audit.Generation != "multi-1" {
+		t.Fatalf("mutation request/audit = %#v %#v, want one controlled kick_existing set", store.setRequests, result.Audit)
+	}
+}
+
+// TestUserBackendPinTargetNonKickStrategiesDoNotCloseLocalSessions preserves state ownership.
+func TestUserBackendPinTargetNonKickStrategiesDoNotCloseLocalSessions(t *testing.T) {
+	cfg := config.DefaultConfig()
+	registry, err := backend.NewStaticRegistry(cfg.Director)
+	if err != nil {
+		t.Fatalf("NewStaticRegistry returned error: %v", err)
+	}
+
+	local := NewLocalSessionRegistry()
+	handle := &recordingLocalHandle{}
+	registerTestLocalSession(t, local, LocalSessionInfo{
+		SessionID:         runtimeTestSessionA,
+		Tenant:            runtimeTestTenant,
+		UserHash:          runtimeTestUserHash,
+		BackendIdentifier: routeLookupBackendA,
+	}, handle)
+
+	for _, strategy := range []MoveStrategy{MoveStrategyNewSessionsOnly, MoveStrategyDrainExisting} {
+		t.Run(string(strategy), func(t *testing.T) {
+			store := &recordingBackendPinStateStore{setRecordsFromRequest: true}
+			service := NewUserBackendPinService(
+				store,
+				registry,
+				WithUserBackendPinRequiredScopes(runtimeBackendPinRequiredScopes(t, cfg.Director)),
+			)
+
+			_, err := service.SetUserBackendPinTarget(context.Background(), SetUserBackendPinTargetRequest{
+				Key:         UserKey{Tenant: runtimeTestTenant, UserHash: runtimeTestUserHash},
+				BackendNode: runtimeTestBackendNodeA,
+				Protocol:    routeLookupProtocol,
+				BackendPool: routeLookupDefaultPool,
+				Strategy:    strategy,
+				Reason:      runtimeTestBackendPinReason,
+			})
+			if err != nil {
+				t.Fatalf("SetUserBackendPinTarget returned error: %v", err)
+			}
+
+			if handle.closed != 0 {
+				t.Fatalf("local session closed = %d, want 0", handle.closed)
+			}
+		})
 	}
 }
 
@@ -580,6 +1019,7 @@ func backendPinObservationRecord(status string, generation string, unixSecond in
 		Protocol:           routeLookupProtocol,
 		BackendPool:        routeLookupDefaultPool,
 		ShardTag:           routeLookupShardA,
+		BackendNode:        runtimeTestBackendNodeA,
 		Strategy:           string(MoveStrategyKickExisting),
 		ActiveSessionCount: 1,
 		ServerTime:         time.Unix(unixSecond, 0),
@@ -596,6 +1036,7 @@ func TestUserBackendPinClearAuditMetadataIncludesActor(t *testing.T) {
 			Protocol:          routeLookupProtocol,
 			BackendPool:       routeLookupDefaultPool,
 			ShardTag:          routeLookupShardA,
+			BackendNode:       runtimeTestBackendNodeA,
 			Strategy:          string(MoveStrategyDrainExisting),
 			Generation:        "42",
 			ServerTime:        time.Unix(300, 0),
@@ -969,6 +1410,7 @@ func assertBackendPinAuditFields(t *testing.T, fields map[string]string) {
 	t.Helper()
 
 	if fields[auditFieldBackendIdentifier] != routeLookupBackendA ||
+		fields[auditFieldBackendNode] != runtimeTestBackendNodeA ||
 		fields[auditFieldProtocol] != routeLookupProtocol ||
 		fields[auditFieldBackendPool] != routeLookupDefaultPool ||
 		fields[auditFieldEffectiveShard] != routeLookupShardA ||
@@ -981,6 +1423,116 @@ func assertBackendPinAuditFields(t *testing.T, fields map[string]string) {
 			t.Fatalf("audit fields included forbidden backend metadata %q: %#v", forbidden, fields)
 		}
 	}
+}
+
+// runtimeBackendPinRequiredScopes converts config scopes into runtime scope fixtures.
+func runtimeBackendPinRequiredScopes(t *testing.T, director config.DirectorConfig) []UserBackendPinScope {
+	t.Helper()
+
+	scopes, err := director.BackendPinRequiredScopes()
+	if err != nil {
+		t.Fatalf("BackendPinRequiredScopes returned error: %v", err)
+	}
+
+	return runtimeBackendPinScopes(scopes)
+}
+
+// runtimeBackendPinScopes adapts config scope records for service options.
+func runtimeBackendPinScopes(scopes []config.BackendPinScope) []UserBackendPinScope {
+	converted := make([]UserBackendPinScope, 0, len(scopes))
+	for _, scope := range scopes {
+		converted = append(converted, UserBackendPinScope{Protocol: scope.Protocol, BackendPool: scope.BackendPool})
+	}
+
+	return converted
+}
+
+// backendPinSetScopeNames renders multi-scope set requests for deterministic assertions.
+func backendPinSetScopeNames(pins []state.UserBackendPinScope) []string {
+	names := make([]string, 0, len(pins))
+	for _, pin := range pins {
+		names = append(names, pin.Protocol+"/"+pin.BackendPool+"/"+pin.BackendIdentifier)
+	}
+	sort.Strings(names)
+
+	return names
+}
+
+// assertNoBackendPinMutation verifies validation failed before state mutation.
+func assertNoBackendPinMutation(t *testing.T, store *recordingBackendPinStateStore) {
+	t.Helper()
+
+	if store.setCalled || store.setAllCalled || store.clearCalled || store.clearAllCalled {
+		t.Fatalf("unexpected backend-pin mutation calls: %#v", store)
+	}
+}
+
+// fakeBackendPinBackend creates registry identity records for resolution tests.
+func fakeBackendPinBackend(identifier string, protocol string, pool string, shard string, node string) backend.Backend {
+	return backend.Backend{
+		Identifier:  identifier,
+		Protocol:    protocol,
+		BackendPool: pool,
+		ShardTag:    shard,
+		BackendNode: node,
+	}
+}
+
+// backendPinRecordsFromSetRequest mirrors state output for aggregate runtime tests.
+func backendPinRecordsFromSetRequest(request state.UserBackendPinsSetRequest) state.UserBackendPinsRecord {
+	pins := make([]state.UserBackendPinRecord, 0, len(request.Pins))
+	for _, pin := range request.Pins {
+		pins = append(pins, state.UserBackendPinRecord{
+			Present:           true,
+			Key:               request.Key,
+			BackendIdentifier: pin.BackendIdentifier,
+			Protocol:          pin.Protocol,
+			BackendPool:       pin.BackendPool,
+			ShardTag:          pin.ShardTag,
+			BackendNode:       pin.BackendNode,
+			Strategy:          request.Strategy,
+			Generation:        "multi-1",
+			ServerTime:        time.Unix(410, 0),
+		})
+	}
+
+	return state.UserBackendPinsRecord{
+		Present:    len(pins) > 0,
+		Key:        request.Key,
+		Pins:       pins,
+		Status:     runtimeTestPinnedStatus,
+		Generation: "multi-1",
+		ServerTime: time.Unix(410, 0),
+	}
+}
+
+type fakeBackendRegistry struct {
+	backends []backend.Backend
+}
+
+// AllBackends returns configured fake backend entries.
+func (r fakeBackendRegistry) AllBackends(context.Context) ([]backend.Backend, error) {
+	return append([]backend.Backend(nil), r.backends...), nil
+}
+
+// BackendsForShard is unused by backend-pin resolution tests.
+func (r fakeBackendRegistry) BackendsForShard(context.Context, backend.RegistryRequest) ([]backend.Backend, error) {
+	return nil, errors.New("fake registry shard lookup unused")
+}
+
+// Lookup is unused by backend-node resolution tests.
+func (r fakeBackendRegistry) Lookup(context.Context, string) (backend.Backend, error) {
+	return backend.Backend{}, errors.New("fake registry lookup unused")
+}
+
+// LookupInBackendNode is unused by all-protocol resolution tests.
+func (r fakeBackendRegistry) LookupInBackendNode(context.Context, backend.NodeLookupRequest) (backend.Backend, error) {
+	return backend.Backend{}, errors.New("fake registry node lookup unused")
+}
+
+// Pool is unused by backend-pin resolution tests.
+func (r fakeBackendRegistry) Pool(context.Context, string) (backend.Pool, error) {
+	return backend.Pool{}, errors.New("fake registry pool lookup unused")
 }
 
 // assertBackendPinObservation verifies operation and bounded reason labels.
@@ -1080,15 +1632,25 @@ func (s *recordingUserStateStore) ClearUserAffinity(
 }
 
 type recordingBackendPinStateStore struct {
-	setRecord    state.UserBackendPinRecord
-	getRecord    state.UserBackendPinRecord
-	clearRecord  state.UserBackendPinRecord
-	setRequest   state.UserBackendPinSetRequest
-	getRequest   state.UserBackendPinGetRequest
-	clearRequest state.UserBackendPinClearRequest
-	setCalled    bool
-	getCalled    bool
-	clearCalled  bool
+	setRecord             state.UserBackendPinRecord
+	setRecords            state.UserBackendPinsRecord
+	getRecord             state.UserBackendPinRecord
+	listRecords           state.UserBackendPinsRecord
+	clearRecord           state.UserBackendPinRecord
+	clearRecords          state.UserBackendPinsRecord
+	setRequest            state.UserBackendPinSetRequest
+	setRequests           state.UserBackendPinsSetRequest
+	getRequest            state.UserBackendPinGetRequest
+	listRequest           state.UserBackendPinsListRequest
+	clearRequest          state.UserBackendPinClearRequest
+	clearAll              state.UserBackendPinsClearRequest
+	setCalled             bool
+	setAllCalled          bool
+	setRecordsFromRequest bool
+	getCalled             bool
+	listCalled            bool
+	clearCalled           bool
+	clearAllCalled        bool
 }
 
 // SetUserBackendPin records and returns the configured backend-pin mutation.
@@ -1102,6 +1664,20 @@ func (s *recordingBackendPinStateStore) SetUserBackendPin(
 	return s.setRecord, nil
 }
 
+// SetUserBackendPins records and returns the configured backend-pin set mutation.
+func (s *recordingBackendPinStateStore) SetUserBackendPins(
+	_ context.Context,
+	request state.UserBackendPinsSetRequest,
+) (state.UserBackendPinsRecord, error) {
+	s.setAllCalled = true
+	s.setRequests = request
+	if s.setRecordsFromRequest {
+		return backendPinRecordsFromSetRequest(request), nil
+	}
+
+	return s.setRecords, nil
+}
+
 // GetUserBackendPin records and returns the configured backend-pin read.
 func (s *recordingBackendPinStateStore) GetUserBackendPin(
 	_ context.Context,
@@ -1113,6 +1689,17 @@ func (s *recordingBackendPinStateStore) GetUserBackendPin(
 	return s.getRecord, nil
 }
 
+// ListUserBackendPins records and returns the configured backend-pin set read.
+func (s *recordingBackendPinStateStore) ListUserBackendPins(
+	_ context.Context,
+	request state.UserBackendPinsListRequest,
+) (state.UserBackendPinsRecord, error) {
+	s.listCalled = true
+	s.listRequest = request
+
+	return s.listRecords, nil
+}
+
 // ClearUserBackendPin records and returns the configured backend-pin clear.
 func (s *recordingBackendPinStateStore) ClearUserBackendPin(
 	_ context.Context,
@@ -1122,6 +1709,17 @@ func (s *recordingBackendPinStateStore) ClearUserBackendPin(
 	s.clearRequest = request
 
 	return s.clearRecord, nil
+}
+
+// ClearUserBackendPins records and returns the configured backend-pin all-clear.
+func (s *recordingBackendPinStateStore) ClearUserBackendPins(
+	_ context.Context,
+	request state.UserBackendPinsClearRequest,
+) (state.UserBackendPinsRecord, error) {
+	s.clearAllCalled = true
+	s.clearAll = request
+
+	return s.clearRecords, nil
 }
 
 type recordingSessionStateStore struct {

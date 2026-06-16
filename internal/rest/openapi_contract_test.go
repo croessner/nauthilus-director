@@ -14,7 +14,7 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-//nolint:goconst // OpenAPI contract tests repeat schema sentinel strings intentionally.
+//nolint:dupl,goconst,wsl_v5 // OpenAPI contract tests repeat schema sentinel strings intentionally.
 package rest_test
 
 import (
@@ -128,19 +128,35 @@ func TestOpenAPIContractIncludesUserBackendPinOperations(t *testing.T) {
 	}
 
 	pinSchema := contract.Components.Schemas["UserBackendPin"].Value
-	if !schemaRejectsAdditionalProperties(pinSchema) {
-		t.Fatal("UserBackendPin must reject additional properties")
+	assertBackendPinAggregateSchema(t, "UserBackendPin", pinSchema)
+
+	pinsSchema := contract.Components.Schemas["UserBackendPins"].Value
+	assertBackendPinAggregateSchema(t, "UserBackendPins", pinsSchema)
+
+	entrySchema := contract.Components.Schemas["UserBackendPinEntry"].Value
+	if !schemaRejectsAdditionalProperties(entrySchema) {
+		t.Fatal("UserBackendPinEntry must reject additional properties")
 	}
 
-	assertSchemaRequires(t, pinSchema, "present", "user_key")
+	assertSchemaRequires(t, entrySchema, "backend", "protocol", "backend_pool", "shard_tag", "backend_node", "strategy")
+	assertSchemaPropertiesExactly(t, entrySchema, "active_session_count", "backend", "backend_node", "backend_pool", "generation", "protocol", "shard_tag", "strategy")
+	assertSchemaPropertyRef(t, entrySchema, "strategy", "#/components/schemas/UserMoveRequestStrategy")
+	for _, field := range []string{"backend", "protocol", "backend_pool", "shard_tag", "backend_node"} {
+		assertStringPropertyMinLength(t, entrySchema, field, 1)
+	}
 
 	setSchema := contract.Components.Schemas["UserBackendPinRequest"].Value
 	if !schemaRejectsAdditionalProperties(setSchema) {
 		t.Fatal("UserBackendPinRequest must reject additional properties")
 	}
 
-	assertSchemaRequires(t, setSchema, "backend", "strategy", "reason")
+	assertSchemaRequires(t, setSchema, "strategy", "reason")
+	assertSchemaPropertiesExactly(t, setSchema, "backend", "backend_node", "backend_pool", "protocol", "reason", "strategy")
+	assertSchemaRejectsBothAndNeitherTargets(t, setSchema)
 	assertSchemaPropertyRef(t, setSchema, "strategy", "#/components/schemas/UserMoveRequestStrategy")
+	for _, field := range []string{"backend", "backend_node", "protocol", "backend_pool", "reason"} {
+		assertStringPropertyMinLength(t, setSchema, field, 1)
+	}
 
 	clearSchema := contract.Components.Schemas["UserBackendPinClearRequest"].Value
 	if !schemaRejectsAdditionalProperties(clearSchema) {
@@ -148,6 +164,11 @@ func TestOpenAPIContractIncludesUserBackendPinOperations(t *testing.T) {
 	}
 
 	assertSchemaRequires(t, clearSchema, "reason")
+	assertSchemaPropertiesExactly(t, clearSchema, "backend_pool", "protocol", "reason")
+	assertSchemaRejectsPartialScope(t, clearSchema)
+	for _, field := range []string{"protocol", "backend_pool", "reason"} {
+		assertStringPropertyMinLength(t, clearSchema, field, 1)
+	}
 }
 
 // TestOpenAPIContractIncludesUserHoldOperations checks the user-hold contract.
@@ -215,6 +236,36 @@ func TestOpenAPIContractIncludesRouteLookupBackendPin(t *testing.T) {
 	}
 
 	assertSchemaRequires(t, pinSchema, "present", "applied", "reason")
+
+	for _, field := range []string{"operator_reason", "reason_text", "user_key", "recipient"} {
+		if _, ok := pinSchema.Properties[field]; ok {
+			t.Fatalf("RouteLookupBackendPin must not expose %q", field)
+		}
+	}
+
+	if _, ok := pinSchema.Properties["backend_node"]; !ok {
+		t.Fatal("RouteLookupBackendPin must expose backend_node for aggregate diagnostics")
+	}
+
+	if _, ok := pinSchema.Properties["scope_count"]; !ok {
+		t.Fatal("RouteLookupBackendPin must expose bounded scope_count")
+	}
+
+	if _, ok := pinSchema.Properties["current_scope_unpinned"]; !ok {
+		t.Fatal("RouteLookupBackendPin must expose current_scope_unpinned")
+	}
+
+	assertSchemaArrayItemsRef(t, pinSchema, "other_scopes", "#/components/schemas/RouteLookupBackendPinScope")
+
+	scopeSchema := contract.Components.Schemas["RouteLookupBackendPinScope"].Value
+	if !schemaRejectsAdditionalProperties(scopeSchema) {
+		t.Fatal("RouteLookupBackendPinScope must reject additional properties")
+	}
+
+	assertSchemaRequires(t, scopeSchema, "protocol", "backend_pool")
+	assertSchemaPropertiesExactly(t, scopeSchema, "backend_pool", "protocol")
+	assertStringPropertyMinLength(t, scopeSchema, "protocol", 1)
+	assertStringPropertyMinLength(t, scopeSchema, "backend_pool", 1)
 }
 
 // TestOpenAPIContractIncludesRouteLookupUserHold checks hold diagnostics.
@@ -400,6 +451,35 @@ func TestRouteLookupContractExcludesForbiddenFields(t *testing.T) {
 	}
 }
 
+// assertBackendPinAggregateSchema checks the aggregate backend-pin read shape.
+func assertBackendPinAggregateSchema(t *testing.T, name string, schema *openapi3.Schema) {
+	t.Helper()
+
+	if !schemaRejectsAdditionalProperties(schema) {
+		t.Fatalf("%s must reject additional properties", name)
+	}
+
+	assertSchemaRequires(t, schema, "present", "user_key", "pins")
+	assertSchemaPropertiesExactly(
+		t,
+		schema,
+		"active_session_count",
+		"backend",
+		"backend_node",
+		"backend_pool",
+		"generation",
+		"pins",
+		"present",
+		"protocol",
+		"shard_tag",
+		"strategy",
+		"user_key",
+	)
+	assertSchemaArrayItemsRef(t, schema, "pins", "#/components/schemas/UserBackendPinEntry")
+	assertSchemaPropertyRef(t, schema, "strategy", "#/components/schemas/UserMoveRequestStrategy")
+	assertStringPropertyMinLength(t, schema, "user_key", 1)
+}
+
 // assertSchemaRequires fails when a schema does not require all expected fields.
 func assertSchemaRequires(t *testing.T, schema *openapi3.Schema, fields ...string) {
 	t.Helper()
@@ -409,6 +489,24 @@ func assertSchemaRequires(t *testing.T, schema *openapi3.Schema, fields ...strin
 		if !found {
 			t.Fatalf("schema missing required field %q", field)
 		}
+	}
+}
+
+// assertSchemaPropertiesExactly fails when a schema exposes a different field set.
+func assertSchemaPropertiesExactly(t *testing.T, schema *openapi3.Schema, fields ...string) {
+	t.Helper()
+
+	got := make([]string, 0, len(schema.Properties))
+	for field := range schema.Properties {
+		got = append(got, field)
+	}
+
+	want := slices.Clone(fields)
+	slices.Sort(got)
+	slices.Sort(want)
+
+	if !slices.Equal(got, want) {
+		t.Fatalf("schema properties = %#v, want %#v", got, want)
 	}
 }
 
@@ -424,6 +522,121 @@ func assertSchemaPropertyRef(t *testing.T, schema *openapi3.Schema, property str
 	if propertySchema.Ref != ref {
 		t.Fatalf("schema property %q ref = %q, want %q", property, propertySchema.Ref, ref)
 	}
+}
+
+// assertSchemaArrayItemsRef fails when an array property does not reference the expected item schema.
+func assertSchemaArrayItemsRef(t *testing.T, schema *openapi3.Schema, property string, ref string) {
+	t.Helper()
+
+	propertySchema, ok := schema.Properties[property]
+	if !ok || propertySchema.Value == nil {
+		t.Fatalf("schema missing array property %q", property)
+	}
+
+	if propertySchema.Value.Items == nil || propertySchema.Value.Items.Ref != ref {
+		t.Fatalf("schema property %q item ref = %#v, want %q", property, propertySchema.Value.Items, ref)
+	}
+}
+
+// assertStringPropertyMinLength fails when a string property omits the expected minimum length.
+func assertStringPropertyMinLength(t *testing.T, schema *openapi3.Schema, property string, minimum uint64) {
+	t.Helper()
+
+	propertySchema, ok := schema.Properties[property]
+	if !ok || propertySchema.Value == nil {
+		t.Fatalf("schema missing string property %q", property)
+	}
+
+	if propertySchema.Value.MinLength != minimum {
+		t.Fatalf("schema property %q minLength = %d, want %d", property, propertySchema.Value.MinLength, minimum)
+	}
+}
+
+// assertSchemaRejectsBothAndNeitherTargets checks backend/backend_node exclusivity.
+func assertSchemaRejectsBothAndNeitherTargets(t *testing.T, schema *openapi3.Schema) {
+	t.Helper()
+
+	if schema.Not == nil || schema.Not.Value == nil || len(schema.Not.Value.AnyOf) != 2 {
+		t.Fatal("set schema must declare two rejected target combinations")
+	}
+
+	if !schemaBranchRequiresPair(schema.Not.Value.AnyOf[0], "backend", "backend_node") {
+		t.Fatal("set schema must reject backend and backend_node together")
+	}
+
+	if !schemaBranchMatchesMissingBoth(schema.Not.Value.AnyOf[1], "backend", "backend_node") {
+		t.Fatal("set schema must reject missing backend and backend_node")
+	}
+}
+
+// assertSchemaRejectsPartialScope checks clear request scope pairing.
+func assertSchemaRejectsPartialScope(t *testing.T, schema *openapi3.Schema) {
+	t.Helper()
+
+	if schema.Not == nil || schema.Not.Value == nil || len(schema.Not.Value.AnyOf) != 2 {
+		t.Fatal("clear schema must declare two rejected partial-scope combinations")
+	}
+
+	if !schemaBranchMatchesRequiredWithoutPair(schema.Not.Value.AnyOf[0], "protocol", "backend_pool") {
+		t.Fatal("clear schema must reject protocol without backend_pool")
+	}
+	if !schemaBranchMatchesRequiredWithoutPair(schema.Not.Value.AnyOf[1], "backend_pool", "protocol") {
+		t.Fatal("clear schema must reject backend_pool without protocol")
+	}
+}
+
+// schemaBranchRequiresPair reports whether a branch requires two fields together.
+func schemaBranchRequiresPair(branch *openapi3.SchemaRef, first string, second string) bool {
+	if branch == nil || branch.Value == nil {
+		return false
+	}
+
+	required := branch.Value.Required
+	return len(required) == 2 && slices.Contains(required, first) && slices.Contains(required, second)
+}
+
+// schemaBranchMatchesMissingBoth reports whether a branch matches both fields being absent.
+func schemaBranchMatchesMissingBoth(branch *openapi3.SchemaRef, first string, second string) bool {
+	if branch == nil || branch.Value == nil {
+		return false
+	}
+
+	nested := branch.Value.AllOf
+	if len(nested) != 2 {
+		return false
+	}
+
+	return schemaBranchMatchesMissingOne(nested[0], first) && schemaBranchMatchesMissingOne(nested[1], second)
+}
+
+// schemaBranchMatchesMissingOne reports whether a nested not branch matches one absent field.
+func schemaBranchMatchesMissingOne(branch *openapi3.SchemaRef, field string) bool {
+	if branch == nil || branch.Value == nil || branch.Value.Not == nil || branch.Value.Not.Value == nil {
+		return false
+	}
+
+	required := branch.Value.Not.Value.Required
+	return len(required) == 1 && required[0] == field
+}
+
+// schemaBranchMatchesRequiredWithoutPair reports whether one half-scoped payload is matched.
+func schemaBranchMatchesRequiredWithoutPair(branch *openapi3.SchemaRef, present string, missing string) bool {
+	if branch == nil || branch.Value == nil {
+		return false
+	}
+
+	nested := branch.Value.AllOf
+	if len(nested) != 2 {
+		return false
+	}
+
+	if nested[0].Value == nil {
+		return false
+	}
+
+	return len(nested[0].Value.Required) == 1 &&
+		nested[0].Value.Required[0] == present &&
+		schemaBranchMatchesMissingOne(nested[1], missing)
 }
 
 // operationHasParameter reports whether an operation declares one query parameter.

@@ -20,6 +20,10 @@
 package config
 
 import (
+	"fmt"
+	"sort"
+	"strings"
+
 	"github.com/go-playground/validator/v10"
 	"github.com/spf13/viper"
 )
@@ -339,6 +343,67 @@ type DirectorConfig struct {
 	Maintenance      MaintenanceConfig            `mapstructure:"maintenance" yaml:"maintenance" validate:"required"`
 	BackendPools     map[string]BackendPoolConfig `mapstructure:"backend_pools" yaml:"backend_pools" validate:"required,min=1,dive"`
 	Backends         map[string]BackendConfig     `mapstructure:"backends" yaml:"backends" validate:"required,min=1,dive"`
+}
+
+// BackendPinScope identifies one active protocol and backend-pool placement surface.
+type BackendPinScope struct {
+	Protocol    string
+	BackendPool string
+}
+
+// BackendPinRequiredScopes derives active backend-pin scopes from configured listeners.
+func (d DirectorConfig) BackendPinRequiredScopes() ([]BackendPinScope, error) {
+	d = d.Normalize()
+
+	scopes := make(map[string]BackendPinScope)
+
+	for listenerName, listener := range d.Listeners {
+		protocol := strings.ToLower(strings.TrimSpace(listener.Protocol))
+		backendPool := strings.TrimSpace(listener.BackendPool)
+
+		if protocol == "" {
+			return nil, fmt.Errorf("director.listeners.%s.protocol is required", listenerName)
+		}
+
+		if backendPool == "" {
+			return nil, fmt.Errorf("director.listeners.%s.backend_pool is required", listenerName)
+		}
+
+		pool, ok := d.BackendPools[backendPool]
+		if !ok {
+			return nil, fmt.Errorf("director.listeners.%s.backend_pool references unknown pool %s", listenerName, backendPool)
+		}
+
+		poolProtocol := strings.ToLower(strings.TrimSpace(pool.Protocol))
+		if poolProtocol == "" {
+			return nil, fmt.Errorf("director.backend_pools.%s.protocol is required", backendPool)
+		}
+
+		if protocol != poolProtocol {
+			return nil, fmt.Errorf("director.listeners.%s.backend_pool references pool with different protocol %s", listenerName, backendPool)
+		}
+
+		key := protocol + "\x00" + backendPool
+		scopes[key] = BackendPinScope{Protocol: protocol, BackendPool: backendPool}
+	}
+
+	if len(scopes) == 0 {
+		return nil, fmt.Errorf("director.listeners must define at least one backend pin scope")
+	}
+
+	keys := make([]string, 0, len(scopes))
+	for key := range scopes {
+		keys = append(keys, key)
+	}
+
+	sort.Strings(keys)
+
+	required := make([]BackendPinScope, 0, len(keys))
+	for _, key := range keys {
+		required = append(required, scopes[key])
+	}
+
+	return required, nil
 }
 
 type DirectorSecurityConfig struct {

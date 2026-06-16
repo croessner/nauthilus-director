@@ -335,6 +335,7 @@ func TestAuthenticatedPathPassesApplicableOperatorBackendPin(t *testing.T) {
 			Protocol:          protocolIMAP,
 			BackendPool:       "imap-default",
 			ShardTag:          "mailstore-a",
+			BackendNode:       "mailstore-c-node-1",
 		},
 	}
 	selector := &recordingBackendSelector{result: backend.SelectionResult{Backend: backend.Backend{Identifier: "mailstore-c-imap"}}}
@@ -361,8 +362,8 @@ func TestAuthenticatedPathPassesApplicableOperatorBackendPin(t *testing.T) {
 	}
 }
 
-// TestAuthenticatedPathIgnoresCrossShardOperatorBackendPin verifies pins cannot move shards.
-func TestAuthenticatedPathIgnoresCrossShardOperatorBackendPin(t *testing.T) {
+// TestAuthenticatedPathRejectsCrossShardOperatorBackendPin verifies stale scoped pins fail closed.
+func TestAuthenticatedPathRejectsCrossShardOperatorBackendPin(t *testing.T) {
 	authenticator := &recordingAuthenticator{
 		result: nauthilus.AuthResult{
 			Decision: nauthilus.DecisionAuthenticated,
@@ -384,6 +385,7 @@ func TestAuthenticatedPathIgnoresCrossShardOperatorBackendPin(t *testing.T) {
 			Protocol:          protocolIMAP,
 			BackendPool:       "imap-default",
 			ShardTag:          "mailstore-c",
+			BackendNode:       "mailstore-c-node-1",
 		},
 	}
 	selector := &recordingBackendSelector{result: backend.SelectionResult{Backend: backend.Backend{Identifier: "mailstore-a-imap"}}}
@@ -391,14 +393,14 @@ func TestAuthenticatedPathIgnoresCrossShardOperatorBackendPin(t *testing.T) {
 
 	harness.expectLine(t, greetingLine)
 	harness.write(t, `A001 LOGIN "alice@example.test" "secret-password"`+"\r\n")
-	harness.expectLine(t, "A001 OK Authentication completed\r\n")
+	harness.expectLine(t, "A001 NO [UNAVAILABLE] Authentication service temporarily unavailable\r\n")
 
-	if store.record.ShardTag != "mailstore-a" {
-		t.Fatalf("session open shard = %q, want routed shard", store.record.ShardTag)
+	if store.calls != 0 || store.reserveCalls != 0 || store.attachCalls != 0 {
+		t.Fatalf("placement side effects = session:%d reserve:%d attach:%d, want none", store.calls, store.reserveCalls, store.attachCalls)
 	}
 
-	if selector.request.OperatorBackendIdentifier != "" {
-		t.Fatalf("operator backend pin = %q, want ignored across shard boundary", selector.request.OperatorBackendIdentifier)
+	if selector.calls != 0 {
+		t.Fatalf("selector calls = %d, want stale pin rejection before selection", selector.calls)
 	}
 }
 
@@ -425,6 +427,7 @@ func TestAuthenticatedPathKeepsActiveBackendSeparateFromOperatorPin(t *testing.T
 			Protocol:          protocolIMAP,
 			BackendPool:       "imap-default",
 			ShardTag:          "mailstore-c",
+			BackendNode:       "mailstore-c-node-1",
 		},
 	}
 	selector := &recordingBackendSelector{result: backend.SelectionResult{Backend: backend.Backend{Identifier: "mailstore-b-imap"}}}
@@ -468,6 +471,7 @@ func TestAuthenticatedPlacementGateRunsBeforeRuntimeReads(t *testing.T) {
 				Protocol:          protocolIMAP,
 				BackendPool:       "imap-default",
 				ShardTag:          "mailstore-a",
+				BackendNode:       "mailstore-c-node-1",
 			}
 
 			return runtimectl.PlacementGateResult{
@@ -557,6 +561,7 @@ func TestAuthenticatedPathDefersOperatorPinDuringActiveAffinity(t *testing.T) {
 			Protocol:          protocolIMAP,
 			BackendPool:       "imap-default",
 			ShardTag:          "mailstore-a",
+			BackendNode:       "mailstore-c-node-1",
 			Strategy:          "drain_existing",
 		},
 	}

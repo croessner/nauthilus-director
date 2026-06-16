@@ -1,7 +1,7 @@
 .\" Copyright (C) 2026 Christian Rößner
 .\"
 .\" SPDX-License-Identifier: AGPL-3.0-only
-.TH NAUTHILUS-DIRECTORCTL 1 "2026-06-05" "nauthilus-director" "User Commands"
+.TH NAUTHILUS-DIRECTORCTL 1 "2026-06-16" "nauthilus-director" "User Commands"
 .SH NAME
 nauthilus-directorctl \- control a running Nauthilus Director
 .SH SYNOPSIS
@@ -285,7 +285,11 @@ Set user affinity for future sessions.
 Clear inactive user affinity.
 .TP
 .BI "users backend-pin show " user-key
-Show the concrete backend pin for one user.
+Show all scoped backend pins for one user.
+Text output prints one deterministic line per scoped pin, sorted by protocol and
+backend pool, and includes protocol, backend pool, backend identifier, backend
+node, shard tag, strategy, generation and active session count when present.
+JSON output returns the generated aggregate backend-pin response body.
 .TP
 .BI "users backend-pin set " user-key " --backend " identifier " --strategy " strategy " --reason " text
 Set a runtime backend pin for one user and one concrete configured backend.
@@ -294,8 +298,47 @@ is excluded from general placement by runtime weight while selected test users
 must still reach it.
 The target must be a configured backend identifier.
 The pin is scoped to that backend's protocol and backend pool, and it derives
-the effective shard from the backend registry instead of trusting operator
-input.
+the protocol, backend pool, effective shard and backend node from the backend
+registry instead of trusting operator input.
+.TP
+.BI "users backend-pin set " user-key " --backend-node " node " --strategy " strategy " --reason " text
+Resolve a backend node to every configured backend-pin protocol scope and set
+those pins as one runtime workflow.
+The server fails without partial state if the backend node is unknown, missing a
+required configured scope, resolves one scope ambiguously or maps to conflicting
+shards.
+.TP
+.BI "users backend-pin set " user-key " --backend-node " node " --protocol " protocol " --backend-pool " pool " --strategy " strategy " --reason " text
+Resolve one backend-node protocol/backend-pool scope and set only that scoped
+pin.
+The CLI requires
+.B --protocol
+and
+.B --backend-pool
+together for scoped backend-node requests.
+.PP
+Examples:
+.RS
+.nf
+nauthilus-directorctl users backend-pin set user@example.org \\
+  --backend mailstack-canary-imap \\
+  --strategy new_sessions_only \\
+  --reason "commission IMAP"
+
+nauthilus-directorctl users backend-pin set user@example.org \\
+  --backend-node mailstack-canary \\
+  --strategy new_sessions_only \\
+  --reason "mailbox canary"
+
+nauthilus-directorctl users backend-pin set user@example.org \\
+  --backend-node mailstack-canary \\
+  --protocol imap \\
+  --backend-pool imap-default \\
+  --strategy new_sessions_only \\
+  --reason "commission IMAP"
+.fi
+.RE
+.PP
 A backend pin applies only when the user's selected shard and any active or
 retained backend-node binding already match the pinned backend. Use
 .B users move
@@ -313,9 +356,32 @@ and
 .BR drain_existing .
 .TP
 .BI "users backend-pin clear " user-key " --reason " text
-Clear the concrete backend pin for one user without rewriting YAML
+Clear every scoped backend pin for one user without rewriting YAML
 configuration.
-Clearing a backend pin is explicit and does not terminate sessions, clear shard
+.TP
+.BI "users backend-pin clear " user-key " --protocol " protocol " --backend-pool " pool " --reason " text
+Clear one protocol/backend-pool backend pin while preserving every other scoped
+pin for the same user.
+The CLI requires
+.B --protocol
+and
+.B --backend-pool
+together for scoped clears.
+.PP
+Examples:
+.RS
+.nf
+nauthilus-directorctl users backend-pin clear user@example.org \\
+  --reason "mailbox canary done"
+
+nauthilus-directorctl users backend-pin clear user@example.org \\
+  --protocol imap \\
+  --backend-pool imap-default \\
+  --reason "IMAP canary done"
+.fi
+.RE
+.PP
+Clearing backend pins is explicit and does not terminate sessions, clear shard
 affinity or remove a pending shard move by itself.
 .TP
 .BI "users hold show " user-key

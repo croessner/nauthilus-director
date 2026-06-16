@@ -45,6 +45,13 @@ const (
 	moveStrategyNewSessionsOnly = "new_sessions_only"
 
 	operationUserHoldCheck = "user_hold_check"
+
+	backendPinScopeSeparator = "|"
+	backendPinScriptModeGet  = "get"
+	backendPinScriptModeList = "list"
+
+	backendPinFieldPinCount = "pin_count"
+	backendPinFieldLegacy   = "legacy"
 )
 
 // MoveUser records a user move strategy in Redis-backed affinity runtime state.
@@ -130,20 +137,67 @@ func (s *RedisSessionStore) SetUserBackendPin(
 		return UserBackendPinRecord{}, err
 	}
 
+	record, err := s.SetUserBackendPins(ctx, UserBackendPinsSetRequest{
+		Key:      request.Key,
+		Pins:     []UserBackendPinScope{backendPinScopeFromSetRequest(request)},
+		Strategy: request.Strategy,
+		Reason:   request.Reason,
+		Actor:    request.Actor,
+	})
+	if err != nil {
+		return UserBackendPinRecord{}, err
+	}
+
+	if len(record.Pins) != 1 {
+		return UserBackendPinRecord{}, newStateError(RedisErrorKindAmbiguousState, scriptBackendPinSet, "single pin result invalid", nil)
+	}
+
+	return record.Pins[0], nil
+}
+
+// SetUserBackendPins stores one or more scoped backend overrides atomically.
+func (s *RedisSessionStore) SetUserBackendPins(
+	ctx context.Context,
+	request UserBackendPinsSetRequest,
+) (UserBackendPinsRecord, error) {
+	if err := validateUserBackendPinsSetRequest(request); err != nil {
+		return UserBackendPinsRecord{}, err
+	}
+
+	keys, err := s.keys.AffinityKeys(request.Key.Tenant, request.Key.AccountKey)
+	if err != nil {
+		return UserBackendPinsRecord{}, err
+	}
+
+	args := backendPinSetScriptArgs(s.keys.schemaVersion, request)
+	value, err := s.runScript(ctx, scriptBackendPinSet, s.backendPinSetScriptKeys(keys),
+		args...,
+	)
+	if err != nil {
+		return UserBackendPinsRecord{}, err
+	}
+
+	return parseUserBackendPinsRecord(request.Key, value)
+}
+
+// GetUserBackendPin reads a concrete backend override without mutating leases.
+func (s *RedisSessionStore) GetUserBackendPin(
+	ctx context.Context,
+	request UserBackendPinGetRequest,
+) (UserBackendPinRecord, error) {
+	if err := validateUserBackendPinGetRequest(request); err != nil {
+		return UserBackendPinRecord{}, err
+	}
+
 	keys, err := s.keys.AffinityKeys(request.Key.Tenant, request.Key.AccountKey)
 	if err != nil {
 		return UserBackendPinRecord{}, err
 	}
 
-	value, err := s.runScript(ctx, scriptBackendPinSet, s.backendPinSetScriptKeys(keys),
-		normalizedStateValue(request.BackendIdentifier),
+	value, err := s.runScript(ctx, scriptBackendPinGet, s.backendPinGetScriptKeys(keys),
+		backendPinScriptModeGet,
 		normalizedStateValue(request.Protocol),
 		normalizedStateValue(request.BackendPool),
-		normalizedStateValue(request.ShardTag),
-		normalizedStateValue(request.Strategy),
-		normalizedStateValue(request.Reason),
-		normalizedStateValue(request.Actor),
-		s.keys.schemaVersion,
 		normalizedStateValue(request.Key.Tenant),
 		normalizedStateValue(request.Key.AccountKey),
 	)
@@ -154,26 +208,32 @@ func (s *RedisSessionStore) SetUserBackendPin(
 	return parseUserBackendPinRecord(request.Key, value)
 }
 
-// GetUserBackendPin reads a concrete backend override without mutating leases.
-func (s *RedisSessionStore) GetUserBackendPin(
+// ListUserBackendPins reads all scoped backend overrides in deterministic order.
+func (s *RedisSessionStore) ListUserBackendPins(
 	ctx context.Context,
-	request UserBackendPinGetRequest,
-) (UserBackendPinRecord, error) {
+	request UserBackendPinsListRequest,
+) (UserBackendPinsRecord, error) {
 	if err := validateAffinityKey(request.Key, scriptBackendPinGet); err != nil {
-		return UserBackendPinRecord{}, err
+		return UserBackendPinsRecord{}, err
 	}
 
 	keys, err := s.keys.AffinityKeys(request.Key.Tenant, request.Key.AccountKey)
 	if err != nil {
-		return UserBackendPinRecord{}, err
+		return UserBackendPinsRecord{}, err
 	}
 
-	value, err := s.runScript(ctx, scriptBackendPinGet, s.backendPinGetScriptKeys(keys))
+	value, err := s.runScript(ctx, scriptBackendPinGet, s.backendPinGetScriptKeys(keys),
+		backendPinScriptModeList,
+		"",
+		"",
+		normalizedStateValue(request.Key.Tenant),
+		normalizedStateValue(request.Key.AccountKey),
+	)
 	if err != nil {
-		return UserBackendPinRecord{}, err
+		return UserBackendPinsRecord{}, err
 	}
 
-	return parseUserBackendPinRecord(request.Key, value)
+	return parseUserBackendPinsRecord(request.Key, value)
 }
 
 // ClearUserBackendPin removes only the concrete backend override for an affinity key.
@@ -181,7 +241,7 @@ func (s *RedisSessionStore) ClearUserBackendPin(
 	ctx context.Context,
 	request UserBackendPinClearRequest,
 ) (UserBackendPinRecord, error) {
-	if err := validateUserAction(request.Key, request.Reason, scriptBackendPinClear); err != nil {
+	if err := validateUserBackendPinClearRequest(request); err != nil {
 		return UserBackendPinRecord{}, err
 	}
 
@@ -195,12 +255,43 @@ func (s *RedisSessionStore) ClearUserBackendPin(
 		normalizedStateValue(request.Actor),
 		normalizedStateValue(request.Key.Tenant),
 		normalizedStateValue(request.Key.AccountKey),
+		normalizedStateValue(request.Protocol),
+		normalizedStateValue(request.BackendPool),
 	)
 	if err != nil {
 		return UserBackendPinRecord{}, err
 	}
 
 	return parseUserBackendPinRecord(request.Key, value)
+}
+
+// ClearUserBackendPins removes every scoped backend override for an affinity key.
+func (s *RedisSessionStore) ClearUserBackendPins(
+	ctx context.Context,
+	request UserBackendPinsClearRequest,
+) (UserBackendPinsRecord, error) {
+	if err := validateUserAction(request.Key, request.Reason, scriptBackendPinClear); err != nil {
+		return UserBackendPinsRecord{}, err
+	}
+
+	keys, err := s.keys.AffinityKeys(request.Key.Tenant, request.Key.AccountKey)
+	if err != nil {
+		return UserBackendPinsRecord{}, err
+	}
+
+	value, err := s.runScript(ctx, scriptBackendPinClear, s.backendPinClearScriptKeys(keys),
+		normalizedStateValue(request.Reason),
+		normalizedStateValue(request.Actor),
+		normalizedStateValue(request.Key.Tenant),
+		normalizedStateValue(request.Key.AccountKey),
+		"",
+		"",
+	)
+	if err != nil {
+		return UserBackendPinsRecord{}, err
+	}
+
+	return parseUserBackendPinsRecord(request.Key, value)
 }
 
 // SetUserHold stores one bounded placement hold for an affinity key.
@@ -412,6 +503,31 @@ func (s *RedisSessionStore) backendPinGetScriptKeys(keys AffinityKeys) []string 
 // backendPinClearScriptKeys returns the same-slot key list for backend-pin clears.
 func (s *RedisSessionStore) backendPinClearScriptKeys(keys AffinityKeys) []string {
 	return []string{keys.Sessions, keys.BackendPin}
+}
+
+// backendPinSetScriptArgs flattens a validated scoped pin set for Lua.
+func backendPinSetScriptArgs(schemaVersion int, request UserBackendPinsSetRequest) []any {
+	args := []any{
+		normalizedStateValue(request.Reason),
+		normalizedStateValue(request.Actor),
+		schemaVersion,
+		normalizedStateValue(request.Key.Tenant),
+		normalizedStateValue(request.Key.AccountKey),
+		normalizedStateValue(request.Strategy),
+		len(request.Pins),
+	}
+
+	for _, pin := range request.Pins {
+		args = append(args,
+			normalizedStateValue(pin.BackendIdentifier),
+			normalizedStateValue(pin.Protocol),
+			normalizedStateValue(pin.BackendPool),
+			normalizedStateValue(pin.ShardTag),
+			normalizedStateValue(pin.BackendNode),
+		)
+	}
+
+	return args
 }
 
 // userHoldScriptKeys returns the same-slot key list for placement-hold operations.
@@ -633,24 +749,34 @@ func validateUserMoveRequest(request UserMoveRequest) error {
 
 // validateUserBackendPinSetRequest rejects ambiguous backend-pin payloads.
 func validateUserBackendPinSetRequest(request UserBackendPinSetRequest) error {
+	return validateUserBackendPinsSetRequest(UserBackendPinsSetRequest{
+		Key:      request.Key,
+		Pins:     []UserBackendPinScope{backendPinScopeFromSetRequest(request)},
+		Strategy: request.Strategy,
+		Reason:   request.Reason,
+		Actor:    request.Actor,
+	})
+}
+
+// backendPinScopeFromSetRequest adapts the singular request to a scoped pin.
+func backendPinScopeFromSetRequest(request UserBackendPinSetRequest) UserBackendPinScope {
+	return UserBackendPinScope{
+		BackendIdentifier: request.BackendIdentifier,
+		Protocol:          request.Protocol,
+		BackendPool:       request.BackendPool,
+		ShardTag:          request.ShardTag,
+		BackendNode:       request.BackendNode,
+	}
+}
+
+// validateUserBackendPinsSetRequest rejects ambiguous scoped backend-pin payloads.
+func validateUserBackendPinsSetRequest(request UserBackendPinsSetRequest) error {
 	if err := validateAffinityKey(request.Key, scriptBackendPinSet); err != nil {
 		return err
 	}
 
-	if strings.TrimSpace(request.BackendIdentifier) == "" {
-		return newStateError(RedisErrorKindAmbiguousState, scriptBackendPinSet, "backend id required", nil)
-	}
-
-	if strings.TrimSpace(request.Protocol) == "" {
-		return newStateError(RedisErrorKindAmbiguousState, scriptBackendPinSet, "protocol required", nil)
-	}
-
-	if strings.TrimSpace(request.BackendPool) == "" {
-		return newStateError(RedisErrorKindAmbiguousState, scriptBackendPinSet, "backend pool required", nil)
-	}
-
-	if strings.TrimSpace(request.ShardTag) == "" {
-		return newStateError(RedisErrorKindAmbiguousState, scriptBackendPinSet, "shard tag required", nil)
+	if len(request.Pins) == 0 {
+		return newStateError(RedisErrorKindAmbiguousState, scriptBackendPinSet, "backend pin required", nil)
 	}
 
 	switch strings.TrimSpace(request.Strategy) {
@@ -663,7 +789,105 @@ func validateUserBackendPinSetRequest(request UserBackendPinSetRequest) error {
 		return newStateError(RedisErrorKindAmbiguousState, scriptBackendPinSet, "reason required", nil)
 	}
 
+	seen := make(map[string]struct{}, len(request.Pins))
+	for _, pin := range request.Pins {
+		if err := validateUserBackendPinScope(pin, scriptBackendPinSet); err != nil {
+			return err
+		}
+
+		scope, err := backendPinScopeField(pin.Protocol, pin.BackendPool, scriptBackendPinSet)
+		if err != nil {
+			return err
+		}
+
+		if _, ok := seen[scope]; ok {
+			return newStateError(RedisErrorKindAmbiguousState, scriptBackendPinSet, "duplicate backend pin scope", nil)
+		}
+
+		seen[scope] = struct{}{}
+	}
+
 	return nil
+}
+
+// validateUserBackendPinScope checks one concrete protocol and backend-pool pin.
+func validateUserBackendPinScope(pin UserBackendPinScope, operation string) error {
+	if strings.TrimSpace(pin.BackendIdentifier) == "" {
+		return newStateError(RedisErrorKindAmbiguousState, operation, "backend id required", nil)
+	}
+
+	if strings.TrimSpace(pin.Protocol) == "" {
+		return newStateError(RedisErrorKindAmbiguousState, operation, "protocol required", nil)
+	}
+
+	if strings.TrimSpace(pin.BackendPool) == "" {
+		return newStateError(RedisErrorKindAmbiguousState, operation, "backend pool required", nil)
+	}
+
+	if strings.TrimSpace(pin.ShardTag) == "" {
+		return newStateError(RedisErrorKindAmbiguousState, operation, "shard tag required", nil)
+	}
+
+	if strings.TrimSpace(pin.BackendNode) == "" {
+		return newStateError(RedisErrorKindAmbiguousState, operation, "backend node required", nil)
+	}
+
+	_, err := backendPinScopeField(pin.Protocol, pin.BackendPool, operation)
+
+	return err
+}
+
+// validateUserBackendPinGetRequest checks an optional protocol/backend-pool scope.
+func validateUserBackendPinGetRequest(request UserBackendPinGetRequest) error {
+	if err := validateAffinityKey(request.Key, scriptBackendPinGet); err != nil {
+		return err
+	}
+
+	return validateOptionalBackendPinScope(request.Protocol, request.BackendPool, scriptBackendPinGet)
+}
+
+// validateUserBackendPinClearRequest checks one optional clear scope and audit reason.
+func validateUserBackendPinClearRequest(request UserBackendPinClearRequest) error {
+	if err := validateUserAction(request.Key, request.Reason, scriptBackendPinClear); err != nil {
+		return err
+	}
+
+	return validateOptionalBackendPinScope(request.Protocol, request.BackendPool, scriptBackendPinClear)
+}
+
+// validateOptionalBackendPinScope requires protocol and backend pool together.
+func validateOptionalBackendPinScope(protocol string, backendPool string, operation string) error {
+	protocol = strings.TrimSpace(protocol)
+	backendPool = strings.TrimSpace(backendPool)
+
+	if protocol == "" && backendPool == "" {
+		return nil
+	}
+
+	if protocol == "" || backendPool == "" {
+		return newStateError(RedisErrorKindAmbiguousState, operation, "backend pin scope incomplete", nil)
+	}
+
+	_, err := backendPinScopeField(protocol, backendPool, operation)
+
+	return err
+}
+
+// backendPinScopeField derives the bounded Redis field scope name.
+func backendPinScopeField(protocol string, backendPool string, operation string) (string, error) {
+	protocol = strings.ToLower(strings.TrimSpace(protocol))
+	backendPool = strings.TrimSpace(backendPool)
+
+	if protocol == "" || backendPool == "" {
+		return "", newStateError(RedisErrorKindAmbiguousState, operation, "backend pin scope required", nil)
+	}
+
+	if strings.ContainsAny(protocol, backendPinScopeSeparator+"\n\r\t") ||
+		strings.ContainsAny(backendPool, backendPinScopeSeparator+"\n\r\t") {
+		return "", newStateError(RedisErrorKindAmbiguousState, operation, "backend pin scope invalid", nil)
+	}
+
+	return protocol + backendPinScopeSeparator + backendPool, nil
 }
 
 // validateUserHoldSetRequest rejects ambiguous placement-hold payloads.
@@ -773,31 +997,63 @@ func parseUserRuntimeRecord(key AffinityKey, value any) (UserRuntimeRecord, erro
 	return record, nil
 }
 
-// parseUserBackendPinRecord converts a backend-pin script result.
+// parseUserBackendPinRecord converts a single backend-pin script result.
 func parseUserBackendPinRecord(defaultKey AffinityKey, value any) (UserBackendPinRecord, error) {
-	fields, err := parseScriptFields(value)
+	record, err := parseUserBackendPinsRecord(defaultKey, value)
 	if err != nil {
 		return UserBackendPinRecord{}, err
 	}
 
-	record := UserBackendPinRecord{
-		Status:            fields[scriptFieldStatus],
-		Key:               defaultKey,
-		BackendIdentifier: strings.TrimSpace(fields[scriptFieldBackendID]),
-		Protocol:          strings.TrimSpace(fields[scriptFieldProtocol]),
-		BackendPool:       strings.TrimSpace(fields[scriptFieldBackendPool]),
-		ShardTag:          strings.TrimSpace(fields[scriptFieldShardTag]),
-		Strategy:          strings.TrimSpace(fields[scriptFieldStrategy]),
-		Generation:        strings.TrimSpace(fields[scriptFieldGeneration]),
+	switch len(record.Pins) {
+	case 0:
+		return UserBackendPinRecord{
+			Present:            record.Present,
+			Status:             record.Status,
+			Key:                record.Key,
+			Generation:         record.Generation,
+			ActiveSessionCount: record.ActiveSessionCount,
+			ServerTime:         record.ServerTime,
+		}, nil
+	case 1:
+		return record.Pins[0], nil
+	default:
+		if record.Status == scriptStatusCleared && !record.Present {
+			return UserBackendPinRecord{
+				Present:            record.Present,
+				Status:             record.Status,
+				Key:                record.Key,
+				Generation:         record.Generation,
+				ActiveSessionCount: record.ActiveSessionCount,
+				ServerTime:         record.ServerTime,
+			}, nil
+		}
+
+		return UserBackendPinRecord{}, newStateError(RedisErrorKindAmbiguousState, "script_result", "single backend pin result ambiguous", nil)
+	}
+}
+
+// parseUserBackendPinsRecord converts a deterministic backend-pin set result.
+//
+//nolint:gocyclo // Redis script payload parsing must classify legacy, scoped and cleared forms.
+func parseUserBackendPinsRecord(defaultKey AffinityKey, value any) (UserBackendPinsRecord, error) {
+	fields, err := parseScriptFields(value)
+	if err != nil {
+		return UserBackendPinsRecord{}, err
+	}
+
+	record := UserBackendPinsRecord{
+		Status:     fields[scriptFieldStatus],
+		Key:        defaultKey,
+		Generation: strings.TrimSpace(fields[scriptFieldGeneration]),
 	}
 
 	if record.Status == "" {
-		return UserBackendPinRecord{}, newStateError(RedisErrorKindAmbiguousState, "script_result", "status required", nil)
+		return UserBackendPinsRecord{}, newStateError(RedisErrorKindAmbiguousState, "script_result", "status required", nil)
 	}
 
 	present, err := parsePresentField(fields)
 	if err != nil {
-		return UserBackendPinRecord{}, err
+		return UserBackendPinsRecord{}, err
 	}
 
 	record.Present = present
@@ -812,21 +1068,95 @@ func parseUserBackendPinRecord(defaultKey AffinityKey, value any) (UserBackendPi
 
 	record.ActiveSessionCount, err = parseIntField(fields, scriptFieldActiveSessionCount)
 	if err != nil {
-		return UserBackendPinRecord{}, err
+		return UserBackendPinsRecord{}, err
 	}
 
 	record.ServerTime, err = parseTimeField(fields, scriptFieldServerTimeMS)
 	if err != nil {
+		return UserBackendPinsRecord{}, err
+	}
+
+	pinCount, err := parseIntField(fields, backendPinFieldPinCount)
+	if err != nil {
+		return UserBackendPinsRecord{}, err
+	}
+
+	record.Pins = make([]UserBackendPinRecord, 0, pinCount)
+	for index := 1; index <= pinCount; index++ {
+		pin, err := parseIndexedBackendPinRecord(record, fields, index)
+		if err != nil {
+			return UserBackendPinsRecord{}, err
+		}
+
+		record.Pins = append(record.Pins, pin)
+	}
+
+	if record.Present && len(record.Pins) == 0 {
+		return UserBackendPinsRecord{}, newStateError(RedisErrorKindAmbiguousState, "script_result", "present backend pin missing", nil)
+	}
+
+	return record, nil
+}
+
+// parseIndexedBackendPinRecord parses one numbered pin from a script result.
+func parseIndexedBackendPinRecord(
+	set UserBackendPinsRecord,
+	fields map[string]string,
+	index int,
+) (UserBackendPinRecord, error) {
+	prefix := backendPinResultPrefix(index)
+	record := UserBackendPinRecord{
+		Present:            set.Present,
+		Status:             set.Status,
+		Key:                set.Key,
+		BackendIdentifier:  strings.TrimSpace(fields[prefix+scriptFieldBackendID]),
+		Protocol:           strings.TrimSpace(fields[prefix+scriptFieldProtocol]),
+		BackendPool:        strings.TrimSpace(fields[prefix+scriptFieldBackendPool]),
+		ShardTag:           strings.TrimSpace(fields[prefix+scriptFieldShardTag]),
+		BackendNode:        strings.TrimSpace(fields[prefix+scriptFieldBackendNode]),
+		Strategy:           strings.TrimSpace(fields[prefix+scriptFieldStrategy]),
+		Generation:         strings.TrimSpace(firstNonEmptyString(fields[prefix+scriptFieldGeneration], set.Generation)),
+		Reason:             strings.TrimSpace(fields[prefix+"reason"]),
+		Actor:              strings.TrimSpace(fields[prefix+"actor"]),
+		ActiveSessionCount: set.ActiveSessionCount,
+		ServerTime:         set.ServerTime,
+		Legacy:             strings.TrimSpace(fields[prefix+backendPinFieldLegacy]) == "1",
+	}
+
+	var err error
+
+	record.UpdatedAt, err = parseOptionalTimeField(fields, prefix+scriptFieldUpdatedAtMS)
+	if err != nil {
 		return UserBackendPinRecord{}, err
 	}
 
-	if record.Present {
-		if err := validatePresentBackendPinRecord(record); err != nil {
+	if record.UpdatedAt.IsZero() {
+		record.UpdatedAt = set.ServerTime
+	}
+
+	if record.Present || record.Status == scriptStatusCleared {
+		if err := validateBackendPinRecord(record); err != nil {
 			return UserBackendPinRecord{}, err
 		}
 	}
 
 	return record, nil
+}
+
+// backendPinResultPrefix returns the script field prefix for one result pin.
+func backendPinResultPrefix(index int) string {
+	return "pin_" + strconv.Itoa(index) + "_"
+}
+
+// firstNonEmptyString returns the first non-empty value after trimming space.
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+
+	return ""
 }
 
 // parseUserHoldRecord converts a placement-hold script result.
@@ -927,8 +1257,8 @@ func parsePresentField(fields map[string]string) (bool, error) {
 	}
 }
 
-// validatePresentBackendPinRecord rejects incomplete present backend-pin state.
-func validatePresentBackendPinRecord(record UserBackendPinRecord) error {
+// validateBackendPinRecord rejects incomplete backend-pin state.
+func validateBackendPinRecord(record UserBackendPinRecord) error {
 	if record.ServerTime.IsZero() {
 		return newStateError(RedisErrorKindAmbiguousState, "script_result", "server_time_ms required", nil)
 	}
@@ -942,6 +1272,10 @@ func validatePresentBackendPinRecord(record UserBackendPinRecord) error {
 		scriptFieldShardTag:    record.ShardTag,
 		scriptFieldStrategy:    record.Strategy,
 		scriptFieldGeneration:  record.Generation,
+	}
+
+	if !record.Legacy {
+		required[scriptFieldBackendNode] = record.BackendNode
 	}
 
 	for name, value := range required {

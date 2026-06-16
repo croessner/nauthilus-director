@@ -48,6 +48,49 @@ func TestDefaultsValidate(t *testing.T) {
 	}
 }
 
+// TestBackendPinRequiredScopesDeriveFromActiveListeners verifies listener-driven scope discovery.
+func TestBackendPinRequiredScopesDeriveFromActiveListeners(t *testing.T) {
+	scopes, err := DefaultConfig().Director.BackendPinRequiredScopes()
+	if err != nil {
+		t.Fatalf("BackendPinRequiredScopes returned error: %v", err)
+	}
+
+	if got, want := backendPinScopeNames(scopes), []string{
+		"imap/imap-default",
+		"lmtp/lmtp-default",
+		"pop3/pop3-default",
+		"sieve/sieve-default",
+	}; !slices.Equal(got, want) {
+		t.Fatalf("backend pin scopes = %#v, want %#v", got, want)
+	}
+}
+
+// TestBackendPinRequiredScopesIgnoreAbsentPOP3Listeners keeps optional protocols optional.
+func TestBackendPinRequiredScopesIgnoreAbsentPOP3Listeners(t *testing.T) {
+	cfg := DefaultConfig()
+	delete(cfg.Director.Listeners, "pop3")
+	delete(cfg.Director.Listeners, "pop3s")
+
+	scopes, err := cfg.Director.BackendPinRequiredScopes()
+	if err != nil {
+		t.Fatalf("BackendPinRequiredScopes returned error: %v", err)
+	}
+
+	if got := backendPinScopeNames(scopes); slices.Contains(got, "pop3/pop3-default") {
+		t.Fatalf("backend pin scopes = %#v, want no POP3 scope without POP3 listeners", got)
+	}
+}
+
+// backendPinScopeNames renders scopes for deterministic assertions.
+func backendPinScopeNames(scopes []BackendPinScope) []string {
+	names := make([]string, 0, len(scopes))
+	for _, scope := range scopes {
+		names = append(names, scope.Protocol+"/"+scope.BackendPool)
+	}
+
+	return names
+}
+
 // TestTargetConfigDecodesAndValidates keeps typed structs aligned with the documented target YAML.
 func TestTargetConfigDecodesAndValidates(t *testing.T) {
 	loader := NewLoader()

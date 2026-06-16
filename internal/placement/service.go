@@ -250,7 +250,11 @@ func (s *Service) openPlacement(ctx context.Context, request Request) (LeaseHand
 		return nil, err
 	}
 
-	pin, err := s.store.GetUserBackendPin(ctx, state.UserBackendPinGetRequest{Key: request.Key})
+	pin, err := s.store.GetUserBackendPin(ctx, state.UserBackendPinGetRequest{
+		Key:         request.Key,
+		Protocol:    request.Protocol,
+		BackendPool: request.BackendPool,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -476,7 +480,7 @@ func (s *Service) initialOperatorBackendPin(
 	}
 
 	if strings.TrimSpace(pin.ShardTag) != strings.TrimSpace(shardTag) {
-		return "", nil
+		return "", newPlacementError(ErrorKindNoBackend, "backend_pin", "operator backend pin shard mismatch", nil)
 	}
 
 	target, err := s.lookupBackendPinTarget(ctx, request, pin)
@@ -524,6 +528,10 @@ func (s *Service) lookupBackendPinTarget(ctx context.Context, request Request, p
 
 	if facts.EffectiveShard != strings.TrimSpace(pin.ShardTag) {
 		return backend.Backend{}, newPlacementError(ErrorKindNoBackend, "backend_pin", "operator backend pin shard mismatch", nil)
+	}
+
+	if facts.BackendNode != strings.TrimSpace(pin.BackendNode) {
+		return backend.Backend{}, newPlacementError(ErrorKindNoBackend, "backend_pin", "operator backend pin backend-node mismatch", nil)
 	}
 
 	return target, nil

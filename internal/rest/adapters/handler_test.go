@@ -14,6 +14,7 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
+//nolint:goconst,wsl_v5 // REST adapter fixtures repeat generated DTO field values intentionally.
 package adapters
 
 import (
@@ -91,6 +92,16 @@ func TestLookupRouteUsesInjectedSideEffectFreeDomainService(t *testing.T) {
 
 	if !routeResponse.BackendPin.Present || !routeResponse.BackendPin.Applied || routeResponse.BackendPin.Reason != testBackendPinApplied {
 		t.Fatalf("backend pin = %#v, want applied diagnostics", routeResponse.BackendPin)
+	}
+	assertStringPtrValue(t, "backend pin node", routeResponse.BackendPin.BackendNode, testBackendNode)
+	if routeResponse.BackendPin.ScopeCount == nil || *routeResponse.BackendPin.ScopeCount != 2 {
+		t.Fatalf("scope count = %#v, want 2", routeResponse.BackendPin.ScopeCount)
+	}
+	if routeResponse.BackendPin.CurrentScopeUnpinned == nil || *routeResponse.BackendPin.CurrentScopeUnpinned {
+		t.Fatalf("current scope unpinned = %#v, want false", routeResponse.BackendPin.CurrentScopeUnpinned)
+	}
+	if routeResponse.BackendPin.OtherScopes == nil || len(*routeResponse.BackendPin.OtherScopes) != 1 || (*routeResponse.BackendPin.OtherScopes)[0].Protocol != "lmtp" {
+		t.Fatalf("other scopes = %#v, want bounded LMTP context", routeResponse.BackendPin.OtherScopes)
 	}
 }
 
@@ -260,9 +271,7 @@ func TestRuntimeErrorsMapToStableStatuses(t *testing.T) {
 // TestGetUserBackendPinMapsAbsentDTO verifies absent read DTO mapping.
 func TestGetUserBackendPinMapsAbsentDTO(t *testing.T) {
 	service := &recordingUserBackendPinService{
-		readResult: runtime.UserBackendPinReadResult{
-			Pin: runtime.UserBackendPin{Present: false},
-		},
+		listResult: runtime.UserBackendPinsReadResult{},
 	}
 	handler := NewHandler(HandlerOptions{
 		Version:              testHandlerVersion,
@@ -283,30 +292,31 @@ func TestGetUserBackendPinMapsAbsentDTO(t *testing.T) {
 		t.Fatalf("read calls = %d, want 1", service.readCalls)
 	}
 
-	if service.readRequest.Key != (runtime.UserKey{Tenant: defaultTenant, UserHash: testBackendPinUserHash}) {
-		t.Fatalf("read key = %#v, want parsed default tenant key", service.readRequest.Key)
+	if service.listRequest.Key != (runtime.UserKey{Tenant: defaultTenant, UserHash: testBackendPinUserHash}) {
+		t.Fatalf("read key = %#v, want parsed default tenant key", service.listRequest.Key)
 	}
 
-	if pin.Present || pin.UserKey != testBackendPinUserHash || pin.Backend != nil || pin.Strategy != nil {
+	if pin.Present || pin.UserKey != testBackendPinUserHash || pin.Backend != nil || pin.Strategy != nil || len(pin.Pins) != 0 {
 		t.Fatalf("absent pin DTO = %#v, want only present=false and user key", pin)
 	}
 }
 
-// TestGetUserBackendPinMapsPresentDTO verifies present read DTO mapping.
+// TestGetUserBackendPinMapsPresentDTO verifies one-pin read DTO mapping.
 func TestGetUserBackendPinMapsPresentDTO(t *testing.T) {
 	service := &recordingUserBackendPinService{
-		readResult: runtime.UserBackendPinReadResult{
-			Pin: runtime.UserBackendPin{
+		listResult: runtime.UserBackendPinsReadResult{
+			Pins: []runtime.UserBackendPin{{
 				Present:            true,
 				Key:                runtime.UserKey{Tenant: testBackendPinTenant, UserHash: testBackendPinUserHash},
 				BackendIdentifier:  testPinnedBackend,
 				Protocol:           testBackendPinProtocol,
 				BackendPool:        testBackendPinPool,
 				EffectiveShard:     testBackendPinShard,
+				BackendNode:        testBackendNode,
 				Strategy:           runtime.MoveStrategyKickExisting,
 				Generation:         "42",
 				ActiveSessionCount: 3,
-			},
+			}},
 		},
 	}
 	handler := NewHandler(HandlerOptions{
@@ -336,9 +346,72 @@ func TestGetUserBackendPinMapsPresentDTO(t *testing.T) {
 	assertStringPtrValue(t, "protocol", pin.Protocol, testBackendPinProtocol)
 	assertStringPtrValue(t, "backend pool", pin.BackendPool, testBackendPinPool)
 	assertStringPtrValue(t, "shard tag", pin.ShardTag, testBackendPinShard)
+	assertStringPtrValue(t, "backend node", pin.BackendNode, testBackendNode)
 	assertStringPtrValue(t, "generation", pin.Generation, "42")
 	assertBackendPinStrategy(t, pin.Strategy, generated.KickExisting)
 	assertIntPtrValue(t, "active session count", pin.ActiveSessionCount, 3)
+
+	if len(pin.Pins) != 1 {
+		t.Fatalf("pins = %d, want one scoped entry", len(pin.Pins))
+	}
+	if entry := pin.Pins[0]; entry.Backend != testPinnedBackend || entry.BackendNode != testBackendNode || entry.Protocol != testBackendPinProtocol || entry.BackendPool != testBackendPinPool {
+		t.Fatalf("pin entry = %#v, want scoped backend facts", entry)
+	}
+}
+
+// TestGetUserBackendPinMapsAggregateDTO verifies multi-pin output is sorted and compatibility-free.
+func TestGetUserBackendPinMapsAggregateDTO(t *testing.T) {
+	service := &recordingUserBackendPinService{
+		listResult: runtime.UserBackendPinsReadResult{
+			Pins: []runtime.UserBackendPin{
+				{
+					Present:            true,
+					Key:                runtime.UserKey{Tenant: testBackendPinTenant, UserHash: testBackendPinUserHash},
+					BackendIdentifier:  "mailstore-a-sieve",
+					Protocol:           "sieve",
+					BackendPool:        "sieve-default",
+					EffectiveShard:     testBackendPinShard,
+					BackendNode:        testBackendNode,
+					Strategy:           runtime.MoveStrategyNewSessionsOnly,
+					Generation:         "sieve-gen",
+					ActiveSessionCount: 1,
+				},
+				{
+					Present:            true,
+					Key:                runtime.UserKey{Tenant: testBackendPinTenant, UserHash: testBackendPinUserHash},
+					BackendIdentifier:  testPinnedBackend,
+					Protocol:           testBackendPinProtocol,
+					BackendPool:        testBackendPinPool,
+					EffectiveShard:     testBackendPinShard,
+					BackendNode:        testBackendNode,
+					Strategy:           runtime.MoveStrategyNewSessionsOnly,
+					Generation:         "imap-gen",
+					ActiveSessionCount: 2,
+				},
+			},
+		},
+	}
+	handler := NewHandler(HandlerOptions{Version: testHandlerVersion, UserBackendPinReader: service})
+
+	response, err := handler.GetUserBackendPin(context.Background(), generated.GetUserBackendPinRequestObject{UserKey: testBackendPinUserKey})
+	if err != nil {
+		t.Fatalf("GetUserBackendPin returned error: %v", err)
+	}
+
+	pin, ok := response.(generated.GetUserBackendPin200JSONResponse)
+	if !ok {
+		t.Fatalf("GetUserBackendPin response = %T, want 200 backend pin", response)
+	}
+
+	if !pin.Present || len(pin.Pins) != 2 {
+		t.Fatalf("aggregate pin = %#v, want two scoped pins", pin)
+	}
+	if pin.Backend != nil || pin.Protocol != nil || pin.BackendPool != nil || pin.Strategy != nil {
+		t.Fatalf("compatibility fields = %#v, want omitted for multi-pin response", pin)
+	}
+	if pin.Pins[0].Protocol != testBackendPinProtocol || pin.Pins[0].BackendPool != testBackendPinPool {
+		t.Fatalf("pins = %#v, want sorted by protocol and backend pool", pin.Pins)
+	}
 }
 
 // TestDefaultBackendPinReaderReturnsAbsent verifies unassembled servers stay deterministic.
@@ -394,16 +467,80 @@ func TestSetUserBackendPinMapsGeneratedRequest(t *testing.T) {
 	}
 
 	wantKey := runtime.UserKey{Tenant: testBackendPinTenant, UserHash: testBackendPinUserHash}
-	if service.setRequest.Key != wantKey ||
-		service.setRequest.BackendIdentifier != testPinnedBackend ||
-		service.setRequest.Strategy != runtime.MoveStrategyKickExisting ||
-		service.setRequest.Reason != testBackendPinReason ||
-		service.setRequest.Actor != actor {
-		t.Fatalf("set request = %#v, want trimmed runtime request", service.setRequest)
+	if service.targetRequest.Key != wantKey ||
+		service.targetRequest.BackendIdentifier != testPinnedBackend ||
+		service.targetRequest.BackendNode != "" ||
+		service.targetRequest.Strategy != runtime.MoveStrategyKickExisting ||
+		service.targetRequest.Reason != testBackendPinReason ||
+		service.targetRequest.Actor != actor {
+		t.Fatalf("set request = %#v, want trimmed runtime request", service.targetRequest)
 	}
 }
 
-// TestClearUserBackendPinRequiresReasonAndCallsRuntime verifies clear validation and mutation flow.
+// TestSetUserBackendPinMapsBackendNodeRequests verifies backend-node workflows cross only the REST adapter.
+func TestSetUserBackendPinMapsBackendNodeRequests(t *testing.T) {
+	testCases := []struct {
+		name         string
+		body         generated.SetUserBackendPinJSONRequestBody
+		wantNode     string
+		wantProtocol string
+		wantPool     string
+	}{
+		{
+			name: "all protocol node",
+			body: generated.SetUserBackendPinJSONRequestBody{
+				BackendNode: " " + testBackendNode + " ",
+				Reason:      testBackendPinReason,
+				Strategy:    generated.NewSessionsOnly,
+			},
+			wantNode: testBackendNode,
+		},
+		{
+			name: "scoped node",
+			body: generated.SetUserBackendPinJSONRequestBody{
+				BackendNode: " " + testBackendNode + " ",
+				Protocol:    " IMAP ",
+				BackendPool: " " + testBackendPinPool + " ",
+				Reason:      testBackendPinReason,
+				Strategy:    generated.NewSessionsOnly,
+			},
+			wantNode:     testBackendNode,
+			wantProtocol: testBackendPinProtocol,
+			wantPool:     testBackendPinPool,
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			service := &recordingUserBackendPinService{}
+			handler := NewHandler(HandlerOptions{Version: testHandlerVersion, UserBackendPinMutator: service})
+
+			response, err := handler.SetUserBackendPin(context.Background(), generated.SetUserBackendPinRequestObject{
+				UserKey: testBackendPinUserHash,
+				Body:    &testCase.body,
+			})
+			if err != nil {
+				t.Fatalf("SetUserBackendPin returned error: %v", err)
+			}
+
+			if _, ok := response.(generated.SetUserBackendPin202JSONResponse); !ok {
+				t.Fatalf("SetUserBackendPin response = %T, want 202 accepted", response)
+			}
+
+			if service.setCalls != 1 {
+				t.Fatalf("set calls = %d, want 1", service.setCalls)
+			}
+			if service.targetRequest.BackendIdentifier != "" ||
+				service.targetRequest.BackendNode != testCase.wantNode ||
+				service.targetRequest.Protocol != testCase.wantProtocol ||
+				service.targetRequest.BackendPool != testCase.wantPool {
+				t.Fatalf("target request = %#v, want backend-node mapping", service.targetRequest)
+			}
+		})
+	}
+}
+
+// TestClearUserBackendPinRequiresReasonAndCallsRuntime verifies all-clear validation and mutation flow.
 func TestClearUserBackendPinRequiresReasonAndCallsRuntime(t *testing.T) {
 	service := &recordingUserBackendPinService{}
 	handler := NewHandler(HandlerOptions{
@@ -442,13 +579,46 @@ func TestClearUserBackendPinRequiresReasonAndCallsRuntime(t *testing.T) {
 		t.Fatalf("ClearUserBackendPin response = %T, want 202 accepted", response)
 	}
 
-	if service.clearCalls != 1 {
-		t.Fatalf("clear calls = %d, want 1", service.clearCalls)
+	if service.clearAllCalls != 1 {
+		t.Fatalf("clear-all calls = %d, want 1", service.clearAllCalls)
 	}
 
-	if service.clearRequest.Key != (runtime.UserKey{Tenant: defaultTenant, UserHash: testBackendPinUserHash}) ||
+	if service.clearAllRequest.Key != (runtime.UserKey{Tenant: defaultTenant, UserHash: testBackendPinUserHash}) ||
+		service.clearAllRequest.Reason != testBackendPinReason {
+		t.Fatalf("clear request = %#v, want parsed key and trimmed reason", service.clearAllRequest)
+	}
+}
+
+// TestClearUserBackendPinMapsScopedRequest verifies scoped clear stays explicit.
+func TestClearUserBackendPinMapsScopedRequest(t *testing.T) {
+	service := &recordingUserBackendPinService{}
+	handler := NewHandler(HandlerOptions{Version: testHandlerVersion, UserBackendPinMutator: service})
+
+	body := generated.ClearUserBackendPinJSONRequestBody{
+		Protocol:    " IMAP ",
+		BackendPool: " " + testBackendPinPool + " ",
+		Reason:      " " + testBackendPinReason + " ",
+	}
+
+	response, err := handler.ClearUserBackendPin(context.Background(), generated.ClearUserBackendPinRequestObject{
+		UserKey: testBackendPinUserHash,
+		Body:    &body,
+	})
+	if err != nil {
+		t.Fatalf("ClearUserBackendPin returned error: %v", err)
+	}
+
+	if _, ok := response.(generated.ClearUserBackendPin202JSONResponse); !ok {
+		t.Fatalf("ClearUserBackendPin response = %T, want 202 accepted", response)
+	}
+
+	if service.clearCalls != 1 || service.clearAllCalls != 0 {
+		t.Fatalf("clear calls scoped=%d all=%d, want one scoped clear", service.clearCalls, service.clearAllCalls)
+	}
+	if service.clearRequest.Protocol != testBackendPinProtocol ||
+		service.clearRequest.BackendPool != testBackendPinPool ||
 		service.clearRequest.Reason != testBackendPinReason {
-		t.Fatalf("clear request = %#v, want parsed key and trimmed reason", service.clearRequest)
+		t.Fatalf("scoped clear request = %#v, want trimmed scope and reason", service.clearRequest)
 	}
 }
 
@@ -482,12 +652,39 @@ func TestBackendPinRequestValidationMapsToBadRequest(t *testing.T) {
 
 	assertBackendPinProblemStatus(t, setEmptyReason, http.StatusBadRequest)
 
+	setBothTargets := generated.SetUserBackendPinJSONRequestBody{
+		Backend:     testPinnedBackend,
+		BackendNode: testBackendNode,
+		Reason:      testBackendPinReason,
+		Strategy:    generated.NewSessionsOnly,
+	}
+	setBothResponse, err := handler.SetUserBackendPin(context.Background(), generated.SetUserBackendPinRequestObject{
+		UserKey: testBackendPinUserHash,
+		Body:    &setBothTargets,
+	})
+	if err != nil {
+		t.Fatalf("SetUserBackendPin both targets returned error: %v", err)
+	}
+
+	assertBackendPinProblemStatus(t, setBothResponse, http.StatusBadRequest)
+
 	clearMissing, err := handler.ClearUserBackendPin(context.Background(), generated.ClearUserBackendPinRequestObject{UserKey: testBackendPinUserHash})
 	if err != nil {
 		t.Fatalf("ClearUserBackendPin missing body returned error: %v", err)
 	}
 
 	assertBackendPinProblemStatus(t, clearMissing, http.StatusBadRequest)
+
+	clearIncompleteScope := generated.ClearUserBackendPinJSONRequestBody{Protocol: testBackendPinProtocol, Reason: testBackendPinReason}
+	clearIncompleteResponse, err := handler.ClearUserBackendPin(context.Background(), generated.ClearUserBackendPinRequestObject{
+		UserKey: testBackendPinUserHash,
+		Body:    &clearIncompleteScope,
+	})
+	if err != nil {
+		t.Fatalf("ClearUserBackendPin incomplete scope returned error: %v", err)
+	}
+
+	assertBackendPinProblemStatus(t, clearIncompleteResponse, http.StatusBadRequest)
 }
 
 // TestBackendPinRuntimeErrorsMapToStableStatuses verifies generated problems remain deterministic.
@@ -497,6 +694,11 @@ func TestBackendPinRuntimeErrorsMapToStableStatuses(t *testing.T) {
 		err    error
 		status int
 	}{
+		{
+			name:   "malformed request",
+			err:    &runtime.Error{Kind: runtime.ErrorKindInvalidRequest, Operation: testBackendPinOperation, Message: "bad request"},
+			status: http.StatusBadRequest,
+		},
 		{
 			name:   "unknown backend",
 			err:    &runtime.Error{Kind: runtime.ErrorKindNotFound, Operation: testBackendPinOperation, Message: "backend not found"},
@@ -516,7 +718,7 @@ func TestBackendPinRuntimeErrorsMapToStableStatuses(t *testing.T) {
 
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
-			service := &recordingUserBackendPinService{setErr: testCase.err}
+			service := &recordingUserBackendPinService{targetErr: testCase.err}
 			handler := NewHandler(HandlerOptions{
 				Version:               testHandlerVersion,
 				UserBackendPinMutator: service,
@@ -1187,9 +1389,14 @@ func (r *recordingRouteLookup) Lookup(_ context.Context, request runtime.RouteLo
 			BackendID:      testPinnedBackend,
 			Protocol:       testBackendPinProtocol,
 			BackendPool:    testBackendPinPool,
+			BackendNode:    testBackendNode,
 			EffectiveShard: testBackendPinShard,
 			Applied:        true,
 			ReasonClass:    testBackendPinApplied,
+			ScopeCount:     2,
+			OtherScopes: []runtime.RouteLookupBackendPinScope{
+				{Protocol: "lmtp", BackendPool: "lmtp-default"},
+			},
 		},
 		SelectedBackend: "mailstore-a-imap",
 		ReasonClass:     "initial_placement",
@@ -1198,42 +1405,46 @@ func (r *recordingRouteLookup) Lookup(_ context.Context, request runtime.RouteLo
 
 // recordingUserBackendPinService captures backend-pin runtime requests.
 type recordingUserBackendPinService struct {
-	readCalls    int
-	readRequest  runtime.GetUserBackendPinRequest
-	readResult   runtime.UserBackendPinReadResult
-	readErr      error
-	setCalls     int
-	setRequest   runtime.SetUserBackendPinRequest
-	setResult    runtime.UserBackendPinMutationResult
-	setErr       error
-	clearCalls   int
-	clearRequest runtime.ClearUserBackendPinRequest
-	clearResult  runtime.UserBackendPinMutationResult
-	clearErr     error
+	readCalls       int
+	listRequest     runtime.ListUserBackendPinsRequest
+	listResult      runtime.UserBackendPinsReadResult
+	readErr         error
+	setCalls        int
+	targetRequest   runtime.SetUserBackendPinTargetRequest
+	targetResult    runtime.UserBackendPinsMutationResult
+	targetErr       error
+	clearCalls      int
+	clearRequest    runtime.ClearUserBackendPinRequest
+	clearResult     runtime.UserBackendPinMutationResult
+	clearErr        error
+	clearAllCalls   int
+	clearAllRequest runtime.ClearUserBackendPinsRequest
+	clearAllResult  runtime.UserBackendPinsMutationResult
+	clearAllErr     error
 }
 
-// GetUserBackendPin records one backend-pin read request.
-func (r *recordingUserBackendPinService) GetUserBackendPin(_ context.Context, request runtime.GetUserBackendPinRequest) (runtime.UserBackendPinReadResult, error) {
+// ListUserBackendPins records one aggregate backend-pin read request.
+func (r *recordingUserBackendPinService) ListUserBackendPins(_ context.Context, request runtime.ListUserBackendPinsRequest) (runtime.UserBackendPinsReadResult, error) {
 	r.readCalls++
 
-	r.readRequest = request
+	r.listRequest = request
 	if r.readErr != nil {
-		return runtime.UserBackendPinReadResult{}, r.readErr
+		return runtime.UserBackendPinsReadResult{}, r.readErr
 	}
 
-	return r.readResult, nil
+	return r.listResult, nil
 }
 
-// SetUserBackendPin records one backend-pin set request.
-func (r *recordingUserBackendPinService) SetUserBackendPin(_ context.Context, request runtime.SetUserBackendPinRequest) (runtime.UserBackendPinMutationResult, error) {
+// SetUserBackendPinTarget records one backend or backend-node set request.
+func (r *recordingUserBackendPinService) SetUserBackendPinTarget(_ context.Context, request runtime.SetUserBackendPinTargetRequest) (runtime.UserBackendPinsMutationResult, error) {
 	r.setCalls++
 
-	r.setRequest = request
-	if r.setErr != nil {
-		return runtime.UserBackendPinMutationResult{}, r.setErr
+	r.targetRequest = request
+	if r.targetErr != nil {
+		return runtime.UserBackendPinsMutationResult{}, r.targetErr
 	}
 
-	return r.setResult, nil
+	return r.targetResult, nil
 }
 
 // ClearUserBackendPin records one backend-pin clear request.
@@ -1246,6 +1457,18 @@ func (r *recordingUserBackendPinService) ClearUserBackendPin(_ context.Context, 
 	}
 
 	return r.clearResult, nil
+}
+
+// ClearUserBackendPins records one all-scope backend-pin clear request.
+func (r *recordingUserBackendPinService) ClearUserBackendPins(_ context.Context, request runtime.ClearUserBackendPinsRequest) (runtime.UserBackendPinsMutationResult, error) {
+	r.clearAllCalls++
+
+	r.clearAllRequest = request
+	if r.clearAllErr != nil {
+		return runtime.UserBackendPinsMutationResult{}, r.clearAllErr
+	}
+
+	return r.clearAllResult, nil
 }
 
 // recordingUserHoldService captures placement-hold runtime requests.
