@@ -1510,6 +1510,17 @@ delivery/fetch marker flow through the production binary. Completion evidence
 lives in
 `docs/specs/implementation/M8_MULTI_PROTOCOL_BACKEND_PINNING_FOLLOWUP.md`.
 
+The M8 runtime session-holder control follow-up is complete. Route lookup stays
+side-effect-free, public session reads expose bounded `holder_kind=session`
+state, `sessions kill` distinguishes marked, missing, stale-repaired and
+fail-closed ambiguous outcomes, `users kick` documents cooperative local-stream
+and heartbeat/lease closure, and normal affinity clear remains inactive-only.
+The fake-service E2E lane proves the workflow through the production binary,
+HTTPS/authenticated control listener, generated REST, `nauthilus-directorctl`,
+Valkey, fake Nauthilus and public IMAP backend sockets. Completion evidence
+lives in
+`docs/specs/implementation/M8_RUNTIME_SESSION_HOLDER_CONTROL_FOLLOWUP.md`.
+
 - hardened production Docker image and Docker smoke proof
 - restrictive systemd unit and reload path through `nauthilus-directorctl reload`
 - safe reload semantics shared by REST, CLI and systemd

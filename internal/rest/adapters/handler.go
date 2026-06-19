@@ -613,11 +613,20 @@ func (h *Handler) DeleteSession(ctx context.Context, request generated.DeleteSes
 		return generated.DeleteSessiondefaultJSONResponse{StatusCode: http.StatusServiceUnavailable, Body: h.runtimeUnavailable("DeleteSession")}, nil
 	}
 
-	if _, err := h.sessionMutator.KillSession(ctx, runtime.KillSessionRequest{SessionID: request.SessionID, Reason: reason, Actor: actorFromContext(ctx)}); err != nil {
+	result, err := h.sessionMutator.KillSession(ctx, runtime.KillSessionRequest{SessionID: request.SessionID, Reason: reason, Actor: actorFromContext(ctx)})
+	if err != nil {
 		return generated.DeleteSessiondefaultJSONResponse{StatusCode: statusForError(err), Body: h.problemFromError("DeleteSession", err)}, nil
 	}
 
-	return generated.DeleteSession202JSONResponse(accepted()), nil
+	response := sessionKillResponse(result)
+	switch result.Outcome {
+	case runtime.SessionMutationOutcomeMarked:
+		return generated.DeleteSession202JSONResponse(response), nil
+	case runtime.SessionMutationOutcomeMissing, runtime.SessionMutationOutcomeStaleIndexRepaired:
+		return generated.DeleteSession404JSONResponse(response), nil
+	default:
+		return generated.DeleteSession503JSONResponse(h.problem(http.StatusServiceUnavailable, problemCodeUnavailable, "ambiguous session state", "DeleteSession")), nil
+	}
 }
 
 // GetSession returns one frontend session.
@@ -1715,11 +1724,34 @@ func sessionDetail(session runtime.SessionRuntimeState) generated.SessionDetail 
 		Backend:     session.BackendIdentifier,
 		BackendNode: session.BackendNode,
 		ExpiresAt:   expiresAt.UTC(),
+		HolderKind:  state.HolderKindSession,
 		Protocol:    session.Protocol,
 		SessionID:   session.SessionID,
 		ShardTag:    session.EffectiveShardTag,
 		UserKey:     formatUserKey(runtime.UserKey{Tenant: session.Tenant, UserHash: session.UserHash}),
 	}
+}
+
+// sessionKillResponse adapts one bounded session-kill result into a generated DTO.
+func sessionKillResponse(result runtime.SessionMutationResult) generated.SessionKillResponse {
+	response := generated.SessionKillResponse{
+		Lifecycle:          generated.SessionKillLifecycle(result.Lifecycle),
+		Outcome:            generated.SessionKillOutcome(result.Outcome),
+		SessionID:          result.State.SessionID,
+		StaleIndexRepaired: result.StaleIndexRepaired,
+	}
+
+	if result.ControlAction != "" && result.ControlAction != runtime.SessionMutationControlActionNone {
+		action := generated.SessionKillControlAction(result.ControlAction)
+		response.ControlAction = &action
+	}
+
+	generation := strings.TrimSpace(result.State.ControlGeneration)
+	if generation != "" {
+		response.ControlGeneration = &generation
+	}
+
+	return response
 }
 
 // runtimeSummary adapts repairable runtime aggregates into generated DTOs.

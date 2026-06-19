@@ -58,7 +58,11 @@ reload, failure diagnosis and migration workflows are maintained under
 Control API base URL.
 The default is
 .BR http://127.0.0.1:9090 .
+That compiled default is correct only for a plain HTTP control listener.
 A bare host:port value is interpreted as HTTP.
+Use an explicit
+.B https://
+URL when the control listener has TLS enabled.
 .TP
 .BR --timeout " " \fIduration\fR
 Request timeout as a Go duration.
@@ -110,6 +114,49 @@ or
 .BR NAUTHILUS_DIRECTORCTL_BEARER_TOKEN .
 Configuring both inline and file-based bearer token input is rejected before
 any request is sent.
+.PP
+For an HTTPS control listener with static bearer or OIDC bearer control auth,
+use an explicit address and trust source, for example:
+.RS
+.nf
+nauthilus-directorctl \\
+  --address https://127.0.0.1:9090 \\
+  --tls-ca-file /etc/nauthilus-director/control-ca.pem \\
+  --auth-bearer-token-file /run/nauthilus-director/operator-control-token \\
+  sessions list
+.fi
+.RE
+.PP
+For mTLS control auth, pair
+.B --tls-client-cert
+with
+.B --tls-client-key
+and keep
+.B --tls-ca-file
+or
+.B --tls-server-name
+configured for server verification.
+.B --tls-insecure-skip-verify
+is for emergency diagnostics only and is not a production recommendation.
+.PP
+Transport diagnostics distinguish invalid local address or TLS configuration,
+plain HTTP sent to an HTTPS listener, TLS verification failure, connection
+refusal or timeout, authentication and authorization failures, non-JSON
+responses and structured runtime API problem responses.
+Response body hints are bounded and redact common credential markers.
+.PP
+Read commands such as
+.B sessions list
+,
+.B users list
+and
+.B users sessions
+are authenticated control API reads, not local Redis inspection.
+When the addressed control listener uses HTTPS or authentication, pass the same
+explicit
+.B https://
+address, TLS verification flags and bearer-token-file or mTLS flags as for
+mutating commands.
 .TP
 .B --version
 Print the client version and exit.
@@ -211,6 +258,10 @@ YAML is the default.
 .TP
 .BI "sessions list [--protocol " protocol "] [--backend " identifier "] [--limit " n "] [--cursor " token "] [--all]"
 List active sessions, optionally filtered by protocol or backend.
+Text rows include
+.B holder_kind=session
+for visible protocol session holders. Delivery-scoped holders remain hidden from
+session list and user-session output.
 The protocol filter accepts the canonical runtime protocol values such as
 .BR imap ,
 .BR lmtp ,
@@ -242,7 +293,48 @@ and is
 Show one active session.
 .TP
 .BI "sessions kill " session-id " --reason " text
-Terminate one active session.
+Mark one active session for cooperative closure or report bounded absence.
+The bounded session-kill states are
+.B marked
+,
+.B missing
+,
+.B stale_index_repaired
+and fail-closed
+.B ambiguous_state .
+Text output is a single scriptable line with
+.B outcome
+,
+.B session_id
+,
+.B lifecycle
+and
+.B stale_index_repaired .
+When a mark is accepted the line also includes
+.B control_action=kick
+and
+.B control_generation .
+The command exits
+.B 0
+for
+.B outcome=marked .
+If the target is already gone or a repairable stale locator was removed, the
+server returns a generated
+.B SessionKillResponse
+with
+.B outcome=missing
+or
+.B outcome=stale_index_repaired
+and the command exits
+.B 1
+after printing that body.
+Corrupt authoritative session state fails closed as a runtime error, commonly
+.B HTTP 503 .
+This is the operator-facing
+.B ambiguous_state
+class; scripts must treat it as a failed cleanup attempt, not as a stale-index
+repair.
+JSON output prints the generated response body.
 .TP
 .BI "users list [--limit " n "] [--cursor " token "] [--all]"
 List users with runtime state.
@@ -271,6 +363,11 @@ Show one user's runtime state.
 .TP
 .BI "users sessions " user-key
 List sessions for one user.
+Text rows use the same bounded session fields as
+.BR "sessions list" ,
+including
+.B holder_kind=session
+for visible protocol sessions.
 .TP
 .BI "users affinity show " user-key
 Show active or retained affinity for one user.
@@ -424,7 +521,23 @@ and
 .BR drain_existing .
 .TP
 .BI "users kick " user-key " --reason " text
-Terminate active sessions for one user.
+Mark active sessions for one user for cooperative closure.
+The operation is cooperative: it marks active sessions for the affinity key,
+accelerates local stream closure when this Director owns the stream handle, and
+relies on remote heartbeat observation or lease expiry for streams owned by
+other replicas.
+Text output reports
+.B status=accepted
+,
+.B mark=cooperative
+,
+.B local_close=accelerated_when_owned
+and
+.B remote_close=heartbeat_or_lease .
+It also prints an active-session count when the generated API response exposes
+one; otherwise it prints
+.B active_sessions=unknown .
+JSON output stays the generated accepted response body.
 .TP
 .B runtime summary
 Show repairable aggregate runtime totals without listing every active session.
@@ -520,6 +633,11 @@ The command succeeded.
 .B 1
 The request was sent through the generated client and the server-side operation
 failed, or the generated client could not complete the request.
+For
+.B sessions kill ,
+missing and stale-repaired targets also use exit status
+.B 1
+after printing the bounded generated response body.
 .TP
 .B 2
 The command line or local client configuration was invalid.

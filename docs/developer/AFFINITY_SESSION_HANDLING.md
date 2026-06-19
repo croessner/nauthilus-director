@@ -58,6 +58,14 @@ code uses two holder kinds:
 - `session`: a mailbox login session, visible through runtime session APIs.
 - `delivery`: an LMTP delivery-scoped hold, hidden from runtime session APIs.
 
+Visible runtime session holders are created by protocol placement for
+user-stateful login traffic such as IMAP, ManageSieve and POP3. Hidden LMTP
+delivery holders are created by LMTP recipient placement and protect an active
+delivery transaction without appearing in `sessions list`, `users list` or
+`users sessions` output. Route lookup can report active holder counts when
+Redis already contains active or retained affinity state, but it never creates
+runtime session holders or LMTP delivery holders.
+
 ```mermaid
 flowchart TB
     A["AffinityKey<br/>tenant + account_key"] --> H["Affinity hash<br/>sha256(tenant NUL account_key)"]
@@ -591,21 +599,48 @@ scripts:
 - `ClearUserHold` deletes only placement-hold state and leaves active affinity,
   movement overrides, backend pins, sessions, delivery holds and backend
   reservations untouched.
-- `KickUser` increments affinity control generation and marks the affinity for
-  heartbeat-observed closure.
+- `KickUser` increments the affinity control generation and marks currently
+  active session records for the affinity key for controlled closure. Locally
+  owned visible login streams can close promptly through the local registry;
+  visible login streams owned by other Director replicas close when their
+  heartbeat observes the control generation or when their lease expires and the
+  reaper repairs state. Hidden LMTP delivery holders remain governed by the
+  delivery transaction lifecycle or lease expiry.
 - `ClearUserAffinity` clears inactive affinity and override state, and requires
   an explicit flag to clear active affinity.
 
 Session and backend controls use repairable indexes:
 
-- `KillSession` looks up the session through its session-index shard and writes
-  a session-local `kick` control action.
+- `KillSession` looks up one session through its repairable session locator
+  index and writes a session-local `kick` control action when the authoritative
+  session hash is active and consistent. A kill result is one of:
+  - `marked`: the authoritative session hash was marked for cooperative
+    closure.
+  - `missing`: the locator did not contain the requested session.
+  - `stale_index_repaired`: the locator pointed at an absent authoritative
+    session hash and was removed.
+  - `ambiguous_state`: authoritative session state was corrupt,
+    contradictory or malformed and must fail closed.
 - `SetBackendRuntime` writes backend runtime override state. Hard maintenance
   or enabled drain walks backend-session index shards with `SScan` and marks
   indexed sessions with `drain`.
 - `SessionService.KillSession` also asks `LocalSessionRegistry` to close a
   locally owned stream when the current process has it. The local registry is
   only an acceleration index and does not own global state.
+
+Repairable secondary indexes are convenience read paths. Runtime reads and kill
+operations may clean a stale locator only after proving that the authoritative
+session hash is absent. They must not "repair" malformed authoritative hashes,
+invalid generations, mismatched session IDs or conflicting affinity facts; those
+conditions remain `ambiguous_state` so operators see a fail-closed corruption
+signal instead of a silent cleanup.
+
+Normal `ClearUserAffinity` is the migration-safe inactive-only path. It refuses
+active holders by default and is intended after operators have set any required
+hold, kicked or killed active sessions, waited for heartbeat or lease expiry,
+optionally run the reaper, and verified that runtime session reads no longer
+show active visible sessions and affinity diagnostics no longer show active
+holders.
 
 ```mermaid
 flowchart TD
@@ -686,6 +721,11 @@ route diagnostics with a recipient and no supplied account key, route lookup
 first tries an existing active affinity for the normalized recipient lookup name,
 then falls back to the configured identity lookup.
 
+Route lookup is therefore not an authentication test, not a protocol login and
+not a cleanup action. Active holders shown in lookup output are pre-existing
+runtime facts from protocol placement or delivery placement; repeated lookups do
+not create, close, reap, kick, kill, clear or refresh them.
+
 ## Developer Rules
 
 - Open, heartbeat and close sessions only through `state.SessionStore`.
@@ -697,6 +737,10 @@ then falls back to the configured identity lookup.
 - Keep LMTP delivery-scoped placement on `placement.DeliveryPlacer` so delivery
   holders remain hidden from runtime session lists.
 - Treat secondary indexes and aggregates as repairable, not authoritative.
+- Treat `stale_index_repaired` as successful cleanup of a repairable locator,
+  not as proof that an active stream was closed by the command.
+- Treat `ambiguous_state` as corrupt or contradictory authoritative runtime
+  data that must be investigated fail-closed.
 - Do not add routing decisions to Nauthilus-facing auth or identity calls.
 - Do not expose `delivery` holders through runtime session listings.
 - Do not use provisional protocol identities such as POP3 `USER` as affinity

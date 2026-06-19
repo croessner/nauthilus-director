@@ -60,6 +60,14 @@ The default lane is fake-service based and deterministic:
   `operator_backend_pin` for all three canary targets, correlates a unique LMTP
   delivery marker with a later public IMAP backend observation for the same
   user, clears without protocol and verifies normal placement resumes
+- runtime session-holder control proof through the production
+  `nauthilus-director` binary, Valkey, fake Nauthilus, a fake IMAP backend,
+  generated REST, an HTTPS/authenticated control listener and
+  `nauthilus-directorctl`. The scenario proves baseline empty session/user
+  reads, repeated read-only route lookup, visible `holder_kind=session`
+  creation through public protocol login, active-clear refusal, `sessions kill`
+  marked and bounded missing/stale outcomes, `users kick` cooperative closure,
+  post-close empty reads and inactive affinity clear.
 
 Fake services must expose counters or request observations that prove protocol
 mapping, routing, and backend behavior without logging credentials, SASL blobs,

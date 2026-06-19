@@ -96,4 +96,7 @@ __pycache__/
 # Local planning, handoff, and scratch artifacts. Keep this directory out of Git.
 /temp/
 
+# Local Codex project skills and assistant-specific state.
+/.codex/skills/
+
 .DS_Store

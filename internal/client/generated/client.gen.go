@@ -154,6 +154,87 @@ func (e RuntimeDimensionCountAccuracy) Valid() bool {
 	}
 }
 
+// Defines values for SessionDetailHolderKind.
+const (
+	Session SessionDetailHolderKind = "session"
+)
+
+// Valid indicates whether the value is a known member of the SessionDetailHolderKind enum.
+func (e SessionDetailHolderKind) Valid() bool {
+	switch e {
+	case Session:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for SessionKillControlAction.
+const (
+	Kick SessionKillControlAction = "kick"
+	None SessionKillControlAction = "none"
+)
+
+// Valid indicates whether the value is a known member of the SessionKillControlAction enum.
+func (e SessionKillControlAction) Valid() bool {
+	switch e {
+	case Kick:
+		return true
+	case None:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for SessionKillLifecycle.
+const (
+	AlreadyAbsent               SessionKillLifecycle = "already_absent"
+	FailClosedAmbiguous         SessionKillLifecycle = "fail_closed_ambiguous"
+	LocalCloseOrRemoteHeartbeat SessionKillLifecycle = "local_close_or_remote_heartbeat"
+	StaleLocatorRepaired        SessionKillLifecycle = "stale_locator_repaired"
+)
+
+// Valid indicates whether the value is a known member of the SessionKillLifecycle enum.
+func (e SessionKillLifecycle) Valid() bool {
+	switch e {
+	case AlreadyAbsent:
+		return true
+	case FailClosedAmbiguous:
+		return true
+	case LocalCloseOrRemoteHeartbeat:
+		return true
+	case StaleLocatorRepaired:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for SessionKillOutcome.
+const (
+	AmbiguousState     SessionKillOutcome = "ambiguous_state"
+	Marked             SessionKillOutcome = "marked"
+	Missing            SessionKillOutcome = "missing"
+	StaleIndexRepaired SessionKillOutcome = "stale_index_repaired"
+)
+
+// Valid indicates whether the value is a known member of the SessionKillOutcome enum.
+func (e SessionKillOutcome) Valid() bool {
+	switch e {
+	case AmbiguousState:
+		return true
+	case Marked:
+		return true
+	case Missing:
+		return true
+	case StaleIndexRepaired:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for UserMoveRequestStrategy.
 const (
 	DrainExisting   UserMoveRequestStrategy = "drain_existing"
@@ -584,10 +665,41 @@ type SessionDetail struct {
 	Backend     string    `json:"backend"`
 	BackendNode string    `json:"backend_node"`
 	ExpiresAt   time.Time `json:"expires_at"`
-	Protocol    string    `json:"protocol"`
-	SessionID   string    `json:"session_id"`
-	ShardTag    string    `json:"shard_tag"`
-	UserKey     string    `json:"user_key"`
+
+	// HolderKind Bounded runtime holder kind. Session list endpoints expose only frontend session holders.
+	HolderKind SessionDetailHolderKind `json:"holder_kind"`
+	Protocol   string                  `json:"protocol"`
+	SessionID  string                  `json:"session_id"`
+	ShardTag   string                  `json:"shard_tag"`
+	UserKey    string                  `json:"user_key"`
+}
+
+// SessionDetailHolderKind Bounded runtime holder kind. Session list endpoints expose only frontend session holders.
+type SessionDetailHolderKind string
+
+// SessionKillControlAction defines model for SessionKillControlAction.
+type SessionKillControlAction string
+
+// SessionKillLifecycle defines model for SessionKillLifecycle.
+type SessionKillLifecycle string
+
+// SessionKillOutcome defines model for SessionKillOutcome.
+type SessionKillOutcome string
+
+// SessionKillResponse defines model for SessionKillResponse.
+type SessionKillResponse struct {
+	ControlAction *SessionKillControlAction `json:"control_action,omitempty"`
+
+	// ControlGeneration Present only when the session was marked for cooperative closure.
+	ControlGeneration *string              `json:"control_generation,omitempty"`
+	Lifecycle         SessionKillLifecycle `json:"lifecycle"`
+	Outcome           SessionKillOutcome   `json:"outcome"`
+
+	// SessionID Target session resource supplied by the operator.
+	SessionID string `json:"session_id"`
+
+	// StaleIndexRepaired True when a repairable stale session locator was removed.
+	StaleIndexRepaired bool `json:"stale_index_repaired"`
 }
 
 // SessionListResponse defines model for SessionListResponse.
@@ -4403,7 +4515,12 @@ func (r ListSessionsResponse) ContentType() string {
 type DeleteSessionResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
-	JSON202      *AcceptedResponse
+	JSON202      *SessionKillResponse
+	JSON400      *BadRequest
+	JSON401      *Error
+	JSON403      *Error
+	JSON404      *SessionKillResponse
+	JSON503      *Error
 	JSONDefault  *Error
 }
 
@@ -6214,11 +6331,46 @@ func ParseDeleteSessionResponse(rsp *http.Response) (*DeleteSessionResponse, err
 
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 202:
-		var dest AcceptedResponse
+		var dest SessionKillResponse
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
 		response.JSON202 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 400:
+		var dest BadRequest
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON400 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 401:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON401 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 403:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON403 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest SessionKillResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON503 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
 		var dest Error

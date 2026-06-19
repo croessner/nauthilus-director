@@ -15,6 +15,7 @@ unless the text explicitly calls out an external system.
 - [How do I move a user from one shard to another?](#how-do-i-move-a-user-from-one-shard-to-another)
 - [When do I add a backend pin during a migration?](#when-do-i-add-a-backend-pin-during-a-migration)
 - [What does each user migration command do?](#what-does-each-user-migration-command-do)
+- [What is the migration-safe order for holders and affinity clear?](#what-is-the-migration-safe-order-for-holders-and-affinity-clear)
 - [Which move strategy should I use?](#which-move-strategy-should-i-use)
 - [What if the hold expires before the migration is complete?](#what-if-the-hold-expires-before-the-migration-is-complete)
 - [How do I test a new backend before general traffic reaches it?](#how-do-i-test-a-new-backend-before-general-traffic-reaches-it)
@@ -151,8 +152,9 @@ $CTL users hold show alice@example.org
 $CTL users sessions alice@example.org
 ```
 
-Remember the boundary: route lookup explains placement; it is not an auth test
-and not a mailbox login.
+Remember the boundary: route lookup explains current routing state. It is not
+an auth test, not a mailbox login and not a cleanup action. Active holders shown
+with `--include-affinity` already existed before the lookup.
 
 ## How do I move a user from one shard to another?
 
@@ -296,8 +298,11 @@ $CTL users backend-pin clear "$USER" \
 ## What does each user migration command do?
 
 - `users hold set`: blocks new placement for one user for a bounded duration.
-- `users kick`: asks active sessions for that user to close through heartbeat
-  observed runtime control.
+- `users kick`: marks all currently active sessions for that affinity key for
+  cooperative closure. Locally owned streams close promptly; remotely owned
+  streams close through heartbeat observation or lease expiry.
+- `sessions kill`: marks one active session or reports that it is missing,
+  stale-repaired or fail-closed ambiguous state.
 - `users move`: changes the runtime shard target for future placement.
 - `users backend-pin`: optionally constrains placement to one concrete backend
   after the selected shard and active or retained backend-node binding already
@@ -307,6 +312,66 @@ $CTL users backend-pin clear "$USER" \
 - `users affinity clear`: clears inactive affinity and pending override state.
   Use it only after the durable routing source is already correct and no active
   sessions remain.
+
+## What is the migration-safe order for holders and affinity clear?
+
+Use this order when a mailbox migration needs runtime evidence before the next
+user is processed:
+
+```text
+route lookup -> hold -> kick/kill -> wait or reap -> verify sessions -> clear affinity -> continue
+```
+
+Route lookup comes first because it explains current routing, active affinity,
+retained bindings, holds and backend pins without authenticating credentials,
+logging in, creating sessions or cleaning state. If lookup shows active holders,
+those holders came from earlier protocol placement or LMTP delivery placement.
+
+Set a bounded hold before the cutover so new authenticated placement waits
+instead of racing the mailbox move:
+
+```bash
+$CTL users hold set "$USER" --duration 15m --reason "begin mailbox migration"
+```
+
+Then ask active holders to close. Use `users kick` for the normal
+affinity-wide cooperative mark, and use `sessions kill` only for a specific
+visible session that must be targeted:
+
+```bash
+$CTL users kick "$USER" --reason "close sessions for migration"
+$CTL sessions kill "$SESSION_ID" --reason "target remaining session"
+```
+
+Wait for remote replicas to observe heartbeat control or for leases to expire.
+If a bounded repair pass is exposed in the current build, run it before deciding
+that a holder is still active; otherwise wait for the configured reaper cadence.
+Verify with runtime reads and affinity diagnostics, not Redis inspection. Hidden
+LMTP delivery holders do not appear in `users sessions`, so the affinity holder
+count must also be inactive before normal clear:
+
+```bash
+$CTL users sessions "$USER"
+$CTL users affinity show "$USER"
+$CTL route lookup \
+  --protocol imap \
+  --user "$USER" \
+  --backend-pool imap-default \
+  --include-affinity
+```
+
+Use `users affinity clear` only after the runtime reads no longer show active
+sessions, affinity diagnostics no longer show active holders and the durable
+routing source, move or backend pin is already correct:
+
+```bash
+$CTL users affinity clear "$USER" --reason "clear inactive affinity after migration"
+```
+
+`affinity clear` is not a substitute for `users kick`, `sessions kill`, backend
+drain, hard maintenance or mailbox-data movement. Normal affinity clear refuses
+active holders; an active-clear path is an explicit exceptional operation, not
+the migration default.
 
 ## Which move strategy should I use?
 
@@ -569,6 +634,7 @@ $CTL users affinity clear alice@example.org \
   --reason "clear inactive stale affinity after routing update"
 ```
 
-Do not use `affinity clear` as a substitute for `users move`, `users kick` or
-mailbox data migration. It removes inactive runtime affinity or pending override
-state; it is not a migration workflow by itself.
+Do not use `affinity clear` as a substitute for `users move`, `users kick`,
+`sessions kill`, backend drain, hard maintenance or mailbox data migration. It
+removes inactive runtime affinity or pending override state; it is not a
+migration workflow by itself.

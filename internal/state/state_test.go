@@ -1197,6 +1197,52 @@ func TestRedisRuntimeReadRemovesStaleLocator(t *testing.T) {
 	}
 }
 
+// TestRedisRuntimeReadHidesStaleUserSessionLocator verifies user reads repair stale holders.
+func TestRedisRuntimeReadHidesStaleUserSessionLocator(t *testing.T) {
+	store, client, builder := redisIntegrationStore(t)
+	key := AffinityKey{Tenant: testTenantDefault, AccountKey: "stale-user@example.test"}
+	sessionID := "stale-user-session"
+	cleanupAffinity(t, client, builder, key, sessionID)
+
+	sessionKey, err := builder.SessionKey(key.Tenant, key.AccountKey, sessionID)
+	if err != nil {
+		t.Fatalf("SessionKey returned error: %v", err)
+	}
+
+	sessionIndexKey, err := builder.SessionIndexShardKey(sessionID)
+	if err != nil {
+		t.Fatalf("SessionIndexShardKey returned error: %v", err)
+	}
+
+	userIndexKey, err := builder.UserSessionIndexShardKey(key.Tenant, key.AccountKey, sessionID)
+	if err != nil {
+		t.Fatalf("UserSessionIndexShardKey returned error: %v", err)
+	}
+
+	if err := client.HSet(context.Background(), sessionIndexKey, sessionID, sessionKey).Err(); err != nil {
+		t.Fatalf("seed stale session locator: %v", err)
+	}
+	if err := client.SAdd(context.Background(), userIndexKey, sessionID).Err(); err != nil {
+		t.Fatalf("seed stale user session index: %v", err)
+	}
+
+	userSessions, err := store.ListRuntimeSessionsForUser(context.Background(), key)
+	if err != nil {
+		t.Fatalf("ListRuntimeSessionsForUser returned error: %v", err)
+	}
+
+	if len(userSessions) != 0 {
+		t.Fatalf("ListRuntimeSessionsForUser returned stale sessions: %#v", userSessions)
+	}
+
+	if exists := client.HExists(context.Background(), sessionIndexKey, sessionID).Val(); exists {
+		t.Fatal("stale session locator still exists after user read")
+	}
+	if member := client.SIsMember(context.Background(), userIndexKey, sessionID).Val(); member {
+		t.Fatal("stale user session index membership still exists after user read")
+	}
+}
+
 // TestRedisDeliveryHoldPinsAffinityWithoutSessionListing verifies LMTP holds are not login sessions.
 func TestRedisDeliveryHoldPinsAffinityWithoutSessionListing(t *testing.T) {
 	store, client, builder := redisIntegrationStore(t)
@@ -1672,6 +1718,255 @@ func TestRedisBackendSnapshotReadsReservationCapacity(t *testing.T) {
 
 	if snapshot.ActiveSessions != 1 {
 		t.Fatalf("snapshot active sessions = %d, want reservation-backed count 1", snapshot.ActiveSessions)
+	}
+}
+
+// TestRedisSessionKillMarksActiveSession verifies an authoritative session gets a kick mark.
+func TestRedisSessionKillMarksActiveSession(t *testing.T) {
+	store, client, builder := redisIntegrationStore(t)
+	key := AffinityKey{Tenant: testTenantDefault, AccountKey: "kill-active@example.test"}
+	sessionID := "kill-active-session"
+	reason := "operator killed one active session"
+	cleanupAffinity(t, client, builder, key, sessionID)
+	cleanupBackend(t, client, builder, testBackendIMAP)
+
+	openAttachedSession(t, store, key, sessionID, testBackendIMAP)
+
+	record, err := store.KillSession(context.Background(), SessionKillRequest{
+		SessionID: sessionID,
+		Reason:    reason,
+		Actor:     testOperatorActor,
+	})
+	if err != nil {
+		t.Fatalf("KillSession returned error: %v", err)
+	}
+
+	if record.Status != SessionKillStatusMarked ||
+		record.SessionID != sessionID ||
+		record.ControlAction != ControlActionKick ||
+		record.ControlGeneration == "" ||
+		record.ServerTime.IsZero() {
+		t.Fatalf("KillSession record = %#v, want marked kick outcome", record)
+	}
+
+	sessionKey, err := builder.SessionKey(key.Tenant, key.AccountKey, sessionID)
+	if err != nil {
+		t.Fatalf("SessionKey returned error: %v", err)
+	}
+
+	fields := client.HGetAll(context.Background(), sessionKey).Val()
+	if fields["session_control_action"] != string(ControlActionKick) ||
+		fields["session_control_generation"] != record.ControlGeneration {
+		t.Fatalf("session control fields = %#v, want kick generation %q", fields, record.ControlGeneration)
+	}
+
+	renderedPayload := strings.Join([]string{
+		string(record.Status),
+		record.SessionID,
+		string(record.ControlAction),
+		record.ControlGeneration,
+	}, "\n")
+	if strings.Contains(renderedPayload, key.AccountKey) || strings.Contains(renderedPayload, reason) {
+		t.Fatalf("session kill payload leaked account or reason: %q", renderedPayload)
+	}
+}
+
+// TestRedisSessionKillReturnsMissingForAbsentLocator verifies absent index entries are bounded.
+func TestRedisSessionKillReturnsMissingForAbsentLocator(t *testing.T) {
+	store, client, builder := redisIntegrationStore(t)
+	key := AffinityKey{Tenant: testTenantDefault, AccountKey: "kill-missing@example.test"}
+	sessionID := "kill-missing-session"
+	cleanupAffinity(t, client, builder, key, sessionID)
+
+	record, err := store.KillSession(context.Background(), SessionKillRequest{
+		SessionID: sessionID,
+		Reason:    "operator killed missing session",
+		Actor:     testOperatorActor,
+	})
+	if err != nil {
+		t.Fatalf("KillSession returned error: %v", err)
+	}
+
+	if record.Status != SessionKillStatusMissing ||
+		record.SessionID != sessionID ||
+		record.ControlAction != ControlActionNone ||
+		record.ControlGeneration != "" ||
+		record.ServerTime.IsZero() {
+		t.Fatalf("KillSession record = %#v, want missing outcome", record)
+	}
+}
+
+// TestRedisSessionKillRepairsStaleLocator verifies stale index repair and idempotency.
+func TestRedisSessionKillRepairsStaleLocator(t *testing.T) {
+	store, client, builder := redisIntegrationStore(t)
+	key := AffinityKey{Tenant: testTenantDefault, AccountKey: "kill-stale@example.test"}
+	sessionID := "kill-stale-session"
+	cleanupAffinity(t, client, builder, key, sessionID)
+
+	sessionKey, err := builder.SessionKey(key.Tenant, key.AccountKey, sessionID)
+	if err != nil {
+		t.Fatalf("SessionKey returned error: %v", err)
+	}
+
+	sessionIndexKey, err := builder.SessionIndexShardKey(sessionID)
+	if err != nil {
+		t.Fatalf("SessionIndexShardKey returned error: %v", err)
+	}
+
+	if err := client.HSet(context.Background(), sessionIndexKey, sessionID, sessionKey).Err(); err != nil {
+		t.Fatalf("seed stale session locator: %v", err)
+	}
+
+	record, err := store.KillSession(context.Background(), SessionKillRequest{
+		SessionID: sessionID,
+		Reason:    "operator killed stale session",
+		Actor:     testOperatorActor,
+	})
+	if err != nil {
+		t.Fatalf("KillSession returned error: %v", err)
+	}
+	if record.Status != SessionKillStatusStaleIndexRepaired ||
+		record.SessionID != sessionID ||
+		record.ControlAction != ControlActionNone ||
+		record.ControlGeneration != "" {
+		t.Fatalf("KillSession record = %#v, want stale-index repair", record)
+	}
+
+	if exists := client.HExists(context.Background(), sessionIndexKey, sessionID).Val(); exists {
+		t.Fatal("stale session locator still exists after stale-index repair")
+	}
+
+	repeated, err := store.KillSession(context.Background(), SessionKillRequest{
+		SessionID: sessionID,
+		Reason:    "operator repeated stale session kill",
+		Actor:     testOperatorActor,
+	})
+	if err != nil {
+		t.Fatalf("repeated KillSession returned error: %v", err)
+	}
+	if repeated.Status != SessionKillStatusMissing {
+		t.Fatalf("repeated KillSession status = %q, want missing", repeated.Status)
+	}
+}
+
+// TestRedisSessionKillKeepsInvalidControlGenerationAmbiguous keeps corrupt hashes fail-closed.
+func TestRedisSessionKillKeepsInvalidControlGenerationAmbiguous(t *testing.T) {
+	store, client, builder := redisIntegrationStore(t)
+	key := AffinityKey{Tenant: testTenantDefault, AccountKey: "kill-corrupt@example.test"}
+	sessionID := "kill-corrupt-session"
+	cleanupAffinity(t, client, builder, key, sessionID)
+	cleanupBackend(t, client, builder, testBackendIMAP)
+
+	sessionKey, err := builder.SessionKey(key.Tenant, key.AccountKey, sessionID)
+	if err != nil {
+		t.Fatalf("SessionKey returned error: %v", err)
+	}
+
+	sessionIndexKey, err := builder.SessionIndexShardKey(sessionID)
+	if err != nil {
+		t.Fatalf("SessionIndexShardKey returned error: %v", err)
+	}
+
+	openAttachedSession(t, store, key, sessionID, testBackendIMAP)
+
+	if err := client.HSet(context.Background(), sessionKey, scriptFieldControlGeneration, "not-a-number").Err(); err != nil {
+		t.Fatalf("seed corrupt authoritative session hash: %v", err)
+	}
+
+	_, err = store.KillSession(context.Background(), SessionKillRequest{
+		SessionID: sessionID,
+		Reason:    "operator killed corrupt session",
+		Actor:     testOperatorActor,
+	})
+	if !IsRedisErrorKind(err, RedisErrorKindAmbiguousState) {
+		t.Fatalf("KillSession error = %v, want ambiguous_state for corrupt authoritative hash", err)
+	}
+
+	if exists := client.HExists(context.Background(), sessionIndexKey, sessionID).Val(); !exists {
+		t.Fatal("corrupt authoritative session locator was repaired as stale")
+	}
+	if exists := client.Exists(context.Background(), sessionKey).Val(); exists != 1 {
+		t.Fatalf("corrupt authoritative session hash exists = %d, want 1", exists)
+	}
+}
+
+// TestRedisSessionKillKeepsMalformedAuthoritativeSessionAmbiguous rejects sparse hashes.
+func TestRedisSessionKillKeepsMalformedAuthoritativeSessionAmbiguous(t *testing.T) {
+	store, client, builder := redisIntegrationStore(t)
+	key := AffinityKey{Tenant: testTenantDefault, AccountKey: "kill-malformed@example.test"}
+	sessionID := "kill-malformed-session"
+	cleanupAffinity(t, client, builder, key, sessionID)
+	cleanupBackend(t, client, builder, testBackendIMAP)
+
+	sessionKey, err := builder.SessionKey(key.Tenant, key.AccountKey, sessionID)
+	if err != nil {
+		t.Fatalf("SessionKey returned error: %v", err)
+	}
+
+	sessionIndexKey, err := builder.SessionIndexShardKey(sessionID)
+	if err != nil {
+		t.Fatalf("SessionIndexShardKey returned error: %v", err)
+	}
+
+	openAttachedSession(t, store, key, sessionID, testBackendIMAP)
+
+	if err := client.HDel(context.Background(), sessionKey, scriptFieldProtocol).Err(); err != nil {
+		t.Fatalf("corrupt authoritative session hash: %v", err)
+	}
+
+	_, err = store.KillSession(context.Background(), SessionKillRequest{
+		SessionID: sessionID,
+		Reason:    "operator killed malformed session",
+		Actor:     testOperatorActor,
+	})
+	if !IsRedisErrorKind(err, RedisErrorKindAmbiguousState) {
+		t.Fatalf("KillSession error = %v, want ambiguous_state for malformed authoritative hash", err)
+	}
+
+	if exists := client.HExists(context.Background(), sessionIndexKey, sessionID).Val(); !exists {
+		t.Fatal("malformed authoritative session locator was repaired as stale")
+	}
+	if fields := client.HGetAll(context.Background(), sessionKey).Val(); len(fields) == 0 {
+		t.Fatal("malformed authoritative session hash was deleted")
+	}
+}
+
+// TestRedisSessionKillKeepsCrossKeyLocatorAmbiguous rejects locators to another session hash.
+func TestRedisSessionKillKeepsCrossKeyLocatorAmbiguous(t *testing.T) {
+	store, client, builder := redisIntegrationStore(t)
+	key := AffinityKey{Tenant: testTenantDefault, AccountKey: "kill-cross-key@example.test"}
+	sessionID := "kill-cross-key-session"
+	otherSessionID := "kill-cross-key-other-session"
+	cleanupAffinity(t, client, builder, key, sessionID, otherSessionID)
+	cleanupBackend(t, client, builder, testBackendIMAP)
+
+	openAttachedSession(t, store, key, otherSessionID, testBackendIMAP)
+
+	otherSessionKey, err := builder.SessionKey(key.Tenant, key.AccountKey, otherSessionID)
+	if err != nil {
+		t.Fatalf("SessionKey returned error: %v", err)
+	}
+
+	sessionIndexKey, err := builder.SessionIndexShardKey(sessionID)
+	if err != nil {
+		t.Fatalf("SessionIndexShardKey returned error: %v", err)
+	}
+
+	if err := client.HSet(context.Background(), sessionIndexKey, sessionID, otherSessionKey).Err(); err != nil {
+		t.Fatalf("seed cross-key session locator: %v", err)
+	}
+
+	_, err = store.KillSession(context.Background(), SessionKillRequest{
+		SessionID: sessionID,
+		Reason:    "operator killed cross-key session",
+		Actor:     testOperatorActor,
+	})
+	if !IsRedisErrorKind(err, RedisErrorKindAmbiguousState) {
+		t.Fatalf("KillSession error = %v, want ambiguous_state for cross-key locator", err)
+	}
+
+	if exists := client.HExists(context.Background(), sessionIndexKey, sessionID).Val(); !exists {
+		t.Fatal("cross-key session locator was repaired as stale")
 	}
 }
 

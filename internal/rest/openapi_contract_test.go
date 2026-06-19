@@ -104,6 +104,83 @@ func TestOpenAPIContractIncludesPlannedEndpointGroupSet(t *testing.T) {
 	}
 }
 
+// TestOpenAPIContractIncludesSessionKillOutcomes checks deterministic kill responses.
+//
+//nolint:gocyclo // The test keeps related status, schema and enum assertions together.
+func TestOpenAPIContractIncludesSessionKillOutcomes(t *testing.T) {
+	contract := loadContract(t)
+	operation := contract.Paths.Find(pathContractSession).GetOperation(http.MethodDelete)
+	if operation == nil {
+		t.Fatalf("OpenAPI contract missing DELETE %s", pathContractSession)
+	}
+
+	if operation.OperationID != "deleteSession" {
+		t.Fatalf("DELETE %s operationId = %q, want deleteSession", pathContractSession, operation.OperationID)
+	}
+
+	if got := operationResponseSchemaRef(t, operation, http.StatusAccepted); got != "#/components/schemas/SessionKillResponse" {
+		t.Fatalf("202 response schema = %q, want SessionKillResponse", got)
+	}
+	if got := operationResponseSchemaRef(t, operation, http.StatusNotFound); got != "#/components/schemas/SessionKillResponse" {
+		t.Fatalf("404 response schema = %q, want SessionKillResponse", got)
+	}
+
+	for _, status := range []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusServiceUnavailable} {
+		if operation.Responses.Status(status) == nil {
+			t.Fatalf("DELETE %s missing %d response", pathContractSession, status)
+		}
+	}
+
+	responseSchema := contract.Components.Schemas["SessionKillResponse"].Value
+	if !schemaRejectsAdditionalProperties(responseSchema) {
+		t.Fatal("SessionKillResponse must reject additional properties")
+	}
+
+	assertSchemaRequires(t, responseSchema, "outcome", "session_id", "lifecycle", "stale_index_repaired")
+	assertSchemaPropertiesExactly(t, responseSchema, "control_action", "control_generation", "lifecycle", "outcome", "session_id", "stale_index_repaired")
+	assertSchemaPropertyRef(t, responseSchema, "outcome", "#/components/schemas/SessionKillOutcome")
+	assertSchemaPropertyRef(t, responseSchema, "control_action", "#/components/schemas/SessionKillControlAction")
+	assertSchemaPropertyRef(t, responseSchema, "lifecycle", "#/components/schemas/SessionKillLifecycle")
+	assertStringPropertyMinLength(t, responseSchema, "session_id", 1)
+
+	for _, forbidden := range []string{"reason", "operator_reason", "reason_text", "user_key", "recipient", "client_ip", "backend", "backend_identifier", "raw_error"} {
+		if _, ok := responseSchema.Properties[forbidden]; ok {
+			t.Fatalf("SessionKillResponse exposes forbidden field %q", forbidden)
+		}
+	}
+
+	outcomeSchema := contract.Components.Schemas["SessionKillOutcome"].Value
+	for _, outcome := range []string{"marked", "missing", "stale_index_repaired", "ambiguous_state"} {
+		if !schemaEnumContains(outcomeSchema.Enum, outcome) {
+			t.Fatalf("SessionKillOutcome enum missing %q: %#v", outcome, outcomeSchema.Enum)
+		}
+	}
+
+	lifecycleSchema := contract.Components.Schemas["SessionKillLifecycle"].Value
+	for _, lifecycle := range []string{"local_close_or_remote_heartbeat", "already_absent", "stale_locator_repaired", "fail_closed_ambiguous"} {
+		if !schemaEnumContains(lifecycleSchema.Enum, lifecycle) {
+			t.Fatalf("SessionKillLifecycle enum missing %q: %#v", lifecycle, lifecycleSchema.Enum)
+		}
+	}
+}
+
+// TestOpenAPIContractIncludesVisibleSessionHolderKind checks session holder diagnostics.
+func TestOpenAPIContractIncludesVisibleSessionHolderKind(t *testing.T) {
+	contract := loadContract(t)
+	schema := contract.Components.Schemas["SessionDetail"].Value
+	if !schemaRejectsAdditionalProperties(schema) {
+		t.Fatal("SessionDetail must reject additional properties")
+	}
+
+	assertSchemaRequires(t, schema, "session_id", "user_key", "protocol", "holder_kind", "backend", "backend_node", "shard_tag", "expires_at")
+	assertSchemaPropertiesExactly(t, schema, "backend", "backend_node", "expires_at", "holder_kind", "protocol", "session_id", "shard_tag", "user_key")
+
+	holderKind := schema.Properties["holder_kind"].Value
+	if holderKind == nil || !schemaEnumContains(holderKind.Enum, "session") {
+		t.Fatalf("SessionDetail holder_kind enum = %#v, want session", holderKind)
+	}
+}
+
 // TestOpenAPIContractIncludesUserBackendPinOperations checks the backend-pin contract.
 func TestOpenAPIContractIncludesUserBackendPinOperations(t *testing.T) {
 	contract := loadContract(t)
@@ -652,6 +729,27 @@ func operationHasParameter(operation *openapi3.Operation, name string) bool {
 	}
 
 	return false
+}
+
+// operationResponseSchemaRef returns the JSON response schema reference for one status.
+func operationResponseSchemaRef(t *testing.T, operation *openapi3.Operation, status int) string {
+	t.Helper()
+
+	if operation == nil || operation.Responses == nil {
+		t.Fatal("operation has no responses")
+	}
+
+	response := operation.Responses.Status(status)
+	if response == nil || response.Value == nil {
+		t.Fatalf("operation missing %d response", status)
+	}
+
+	media := response.Value.Content.Get("application/json")
+	if media == nil || media.Schema == nil {
+		t.Fatalf("%d response missing application/json schema", status)
+	}
+
+	return media.Schema.Ref
 }
 
 // loadContract parses and validates the source OpenAPI document.

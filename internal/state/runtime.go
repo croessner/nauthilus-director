@@ -1363,7 +1363,7 @@ func parseSessionKillRecord(value any) (SessionKillRecord, error) {
 	}
 
 	record := SessionKillRecord{
-		Status:            fields["status"],
+		Status:            SessionKillStatus(strings.TrimSpace(fields[scriptFieldStatus])),
 		SessionID:         fields["session_id"],
 		ControlAction:     action,
 		ControlGeneration: fields["control_generation"],
@@ -1373,6 +1373,7 @@ func parseSessionKillRecord(value any) (SessionKillRecord, error) {
 		return SessionKillRecord{}, newStateError(RedisErrorKindAmbiguousState, "script_result", "status required", nil)
 	}
 
+	record.SessionID = strings.TrimSpace(record.SessionID)
 	if record.SessionID == "" {
 		return SessionKillRecord{}, newStateError(RedisErrorKindAmbiguousState, "script_result", "session id required", nil)
 	}
@@ -1380,6 +1381,35 @@ func parseSessionKillRecord(value any) (SessionKillRecord, error) {
 	record.ServerTime, err = parseTimeField(fields, "server_time_ms")
 	if err != nil {
 		return SessionKillRecord{}, err
+	}
+
+	return validateSessionKillRecord(record)
+}
+
+// validateSessionKillRecord rejects malformed or internally contradictory kill outcomes.
+func validateSessionKillRecord(record SessionKillRecord) (SessionKillRecord, error) {
+	switch record.Status {
+	case SessionKillStatusMarked:
+		if record.ControlAction != ControlActionKick {
+			return SessionKillRecord{}, newStateError(RedisErrorKindAmbiguousState, "script_result", "session kill action invalid", nil)
+		}
+
+		generation, err := strconv.Atoi(strings.TrimSpace(record.ControlGeneration))
+		if err != nil || generation <= 0 {
+			return SessionKillRecord{}, newStateError(RedisErrorKindAmbiguousState, "script_result", "control_generation invalid", err)
+		}
+
+	case SessionKillStatusMissing, SessionKillStatusStaleIndexRepaired:
+		if record.ControlAction != ControlActionNone {
+			return SessionKillRecord{}, newStateError(RedisErrorKindAmbiguousState, "script_result", "missing session action invalid", nil)
+		}
+
+		if strings.TrimSpace(record.ControlGeneration) != "" {
+			return SessionKillRecord{}, newStateError(RedisErrorKindAmbiguousState, "script_result", "missing session generation invalid", nil)
+		}
+
+	default:
+		return SessionKillRecord{}, newStateError(RedisErrorKindAmbiguousState, "script_result", "session kill status invalid", nil)
 	}
 
 	return record, nil

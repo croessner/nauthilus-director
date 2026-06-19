@@ -421,6 +421,93 @@ func TestRouteLookupUsesResolverSelectorAndReadOnlyAffinity(t *testing.T) {
 	assertNoRouteLookupMutations(t, store)
 }
 
+// TestRepeatedRouteLookupPreservesRuntimeStateEvidence proves diagnostics do not mutate holder state.
+//
+//nolint:gocyclo // The test compares repeated lookup evidence against one immutable state snapshot.
+func TestRepeatedRouteLookupPreservesRuntimeStateEvidence(t *testing.T) {
+	store := &countingRouteState{
+		affinity: state.AffinityRecord{
+			Present:            true,
+			Status:             "found",
+			ShardTag:           routeLookupShardB,
+			BackendNode:        "mailstore-b-node-1",
+			BackendIdentifier:  routeLookupBackendB,
+			Generation:         "affinity-generation-3",
+			BindingGeneration:  "binding-generation-5",
+			BindingStatus:      state.BindingStatusActive,
+			ActiveSessionCount: 2,
+			ActiveHolderCount:  2,
+		},
+		backendPin: state.UserBackendPinRecord{
+			Present:           true,
+			BackendIdentifier: routeLookupBackendA,
+			Protocol:          routeLookupProtocol,
+			BackendPool:       routeLookupDefaultPool,
+			ShardTag:          routeLookupShardA,
+			BackendNode:       "mailstore-a-node-1",
+			Strategy:          string(MoveStrategyDrainExisting),
+			Generation:        "pin-generation-7",
+		},
+	}
+	before := struct {
+		activeSessions     int
+		activeHolders      int
+		affinityGeneration string
+		bindingGeneration  string
+		pinGeneration      string
+	}{
+		activeSessions:     store.affinity.ActiveSessionCount,
+		activeHolders:      store.affinity.ActiveHolderCount,
+		affinityGeneration: store.affinity.Generation,
+		bindingGeneration:  store.affinity.BindingGeneration,
+		pinGeneration:      store.backendPin.Generation,
+	}
+	service := newRouteLookupTestService(t, store, false)
+
+	for index := range 2 {
+		response, err := service.Lookup(context.Background(), RouteLookupRequest{
+			Protocol:        routeLookupProtocol,
+			ListenerName:    routeLookupListener,
+			AccountKey:      routeLookupAccount,
+			IncludeAffinity: true,
+			Attributes: map[string][]string{
+				routeLookupAttributeShard: {routeLookupShardA},
+			},
+		})
+		if err != nil {
+			t.Fatalf("Lookup %d returned error: %v", index+1, err)
+		}
+
+		if response.SelectedBackend != routeLookupBackendB || response.Source != routeLookupSourceActiveAffinity {
+			t.Fatalf("lookup %d selected %q from %q, want active affinity backend %q", index+1, response.SelectedBackend, response.Source, routeLookupBackendB)
+		}
+		if response.Affinity.ActiveSessions != before.activeSessions || response.Affinity.ActiveHolders != before.activeHolders {
+			t.Fatalf("lookup %d affinity counts = %d/%d, want %d/%d", index+1, response.Affinity.ActiveSessions, response.Affinity.ActiveHolders, before.activeSessions, before.activeHolders)
+		}
+		if response.Affinity.Generation != before.affinityGeneration || response.Affinity.BindingGeneration != before.bindingGeneration {
+			t.Fatalf("lookup %d generations = %q/%q, want %q/%q", index+1, response.Affinity.Generation, response.Affinity.BindingGeneration, before.affinityGeneration, before.bindingGeneration)
+		}
+		if response.BackendPin.Applied || response.BackendPin.ReasonClass != routeLookupIdentityActiveAffinity {
+			t.Fatalf("lookup %d backend pin = %#v, want diagnostic-only active-affinity context", index+1, response.BackendPin)
+		}
+
+		assertNoRouteLookupMutations(t, store)
+	}
+
+	if store.lookupAffinityCalls != 2 {
+		t.Fatalf("LookupAffinity calls = %d, want repeated read count 2", store.lookupAffinityCalls)
+	}
+	if store.backendPinGetCalls != 2 {
+		t.Fatalf("ListUserBackendPins calls = %d, want repeated read count 2", store.backendPinGetCalls)
+	}
+	if store.affinity.ActiveSessionCount != before.activeSessions || store.affinity.ActiveHolderCount != before.activeHolders {
+		t.Fatalf("backing affinity counts mutated to %d/%d, want %d/%d", store.affinity.ActiveSessionCount, store.affinity.ActiveHolderCount, before.activeSessions, before.activeHolders)
+	}
+	if store.affinity.Generation != before.affinityGeneration || store.affinity.BindingGeneration != before.bindingGeneration || store.backendPin.Generation != before.pinGeneration {
+		t.Fatalf("runtime generations mutated to affinity=%q binding=%q pin=%q", store.affinity.Generation, store.affinity.BindingGeneration, store.backendPin.Generation)
+	}
+}
+
 // TestRouteLookupReportsOutboundProxyRequirement verifies transport diagnostics stay read-only.
 func TestRouteLookupReportsOutboundProxyRequirement(t *testing.T) {
 	store := &countingRouteState{}

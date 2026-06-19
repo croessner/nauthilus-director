@@ -57,6 +57,8 @@ const (
 	testListenerBound       = "127.0.0.1:2143"
 	testListenerName        = "imap"
 	testListenerReason      = "node maintenance"
+	testSessionKillID       = "session-a"
+	testSessionKillReason   = "operator killed holder"
 	testPinnedBackend       = "mailstore-c-imap"
 	testPrivateKeyField     = "private_key"
 	testRecipientField      = "recipient"
@@ -1035,6 +1037,168 @@ func TestRuntimeListHandlersMapPaginationClientErrors(t *testing.T) {
 	}
 }
 
+// TestDeleteSessionRejectsMissingReason verifies bad kill requests stay at the REST boundary.
+func TestDeleteSessionRejectsMissingReason(t *testing.T) {
+	mutator := &recordingSessionMutator{}
+	handler := NewHandler(HandlerOptions{
+		Version:        testHandlerVersion,
+		SessionMutator: mutator,
+	})
+
+	response, err := handler.DeleteSession(context.Background(), generated.DeleteSessionRequestObject{
+		SessionID: testSessionKillID,
+		Body:      &generated.DeleteSessionJSONRequestBody{Reason: "  "},
+	})
+	if err != nil {
+		t.Fatalf("DeleteSession returned error: %v", err)
+	}
+
+	problem, ok := response.(generated.DeleteSessiondefaultJSONResponse)
+	if !ok {
+		t.Fatalf("DeleteSession response = %T, want problem", response)
+	}
+
+	if problem.StatusCode != http.StatusBadRequest {
+		t.Fatalf("DeleteSession status = %d, want 400", problem.StatusCode)
+	}
+
+	if mutator.calls != 0 {
+		t.Fatalf("session mutator calls = %d, want 0 for invalid request", mutator.calls)
+	}
+}
+
+// TestDeleteSessionMapsMarkedOutcome verifies accepted session kill DTO mapping.
+//
+//nolint:gocyclo // The test keeps the generated response mapping assertions in one public-contract proof.
+func TestDeleteSessionMapsMarkedOutcome(t *testing.T) {
+	mutator := &recordingSessionMutator{result: sessionKillMutationResult(runtime.SessionMutationOutcomeMarked)}
+	handler := NewHandler(HandlerOptions{
+		Version:        testHandlerVersion,
+		SessionMutator: mutator,
+	})
+
+	response, err := handler.DeleteSession(context.Background(), generated.DeleteSessionRequestObject{
+		SessionID: testSessionKillID,
+		Body:      &generated.DeleteSessionJSONRequestBody{Reason: " " + testSessionKillReason + " "},
+	})
+	if err != nil {
+		t.Fatalf("DeleteSession returned error: %v", err)
+	}
+
+	accepted, ok := response.(generated.DeleteSession202JSONResponse)
+	if !ok {
+		t.Fatalf("DeleteSession response = %T, want 202 session kill", response)
+	}
+
+	body := generated.SessionKillResponse(accepted)
+	if body.Outcome != generated.SessionKillOutcome(runtime.SessionMutationOutcomeMarked) ||
+		body.SessionID != testSessionKillID ||
+		body.Lifecycle != generated.SessionKillLifecycle(runtime.SessionMutationLifecycleLocalOrHeartbeatClose) ||
+		body.StaleIndexRepaired {
+		t.Fatalf("session kill body = %#v, want marked outcome", body)
+	}
+
+	if body.ControlAction == nil || *body.ControlAction != generated.SessionKillControlAction(runtime.SessionMutationControlActionKick) {
+		t.Fatalf("control action = %#v, want kick", body.ControlAction)
+	}
+
+	if body.ControlGeneration == nil || *body.ControlGeneration != "7" {
+		t.Fatalf("control generation = %#v, want 7", body.ControlGeneration)
+	}
+
+	if mutator.calls != 1 || mutator.request.SessionID != testSessionKillID || mutator.request.Reason != testSessionKillReason {
+		t.Fatalf("mutator request = %#v after %d calls, want trimmed kill request", mutator.request, mutator.calls)
+	}
+}
+
+// TestDeleteSessionMapsMissingAndStaleOutcomes verifies bounded 404 kill evidence.
+func TestDeleteSessionMapsMissingAndStaleOutcomes(t *testing.T) {
+	testCases := []struct {
+		name      string
+		outcome   runtime.SessionMutationOutcome
+		lifecycle runtime.SessionMutationLifecycle
+		stale     bool
+	}{
+		{
+			name:      "missing",
+			outcome:   runtime.SessionMutationOutcomeMissing,
+			lifecycle: runtime.SessionMutationLifecycleAlreadyAbsent,
+			stale:     false,
+		},
+		{
+			name:      "stale repaired",
+			outcome:   runtime.SessionMutationOutcomeStaleIndexRepaired,
+			lifecycle: runtime.SessionMutationLifecycleStaleLocatorRepaired,
+			stale:     true,
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			mutator := &recordingSessionMutator{result: sessionKillMutationResult(testCase.outcome)}
+			handler := NewHandler(HandlerOptions{
+				Version:        testHandlerVersion,
+				SessionMutator: mutator,
+			})
+
+			response, err := handler.DeleteSession(context.Background(), generated.DeleteSessionRequestObject{
+				SessionID: testSessionKillID,
+				Body:      &generated.DeleteSessionJSONRequestBody{Reason: testSessionKillReason},
+			})
+			if err != nil {
+				t.Fatalf("DeleteSession returned error: %v", err)
+			}
+
+			missing, ok := response.(generated.DeleteSession404JSONResponse)
+			if !ok {
+				t.Fatalf("DeleteSession response = %T, want 404 session kill", response)
+			}
+
+			body := generated.SessionKillResponse(missing)
+			if body.Outcome != generated.SessionKillOutcome(testCase.outcome) ||
+				body.SessionID != testSessionKillID ||
+				body.Lifecycle != generated.SessionKillLifecycle(testCase.lifecycle) ||
+				body.StaleIndexRepaired != testCase.stale {
+				t.Fatalf("session kill body = %#v, want %s/%s stale=%t", body, testCase.outcome, testCase.lifecycle, testCase.stale)
+			}
+
+			if body.ControlAction != nil || body.ControlGeneration != nil {
+				t.Fatalf("missing/stale body included control mark: %#v", body)
+			}
+		})
+	}
+}
+
+// TestDeleteSessionRuntimeFailureFailsClosed verifies ambiguous runtime errors map to 503.
+func TestDeleteSessionRuntimeFailureFailsClosed(t *testing.T) {
+	mutator := &recordingSessionMutator{
+		err: newRuntimeError(runtime.ErrorKindUnavailable, "session_kill", "ambiguous session state"),
+	}
+	handler := NewHandler(HandlerOptions{
+		Version:        testHandlerVersion,
+		SessionMutator: mutator,
+	})
+
+	response, err := handler.DeleteSession(context.Background(), generated.DeleteSessionRequestObject{
+		SessionID: testSessionKillID,
+		Body:      &generated.DeleteSessionJSONRequestBody{Reason: testSessionKillReason},
+	})
+	if err != nil {
+		t.Fatalf("DeleteSession returned error: %v", err)
+	}
+
+	problem, ok := response.(generated.DeleteSessiondefaultJSONResponse)
+	if !ok {
+		t.Fatalf("DeleteSession response = %T, want fail-closed problem", response)
+	}
+
+	if problem.StatusCode != http.StatusServiceUnavailable ||
+		problem.Body.Code != string(runtime.ErrorKindUnavailable) ||
+		!strings.Contains(problem.Body.Message, "ambiguous session state") {
+		t.Fatalf("problem = %#v, want fail-closed 503 ambiguous state", problem)
+	}
+}
+
 // TestSummaryHandlerUsesAggregateReader verifies summaries do not call list readers.
 func TestSummaryHandlerUsesAggregateReader(t *testing.T) {
 	reader := &recordingRuntimeReadService{summary: runtime.Summary{
@@ -1626,6 +1790,54 @@ func (r *recordingBackendReader) GetBackend(context.Context, string) (backend.Ef
 	}
 
 	return r.states[0], nil
+}
+
+// recordingSessionMutator captures one generated-boundary session mutation.
+type recordingSessionMutator struct {
+	calls   int
+	request runtime.KillSessionRequest
+	result  runtime.SessionMutationResult
+	err     error
+}
+
+// KillSession records the domain request and returns the configured outcome.
+func (r *recordingSessionMutator) KillSession(_ context.Context, request runtime.KillSessionRequest) (runtime.SessionMutationResult, error) {
+	r.calls++
+	r.request = request
+	if r.err != nil {
+		return runtime.SessionMutationResult{}, r.err
+	}
+
+	return r.result, nil
+}
+
+// sessionKillMutationResult builds one bounded runtime kill result for REST tests.
+func sessionKillMutationResult(outcome runtime.SessionMutationOutcome) runtime.SessionMutationResult {
+	result := runtime.SessionMutationResult{
+		State: runtime.SessionRuntimeState{
+			SessionID: testSessionKillID,
+			Status:    runtime.SessionStatusExpired,
+		},
+		Outcome:       outcome,
+		ControlAction: runtime.SessionMutationControlActionNone,
+	}
+
+	switch outcome {
+	case runtime.SessionMutationOutcomeMarked:
+		result.State.ControlGeneration = "7"
+		result.State.Status = runtime.SessionStatusClosing
+		result.ControlAction = runtime.SessionMutationControlActionKick
+		result.Lifecycle = runtime.SessionMutationLifecycleLocalOrHeartbeatClose
+	case runtime.SessionMutationOutcomeMissing:
+		result.Lifecycle = runtime.SessionMutationLifecycleAlreadyAbsent
+	case runtime.SessionMutationOutcomeStaleIndexRepaired:
+		result.Lifecycle = runtime.SessionMutationLifecycleStaleLocatorRepaired
+		result.StaleIndexRepaired = true
+	default:
+		result.Lifecycle = runtime.SessionMutationLifecycleFailClosedAmbiguous
+	}
+
+	return result
 }
 
 // recordingRuntimeReadService captures paginated read requests.

@@ -45,6 +45,44 @@ const (
 	SessionStatusExpired SessionStatus = "expired"
 )
 
+// SessionMutationOutcome classifies a bounded session mutation result.
+type SessionMutationOutcome string
+
+const (
+	// SessionMutationOutcomeMarked means runtime state marked the target for cooperative closure.
+	SessionMutationOutcomeMarked SessionMutationOutcome = "marked"
+	// SessionMutationOutcomeMissing means no repairable locator exists for the target session.
+	SessionMutationOutcomeMissing SessionMutationOutcome = "missing"
+	// SessionMutationOutcomeStaleIndexRepaired means a stale locator was removed after proving absence.
+	SessionMutationOutcomeStaleIndexRepaired SessionMutationOutcome = "stale_index_repaired"
+	// SessionMutationOutcomeAmbiguousState means authoritative state was unsafe and must fail closed.
+	SessionMutationOutcomeAmbiguousState SessionMutationOutcome = "ambiguous_state"
+)
+
+// SessionMutationControlAction describes the bounded control mark written for a session.
+type SessionMutationControlAction string
+
+const (
+	// SessionMutationControlActionNone means no session control mark was written.
+	SessionMutationControlActionNone SessionMutationControlAction = "none"
+	// SessionMutationControlActionKick means heartbeat should close the targeted session.
+	SessionMutationControlActionKick SessionMutationControlAction = "kick"
+)
+
+// SessionMutationLifecycle describes cooperative session close behavior for operators.
+type SessionMutationLifecycle string
+
+const (
+	// SessionMutationLifecycleLocalOrHeartbeatClose means local handles close now and remote holders close on heartbeat.
+	SessionMutationLifecycleLocalOrHeartbeatClose SessionMutationLifecycle = "local_close_or_remote_heartbeat"
+	// SessionMutationLifecycleAlreadyAbsent means the target session is already absent.
+	SessionMutationLifecycleAlreadyAbsent SessionMutationLifecycle = "already_absent"
+	// SessionMutationLifecycleStaleLocatorRepaired means a repairable locator was removed.
+	SessionMutationLifecycleStaleLocatorRepaired SessionMutationLifecycle = "stale_locator_repaired"
+	// SessionMutationLifecycleFailClosedAmbiguous means authoritative state was ambiguous.
+	SessionMutationLifecycleFailClosedAmbiguous SessionMutationLifecycle = "fail_closed_ambiguous"
+)
+
 // SessionRuntimeState describes one lease-backed frontend session.
 type SessionRuntimeState struct {
 	SessionID         string
@@ -95,8 +133,12 @@ type ReapSessionsRequest struct {
 
 // SessionMutationResult describes a runtime session mutation outcome.
 type SessionMutationResult struct {
-	State SessionRuntimeState
-	Audit AuditMetadata
+	State              SessionRuntimeState
+	Audit              AuditMetadata
+	Outcome            SessionMutationOutcome
+	ControlAction      SessionMutationControlAction
+	Lifecycle          SessionMutationLifecycle
+	StaleIndexRepaired bool
 }
 
 // SessionStateStore persists session control and reap operations.
@@ -271,6 +313,11 @@ func (s *SessionService) KillSession(ctx context.Context, request KillSessionReq
 		return SessionMutationResult{}, err
 	}
 
+	mutation, err := sessionMutationForKillRecord(record)
+	if err != nil {
+		return SessionMutationResult{}, err
+	}
+
 	audit, err := NewAuditMetadata(AuditInput{
 		Operation: AuditOperationSessionKill,
 		Reason:    request.Reason,
@@ -283,14 +330,14 @@ func (s *SessionService) KillSession(ctx context.Context, request KillSessionReq
 		SessionID:  record.SessionID,
 		Fields: map[string]string{
 			auditFieldControlAction: string(record.ControlAction),
-			auditFieldStatus:        record.Status,
+			auditFieldStatus:        string(record.Status),
 		},
 	})
 	if err != nil {
 		return SessionMutationResult{}, err
 	}
 
-	if s.local != nil {
+	if s.local != nil && record.Status == state.SessionKillStatusMarked {
 		_, closeErr := s.local.CloseSession(ctx, record.SessionID, LocalSessionControl{
 			Action: string(record.ControlAction),
 			Reason: request.Reason,
@@ -303,7 +350,7 @@ func (s *SessionService) KillSession(ctx context.Context, request KillSessionReq
 	s.recordSessionOperation(ctx, observability.EventSessionKill, operationSessionKill, runtimeObservationResultOK, "session_kill", map[string]string{
 		auditFieldControlAction:                  string(record.ControlAction),
 		runtimeObservationFieldRuntimeGeneration: record.ControlGeneration,
-		runtimeObservationFieldRuntimeStatus:     record.Status,
+		runtimeObservationFieldRuntimeStatus:     string(record.Status),
 		"session_id":                             record.SessionID,
 	})
 
@@ -311,10 +358,68 @@ func (s *SessionService) KillSession(ctx context.Context, request KillSessionReq
 		State: SessionRuntimeState{
 			SessionID:         record.SessionID,
 			ControlGeneration: record.ControlGeneration,
-			Status:            SessionStatusClosing,
+			Status:            sessionStatusForKillRecord(record),
 		},
-		Audit: audit,
+		Audit:              audit,
+		Outcome:            mutation.Outcome,
+		ControlAction:      mutation.ControlAction,
+		Lifecycle:          mutation.Lifecycle,
+		StaleIndexRepaired: mutation.StaleIndexRepaired,
 	}, nil
+}
+
+// sessionMutation maps state-layer session-kill outcomes into runtime-domain fields.
+type sessionMutation struct {
+	Outcome            SessionMutationOutcome
+	ControlAction      SessionMutationControlAction
+	Lifecycle          SessionMutationLifecycle
+	StaleIndexRepaired bool
+}
+
+// sessionMutationForKillRecord converts a bounded state record into a runtime result.
+func sessionMutationForKillRecord(record state.SessionKillRecord) (sessionMutation, error) {
+	switch record.Status {
+	case state.SessionKillStatusMarked:
+		if record.ControlAction != state.ControlActionKick || strings.TrimSpace(record.ControlGeneration) == "" {
+			return sessionMutation{}, newRuntimeError(ErrorKindUnavailable, operationSessionKill, "marked session state incomplete")
+		}
+
+		return sessionMutation{
+			Outcome:       SessionMutationOutcomeMarked,
+			ControlAction: SessionMutationControlActionKick,
+			Lifecycle:     SessionMutationLifecycleLocalOrHeartbeatClose,
+		}, nil
+
+	case state.SessionKillStatusMissing:
+		return sessionMutation{
+			Outcome:       SessionMutationOutcomeMissing,
+			ControlAction: SessionMutationControlActionNone,
+			Lifecycle:     SessionMutationLifecycleAlreadyAbsent,
+		}, nil
+
+	case state.SessionKillStatusStaleIndexRepaired:
+		return sessionMutation{
+			Outcome:            SessionMutationOutcomeStaleIndexRepaired,
+			ControlAction:      SessionMutationControlActionNone,
+			Lifecycle:          SessionMutationLifecycleStaleLocatorRepaired,
+			StaleIndexRepaired: true,
+		}, nil
+
+	case state.SessionKillStatusAmbiguousState:
+		return sessionMutation{}, newRuntimeError(ErrorKindUnavailable, operationSessionKill, "ambiguous session state")
+
+	default:
+		return sessionMutation{}, newRuntimeError(ErrorKindUnavailable, operationSessionKill, "unknown session kill outcome")
+	}
+}
+
+// sessionStatusForKillRecord maps bounded state outcomes to the legacy session status field.
+func sessionStatusForKillRecord(record state.SessionKillRecord) SessionStatus {
+	if record.Status == state.SessionKillStatusMarked {
+		return SessionStatusClosing
+	}
+
+	return SessionStatusExpired
 }
 
 // ReapSessions repairs expired Redis leases, backend counts and secondary indexes.

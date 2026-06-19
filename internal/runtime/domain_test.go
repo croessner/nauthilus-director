@@ -1227,7 +1227,7 @@ func TestSessionKillClosesOnlyTargetLocalSession(t *testing.T) {
 
 	service := NewSessionService(&recordingSessionStateStore{
 		killRecord: state.SessionKillRecord{
-			Status:            "marked",
+			Status:            state.SessionKillStatusMarked,
 			SessionID:         runtimeTestSessionA,
 			ControlAction:     state.ControlActionKick,
 			ControlGeneration: "3",
@@ -1235,11 +1235,21 @@ func TestSessionKillClosesOnlyTargetLocalSession(t *testing.T) {
 		},
 	}, registry)
 
-	if _, err := service.KillSession(context.Background(), KillSessionRequest{
+	result, err := service.KillSession(context.Background(), KillSessionRequest{
 		SessionID: runtimeTestSessionA,
 		Reason:    "operator killed one session",
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("KillSession returned error: %v", err)
+	}
+
+	if result.Outcome != SessionMutationOutcomeMarked ||
+		result.State.SessionID != runtimeTestSessionA ||
+		result.State.ControlGeneration != "3" ||
+		result.ControlAction != SessionMutationControlActionKick ||
+		result.Lifecycle != SessionMutationLifecycleLocalOrHeartbeatClose ||
+		result.StaleIndexRepaired {
+		t.Fatalf("result = %#v, want marked kill outcome with control generation", result)
 	}
 
 	if target.closed != 1 {
@@ -1248,6 +1258,101 @@ func TestSessionKillClosesOnlyTargetLocalSession(t *testing.T) {
 
 	if other.closed != 0 {
 		t.Fatalf("other session closed = %d, want 0", other.closed)
+	}
+}
+
+// TestSessionKillMissingDoesNotCloseLocalSession preserves bounded missing semantics.
+func TestSessionKillMissingDoesNotCloseLocalSession(t *testing.T) {
+	registry := NewLocalSessionRegistry()
+	target := &recordingLocalHandle{}
+
+	registerTestLocalSession(t, registry, LocalSessionInfo{SessionID: runtimeTestSessionA}, target)
+
+	service := NewSessionService(&recordingSessionStateStore{
+		killRecord: state.SessionKillRecord{
+			Status:        state.SessionKillStatusMissing,
+			SessionID:     runtimeTestSessionA,
+			ServerTime:    time.Unix(100, 0),
+			ControlAction: state.ControlActionNone,
+		},
+	}, registry)
+
+	result, err := service.KillSession(context.Background(), KillSessionRequest{
+		SessionID: runtimeTestSessionA,
+		Reason:    "operator killed missing session",
+	})
+	if err != nil {
+		t.Fatalf("KillSession returned error: %v", err)
+	}
+
+	if target.closed != 0 {
+		t.Fatalf("missing session closed local handle %d times, want 0", target.closed)
+	}
+
+	if result.Outcome != SessionMutationOutcomeMissing ||
+		result.State.Status != SessionStatusExpired ||
+		result.ControlAction != SessionMutationControlActionNone ||
+		result.Lifecycle != SessionMutationLifecycleAlreadyAbsent ||
+		result.StaleIndexRepaired {
+		t.Fatalf("result = %#v, want missing outcome without closing", result)
+	}
+}
+
+// TestSessionKillStaleIndexRepairedCarriesBoundedOutcome preserves repair evidence.
+func TestSessionKillStaleIndexRepairedCarriesBoundedOutcome(t *testing.T) {
+	registry := NewLocalSessionRegistry()
+	target := &recordingLocalHandle{}
+
+	registerTestLocalSession(t, registry, LocalSessionInfo{SessionID: runtimeTestSessionA}, target)
+
+	service := NewSessionService(&recordingSessionStateStore{
+		killRecord: state.SessionKillRecord{
+			Status:        state.SessionKillStatusStaleIndexRepaired,
+			SessionID:     runtimeTestSessionA,
+			ServerTime:    time.Unix(100, 0),
+			ControlAction: state.ControlActionNone,
+		},
+	}, registry)
+
+	result, err := service.KillSession(context.Background(), KillSessionRequest{
+		SessionID: runtimeTestSessionA,
+		Reason:    "operator killed stale session",
+	})
+	if err != nil {
+		t.Fatalf("KillSession returned error: %v", err)
+	}
+
+	if target.closed != 0 {
+		t.Fatalf("stale session closed local handle %d times, want 0", target.closed)
+	}
+
+	if result.Outcome != SessionMutationOutcomeStaleIndexRepaired ||
+		result.State.SessionID != runtimeTestSessionA ||
+		result.State.Status != SessionStatusExpired ||
+		result.ControlAction != SessionMutationControlActionNone ||
+		result.Lifecycle != SessionMutationLifecycleStaleLocatorRepaired ||
+		!result.StaleIndexRepaired {
+		t.Fatalf("result = %#v, want stale-index repair outcome", result)
+	}
+}
+
+// TestSessionKillAmbiguousStateFailsClosed keeps corrupt state out of normal results.
+func TestSessionKillAmbiguousStateFailsClosed(t *testing.T) {
+	service := NewSessionService(&recordingSessionStateStore{
+		killRecord: state.SessionKillRecord{
+			Status:        state.SessionKillStatusAmbiguousState,
+			SessionID:     runtimeTestSessionA,
+			ServerTime:    time.Unix(100, 0),
+			ControlAction: state.ControlActionNone,
+		},
+	}, nil)
+
+	_, err := service.KillSession(context.Background(), KillSessionRequest{
+		SessionID: runtimeTestSessionA,
+		Reason:    "operator killed ambiguous session",
+	})
+	if !IsErrorKind(err, ErrorKindUnavailable) {
+		t.Fatalf("KillSession error = %v, want unavailable fail-closed error", err)
 	}
 }
 

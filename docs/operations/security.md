@@ -55,6 +55,58 @@ control certificate and key, and `runtime.servers.control.tls.client_ca`.
 Clients use `nauthilus-directorctl --tls-ca-file <path> --tls-client-cert
 <path> --tls-client-key <path>`.
 
+## Control CLI Transport
+
+`nauthilus-directorctl` keeps the compiled default
+`http://127.0.0.1:9090` for plain local control listeners. That default does
+not fit an HTTPS control listener, and a bare `host:port` value is normalized to
+HTTP. For TLS-enabled control listeners, pass an explicit `https://` address
+and a verification source:
+
+```sh
+nauthilus-directorctl \
+  --address https://127.0.0.1:9090 \
+  --tls-ca-file /etc/nauthilus-director/control-ca.pem \
+  --auth-bearer-token-file /run/nauthilus-director/operator-control-token \
+  sessions list
+```
+
+Inside a production pod, keep the same rule: address the configured HTTPS
+listener explicitly and read credentials from mounted files rather than shell
+arguments or environment values that contain token bytes:
+
+```sh
+kubectl -n mail exec deploy/nauthilus-director -c director -- \
+  nauthilus-directorctl \
+    --address https://127.0.0.1:9090 \
+    --tls-ca-file /etc/nauthilus-director/control-ca.pem \
+    --auth-bearer-token-file /run/nauthilus-director/operator-control-token \
+    users sessions user@example.org
+```
+
+For mTLS, add `--tls-client-cert <path> --tls-client-key <path>` and keep server
+verification configured through `--tls-ca-file` or `--tls-server-name`.
+`--tls-insecure-skip-verify` is limited to emergency diagnostics and is not a
+production access pattern.
+
+For pod or host-local mTLS access, use certificate and key paths only:
+
+```sh
+nauthilus-directorctl \
+  --address https://127.0.0.1:9090 \
+  --tls-ca-file /etc/nauthilus-director/control-ca.pem \
+  --tls-client-cert /run/nauthilus-director/control-client.crt \
+  --tls-client-key /run/nauthilus-director/control-client.key \
+  users list --limit 100
+```
+
+The CLI classifies local address or TLS configuration errors, HTTP-to-HTTPS
+scheme mismatches, TLS verification failures, connection refusal or timeout,
+`401` authentication failures, `403` authorization failures, non-JSON or
+malformed control responses and structured runtime API problem responses.
+Diagnostics must not print bearer token values, private key contents,
+certificate bodies or raw large response bodies.
+
 ## OIDC Control Authorization
 
 The default ordinary control scope is `nauthilus-director.admin`. The default

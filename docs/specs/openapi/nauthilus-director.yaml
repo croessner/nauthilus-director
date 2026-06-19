@@ -510,11 +510,25 @@ paths:
               $ref: "#/components/schemas/RuntimeReasonRequest"
       responses:
         "202":
-          description: Session termination was accepted.
+          description: Session termination was marked for cooperative closure.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/AcceptedResponse"
+                $ref: "#/components/schemas/SessionKillResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          description: Session was already missing or a stale locator was repaired.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionKillResponse"
+        "503":
+          $ref: "#/components/responses/Error"
         default:
           $ref: "#/components/responses/Error"
   /api/v1/users:
@@ -1652,6 +1666,7 @@ components:
         - session_id
         - user_key
         - protocol
+        - holder_kind
         - backend
         - backend_node
         - shard_tag
@@ -1663,6 +1678,11 @@ components:
           type: string
         protocol:
           type: string
+        holder_kind:
+          type: string
+          enum:
+            - session
+          description: Bounded runtime holder kind. Session list endpoints expose only frontend session holders.
         backend:
           type: string
         backend_node:
@@ -1672,6 +1692,51 @@ components:
         expires_at:
           type: string
           format: date-time
+    SessionKillControlAction:
+      type: string
+      enum:
+        - none
+        - kick
+    SessionKillLifecycle:
+      type: string
+      enum:
+        - local_close_or_remote_heartbeat
+        - already_absent
+        - stale_locator_repaired
+        - fail_closed_ambiguous
+    SessionKillOutcome:
+      type: string
+      enum:
+        - marked
+        - missing
+        - stale_index_repaired
+        - ambiguous_state
+    SessionKillResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - outcome
+        - session_id
+        - lifecycle
+        - stale_index_repaired
+      properties:
+        outcome:
+          $ref: "#/components/schemas/SessionKillOutcome"
+        session_id:
+          type: string
+          minLength: 1
+          description: Target session resource supplied by the operator.
+        control_action:
+          $ref: "#/components/schemas/SessionKillControlAction"
+        control_generation:
+          type: string
+          minLength: 1
+          description: Present only when the session was marked for cooperative closure.
+        lifecycle:
+          $ref: "#/components/schemas/SessionKillLifecycle"
+        stale_index_repaired:
+          type: boolean
+          description: True when a repairable stale session locator was removed.
     SessionListResponse:
       type: object
       additionalProperties: false

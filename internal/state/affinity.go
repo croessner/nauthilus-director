@@ -369,9 +369,23 @@ type SessionKillRequest struct {
 	Actor     string
 }
 
+// SessionKillStatus classifies the bounded result of a session kill request.
+type SessionKillStatus string
+
+const (
+	// SessionKillStatusMarked means the authoritative session hash was marked for heartbeat closure.
+	SessionKillStatusMarked SessionKillStatus = "marked"
+	// SessionKillStatusMissing means the repairable locator had no entry for the requested session.
+	SessionKillStatusMissing SessionKillStatus = "missing"
+	// SessionKillStatusStaleIndexRepaired means one stale locator was removed after proving the session hash is gone.
+	SessionKillStatusStaleIndexRepaired SessionKillStatus = "stale_index_repaired"
+	// SessionKillStatusAmbiguousState means authoritative state could not be interpreted safely.
+	SessionKillStatusAmbiguousState SessionKillStatus = "ambiguous_state"
+)
+
 // SessionKillRecord describes the session-specific control action outcome.
 type SessionKillRecord struct {
-	Status            string
+	Status            SessionKillStatus
 	SessionID         string
 	ControlAction     ControlAction
 	ControlGeneration string

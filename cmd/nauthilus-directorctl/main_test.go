@@ -20,6 +20,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/pem"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -31,6 +32,8 @@ import (
 	"time"
 
 	"github.com/croessner/nauthilus-director/internal/client/generated"
+	"github.com/croessner/nauthilus-director/internal/config"
+	"github.com/croessner/nauthilus-director/internal/rest"
 )
 
 // TestVersionOutput keeps the client version flag stable for operators.
@@ -281,6 +284,167 @@ func TestMutatingCommandsRequireReason(t *testing.T) {
 				t.Fatalf("stderr = %q, want reason guidance", stderr)
 			}
 		})
+	}
+}
+
+// TestSessionsKillOutputDistinguishesBoundedOutcomes keeps text output scriptable.
+func TestSessionsKillOutputDistinguishesBoundedOutcomes(t *testing.T) {
+	testCases := []struct {
+		name       string
+		response   *generated.DeleteSessionResponse
+		wantCode   int
+		wantOutput []string
+	}{
+		{
+			name:     "marked",
+			response: &generated.DeleteSessionResponse{HTTPResponse: httpResponse(http.StatusAccepted), JSON202: sessionKillResponse()},
+			wantCode: 0,
+			wantOutput: []string{
+				"outcome=marked",
+				"session_id=session-a",
+				"lifecycle=local_close_or_remote_heartbeat",
+				"stale_index_repaired=false",
+				"control_action=kick",
+				"control_generation=7",
+			},
+		},
+		{
+			name: "missing",
+			response: &generated.DeleteSessionResponse{
+				HTTPResponse: httpResponse(http.StatusNotFound),
+				JSON404:      sessionKillAbsentResponse(generated.Missing, generated.AlreadyAbsent, false),
+			},
+			wantCode: 1,
+			wantOutput: []string{
+				"outcome=missing",
+				"session_id=session-a",
+				"lifecycle=already_absent",
+				"stale_index_repaired=false",
+			},
+		},
+		{
+			name: "stale repaired",
+			response: &generated.DeleteSessionResponse{
+				HTTPResponse: httpResponse(http.StatusNotFound),
+				JSON404:      sessionKillAbsentResponse(generated.StaleIndexRepaired, generated.StaleLocatorRepaired, true),
+			},
+			wantCode: 1,
+			wantOutput: []string{
+				"outcome=stale_index_repaired",
+				"session_id=session-a",
+				"lifecycle=stale_locator_repaired",
+				"stale_index_repaired=true",
+			},
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			fake := newFakeControlClient()
+			fake.deleteSessionResponse = testCase.response
+
+			stdout, stderr, code := runWithFakeClient([]string{"sessions", "kill", "session-a", "--reason", "operator cleanup"}, fake)
+			if code != testCase.wantCode {
+				t.Fatalf("exit code = %d, want %d; stdout=%q stderr=%q", code, testCase.wantCode, stdout, stderr)
+			}
+			if stderr != "" {
+				t.Fatalf("stderr = %q, want no generic failure for bounded outcome", stderr)
+			}
+			if !reflect.DeepEqual(fake.calls, []string{"DeleteSession"}) {
+				t.Fatalf("calls = %#v, want DeleteSession", fake.calls)
+			}
+			if fake.deleteSessionID != "session-a" || fake.deleteSessionRequest.Reason != "operator cleanup" {
+				t.Fatalf("delete session request = id=%q body=%#v", fake.deleteSessionID, fake.deleteSessionRequest)
+			}
+			for _, want := range testCase.wantOutput {
+				if !strings.Contains(stdout, want) {
+					t.Fatalf("stdout missing %q:\n%s", want, stdout)
+				}
+			}
+		})
+	}
+}
+
+// TestSessionsKillJSONUsesGeneratedShape keeps JSON output on generated DTOs.
+func TestSessionsKillJSONUsesGeneratedShape(t *testing.T) {
+	fake := newFakeControlClient()
+	fake.deleteSessionResponse = &generated.DeleteSessionResponse{
+		HTTPResponse: httpResponse(http.StatusNotFound),
+		JSON404:      sessionKillAbsentResponse(generated.StaleIndexRepaired, generated.StaleLocatorRepaired, true),
+	}
+
+	stdout, stderr, code := runWithFakeClient([]string{"--output", "json", "sessions", "kill", "session-a", "--reason", "operator cleanup"}, fake)
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1 for reached-server stale outcome; stderr=%q", code, stderr)
+	}
+	if stderr != "" {
+		t.Fatalf("stderr = %q, want JSON body only", stderr)
+	}
+
+	want := "{\n" +
+		"  \"lifecycle\": \"stale_locator_repaired\",\n" +
+		"  \"outcome\": \"stale_index_repaired\",\n" +
+		"  \"session_id\": \"session-a\",\n" +
+		"  \"stale_index_repaired\": true\n" +
+		"}\n"
+	if stdout != want {
+		t.Fatalf("JSON output = %q, want %q", stdout, want)
+	}
+}
+
+// TestSessionsKillExitCodes verifies reached-server and local failure policy.
+func TestSessionsKillExitCodes(t *testing.T) {
+	runtimeFailure := newFakeControlClient()
+	runtimeFailure.deleteSessionResponse = &generated.DeleteSessionResponse{
+		HTTPResponse: httpResponse(http.StatusServiceUnavailable),
+		JSON503:      &generated.ErrorResponse{Status: http.StatusServiceUnavailable, Code: "unavailable", Message: "ambiguous session state"},
+	}
+
+	stdout, stderr, code := runWithFakeClient([]string{"sessions", "kill", "session-a", "--reason", "operator cleanup"}, runtimeFailure)
+	if code != 1 {
+		t.Fatalf("runtime failure exit code = %d, want 1", code)
+	}
+	if stdout != "" {
+		t.Fatalf("runtime failure stdout = %q, want empty", stdout)
+	}
+	if !strings.Contains(stderr, "HTTP 503: ambiguous session state") {
+		t.Fatalf("runtime failure stderr = %q, want fail-closed diagnostic", stderr)
+	}
+
+	usageFake := newFakeControlClient()
+	_, usageStderr, usageCode := runWithFakeClient([]string{"sessions", "kill", "session-a"}, usageFake)
+	if usageCode != 2 {
+		t.Fatalf("usage exit code = %d, want 2; stderr=%q", usageCode, usageStderr)
+	}
+	if len(usageFake.calls) != 0 {
+		t.Fatalf("usage calls = %#v, want none", usageFake.calls)
+	}
+}
+
+// TestUsersKickTextOutputExplainsCooperativeLifecycle keeps runbook wording precise.
+func TestUsersKickTextOutputExplainsCooperativeLifecycle(t *testing.T) {
+	fake := newFakeControlClient()
+	stdout, stderr, code := runWithFakeClient([]string{"users", "kick", "user-a", "--reason", "operator cleanup"}, fake)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr=%q", code, stderr)
+	}
+	if !reflect.DeepEqual(fake.calls, []string{"KickUser"}) {
+		t.Fatalf("calls = %#v, want KickUser", fake.calls)
+	}
+	if fake.kickUserKey != "user-a" || fake.kickUserRequest.Reason != "operator cleanup" {
+		t.Fatalf("kick request = key=%q body=%#v", fake.kickUserKey, fake.kickUserRequest)
+	}
+
+	for _, want := range []string{
+		"status=accepted",
+		"mark=cooperative",
+		"active_sessions=unknown",
+		"local_close=accelerated_when_owned",
+		"remote_close=heartbeat_or_lease",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("users kick output missing %q:\n%s", want, stdout)
+		}
 	}
 }
 
@@ -890,6 +1054,225 @@ func TestGeneratedControlClientSendsBearerTokenFromFile(t *testing.T) {
 	}
 	if response.StatusCode() != http.StatusOK {
 		t.Fatalf("status = %d, want 200", response.StatusCode())
+	}
+}
+
+// TestControlTransportHTTPAddressToHTTPSListenerIsActionable verifies scheme mismatches are not generic 400s.
+func TestControlTransportHTTPAddressToHTTPSListenerIsActionable(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusTeapot)
+	}))
+	t.Cleanup(server.Close)
+
+	httpAddress := "http://" + strings.TrimPrefix(server.URL, "https://")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--address", httpAddress, "--timeout", "2s", "sessions", "list"}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("run returned exit code %d, want 1; stderr=%q", code, stderr.String())
+	}
+	if stdout.String() != "" {
+		t.Fatalf("stdout = %q, want empty output", stdout.String())
+	}
+
+	rendered := stderr.String()
+	for _, want := range []string{"transport scheme mismatch", "HTTPS control listener", "--address https://"} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("stderr missing %q:\n%s", want, rendered)
+		}
+	}
+	if strings.TrimSpace(rendered) == "sessions list failed: HTTP 400: Bad Request" {
+		t.Fatalf("stderr stayed generic: %q", rendered)
+	}
+}
+
+// TestControlTransportHTTPSWithoutCredentialsReportsAuthentication verifies TLS reaches the authenticator.
+func TestControlTransportHTTPSWithoutCredentialsReportsAuthentication(t *testing.T) {
+	server, _, caFile := newAuthenticatedControlTLSServer(t)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--address", server.URL, "--tls-ca-file", caFile, "sessions", "list"}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("run returned exit code %d, want 1", code)
+	}
+	if stdout.String() != "" {
+		t.Fatalf("stdout = %q, want empty output", stdout.String())
+	}
+
+	rendered := stderr.String()
+	for _, want := range []string{"authentication failed", "HTTP 401", "--auth-bearer-token-file", "mTLS"} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("stderr missing %q:\n%s", want, rendered)
+		}
+	}
+}
+
+// TestControlTransportHTTPSAuthenticatedReads verifies read commands work through TLS and auth.
+func TestControlTransportHTTPSAuthenticatedReads(t *testing.T) {
+	server, tokenFile, caFile := newAuthenticatedControlTLSServer(t)
+
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "sessions list", args: []string{"sessions", "list"}, want: `"sessions": null`},
+		{name: "users list", args: []string{"users", "list"}, want: `"users": null`},
+		{name: "users sessions", args: []string{"users", "sessions", "user-a"}, want: `"sessions": []`},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			args := append([]string{"--address", server.URL, "--tls-ca-file", caFile, "--auth-bearer-token-file", tokenFile, "--output", "json"}, test.args...)
+			code := run(args, &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("run returned exit code %d, want 0; stderr=%q", code, stderr.String())
+			}
+			if stderr.String() != "" {
+				t.Fatalf("stderr = %q, want empty output", stderr.String())
+			}
+			if !strings.Contains(stdout.String(), test.want) {
+				t.Fatalf("stdout missing %q:\n%s", test.want, stdout.String())
+			}
+		})
+	}
+}
+
+// TestControlTransportNonJSONResponseIsBounded verifies non-JSON failures stay useful and short.
+func TestControlTransportNonJSONResponseIsBounded(t *testing.T) {
+	body := "<html><body>upstream control gateway returned maintenance text " + strings.Repeat("detail ", 80) + "</body></html>"
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "text/html")
+		writer.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = writer.Write([]byte(body))
+	}))
+	t.Cleanup(server.Close)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--address", server.URL, "sessions", "list"}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("run returned exit code %d, want 1", code)
+	}
+	if stdout.String() != "" {
+		t.Fatalf("stdout = %q, want empty output", stdout.String())
+	}
+
+	rendered := stderr.String()
+	for _, want := range []string{"non-JSON control response", "HTTP 503", "content_type=text/html", "body_hint="} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("stderr missing %q:\n%s", want, rendered)
+		}
+	}
+	if len(rendered) > 420 {
+		t.Fatalf("stderr was not bounded enough: %d bytes\n%s", len(rendered), rendered)
+	}
+}
+
+// TestControlTransportMalformedJSONResponseIsBounded verifies generated parse failures keep response context.
+func TestControlTransportMalformedJSONResponseIsBounded(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		writer.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = writer.Write([]byte(`{"message":`))
+	}))
+	t.Cleanup(server.Close)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--address", server.URL, "users", "list"}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("run returned exit code %d, want 1", code)
+	}
+	if stdout.String() != "" {
+		t.Fatalf("stdout = %q, want empty output", stdout.String())
+	}
+
+	rendered := stderr.String()
+	for _, want := range []string{"malformed JSON control response", "HTTP 503", "content_type=application/json", "body_hint="} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("stderr missing %q:\n%s", want, rendered)
+		}
+	}
+}
+
+// TestControlTransportTLSVerificationFailureIsSecretSafe verifies certificate errors are actionable.
+func TestControlTransportTLSVerificationFailureIsSecretSafe(t *testing.T) {
+	server, tokenFile, _ := newAuthenticatedControlTLSServer(t)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--address", server.URL, "--auth-bearer-token-file", tokenFile, "sessions", "list"}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("run returned exit code %d, want 1", code)
+	}
+	if stdout.String() != "" {
+		t.Fatalf("stdout = %q, want empty output", stdout.String())
+	}
+
+	rendered := stderr.String()
+	for _, want := range []string{"TLS certificate verification failed", "--tls-ca-file", "--tls-server-name", "--tls-insecure-skip-verify"} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("stderr missing %q:\n%s", want, rendered)
+		}
+	}
+	for _, forbidden := range []string{"BEGIN CERTIFICATE", "PRIVATE KEY", "test-control-token"} {
+		if strings.Contains(rendered, forbidden) {
+			t.Fatalf("stderr leaked %q:\n%s", forbidden, rendered)
+		}
+	}
+}
+
+// TestControlTransportBearerInputsRemainRedacted verifies auth inputs are sent but not printed.
+func TestControlTransportBearerInputsRemainRedacted(t *testing.T) {
+	tokenFile := filepath.Join(t.TempDir(), "control-token")
+	if err := os.WriteFile(tokenFile, []byte("file-secret-token\n"), 0o600); err != nil {
+		t.Fatalf("write token file: %v", err)
+	}
+
+	tests := []struct {
+		name  string
+		args  []string
+		token string
+	}{
+		{name: "inline", args: []string{"--auth-bearer-token", "inline-secret-token"}, token: "inline-secret-token"},
+		{name: "file", args: []string{"--auth-bearer-token-file", tokenFile}, token: "file-secret-token"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var gotAuth string
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				gotAuth = request.Header.Get("Authorization")
+				writer.Header().Set("Content-Type", "text/plain")
+				writer.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = writer.Write([]byte("temporary control gateway failure"))
+			}))
+			t.Cleanup(server.Close)
+
+			var stdout, stderr bytes.Buffer
+			args := append([]string{"--address", server.URL}, test.args...)
+			args = append(args, "sessions", "list")
+			code := run(args, &stdout, &stderr)
+			if code != 1 {
+				t.Fatalf("run returned exit code %d, want 1", code)
+			}
+			if gotAuth != "Bearer "+test.token {
+				t.Fatalf("Authorization = %q, want bearer token", gotAuth)
+			}
+			if strings.Contains(stdout.String(), test.token) || strings.Contains(stderr.String(), test.token) {
+				t.Fatalf("CLI output leaked bearer token: stdout=%q stderr=%q", stdout.String(), stderr.String())
+			}
+		})
+	}
+}
+
+// TestNormalizeAddressDefaultsBareHostPortToHTTP keeps compatibility documented and explicit.
+func TestNormalizeAddressDefaultsBareHostPortToHTTP(t *testing.T) {
+	normalized, err := normalizeAddress("127.0.0.1:9090")
+	if err != nil {
+		t.Fatalf("normalizeAddress returned error: %v", err)
+	}
+	if normalized != "http://127.0.0.1:9090" {
+		t.Fatalf("normalized address = %q, want http://127.0.0.1:9090", normalized)
 	}
 }
 
@@ -1538,7 +1921,12 @@ func TestManpagesDocumentImplementedSurface(t *testing.T) {
 		"listeners resume",
 		"config dump -d",
 		"config dump -n",
+		"plain HTTP control listener",
+		"--address https://127.0.0.1:9090",
+		"Transport diagnostics distinguish",
 		"sessions kill",
+		"outcome=stale_index_repaired",
+		"heartbeat_or_lease",
 		"users affinity set",
 		"users backend-pin set",
 		"users hold set",
@@ -1609,6 +1997,54 @@ func runWithFakeClient(args []string, fake *fakeControlClient) (string, string, 
 	return stdout.String(), stderr.String(), code
 }
 
+// newAuthenticatedControlTLSServer returns a real HTTPS REST control listener and client trust material.
+func newAuthenticatedControlTLSServer(t *testing.T) (*httptest.Server, string, string) {
+	t.Helper()
+
+	tokenFile := filepath.Join(t.TempDir(), "control-token")
+	if err := os.WriteFile(tokenFile, []byte("test-control-token\n"), 0o600); err != nil {
+		t.Fatalf("write control token: %v", err)
+	}
+
+	control := config.DefaultConfig().Runtime.Servers.Control
+	control.Auth.Bearer.Enabled = true
+	control.Auth.Bearer.TokenFile = config.Secret(tokenFile)
+	control.Auth.OIDC.Enabled = false
+	control.Auth.OIDC.RequiredScopes = nil
+	control.Auth.OIDC.ProtectedScopes = nil
+	control.Auth.MTLS.Enabled = false
+
+	server := httptest.NewTLSServer(rest.NewServer(rest.Options{
+		Version: "test-version",
+		Control: control,
+	}))
+	t.Cleanup(server.Close)
+
+	return server, tokenFile, writeTLSServerCA(t, server)
+}
+
+// writeTLSServerCA writes the httptest server certificate as a CA bundle.
+func writeTLSServerCA(t *testing.T, server *httptest.Server) string {
+	t.Helper()
+
+	certificate := server.Certificate()
+	if certificate == nil {
+		t.Fatal("TLS test server did not expose a certificate")
+	}
+
+	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certificate.Raw})
+	if len(pemBytes) == 0 {
+		t.Fatal("failed to encode TLS test server certificate")
+	}
+
+	caFile := filepath.Join(t.TempDir(), "control-ca.pem")
+	if err := os.WriteFile(caFile, pemBytes, 0o600); err != nil {
+		t.Fatalf("write control CA file: %v", err)
+	}
+
+	return caFile
+}
+
 // readManpage reads one manpage source from the repository docs tree.
 func readManpage(t *testing.T, name string) string {
 	t.Helper()
@@ -1636,6 +2072,12 @@ type fakeControlClient struct {
 	listUserPages          []generated.UserListResponse
 	listSessionsCalls      int
 	listUsersCalls         int
+	deleteSessionID        generated.SessionID
+	deleteSessionRequest   generated.DeleteSessionJSONRequestBody
+	deleteSessionResponse  *generated.DeleteSessionResponse
+	kickUserKey            generated.UserKey
+	kickUserRequest        generated.KickUserJSONRequestBody
+	kickUserResponse       *generated.KickUserResponse
 	runtimeSummary         *generated.RuntimeSummaryResponse
 	routeRequest           generated.RouteLookupRequest
 	routeResponse          *generated.RouteLookupResponse
@@ -1677,6 +2119,31 @@ func (fake *fakeControlClient) record(call string) {
 // acceptedResponse returns a generated accepted response.
 func acceptedResponse() *generated.AcceptedResponse {
 	return &generated.AcceptedResponse{Status: generated.Accepted}
+}
+
+// sessionKillResponse returns a generated marked session-kill response.
+func sessionKillResponse() *generated.SessionKillResponse {
+	action := generated.SessionKillControlAction("kick")
+	generation := "7"
+
+	return &generated.SessionKillResponse{
+		ControlAction:      &action,
+		ControlGeneration:  &generation,
+		Lifecycle:          generated.SessionKillLifecycle("local_close_or_remote_heartbeat"),
+		Outcome:            generated.SessionKillOutcome("marked"),
+		SessionID:          "session-a",
+		StaleIndexRepaired: false,
+	}
+}
+
+// sessionKillAbsentResponse returns a generated non-marked session-kill response.
+func sessionKillAbsentResponse(outcome generated.SessionKillOutcome, lifecycle generated.SessionKillLifecycle, stale bool) *generated.SessionKillResponse {
+	return &generated.SessionKillResponse{
+		Lifecycle:          lifecycle,
+		Outcome:            outcome,
+		SessionID:          "session-a",
+		StaleIndexRepaired: stale,
+	}
 }
 
 // httpResponse returns a generated-compatible HTTP response shell.
@@ -1750,12 +2217,13 @@ func listenerA() generated.ListenerDetail {
 // sessionA returns a stable session fixture.
 func sessionA() generated.SessionDetail {
 	return generated.SessionDetail{
-		Backend:   "backend-a",
-		ExpiresAt: time.Date(2026, 5, 26, 12, 0, 0, 0, time.UTC),
-		Protocol:  "imap",
-		SessionID: "session-a",
-		ShardTag:  "shard-a",
-		UserKey:   "user-a",
+		Backend:    "backend-a",
+		ExpiresAt:  time.Date(2026, 5, 26, 12, 0, 0, 0, time.UTC),
+		HolderKind: "session",
+		Protocol:   "imap",
+		SessionID:  "session-a",
+		ShardTag:   "shard-a",
+		UserKey:    "user-a",
 	}
 }
 
@@ -2194,10 +2662,16 @@ func (fake *fakeControlClient) DeleteSessionWithBodyWithResponse(context.Context
 	return nil, nil
 }
 
-// DeleteSessionWithResponse records and returns an accepted response.
-func (fake *fakeControlClient) DeleteSessionWithResponse(context.Context, generated.SessionID, generated.DeleteSessionJSONRequestBody, ...generated.RequestEditorFn) (*generated.DeleteSessionResponse, error) {
+// DeleteSessionWithResponse records and returns a marked session-kill response.
+func (fake *fakeControlClient) DeleteSessionWithResponse(_ context.Context, sessionID generated.SessionID, body generated.DeleteSessionJSONRequestBody, _ ...generated.RequestEditorFn) (*generated.DeleteSessionResponse, error) {
 	fake.record("DeleteSession")
-	return &generated.DeleteSessionResponse{HTTPResponse: httpResponse(http.StatusAccepted), JSON202: acceptedResponse()}, nil
+	fake.deleteSessionID = sessionID
+	fake.deleteSessionRequest = body
+	if fake.deleteSessionResponse != nil {
+		return fake.deleteSessionResponse, nil
+	}
+
+	return &generated.DeleteSessionResponse{HTTPResponse: httpResponse(http.StatusAccepted), JSON202: sessionKillResponse()}, nil
 }
 
 // GetSessionWithResponse records and returns session detail data.
@@ -2361,8 +2835,14 @@ func (fake *fakeControlClient) KickUserWithBodyWithResponse(context.Context, gen
 }
 
 // KickUserWithResponse records and returns an accepted response.
-func (fake *fakeControlClient) KickUserWithResponse(context.Context, generated.UserKey, generated.KickUserJSONRequestBody, ...generated.RequestEditorFn) (*generated.KickUserResponse, error) {
+func (fake *fakeControlClient) KickUserWithResponse(_ context.Context, userKey generated.UserKey, body generated.KickUserJSONRequestBody, _ ...generated.RequestEditorFn) (*generated.KickUserResponse, error) {
 	fake.record("KickUser")
+	fake.kickUserKey = userKey
+	fake.kickUserRequest = body
+	if fake.kickUserResponse != nil {
+		return fake.kickUserResponse, nil
+	}
+
 	return &generated.KickUserResponse{HTTPResponse: httpResponse(http.StatusAccepted), JSON202: acceptedResponse()}, nil
 }
 

@@ -154,6 +154,87 @@ func (e RuntimeDimensionCountAccuracy) Valid() bool {
 	}
 }
 
+// Defines values for SessionDetailHolderKind.
+const (
+	Session SessionDetailHolderKind = "session"
+)
+
+// Valid indicates whether the value is a known member of the SessionDetailHolderKind enum.
+func (e SessionDetailHolderKind) Valid() bool {
+	switch e {
+	case Session:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for SessionKillControlAction.
+const (
+	Kick SessionKillControlAction = "kick"
+	None SessionKillControlAction = "none"
+)
+
+// Valid indicates whether the value is a known member of the SessionKillControlAction enum.
+func (e SessionKillControlAction) Valid() bool {
+	switch e {
+	case Kick:
+		return true
+	case None:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for SessionKillLifecycle.
+const (
+	AlreadyAbsent               SessionKillLifecycle = "already_absent"
+	FailClosedAmbiguous         SessionKillLifecycle = "fail_closed_ambiguous"
+	LocalCloseOrRemoteHeartbeat SessionKillLifecycle = "local_close_or_remote_heartbeat"
+	StaleLocatorRepaired        SessionKillLifecycle = "stale_locator_repaired"
+)
+
+// Valid indicates whether the value is a known member of the SessionKillLifecycle enum.
+func (e SessionKillLifecycle) Valid() bool {
+	switch e {
+	case AlreadyAbsent:
+		return true
+	case FailClosedAmbiguous:
+		return true
+	case LocalCloseOrRemoteHeartbeat:
+		return true
+	case StaleLocatorRepaired:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for SessionKillOutcome.
+const (
+	AmbiguousState     SessionKillOutcome = "ambiguous_state"
+	Marked             SessionKillOutcome = "marked"
+	Missing            SessionKillOutcome = "missing"
+	StaleIndexRepaired SessionKillOutcome = "stale_index_repaired"
+)
+
+// Valid indicates whether the value is a known member of the SessionKillOutcome enum.
+func (e SessionKillOutcome) Valid() bool {
+	switch e {
+	case AmbiguousState:
+		return true
+	case Marked:
+		return true
+	case Missing:
+		return true
+	case StaleIndexRepaired:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for UserMoveRequestStrategy.
 const (
 	DrainExisting   UserMoveRequestStrategy = "drain_existing"
@@ -584,10 +665,41 @@ type SessionDetail struct {
 	Backend     string    `json:"backend"`
 	BackendNode string    `json:"backend_node"`
 	ExpiresAt   time.Time `json:"expires_at"`
-	Protocol    string    `json:"protocol"`
-	SessionID   string    `json:"session_id"`
-	ShardTag    string    `json:"shard_tag"`
-	UserKey     string    `json:"user_key"`
+
+	// HolderKind Bounded runtime holder kind. Session list endpoints expose only frontend session holders.
+	HolderKind SessionDetailHolderKind `json:"holder_kind"`
+	Protocol   string                  `json:"protocol"`
+	SessionID  string                  `json:"session_id"`
+	ShardTag   string                  `json:"shard_tag"`
+	UserKey    string                  `json:"user_key"`
+}
+
+// SessionDetailHolderKind Bounded runtime holder kind. Session list endpoints expose only frontend session holders.
+type SessionDetailHolderKind string
+
+// SessionKillControlAction defines model for SessionKillControlAction.
+type SessionKillControlAction string
+
+// SessionKillLifecycle defines model for SessionKillLifecycle.
+type SessionKillLifecycle string
+
+// SessionKillOutcome defines model for SessionKillOutcome.
+type SessionKillOutcome string
+
+// SessionKillResponse defines model for SessionKillResponse.
+type SessionKillResponse struct {
+	ControlAction *SessionKillControlAction `json:"control_action,omitempty"`
+
+	// ControlGeneration Present only when the session was marked for cooperative closure.
+	ControlGeneration *string              `json:"control_generation,omitempty"`
+	Lifecycle         SessionKillLifecycle `json:"lifecycle"`
+	Outcome           SessionKillOutcome   `json:"outcome"`
+
+	// SessionID Target session resource supplied by the operator.
+	SessionID string `json:"session_id"`
+
+	// StaleIndexRepaired True when a repairable stale session locator was removed.
+	StaleIndexRepaired bool `json:"stale_index_repaired"`
 }
 
 // SessionListResponse defines model for SessionListResponse.
@@ -3380,7 +3492,7 @@ type DeleteSessionResponseObject interface {
 	VisitDeleteSessionResponse(w http.ResponseWriter) error
 }
 
-type DeleteSession202JSONResponse AcceptedResponse
+type DeleteSession202JSONResponse SessionKillResponse
 
 func (response DeleteSession202JSONResponse) VisitDeleteSessionResponse(w http.ResponseWriter) error {
 
@@ -3390,6 +3502,76 @@ func (response DeleteSession202JSONResponse) VisitDeleteSessionResponse(w http.R
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(202)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type DeleteSession400JSONResponse struct{ BadRequestJSONResponse }
+
+func (response DeleteSession400JSONResponse) VisitDeleteSessionResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(400)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type DeleteSession401JSONResponse struct{ ErrorJSONResponse }
+
+func (response DeleteSession401JSONResponse) VisitDeleteSessionResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type DeleteSession403JSONResponse ErrorResponse
+
+func (response DeleteSession403JSONResponse) VisitDeleteSessionResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(403)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type DeleteSession404JSONResponse SessionKillResponse
+
+func (response DeleteSession404JSONResponse) VisitDeleteSessionResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(404)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type DeleteSession503JSONResponse ErrorResponse
+
+func (response DeleteSession503JSONResponse) VisitDeleteSessionResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(503)
 	_, err := buf.WriteTo(w)
 	return err
 }

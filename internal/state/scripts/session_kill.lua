@@ -27,19 +27,67 @@ local function require_value(value, message)
 	return value
 end
 
+local function valid_unsigned_integer(value)
+	if value == false or value == nil or value == "" then
+		return false
+	end
+
+	return tostring(value):match("^%d+$") ~= nil
+end
+
 require_value(session_id, "session_id_required")
+require_value(reason, "reason_required")
 
 local now = now_ms()
-local session_key = require_value(redis.call("HGET", session_index_key, session_id), "session_index_missing")
-if redis.call("EXISTS", session_key) == 0 then
-	redis.call("HDEL", session_index_key, session_id)
-	return ambiguous("session_missing")
+local session_key = redis.call("HGET", session_index_key, session_id)
+if session_key == false or session_key == nil then
+	return {
+		"status", "missing",
+		"session_id", session_id,
+		"control_generation", "",
+		"control_action", "none",
+		"server_time_ms", tostring(now)
+	}
 end
 
-local observed_generation = tonumber(redis.call("HGET", session_key, "control_generation") or "0")
-if observed_generation == nil or observed_generation < 0 then
+session_key = require_value(session_key, "session_locator_invalid")
+if redis.call("EXISTS", session_key) == 0 then
+	redis.call("HDEL", session_index_key, session_id)
+	return {
+		"status", "stale_index_repaired",
+		"session_id", session_id,
+		"control_generation", "",
+		"control_action", "none",
+		"server_time_ms", tostring(now)
+	}
+end
+
+local stored_session_id = require_value(redis.call("HGET", session_key, "session_id"), "session_id_required")
+if stored_session_id ~= session_id then
+	return ambiguous("session_id_mismatch")
+end
+
+require_value(redis.call("HGET", session_key, "affinity_hash"), "affinity_hash_required")
+require_value(redis.call("HGET", session_key, "tenant"), "tenant_required")
+require_value(redis.call("HGET", session_key, "account_key"), "account_key_required")
+require_value(redis.call("HGET", session_key, "protocol"), "protocol_required")
+require_value(redis.call("HGET", session_key, "shard_tag"), "shard_tag_required")
+
+local holder_kind = require_value(redis.call("HGET", session_key, "holder_kind"), "holder_kind_required")
+if holder_kind ~= "session" and holder_kind ~= "delivery" then
+	return ambiguous("holder_kind_invalid")
+end
+
+local lease_expires_at = require_value(redis.call("HGET", session_key, "lease_expires_at_ms"), "lease_required")
+if not valid_unsigned_integer(lease_expires_at) or tonumber(lease_expires_at) <= 0 then
+	return ambiguous("lease_invalid")
+end
+
+local observed_generation_value = require_value(redis.call("HGET", session_key, "control_generation"), "control_generation_required")
+if not valid_unsigned_integer(observed_generation_value) then
 	return ambiguous("control_generation_invalid")
 end
+local observed_generation = tonumber(observed_generation_value)
 
 local generation = observed_generation + 1
 redis.call("HSET", session_key,

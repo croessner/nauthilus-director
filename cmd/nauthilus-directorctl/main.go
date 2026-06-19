@@ -20,6 +20,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -27,6 +28,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -48,6 +50,7 @@ const (
 	envBearerToken        = "NAUTHILUS_DIRECTORCTL_BEARER_TOKEN"
 	envBearerTokenFile    = "NAUTHILUS_DIRECTORCTL_BEARER_TOKEN_FILE"
 	maxCLISecretFileBytes = 64 << 10
+	maxResponseHintRunes  = 160
 )
 
 const (
@@ -93,6 +96,29 @@ type application struct {
 	options commandOptions
 	stdout  io.Writer
 	stderr  io.Writer
+}
+
+// diagnosticGeneratedClient keeps normal SDK behavior while preserving failed response metadata.
+type diagnosticGeneratedClient struct {
+	*generated.ClientWithResponses
+}
+
+// controlResponseDiagnostic carries bounded response context lost by generated parse errors.
+type controlResponseDiagnostic struct {
+	status      int
+	contentType string
+	body        []byte
+	err         error
+}
+
+// Error describes a malformed generated-client response without body contents.
+func (err *controlResponseDiagnostic) Error() string {
+	return "control response could not be decoded"
+}
+
+// Unwrap exposes the generated parser error for classification and tests.
+func (err *controlResponseDiagnostic) Unwrap() error {
+	return err.err
 }
 
 // commandFlagKind classifies a command-local flag.
@@ -758,7 +784,7 @@ func (app application) dispatch(args []string) int {
 func (app application) client() (generated.ClientWithResponsesInterface, int) {
 	client, err := newControlClient(app.options)
 	if err != nil {
-		_, _ = fmt.Fprintf(app.stderr, "control client failed: %v\n", err)
+		_, _ = fmt.Fprintf(app.stderr, "control client configuration failed: %s\n", localConfigurationDiagnostic(err))
 		return nil, 2
 	}
 
@@ -1593,7 +1619,7 @@ func (app application) runSessionsList(args []string) int {
 			return app.requestError("sessions list", err)
 		}
 		if response.StatusCode() != http.StatusOK {
-			return app.serverError("sessions list", response.StatusCode(), response.JSONDefault)
+			return app.serverResponseError("sessions list", response.StatusCode(), response.JSONDefault, response.ContentType(), response.Body)
 		}
 		if response.JSON200 == nil {
 			return app.serverError("sessions list", http.StatusBadGateway, nil)
@@ -1643,7 +1669,7 @@ func (app application) runSessionsShow(args []string) int {
 		return app.requestError("sessions show", err)
 	}
 	if response.StatusCode() != http.StatusOK {
-		return app.serverError("sessions show", response.StatusCode(), response.JSONDefault)
+		return app.serverResponseError("sessions show", response.StatusCode(), response.JSONDefault, response.ContentType(), response.Body)
 	}
 	if response.JSON200 == nil {
 		return app.serverError("sessions show", http.StatusBadGateway, nil)
@@ -1768,7 +1794,7 @@ func (app application) runUsersList(args []string) int {
 			return app.requestError("users list", err)
 		}
 		if response.StatusCode() != http.StatusOK {
-			return app.serverError("users list", response.StatusCode(), response.JSONDefault)
+			return app.serverResponseError("users list", response.StatusCode(), response.JSONDefault, response.ContentType(), response.Body)
 		}
 		if response.JSON200 == nil {
 			return app.serverError("users list", http.StatusBadGateway, nil)
@@ -1818,7 +1844,7 @@ func (app application) runUsersShow(args []string) int {
 		return app.requestError("users show", err)
 	}
 	if response.StatusCode() != http.StatusOK {
-		return app.serverError("users show", response.StatusCode(), response.JSONDefault)
+		return app.serverResponseError("users show", response.StatusCode(), response.JSONDefault, response.ContentType(), response.Body)
 	}
 	if response.JSON200 == nil {
 		return app.serverError("users show", http.StatusBadGateway, nil)
@@ -1853,7 +1879,7 @@ func (app application) runUsersSessions(args []string) int {
 		return app.requestError("users sessions", err)
 	}
 	if response.StatusCode() != http.StatusOK {
-		return app.serverError("users sessions", response.StatusCode(), response.JSONDefault)
+		return app.serverResponseError("users sessions", response.StatusCode(), response.JSONDefault, response.ContentType(), response.Body)
 	}
 	if response.JSON200 == nil {
 		return app.serverError("users sessions", http.StatusBadGateway, nil)
@@ -2664,10 +2690,19 @@ func (app application) handleSetBackendWeightResponse(response *generated.SetBac
 
 // handleDeleteSessionResponse renders a session termination response.
 func (app application) handleDeleteSessionResponse(response *generated.DeleteSessionResponse) int {
-	if response.StatusCode() != http.StatusAccepted {
-		return app.serverError("sessions kill", response.StatusCode(), response.JSONDefault)
+	switch response.StatusCode() {
+	case http.StatusAccepted:
+		return app.writeSessionKillResponse(response.JSON202)
+	case http.StatusNotFound:
+		code := app.writeSessionKillResponse(response.JSON404)
+		if code != 0 {
+			return code
+		}
+
+		return 1
+	default:
+		return app.serverError("sessions kill", response.StatusCode(), firstProblem(response.JSON400, response.JSON401, response.JSON403, response.JSON503, response.JSONDefault))
 	}
-	return app.writeAccepted(response.JSON202)
 }
 
 // handleClearUserAffinityResponse renders an affinity clear response.
@@ -2723,7 +2758,8 @@ func (app application) handleKickUserResponse(response *generated.KickUserRespon
 	if response.StatusCode() != http.StatusAccepted {
 		return app.serverError("users kick", response.StatusCode(), response.JSONDefault)
 	}
-	return app.writeAccepted(response.JSON202)
+
+	return app.writeUserKickResponse(response.JSON202)
 }
 
 // handleMoveUserResponse renders a user move response.
@@ -2750,6 +2786,59 @@ func (app application) writeAccepted(response *generated.AcceptedResponse) int {
 
 	return app.writeObject(response, func(writer io.Writer) error {
 		_, err := fmt.Fprintf(writer, "status=%s\n", response.Status)
+		return err
+	})
+}
+
+// writeSessionKillResponse writes bounded session-kill output in text or JSON mode.
+func (app application) writeSessionKillResponse(response *generated.SessionKillResponse) int {
+	if response == nil {
+		return app.serverError("sessions kill", http.StatusBadGateway, nil)
+	}
+
+	return app.writeObject(response, func(writer io.Writer) error {
+		_, err := fmt.Fprintf(
+			writer,
+			"outcome=%s session_id=%s lifecycle=%s stale_index_repaired=%t",
+			response.Outcome,
+			response.SessionID,
+			response.Lifecycle,
+			response.StaleIndexRepaired,
+		)
+		if err != nil {
+			return err
+		}
+
+		if response.ControlAction != nil {
+			if _, err := fmt.Fprintf(writer, " control_action=%s", *response.ControlAction); err != nil {
+				return err
+			}
+		}
+		if response.ControlGeneration != nil {
+			if _, err := fmt.Fprintf(writer, " control_generation=%s", *response.ControlGeneration); err != nil {
+				return err
+			}
+		}
+
+		_, err = fmt.Fprintln(writer)
+
+		return err
+	})
+}
+
+// writeUserKickResponse explains cooperative user-kick lifecycle in text output.
+func (app application) writeUserKickResponse(response *generated.AcceptedResponse) int {
+	if response == nil {
+		return app.serverError("users kick", http.StatusBadGateway, nil)
+	}
+
+	return app.writeObject(response, func(writer io.Writer) error {
+		_, err := fmt.Fprintf(
+			writer,
+			"status=%s mark=cooperative active_sessions=unknown local_close=accelerated_when_owned remote_close=heartbeat_or_lease\n",
+			response.Status,
+		)
+
 		return err
 	})
 }
@@ -2889,7 +2978,12 @@ func (app application) usageError(format string, args ...any) int {
 
 // requestError reports a failed generated-client request.
 func (app application) requestError(operation string, err error) int {
-	_, _ = fmt.Fprintf(app.stderr, "%s failed: %v\n", operation, err)
+	var diagnostic *controlResponseDiagnostic
+	if errors.As(err, &diagnostic) {
+		return app.renderControlFailure(operation, diagnostic.status, nil, diagnostic.contentType, diagnostic.body, diagnostic.err)
+	}
+
+	_, _ = fmt.Fprintf(app.stderr, "%s failed: %s\n", operation, requestFailureDiagnostic(err))
 	return 1
 }
 
@@ -2901,16 +2995,206 @@ func (app application) cursorLoopError(operation string) int {
 
 // serverError reports an operation failure returned by the Director.
 func (app application) serverError(operation string, status int, problem *generated.ErrorResponse) int {
+	return app.renderControlFailure(operation, status, problem, "", nil, nil)
+}
+
+// serverResponseError reports a generated response with bounded raw-response context.
+func (app application) serverResponseError(operation string, status int, problem *generated.ErrorResponse, contentType string, body []byte) int {
+	return app.renderControlFailure(operation, status, problem, contentType, body, nil)
+}
+
+// renderControlFailure prints one classified, secret-safe control failure.
+func (app application) renderControlFailure(operation string, status int, problem *generated.ErrorResponse, contentType string, body []byte, parseErr error) int {
+	_, _ = fmt.Fprintf(app.stderr, "%s failed: %s\n", operation, controlFailureDiagnostic(status, problem, contentType, body, parseErr))
+	return 1
+}
+
+// controlFailureDiagnostic classifies server-side and response-shape failures.
+func controlFailureDiagnostic(status int, problem *generated.ErrorResponse, contentType string, body []byte, parseErr error) string {
+	if status == http.StatusBadRequest && looksLikeHTTPToHTTPSMismatch(body) {
+		return fmt.Sprintf(
+			"transport scheme mismatch (HTTP %d): plain HTTP was sent to an HTTPS control listener; use --address https://... for HTTPS control listeners; content_type=%s body_hint=%q",
+			status,
+			contentTypeForDiagnostic(contentType),
+			responseBodyHint(body),
+		)
+	}
+
 	message := http.StatusText(status)
 	if problem != nil && strings.TrimSpace(problem.Message) != "" {
-		message = problem.Message
+		message = strings.TrimSpace(problem.Message)
 	}
 	if message == "" {
 		message = "unexpected response"
 	}
 
-	_, _ = fmt.Fprintf(app.stderr, "%s failed: HTTP %d: %s\n", operation, status, message)
-	return 1
+	switch status {
+	case http.StatusUnauthorized:
+		return fmt.Sprintf(
+			"authentication failed (HTTP %d: %s); pass --auth-bearer-token-file, --auth-bearer-token or mTLS flags for the configured control auth mode",
+			status,
+			message,
+		)
+	case http.StatusForbidden:
+		return fmt.Sprintf(
+			"authorization failed (HTTP %d: %s); check the configured control auth mode, bearer scopes or mTLS authorization",
+			status,
+			message,
+		)
+	}
+
+	if parseErr != nil {
+		return fmt.Sprintf(
+			"malformed JSON control response (HTTP %d, content_type=%s): %v; body_hint=%q",
+			status,
+			contentTypeForDiagnostic(contentType),
+			parseErr,
+			responseBodyHint(body),
+		)
+	}
+
+	if problem == nil && len(body) > 0 {
+		return fmt.Sprintf(
+			"non-JSON control response (HTTP %d, content_type=%s): body_hint=%q",
+			status,
+			contentTypeForDiagnostic(contentType),
+			responseBodyHint(body),
+		)
+	}
+
+	if problem != nil && strings.TrimSpace(problem.Code) != "" {
+		return fmt.Sprintf("control API problem (HTTP %d: %s, code=%s)", status, message, problem.Code)
+	}
+
+	return fmt.Sprintf("HTTP %d: %s", status, message)
+}
+
+// requestFailureDiagnostic classifies client-side request failures.
+func requestFailureDiagnostic(err error) string {
+	if err == nil {
+		return "request failed"
+	}
+
+	root := err
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) && urlErr.Err != nil {
+		root = urlErr.Err
+	}
+
+	var unknownAuthority x509.UnknownAuthorityError
+	var hostnameError x509.HostnameError
+	var certificateInvalid x509.CertificateInvalidError
+	if errors.As(root, &unknownAuthority) ||
+		errors.As(root, &hostnameError) ||
+		errors.As(root, &certificateInvalid) ||
+		strings.Contains(root.Error(), "x509:") {
+		return fmt.Sprintf(
+			"TLS certificate verification failed: %v; use --tls-ca-file or --tls-server-name, or --tls-insecure-skip-verify only for emergency diagnostics",
+			root,
+		)
+	}
+
+	if strings.Contains(root.Error(), "server gave HTTP response to HTTPS client") {
+		return "transport scheme mismatch: HTTPS was requested but the control listener answered with plain HTTP; check --address scheme"
+	}
+
+	var netErr net.Error
+	if errors.Is(err, context.DeadlineExceeded) || errors.As(root, &netErr) && netErr.Timeout() {
+		return fmt.Sprintf("connection timed out: %v; check --address, listener reachability and --timeout", err)
+	}
+
+	text := strings.ToLower(root.Error())
+	switch {
+	case strings.Contains(text, "connection refused"):
+		return fmt.Sprintf("connection refused: %v; check --address and that the control listener is running", root)
+	case strings.Contains(text, "no such host"):
+		return fmt.Sprintf("control address lookup failed: %v; check --address host", root)
+	default:
+		return fmt.Sprintf("request failed: %v", err)
+	}
+}
+
+// localConfigurationDiagnostic classifies setup failures before a request is sent.
+func localConfigurationDiagnostic(err error) string {
+	if err == nil {
+		return "invalid local control client configuration"
+	}
+
+	text := err.Error()
+	switch {
+	case strings.Contains(text, "tls ca file"):
+		return fmt.Sprintf("TLS CA configuration failed: %v", err)
+	case strings.Contains(text, "tls client certificate"):
+		return fmt.Sprintf("TLS client certificate/key configuration failed: %v", err)
+	case strings.Contains(text, "bearer token"):
+		return fmt.Sprintf("bearer token configuration failed: %v", err)
+	case strings.Contains(text, "control API address"):
+		return fmt.Sprintf("invalid control API address: %v", err)
+	default:
+		return fmt.Sprintf("invalid local control client configuration: %v", err)
+	}
+}
+
+// looksLikeHTTPToHTTPSMismatch detects Go's plaintext response from a TLS listener.
+func looksLikeHTTPToHTTPSMismatch(body []byte) bool {
+	return strings.Contains(strings.ToLower(string(body)), "http request to an https server")
+}
+
+// contentTypeForDiagnostic renders an absent content type explicitly.
+func contentTypeForDiagnostic(contentType string) string {
+	contentType = strings.TrimSpace(contentType)
+	if contentType == "" {
+		return "none"
+	}
+
+	return contentType
+}
+
+// responseBodyHint returns a bounded, redacted hint for unexpected control bodies.
+func responseBodyHint(body []byte) string {
+	text := strings.TrimSpace(strings.ToValidUTF8(string(body), "?"))
+	if text == "" {
+		return "empty"
+	}
+	if responseBodyLooksSecretBearing(text) {
+		return "redacted secret-bearing response body"
+	}
+
+	text = strings.Join(strings.Fields(text), " ")
+	runes := []rune(text)
+	if len(runes) > maxResponseHintRunes {
+		text = string(runes[:maxResponseHintRunes]) + "..."
+	}
+
+	return text
+}
+
+// responseBodyLooksSecretBearing detects common credential markers before hinting bodies.
+func responseBodyLooksSecretBearing(text string) bool {
+	lower := strings.ToLower(text)
+	for _, marker := range []string{
+		"authorization",
+		"bearer",
+		"token",
+		"access_token",
+		"refresh_token",
+		"secret",
+		"client_secret",
+		"password",
+		"passwd",
+		"private_key",
+		"private key",
+		"begin certificate",
+		"begin private key",
+		"begin rsa private key",
+		"begin ec private key",
+	} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // configDumpServerError reports remote config failures without printing partial config data.
@@ -2947,7 +3231,86 @@ func newGeneratedControlClient(options commandOptions) (generated.ClientWithResp
 		}))
 	}
 
-	return generated.NewClientWithResponses(baseURL, clientOptions...)
+	client, err := generated.NewClientWithResponses(baseURL, clientOptions...)
+	if err != nil {
+		return nil, err
+	}
+
+	return diagnosticGeneratedClient{ClientWithResponses: client}, nil
+}
+
+// ListSessionsWithResponse preserves response metadata when generated parsing fails.
+func (client diagnosticGeneratedClient) ListSessionsWithResponse(ctx context.Context, params *generated.ListSessionsParams, reqEditors ...generated.RequestEditorFn) (*generated.ListSessionsResponse, error) {
+	response, err := client.ListSessions(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+
+	return parseControlResponse(response, generated.ParseListSessionsResponse)
+}
+
+// GetSessionWithResponse preserves response metadata when generated parsing fails.
+func (client diagnosticGeneratedClient) GetSessionWithResponse(ctx context.Context, sessionID generated.SessionID, reqEditors ...generated.RequestEditorFn) (*generated.GetSessionResponse, error) {
+	response, err := client.GetSession(ctx, sessionID, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+
+	return parseControlResponse(response, generated.ParseGetSessionResponse)
+}
+
+// ListUsersWithResponse preserves response metadata when generated parsing fails.
+func (client diagnosticGeneratedClient) ListUsersWithResponse(ctx context.Context, params *generated.ListUsersParams, reqEditors ...generated.RequestEditorFn) (*generated.ListUsersResponse, error) {
+	response, err := client.ListUsers(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+
+	return parseControlResponse(response, generated.ParseListUsersResponse)
+}
+
+// GetUserWithResponse preserves response metadata when generated parsing fails.
+func (client diagnosticGeneratedClient) GetUserWithResponse(ctx context.Context, userKey generated.UserKey, reqEditors ...generated.RequestEditorFn) (*generated.GetUserResponse, error) {
+	response, err := client.GetUser(ctx, userKey, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+
+	return parseControlResponse(response, generated.ParseGetUserResponse)
+}
+
+// GetUserSessionsWithResponse preserves response metadata when generated parsing fails.
+func (client diagnosticGeneratedClient) GetUserSessionsWithResponse(ctx context.Context, userKey generated.UserKey, reqEditors ...generated.RequestEditorFn) (*generated.GetUserSessionsResponse, error) {
+	response, err := client.GetUserSessions(ctx, userKey, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+
+	return parseControlResponse(response, generated.ParseGetUserSessionsResponse)
+}
+
+// parseControlResponse gives generated parsers a replayable body and keeps diagnostics on parse failure.
+func parseControlResponse[T any](response *http.Response, parser func(*http.Response) (*T, error)) (*T, error) {
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		return nil, err
+	}
+	_ = response.Body.Close()
+
+	replay := *response
+	replay.Body = io.NopCloser(bytes.NewReader(body))
+
+	parsed, err := parser(&replay)
+	if err != nil {
+		return nil, &controlResponseDiagnostic{
+			status:      response.StatusCode,
+			contentType: response.Header.Get("Content-Type"),
+			body:        body,
+			err:         err,
+		}
+	}
+
+	return parsed, nil
 }
 
 // httpClientFromOptions builds the transport used by the generated client.
@@ -3373,10 +3736,11 @@ func writeListenerLine(writer io.Writer, listener generated.ListenerDetail) {
 func writeSessionLine(writer io.Writer, session generated.SessionDetail) {
 	_, _ = fmt.Fprintf(
 		writer,
-		"session_id=%s user_key=%s protocol=%s backend=%s backend_node=%s shard_tag=%s expires_at=%s\n",
+		"session_id=%s user_key=%s protocol=%s holder_kind=%s backend=%s backend_node=%s shard_tag=%s expires_at=%s\n",
 		fieldValue(session.SessionID),
 		fieldValue(session.UserKey),
 		fieldValue(session.Protocol),
+		fieldValue(string(session.HolderKind)),
 		fieldValue(session.Backend),
 		fieldValue(session.BackendNode),
 		fieldValue(session.ShardTag),

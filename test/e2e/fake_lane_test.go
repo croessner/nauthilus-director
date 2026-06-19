@@ -622,6 +622,213 @@ func TestServerBinaryControlRESTCLIParity(t *testing.T) {
 	}
 }
 
+// TestServerBinarySessionHolderControlPublicWorkflow proves holder control through public process boundaries.
+func TestServerBinarySessionHolderControlPublicWorkflow(t *testing.T) {
+	binary := e2eServerBinary(t)
+	ctl := buildDirectorctl(t)
+	redisFixture := startValkeySessionStore(t)
+	authority := startFakeHTTPAuthority(t, map[string][]string{
+		"account":   {e2eAccount},
+		"tenant":    {e2eTenant},
+		"mailShard": {e2eShardTag},
+	})
+	fakeBackend := startFakeIMAPBackend(t, fakeBackendOptions{})
+	controlCertPath, controlKeyPath, _ := writeTestCertificate(t)
+	directorAddress := loopbackAddress(t)
+	controlAddress := loopbackAddress(t)
+	controlURL := "https://" + controlAddress
+	controlClient := controlTLSClient(t, controlCertPath)
+	controlArgs := func(args ...string) []string {
+		return append([]string{"--tls-ca-file", controlCertPath}, args...)
+	}
+	configPath := writeProcessConfig(t, processConfigOptions{
+		RedisAddress:    redisFixture.addr,
+		AuthorityURL:    authority.URL(),
+		DirectorAddress: directorAddress,
+		ControlAddress:  controlAddress,
+		ControlEnabled:  true,
+		ControlTLS: config.ControlTLSConfig{
+			Enabled:       true,
+			Cert:          controlCertPath,
+			Key:           config.Secret(controlKeyPath),
+			MinTLSVersion: "TLS1.2",
+		},
+		BackendAddress: fakeBackend.Address(),
+		BackendTLS: config.BackendTLSConfig{
+			Mode:          "plaintext",
+			MinTLSVersion: "TLS1.2",
+		},
+		BackendAuth: masterUserBackendAuth(),
+	})
+	process := startDirectorProcess(t, binary, configPath)
+
+	waitForDirectorGreeting(t, directorAddress, process)
+	waitForControlReadyWithClient(t, controlURL, controlClient, process)
+
+	sessionsOutput := runDirectorctl(t, ctl, controlURL, controlArgs("sessions", "list", "--all")...)
+	assertOutputOmits(t, sessionsOutput, "session_id=")
+	usersOutput := runDirectorctl(t, ctl, controlURL, controlArgs("users", "list", "--all")...)
+	assertOutputOmits(t, usersOutput, "active_sessions=1", "active_holders=1")
+	userSessionsOutput := runDirectorctl(t, ctl, controlURL, controlArgs("users", "sessions", e2eAccount)...)
+	assertOutputOmits(t, userSessionsOutput, "session_id=")
+
+	waitForRESTSessionCountWithClient(t, controlClient, controlURL, 0)
+	baselineSummary := getRuntimeSummaryWithClient(t, controlClient, controlURL)
+	baselineSignature := runtimeSummarySignature(baselineSummary)
+	beforeAuthorityRequests := authority.RequestCount()
+	beforeBackendConnections := fakeBackend.ConnectionCount()
+	lookupRouteWithClient(t, controlClient, controlURL, e2eAccount, true)
+	lookupRouteWithClient(t, controlClient, controlURL, e2eAccount, true)
+	if authority.RequestCount() != beforeAuthorityRequests {
+		t.Fatalf("route lookup called authority: got %d requests, want %d", authority.RequestCount(), beforeAuthorityRequests)
+	}
+	if fakeBackend.ConnectionCount() != beforeBackendConnections {
+		t.Fatalf("route lookup opened backend connections: got %d, want %d", fakeBackend.ConnectionCount(), beforeBackendConnections)
+	}
+	waitForRESTSessionCountWithClient(t, controlClient, controlURL, 0)
+	if signature := runtimeSummarySignature(getRuntimeSummaryWithClient(t, controlClient, controlURL)); signature != baselineSignature {
+		t.Fatalf("route lookup changed runtime summary signature %q, want %q", signature, baselineSignature)
+	}
+
+	client, reader := loginProcessIMAP(t, directorAddress, e2eAccount)
+	expectBackendProxy(t, client, reader, fakeBackend, "A002")
+	sessions := waitForRESTSessionCountWithClient(t, controlClient, controlURL, 1)
+	sessionID := sessions[0].SessionID
+	if sessions[0].UserKey != e2eAccount || sessions[0].Protocol != e2eProtocol || sessions[0].Backend != e2eBackendAID {
+		t.Fatalf("public session detail = %#v, want visible IMAP holder on backend %s", sessions[0], e2eBackendAID)
+	}
+
+	sessionsOutput = runDirectorctl(t, ctl, controlURL, controlArgs("sessions", "list", "--all")...)
+	assertCLIOutputFields(t, sessionsOutput, "session_id="+sessionID, "holder_kind=session")
+	usersOutput = runDirectorctl(t, ctl, controlURL, controlArgs("users", "list", "--all")...)
+	assertCLIOutputFields(t, usersOutput, "active_sessions=1", "active_holders=1")
+	userSessionsOutput = runDirectorctl(t, ctl, controlURL, controlArgs("users", "sessions", e2eAccount)...)
+	assertCLIOutputFields(t, userSessionsOutput, "session_id="+sessionID, "holder_kind=session")
+
+	activeSignature := runtimeSummarySignature(getRuntimeSummaryWithClient(t, controlClient, controlURL))
+	beforeAuthorityRequests = authority.RequestCount()
+	beforeBackendConnections = fakeBackend.ConnectionCount()
+	activeLookup := lookupRouteWithClient(t, controlClient, controlURL, e2eAccount, true)
+	if activeLookup.Affinity == nil ||
+		!activeLookup.Affinity.Present ||
+		!activeLookup.Affinity.Active ||
+		activeLookup.Affinity.ActiveSessions != 1 ||
+		activeLookup.Affinity.ActiveHolders != 1 {
+		t.Fatalf("route lookup affinity = %#v, want one active holder", activeLookup.Affinity)
+	}
+	lookupRouteWithClient(t, controlClient, controlURL, e2eAccount, true)
+	if authority.RequestCount() != beforeAuthorityRequests {
+		t.Fatalf("route lookup after login called authority: got %d requests, want %d", authority.RequestCount(), beforeAuthorityRequests)
+	}
+	if fakeBackend.ConnectionCount() != beforeBackendConnections {
+		t.Fatalf("route lookup after login opened backend connections: got %d, want %d", fakeBackend.ConnectionCount(), beforeBackendConnections)
+	}
+	afterLookupSessions := waitForRESTSessionCountWithClient(t, controlClient, controlURL, 1)
+	if afterLookupSessions[0].SessionID != sessionID {
+		t.Fatalf("route lookup changed visible session %q, want %q", afterLookupSessions[0].SessionID, sessionID)
+	}
+	if signature := runtimeSummarySignature(getRuntimeSummaryWithClient(t, controlClient, controlURL)); signature != activeSignature {
+		t.Fatalf("route lookup changed active runtime summary signature %q, want %q", signature, activeSignature)
+	}
+
+	activeClearStatus := requestStatusWithClient(
+		t,
+		controlClient,
+		http.MethodDelete,
+		controlURL+"/api/v1/users/"+escapedUserPath(e2eAccount)+"/affinity",
+		generated.RuntimeReasonRequest{Reason: "active holder clear blocked"},
+	)
+	if activeClearStatus == http.StatusAccepted {
+		t.Fatal("active affinity clear succeeded while a holder was active")
+	}
+	clearCode, clearOutput := runDirectorctlStatus(
+		t,
+		ctl,
+		controlURL,
+		controlArgs("users", "affinity", "clear", e2eAccount, "--reason", "active holder clear blocked")...,
+	)
+	if clearCode == 0 {
+		t.Fatalf("CLI active affinity clear succeeded: %s", clearOutput)
+	}
+
+	killResponse := deleteSessionWithClient(
+		t,
+		controlClient,
+		controlURL+"/api/v1/sessions/"+sessionID,
+		generated.RuntimeReasonRequest{Reason: "kill active holder"},
+		http.StatusAccepted,
+	)
+	if killResponse.Outcome != generated.Marked ||
+		killResponse.Lifecycle != generated.LocalCloseOrRemoteHeartbeat ||
+		killResponse.StaleIndexRepaired {
+		t.Fatalf("active session kill response = %#v, want marked cooperative close", killResponse)
+	}
+	expectSessionClosed(t, client, reader)
+	waitForRESTSessionCountWithClient(t, controlClient, controlURL, 0)
+
+	missingResponse := deleteSessionWithClient(
+		t,
+		controlClient,
+		controlURL+"/api/v1/sessions/"+sessionID,
+		generated.RuntimeReasonRequest{Reason: "kill missing holder"},
+		http.StatusNotFound,
+	)
+	if missingResponse.Outcome == generated.AmbiguousState {
+		t.Fatalf("missing session kill response = %#v, want bounded non-corrupt outcome", missingResponse)
+	}
+	if missingResponse.Outcome != generated.Missing && missingResponse.Outcome != generated.StaleIndexRepaired {
+		t.Fatalf("missing session kill response = %#v, want missing or stale repair", missingResponse)
+	}
+	killCode, killOutput := runDirectorctlStatus(
+		t,
+		ctl,
+		controlURL,
+		controlArgs("sessions", "kill", sessionID, "--reason", "kill missing holder")...,
+	)
+	if killCode == 0 {
+		t.Fatalf("CLI missing session kill succeeded unexpectedly: %s", killOutput)
+	}
+	if !strings.Contains(killOutput, "outcome=missing") && !strings.Contains(killOutput, "outcome=stale_index_repaired") {
+		t.Fatalf("CLI missing session kill output = %q, want bounded outcome", killOutput)
+	}
+	if strings.Contains(killOutput, "outcome=ambiguous_state") {
+		t.Fatalf("CLI missing session kill output = %q, want no corrupt-state outcome", killOutput)
+	}
+
+	kickClient, kickReader := loginProcessIMAP(t, directorAddress, e2eAccount)
+	expectBackendProxy(t, kickClient, kickReader, fakeBackend, "A002")
+	waitForRESTSessionCountWithClient(t, controlClient, controlURL, 1)
+	kickOutput := runDirectorctl(t, ctl, controlURL, controlArgs("users", "kick", e2eAccount, "--reason", "kick active holder")...)
+	assertCLIOutputFields(t, kickOutput, "status=accepted", "mark=cooperative", "remote_close=heartbeat_or_lease")
+	expectSessionClosed(t, kickClient, kickReader)
+	waitForRESTSessionCountWithClient(t, controlClient, controlURL, 0)
+
+	sessionsOutput = runDirectorctl(t, ctl, controlURL, controlArgs("sessions", "list", "--all")...)
+	assertOutputOmits(t, sessionsOutput, "session_id=")
+	userSessionsOutput = runDirectorctl(t, ctl, controlURL, controlArgs("users", "sessions", e2eAccount)...)
+	assertOutputOmits(t, userSessionsOutput, "session_id=")
+	usersOutput = runDirectorctl(t, ctl, controlURL, controlArgs("users", "list", "--all")...)
+	assertOutputOmits(t, usersOutput, "active_sessions=1", "active_holders=1")
+
+	runDirectorctl(t, ctl, controlURL, controlArgs("users", "affinity", "clear", e2eAccount, "--reason", "inactive holder clear")...)
+	waitForRESTSessionCountWithClient(t, controlClient, controlURL, 0)
+	inactiveLookup := lookupRouteWithClient(t, controlClient, controlURL, e2eAccount, true)
+	if inactiveLookup.Affinity != nil && inactiveLookup.Affinity.Active {
+		t.Fatalf("route lookup affinity after clear = %#v, want inactive or absent", inactiveLookup.Affinity)
+	}
+
+	assertNoSecretText(t, process.output.String())
+	assertOutputOmits(t,
+		process.output.String(),
+		e2eAccount,
+		"active holder clear blocked",
+		"kill active holder",
+		"kill missing holder",
+		"kick active holder",
+		"inactive holder clear",
+	)
+}
+
 // TestServerBinaryBackendProxyProtocolPublicIMAPFlow proves outbound PROXY through real process boundaries.
 func TestServerBinaryBackendProxyProtocolPublicIMAPFlow(t *testing.T) {
 	binary := e2eServerBinary(t)
@@ -1558,7 +1765,10 @@ func TestRuntimeControlPublicBoundaries(t *testing.T) {
 		t.Fatal("affinity clear succeeded while sessions were active")
 	}
 
-	deleteAccepted(t, control.URL()+"/api/v1/sessions/"+firstID, generated.RuntimeReasonRequest{Reason: "targeted kill"})
+	killResponse := deleteSessionAccepted(t, control.URL()+"/api/v1/sessions/"+firstID, generated.RuntimeReasonRequest{Reason: "targeted kill"})
+	if killResponse.Outcome != generated.Marked || killResponse.Lifecycle != generated.LocalCloseOrRemoteHeartbeat {
+		t.Fatalf("session kill response = %#v, want marked cooperative close", killResponse)
+	}
 	expectSessionClosed(t, firstClient, firstReader)
 	expectBackendProxy(t, secondClient, secondReader, backends[secondBackendID], "B002")
 
@@ -1725,6 +1935,7 @@ type processConfigOptions struct {
 	DirectorAddress        string
 	ControlAddress         string
 	ControlEnabled         bool
+	ControlTLS             config.ControlTLSConfig
 	BackendAddress         string
 	BackendHAProxy         bool
 	BackendHealthEnabled   bool
@@ -1915,7 +2126,7 @@ runtime:
     control:
       enabled: %t
       address: %q
-%s
+%s%s
   timeouts:
     preauth: 2s
     auth: 2s
@@ -1996,6 +2207,7 @@ director:
 	`, options.ControlEnabled,
 		controlAddress,
 		processControlAuthYAML(t),
+		processControlTLSYAML(options.ControlTLS),
 		e2eProcessKeyPrefix,
 		options.RedisAddress,
 		processAuthorityYAML(t, options.AuthorityOIDC, options.AuthorityBearer),
@@ -3583,6 +3795,35 @@ func processControlAuthYAML(t *testing.T) string {
 `, writeE2EControlTokenFile(t))
 }
 
+// processControlTLSYAML renders optional HTTPS listener settings for process fixtures.
+func processControlTLSYAML(tlsConfig config.ControlTLSConfig) string {
+	if !tlsConfig.Enabled {
+		return `      tls:
+        enabled: false
+`
+	}
+
+	minVersion := strings.TrimSpace(tlsConfig.MinTLSVersion)
+	if minVersion == "" {
+		minVersion = "TLS1.2"
+	}
+
+	return fmt.Sprintf(`      tls:
+        enabled: true
+        cert: %q
+        key: %q
+        client_ca: %q
+        require_client_cert: %t
+        min_tls_version: %q
+`,
+		tlsConfig.Cert,
+		tlsConfig.Key.Value(),
+		tlsConfig.ClientCA,
+		tlsConfig.RequireClientCert,
+		minVersion,
+	)
+}
+
 // processAuthorityOIDCYAML disables caller-token acquisition for fake HTTP authorities.
 func processAuthorityOIDCYAML() string {
 	return `      oidc:
@@ -3909,9 +4150,31 @@ func lookupRoute(t *testing.T, baseURL string, userKey string, includeAffinity b
 	return lookupRouteFor(t, baseURL, e2eProtocol, e2eListenerName, userKey, includeAffinity)
 }
 
+// lookupRouteWithClient posts one public route lookup request through an explicit client.
+func lookupRouteWithClient(t *testing.T, client *http.Client, baseURL string, userKey string, includeAffinity bool) generated.RouteLookupResponse {
+	t.Helper()
+
+	return lookupRouteForWithClient(t, client, baseURL, e2eProtocol, e2eListenerName, userKey, includeAffinity)
+}
+
 // lookupRouteFor posts one public route lookup request for an explicit protocol and listener.
 func lookupRouteFor(
 	t *testing.T,
+	baseURL string,
+	protocol string,
+	listener string,
+	userKey string,
+	includeAffinity bool,
+) generated.RouteLookupResponse {
+	t.Helper()
+
+	return lookupRouteForWithClient(t, http.DefaultClient, baseURL, protocol, listener, userKey, includeAffinity)
+}
+
+// lookupRouteForWithClient posts one public route lookup request for an explicit protocol, listener and client.
+func lookupRouteForWithClient(
+	t *testing.T,
+	client *http.Client,
 	baseURL string,
 	protocol string,
 	listener string,
@@ -3929,7 +4192,7 @@ func lookupRouteFor(
 	}
 
 	var response generated.RouteLookupResponse
-	requestJSON(t, http.MethodPost, baseURL+"/api/v1/route/lookup", body, http.StatusOK, &response)
+	requestJSONWithClient(t, client, http.MethodPost, baseURL+"/api/v1/route/lookup", body, http.StatusOK, &response)
 
 	return response
 }
@@ -4058,10 +4321,39 @@ func waitForProcessHealthStatus(t *testing.T, store *state.RedisSessionStore, ba
 func getRuntimeSummary(t *testing.T, baseURL string) generated.RuntimeSummaryResponse {
 	t.Helper()
 
+	return getRuntimeSummaryWithClient(t, http.DefaultClient, baseURL)
+}
+
+// getRuntimeSummaryWithClient reads the public runtime summary through an explicit client.
+func getRuntimeSummaryWithClient(t *testing.T, client *http.Client, baseURL string) generated.RuntimeSummaryResponse {
+	t.Helper()
+
 	var response generated.RuntimeSummaryResponse
-	requestJSON(t, http.MethodGet, baseURL+"/api/v1/runtime/summary", nil, http.StatusOK, &response)
+	requestJSONWithClient(t, client, http.MethodGet, baseURL+"/api/v1/runtime/summary", nil, http.StatusOK, &response)
 
 	return response
+}
+
+// runtimeSummarySignature returns the stable runtime counters used to prove read-only requests.
+func runtimeSummarySignature(summary generated.RuntimeSummaryResponse) string {
+	fields := []string{
+		fmt.Sprintf("active.total=%d", summary.ActiveSessions.Total.Count),
+		fmt.Sprintf("idle=%d", summary.IdleAffinities.Count),
+		fmt.Sprintf("repairs.backend_reservations=%d", summary.Repairs.BackendReservations.Count),
+		fmt.Sprintf("repairs.expired_sessions=%d", summary.Repairs.ExpiredSessions.Count),
+		fmt.Sprintf("repairs.stale_index_entries=%d", summary.Repairs.StaleIndexEntries.Count),
+	}
+	for _, capacity := range summary.BackendCapacity {
+		fields = append(fields, fmt.Sprintf(
+			"backend=%s active=%d reserved=%d",
+			capacity.Backend,
+			capacity.ActiveSessions.Count,
+			capacity.ReservedSessions.Count,
+		))
+	}
+	sort.Strings(fields)
+
+	return strings.Join(fields, "|")
 }
 
 // assertNoRuntimePlacement verifies no session or backend reservation was opened.
@@ -4084,13 +4376,20 @@ func assertNoRuntimePlacement(t *testing.T, baseURL string) {
 func getSessionListPage(t *testing.T, baseURL string, limit string, cursor string) generated.SessionListResponse {
 	t.Helper()
 
+	return getSessionListPageWithClient(t, http.DefaultClient, baseURL, limit, cursor)
+}
+
+// getSessionListPageWithClient reads one generated session page through an explicit HTTP client.
+func getSessionListPageWithClient(t *testing.T, client *http.Client, baseURL string, limit string, cursor string) generated.SessionListResponse {
+	t.Helper()
+
 	values := url.Values{"limit": []string{limit}}
 	if strings.TrimSpace(cursor) != "" {
 		values.Set("cursor", cursor)
 	}
 
 	var response generated.SessionListResponse
-	requestJSON(t, http.MethodGet, baseURL+"/api/v1/sessions?"+values.Encode(), nil, http.StatusOK, &response)
+	requestJSONWithClient(t, client, http.MethodGet, baseURL+"/api/v1/sessions?"+values.Encode(), nil, http.StatusOK, &response)
 
 	return response
 }
@@ -4099,10 +4398,17 @@ func getSessionListPage(t *testing.T, baseURL string, limit string, cursor strin
 func waitForRESTSessionCount(t *testing.T, baseURL string, count int) []generated.SessionDetail {
 	t.Helper()
 
+	return waitForRESTSessionCountWithClient(t, http.DefaultClient, baseURL, count)
+}
+
+// waitForRESTSessionCountWithClient waits for a session count through an explicit client.
+func waitForRESTSessionCountWithClient(t *testing.T, client *http.Client, baseURL string, count int) []generated.SessionDetail {
+	t.Helper()
+
 	deadline := time.Now().Add(3 * time.Second)
 	var sessions []generated.SessionDetail
 	for time.Now().Before(deadline) {
-		page := getSessionListPage(t, baseURL, "50", "")
+		page := getSessionListPageWithClient(t, client, baseURL, "50", "")
 		sessions = page.Sessions
 		if len(sessions) == count {
 			return sessions
@@ -4113,6 +4419,31 @@ func waitForRESTSessionCount(t *testing.T, baseURL string, count int) []generate
 
 	t.Fatalf("REST session count did not become %d; sessions=%#v", count, sessions)
 	return nil
+}
+
+// waitForControlReadyWithClient waits until the public control API reports readiness.
+func waitForControlReadyWithClient(t *testing.T, controlURL string, client *http.Client, process *directorProcess) {
+	t.Helper()
+
+	if client == nil {
+		client = http.DefaultClient
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		response, err := client.Get(controlURL + "/readyz")
+		if err == nil {
+			_, _ = io.Copy(io.Discard, response.Body)
+			_ = response.Body.Close()
+			if response.StatusCode == http.StatusOK {
+				return
+			}
+		}
+
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	t.Fatalf("control API did not become ready at %s:\n%s", controlURL, process.output.String())
 }
 
 // nextCursorFromCLI extracts the continuation cursor from text-mode CLI output.
@@ -4149,6 +4480,26 @@ func deleteAccepted(t *testing.T, target string, body any) {
 	requestJSON(t, http.MethodDelete, target, body, http.StatusAccepted, &accepted)
 }
 
+// deleteSessionAccepted kills one session and returns the generated bounded result body.
+func deleteSessionAccepted(t *testing.T, target string, body any) generated.SessionKillResponse {
+	t.Helper()
+
+	var response generated.SessionKillResponse
+	requestJSON(t, http.MethodDelete, target, body, http.StatusAccepted, &response)
+
+	return response
+}
+
+// deleteSessionWithClient kills one session through an explicit HTTP client.
+func deleteSessionWithClient(t *testing.T, client *http.Client, target string, body any, wantStatus int) generated.SessionKillResponse {
+	t.Helper()
+
+	var response generated.SessionKillResponse
+	requestJSONWithClient(t, client, http.MethodDelete, target, body, wantStatus, &response)
+
+	return response
+}
+
 // requestJSON sends a JSON request to a public control endpoint.
 func requestJSON(t *testing.T, method string, target string, body any, wantStatus int, out any) {
 	t.Helper()
@@ -4161,9 +4512,32 @@ func requestJSON(t *testing.T, method string, target string, body any, wantStatu
 	}
 }
 
+// requestJSONWithClient sends a JSON request through a caller-supplied HTTP client.
+func requestJSONWithClient(t *testing.T, client *http.Client, method string, target string, body any, wantStatus int, out any) {
+	t.Helper()
+
+	data := requestJSONDataWithClient(t, client, method, target, body, wantStatus)
+	if out != nil && len(data) > 0 {
+		if err := json.Unmarshal(data, out); err != nil {
+			t.Fatalf("decode response body %s: %v", data, err)
+		}
+	}
+}
+
 // requestJSONData sends a JSON request and returns the public response body.
 func requestJSONData(t *testing.T, method string, target string, body any, wantStatus int) []byte {
 	t.Helper()
+
+	return requestJSONDataWithClient(t, http.DefaultClient, method, target, body, wantStatus)
+}
+
+// requestJSONDataWithClient sends a JSON request with an explicit HTTP client.
+func requestJSONDataWithClient(t *testing.T, client *http.Client, method string, target string, body any, wantStatus int) []byte {
+	t.Helper()
+
+	if client == nil {
+		client = http.DefaultClient
+	}
 
 	var reader io.Reader
 	if body != nil {
@@ -4183,7 +4557,7 @@ func requestJSONData(t *testing.T, method string, target string, body any, wantS
 	}
 	authorizeE2EControlRequest(request)
 
-	response, err := http.DefaultClient.Do(request)
+	response, err := client.Do(request)
 	if err != nil {
 		t.Fatalf("request %s %s: %v", method, target, err)
 	}
@@ -4201,9 +4575,40 @@ func requestJSONData(t *testing.T, method string, target string, body any, wantS
 	return data
 }
 
+// controlTLSClient trusts the self-signed control certificate used by process E2E fixtures.
+func controlTLSClient(t *testing.T, caFile string) *http.Client {
+	t.Helper()
+
+	caPEM, err := os.ReadFile(caFile)
+	if err != nil {
+		t.Fatalf("read control CA file: %v", err)
+	}
+
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(caPEM) {
+		t.Fatal("control CA file did not contain a PEM certificate")
+	}
+
+	return &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		RootCAs:    roots,
+	}}}
+}
+
 // requestStatus sends JSON and returns only the HTTP status for negative assertions.
 func requestStatus(t *testing.T, method string, target string, body any) int {
 	t.Helper()
+
+	return requestStatusWithClient(t, http.DefaultClient, method, target, body)
+}
+
+// requestStatusWithClient sends JSON with an explicit HTTP client and returns only the status.
+func requestStatusWithClient(t *testing.T, client *http.Client, method string, target string, body any) int {
+	t.Helper()
+
+	if client == nil {
+		client = http.DefaultClient
+	}
 
 	var reader io.Reader
 	if body != nil {
@@ -4223,7 +4628,7 @@ func requestStatus(t *testing.T, method string, target string, body any) int {
 	}
 	authorizeE2EControlRequest(request)
 
-	response, err := http.DefaultClient.Do(request)
+	response, err := client.Do(request)
 	if err != nil {
 		t.Fatalf("request %s %s: %v", method, target, err)
 	}
