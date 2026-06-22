@@ -125,6 +125,20 @@ func TestGRPCNetworkAuthorityContextMetadataSentForAllOperations(t *testing.T) {
 	}
 }
 
+// TestGRPCNetworkPropagatesTraceContext verifies outbound RPCs carry the active trace.
+func TestGRPCNetworkPropagatesTraceContext(t *testing.T) {
+	service, server := newTestProtoAuthority(t)
+	client := newTestGRPCClient(t, service)
+
+	if _, err := client.Authenticate(contextWithTestTrace(), testAuthRequest()); err != nil {
+		t.Fatalf("Authenticate returned error: %v", err)
+	}
+
+	if got := strings.Join(server.authMetadata.Get("traceparent"), ","); !strings.Contains(got, testTraceID) {
+		t.Fatalf("traceparent metadata = %q, want trace ID %s", got, testTraceID)
+	}
+}
+
 // TestGRPCNetworkAuthorityContextPreservesCallerAuthMetadata verifies context cannot replace authorization.
 func TestGRPCNetworkAuthorityContextPreservesCallerAuthMetadata(t *testing.T) {
 	authorityContext := AuthorityContext{

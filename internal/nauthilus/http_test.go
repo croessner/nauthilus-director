@@ -198,6 +198,24 @@ func TestHTTPAuthorityContextHeadersSentForAllOperations(t *testing.T) {
 	}
 }
 
+// TestHTTPAuthorityPropagatesTraceContext verifies outbound auth calls carry the active trace.
+func TestHTTPAuthorityPropagatesTraceContext(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if got := request.Header.Get("traceparent"); !strings.Contains(got, testTraceID) {
+			t.Fatalf("traceparent = %q, want trace ID %s", got, testTraceID)
+		}
+
+		writer.Header().Set("Content-Type", defaultHTTPContentType)
+		_, _ = writer.Write([]byte(`{"ok":true,"account_field":"uid","attributes":{"uid":["alice"]}}`))
+	}))
+	defer server.Close()
+
+	client := newTestHTTPClient(t, server.URL+"/api/v1/auth/json", nil)
+	if _, err := client.Authenticate(contextWithTestTrace(), testAuthRequest()); err != nil {
+		t.Fatalf("Authenticate returned error: %v", err)
+	}
+}
+
 // TestHTTPAuthorityContextDoesNotOverrideTransportHeaders verifies caller auth and content negotiation win.
 func TestHTTPAuthorityContextDoesNotOverrideTransportHeaders(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {

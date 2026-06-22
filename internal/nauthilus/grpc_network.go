@@ -28,6 +28,7 @@ import (
 	"github.com/croessner/nauthilus-director/internal/config"
 	authv1 "github.com/croessner/nauthilus-director/internal/nauthilus/grpcapi/auth/v1"
 	commonv1 "github.com/croessner/nauthilus-director/internal/nauthilus/grpcapi/common/v1"
+	"github.com/croessner/nauthilus-director/internal/observability"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
@@ -170,14 +171,14 @@ func (s *networkGRPCAuthService) authorizedContext(ctx context.Context) (context
 			return ctx, err
 		}
 
-		return metadata.AppendToOutgoingContext(callCtx, authorizationMetadataKey, "Bearer "+token), nil
+		return observability.ContextWithGRPCTraceContext(metadata.AppendToOutgoingContext(callCtx, authorizationMetadataKey, "Bearer "+token)), nil
 	}
 
 	if s.authorization == "" {
-		return callCtx, nil
+		return observability.ContextWithGRPCTraceContext(callCtx), nil
 	}
 
-	return metadata.AppendToOutgoingContext(callCtx, authorizationMetadataKey, s.authorization), nil
+	return observability.ContextWithGRPCTraceContext(metadata.AppendToOutgoingContext(callCtx, authorizationMetadataKey, s.authorization)), nil
 }
 
 // grpcTransportCredentials builds the authority transport security policy.

@@ -26,6 +26,7 @@ import (
 	"strings"
 
 	"github.com/croessner/nauthilus-director/internal/config"
+	"github.com/croessner/nauthilus-director/internal/observability"
 )
 
 const (
@@ -283,6 +284,7 @@ func (c *HTTPClient) postJSON(
 	}
 
 	c.applyAuthorityContextHeaders(request.Header)
+	observability.InjectHTTPTraceContext(ctx, request.Header)
 
 	response, err := c.client.Do(request)
 	if err != nil {

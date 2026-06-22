@@ -39,6 +39,7 @@ import (
 	"time"
 
 	"github.com/croessner/nauthilus-director/internal/config"
+	"github.com/croessner/nauthilus-director/internal/observability"
 )
 
 const (
@@ -449,6 +450,7 @@ func fetchOIDCDiscoveryMetadata(
 	}
 
 	request.Header.Set("Accept", defaultHTTPContentType)
+	observability.InjectHTTPTraceContext(ctx, request.Header)
 
 	response, err := client.Do(request)
 	if err != nil {
@@ -770,6 +772,7 @@ func newOIDCFormRequest(
 
 	request.Header.Set("Content-Type", oidcFormContentType)
 	request.Header.Set("Accept", defaultHTTPContentType)
+	observability.InjectHTTPTraceContext(ctx, request.Header)
 
 	return request, nil
 }

@@ -27,6 +27,7 @@ import (
 	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -58,6 +59,23 @@ func TestOIDCDiscoverySucceedsWithNauthilusDocument(t *testing.T) {
 		metadata.TokenEndpoint != server.URL+"/oidc/token" ||
 		metadata.IntrospectionEndpoint != server.URL+"/oidc/introspect" {
 		t.Fatalf("metadata = %#v, want Nauthilus endpoints", metadata)
+	}
+}
+
+// TestOIDCFormRequestPropagatesTraceContext verifies token and introspection posts keep trace linkage.
+func TestOIDCFormRequestPropagatesTraceContext(t *testing.T) {
+	request, err := newOIDCFormRequest(
+		contextWithTestTrace(),
+		"https://issuer.example.test/token",
+		url.Values{"grant_type": []string{grantTypeClientCredentials}},
+		"oidc token_endpoint is invalid",
+	)
+	if err != nil {
+		t.Fatalf("newOIDCFormRequest returned error: %v", err)
+	}
+
+	if got := request.Header.Get("traceparent"); !strings.Contains(got, testTraceID) {
+		t.Fatalf("traceparent = %q, want trace ID %s", got, testTraceID)
 	}
 }
 
