@@ -8,7 +8,7 @@ ARG GO_IMAGE=golang:1.26.4-alpine3.23
 ARG CERTS_IMAGE=alpine:3.23
 ARG RUNTIME_IMAGE=scratch
 
-FROM ${GO_IMAGE} AS builder
+FROM --platform=$BUILDPLATFORM ${GO_IMAGE} AS builder
 
 ARG TARGETOS=linux
 ARG TARGETARCH
@@ -37,7 +37,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
             "./cmd/$command"; \
     done
 
-FROM ${CERTS_IMAGE} AS runtime-files
+FROM --platform=$BUILDPLATFORM ${CERTS_IMAGE} AS runtime-files
 
 RUN set -eux; \
     apk add --no-cache ca-certificates; \

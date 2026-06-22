@@ -379,7 +379,13 @@ director:
 
         capabilities:
           - SMTPUTF8
+          - 8BITMIME
+          - ENHANCEDSTATUSCODES
           - CHUNKING
+          - PIPELINING
+          - SIZE
+        size:
+          max_message_bytes: 104857600
 
     pop3:
       # Cleartext POP3 with STLS support, published by HAProxy on host port

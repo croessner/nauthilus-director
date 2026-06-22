@@ -1677,6 +1677,7 @@ func TestLMTPCapabilityFilterNormalizesStableWireForms(t *testing.T) {
 func TestLMTPValidationAcceptsSafeCapabilityFilterDeny(t *testing.T) {
 	cfg := DefaultConfig()
 	entry := cfg.Director.Listeners["lmtp"]
+	entry.LMTP.Capabilities = []string{lmtpCapabilitySMTPUTF8}
 	entry.LMTP.CapabilityFilter.Deny = []string{
 		lmtpCapabilityCHUNKING,
 		lmtpCapability8BITMIME,
@@ -1792,8 +1793,8 @@ func TestLMTPValidationAccepts8BITMIME(t *testing.T) {
 	}
 }
 
-// TestDefaultLMTPCapabilitiesAdvertiseEnhancedStatusCodes keeps generated defaults truthful.
-func TestDefaultLMTPCapabilitiesAdvertiseEnhancedStatusCodes(t *testing.T) {
+// TestDefaultLMTPCapabilitiesAdvertiseImplementedSurface keeps generated defaults truthful.
+func TestDefaultLMTPCapabilitiesAdvertiseImplementedSurface(t *testing.T) {
 	cfg := DefaultConfig()
 	for _, listenerName := range []string{"lmtp", "lmtps"} {
 		listener := cfg.Director.Listeners[listenerName]
@@ -1801,14 +1802,23 @@ func TestDefaultLMTPCapabilitiesAdvertiseEnhancedStatusCodes(t *testing.T) {
 			t.Fatalf("%s LMTP config is nil", listenerName)
 		}
 
-		if !containsString(listener.LMTP.Capabilities, lmtpCapabilityEnhancedStatus) {
-			t.Fatalf("%s capabilities = %v, want ENHANCEDSTATUSCODES", listenerName, listener.LMTP.Capabilities)
+		for _, capability := range []string{
+			lmtpCapabilitySMTPUTF8,
+			lmtpCapability8BITMIME,
+			lmtpCapabilityEnhancedStatus,
+			lmtpCapabilityCHUNKING,
+			lmtpCapabilityPIPELINING,
+			lmtpCapabilitySIZE,
+		} {
+			if !containsString(listener.LMTP.Capabilities, capability) {
+				t.Fatalf("%s capabilities = %v, want %s", listenerName, listener.LMTP.Capabilities, capability)
+			}
 		}
 	}
 }
 
-// TestDefaultLMTPSizePolicyIsDisabled verifies SIZE has no generated frontend limit.
-func TestDefaultLMTPSizePolicyIsDisabled(t *testing.T) {
+// TestDefaultLMTPSizePolicyEnablesSIZE verifies generated defaults can advertise SIZE.
+func TestDefaultLMTPSizePolicyEnablesSIZE(t *testing.T) {
 	cfg := DefaultConfig()
 	for _, listenerName := range []string{"lmtp", "lmtps"} {
 		listener := cfg.Director.Listeners[listenerName]
@@ -1816,20 +1826,21 @@ func TestDefaultLMTPSizePolicyIsDisabled(t *testing.T) {
 			t.Fatalf("%s LMTP config is nil", listenerName)
 		}
 
-		if got := listener.LMTP.Size.MaxMessageBytes; got != 0 {
-			t.Fatalf("%s size.max_message_bytes = %d, want disabled zero", listenerName, got)
+		if got := listener.LMTP.Size.MaxMessageBytes; got != 104_857_600 {
+			t.Fatalf("%s size.max_message_bytes = %d, want 104857600", listenerName, got)
 		}
 	}
 
 	if err := NewLoader().Validate(cfg); err != nil {
-		t.Fatalf("Validate rejected disabled default LMTP size policy: %v", err)
+		t.Fatalf("Validate rejected default LMTP size policy: %v", err)
 	}
 }
 
-// TestLMTPSizePolicyExplicitZeroValidates keeps zero as the disabled operator value.
+// TestLMTPSizePolicyExplicitZeroValidatesWithoutSIZECapability keeps zero as the disabled operator value.
 func TestLMTPSizePolicyExplicitZeroValidates(t *testing.T) {
 	cfg := DefaultConfig()
 	entry := cfg.Director.Listeners["lmtp"]
+	entry.LMTP.Capabilities = []string{lmtpCapabilitySMTPUTF8}
 	entry.LMTP.Size.MaxMessageBytes = 0
 	cfg.Director.Listeners["lmtp"] = entry
 

@@ -110,6 +110,12 @@ fi
 grep -Eq '^ARG GO_IMAGE=.*1\.26' "$dockerfile" || \
 	fail "production Dockerfile must use a Go 1.26 build stage"
 
+grep -Eq '^FROM[[:space:]]+--platform=\$BUILDPLATFORM[[:space:]]+\$\{GO_IMAGE\}[[:space:]]+AS[[:space:]]+builder[[:space:]]*$' "$dockerfile" || \
+	fail "production Dockerfile builder stage must run on BUILDPLATFORM for cross-compiled multi-arch builds"
+
+grep -Eq '^FROM[[:space:]]+--platform=\$BUILDPLATFORM[[:space:]]+\$\{CERTS_IMAGE\}[[:space:]]+AS[[:space:]]+runtime-files[[:space:]]*$' "$dockerfile" || \
+	fail "production Dockerfile runtime-files stage must run on BUILDPLATFORM for multi-arch builds"
+
 grep -F -- "-mod=vendor" "$dockerfile" >/dev/null || \
 	fail "production Dockerfile must build with vendored dependencies"
 

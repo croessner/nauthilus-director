@@ -38,6 +38,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       annotations: ${{ steps.release_metadata.outputs.annotations }}
+      build_args: ${{ steps.release_metadata.outputs.build_args }}
       labels: ${{ steps.release_metadata.outputs.labels }}
       tags: ${{ steps.release_metadata.outputs.tags }}
 
@@ -119,6 +120,11 @@ jobs:
             echo 'annotations<<EOF'
             echo "${annotation_prefix}${OCI_IMAGE_DESCRIPTION}"
             echo 'EOF'
+            echo 'build_args<<EOF'
+            echo "VERSION=${RELEASE_TAG}"
+            echo "REVISION=${release_commit}"
+            echo "SOURCE=https://github.com/${{ github.repository }}"
+            echo 'EOF'
             echo 'labels<<EOF'
             echo "org.opencontainers.image.description=${OCI_IMAGE_DESCRIPTION}"
             echo "org.opencontainers.image.revision=${release_commit}"
@@ -149,4 +155,5 @@ jobs:
       sbom: true
       tags: ${{ needs.prepare.outputs.tags }}
       annotations: ${{ needs.prepare.outputs.annotations }}
+      build_args: ${{ needs.prepare.outputs.build_args }}
       labels: ${{ needs.prepare.outputs.labels }}

@@ -825,6 +825,39 @@ func TestLightHealthPreservesStructuredSizeFacts(t *testing.T) {
 	dialer.Wait(t)
 }
 
+// TestLightHealthPreservesDovecotCapabilities verifies Dovecot LMTP proofs keep every mediated extension.
+func TestLightHealthPreservesDovecotCapabilities(t *testing.T) {
+	dialer := scriptedLMTPBackendDialer(t, func(t *testing.T, conn net.Conn) {
+		reader := bufio.NewReader(conn)
+		writeLMTPBackendLine(t, conn, "220 mail.example Dovecot ready")
+		expectLMTPBackendLine(t, reader, "LHLO "+backendLHLOName)
+		writeLMTPBackendLine(t, conn, "250-mail.example")
+		writeLMTPBackendLine(t, conn, "250-"+capability8BITMIME)
+		writeLMTPBackendLine(t, conn, "250-"+capabilityCHUNKING)
+		writeLMTPBackendLine(t, conn, "250-"+capabilityEnhancedStatusCodes)
+		writeLMTPBackendLine(t, conn, "250-"+capabilityPIPELINING)
+		writeLMTPBackendLine(t, conn, "250-"+capabilitySIZE)
+		writeLMTPBackendLine(t, conn, "250 "+capabilitySMTPUTF8)
+		expectLMTPBackendLine(t, reader, "QUIT")
+		writeLMTPBackendLine(t, conn, "221 2.0.0 bye")
+	})
+
+	result := NewHealthChecker(NewTCPBackendConnector(dialer)).CheckBackend(context.Background(), testLMTPBackendTarget(backendTLSPlaintext), backend.HealthCheckRequest{
+		Timeout: time.Second,
+	})
+	if !result.Healthy {
+		t.Fatalf("health result = %#v, want healthy", result)
+	}
+
+	for _, capability := range []string{capability8BITMIME, capabilityCHUNKING, capabilitySIZE} {
+		if !result.Capabilities.Has(capability) {
+			t.Fatalf("health capabilities = %v, want %s", result.Capabilities.List(), capability)
+		}
+	}
+
+	dialer.Wait(t)
+}
+
 // TestDeepHealthNoAuthDoesNotSendCredentials verifies health honors auth.mode none.
 func TestDeepHealthNoAuthDoesNotSendCredentials(t *testing.T) {
 	commands := make(chan string, 8)

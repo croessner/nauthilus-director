@@ -432,7 +432,7 @@ director:
           # permits it and every eligible backend has fresh SIZE proof. The
           # advertised effective max is the lower of this value and the
           # backend-pool proof. DATA and BDAT enforce the effective max.
-          max_message_bytes: 0
+          max_message_bytes: 104857600
         capabilities:
           # Capabilities are the desired listener surface. Runtime advertisement
           # is mediated by implemented command support, TLS state, auth policy
@@ -448,11 +448,11 @@ director:
           # advertised SIZE. PIPELINING is a frontend ordered-reply contract and
           # does not enable backend command batching.
           - SMTPUTF8
+          - 8BITMIME
           - ENHANCEDSTATUSCODES
           - CHUNKING
-          # - 8BITMIME
-          # - SIZE
-          # - PIPELINING
+          - PIPELINING
+          - SIZE
           - STARTTLS
           - AUTH PLAIN LOGIN XOAUTH2 OAUTHBEARER
         capability_filter:
@@ -504,7 +504,7 @@ director:
           # permits it and every eligible backend has fresh SIZE proof. The
           # advertised effective max is the lower of this value and the
           # backend-pool proof. DATA and BDAT enforce the effective max.
-          max_message_bytes: 0
+          max_message_bytes: 104857600
         capabilities:
           # Capabilities are the desired listener surface. Runtime advertisement
           # is mediated by implemented command support, TLS state, auth policy
@@ -520,11 +520,11 @@ director:
           # advertised SIZE. PIPELINING is a frontend ordered-reply contract and
           # does not enable backend command batching.
           - SMTPUTF8
+          - 8BITMIME
           - ENHANCEDSTATUSCODES
           - CHUNKING
-          # - 8BITMIME
-          # - SIZE
-          # - PIPELINING
+          - PIPELINING
+          - SIZE
           - AUTH PLAIN LOGIN XOAUTH2 OAUTHBEARER
         capability_filter:
           # Hard-denied capabilities are never advertised and are not consumed
