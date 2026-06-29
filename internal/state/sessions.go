@@ -184,6 +184,7 @@ func (s *RedisSessionStore) OpenSession(ctx context.Context, record SessionRecor
 		normalizedHolderKind(record.HolderKind),
 		normalizedStateValue(record.BackendNode),
 		nonNegativeDurationMilliseconds(recordRetentionTTL(record)),
+		redisBoolFlag(record.RepairRetainedBinding),
 	)
 	if err != nil {
 		return AffinityRecord{}, err
@@ -1236,6 +1237,15 @@ func nonNegativeDurationMilliseconds(duration time.Duration) int64 {
 // normalizedStateValue trims protocol and shard values before they cross the Redis boundary.
 func normalizedStateValue(value string) string {
 	return strings.TrimSpace(value)
+}
+
+// redisBoolFlag serializes explicit script gates without accepting arbitrary truthy input.
+func redisBoolFlag(enabled bool) string {
+	if enabled {
+		return "1"
+	}
+
+	return "0"
 }
 
 // redisContext returns a usable context for Redis commands.

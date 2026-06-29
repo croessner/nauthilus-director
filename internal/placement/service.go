@@ -38,6 +38,7 @@ const (
 	moveStrategyDrain      = "drain_existing"
 	moveStrategyKick       = "kick_existing"
 	moveStrategyNew        = "new_sessions_only"
+	reservationRepairLimit = 64
 
 	// BindingSourceActiveAffinity means an active holder binding was reused.
 	BindingSourceActiveAffinity BindingSource = "active_affinity"
@@ -264,22 +265,22 @@ func (s *Service) openPlacement(ctx context.Context, request Request) (LeaseHand
 		return nil, err
 	}
 
-	selected, source, err := s.selectPlacement(ctx, request, affinity, pin)
+	selected, source, repairRetainedBinding, err := s.selectPlacement(ctx, request, affinity, pin)
 	if err != nil {
 		return nil, err
 	}
 
-	lease, mismatch, mismatchRecord, err := s.openSelectedLease(ctx, request, selected, source)
+	lease, mismatch, mismatchRecord, err := s.openSelectedLease(ctx, request, selected, source, repairRetainedBinding)
 	if err != nil || !mismatch {
 		return lease, err
 	}
 
-	selected, source, err = s.selectPlacement(ctx, request, mismatchRecord, pin)
+	selected, source, repairRetainedBinding, err = s.selectPlacement(ctx, request, mismatchRecord, pin)
 	if err != nil {
 		return nil, err
 	}
 
-	lease, mismatch, _, err = s.openSelectedLease(ctx, request, selected, source)
+	lease, mismatch, _, err = s.openSelectedLease(ctx, request, selected, source, repairRetainedBinding)
 	if err != nil {
 		return nil, err
 	}
@@ -297,28 +298,44 @@ func (s *Service) selectPlacement(
 	request Request,
 	affinity state.AffinityRecord,
 	pin state.UserBackendPinRecord,
-) (backend.SelectionResult, BindingSource, error) {
+) (backend.SelectionResult, BindingSource, bool, error) {
 	if targetShard := movementOverrideShard(affinity); targetShard != "" {
 		overrideRequest := request
 		overrideRequest.ShardTag = targetShard
 
 		selected, source, err := s.selectInitialBackend(ctx, overrideRequest, state.AffinityRecord{}, pin)
 		if err != nil {
-			return backend.SelectionResult{}, "", err
+			return backend.SelectionResult{}, "", false, err
 		}
 
 		if source == BindingSourceInitialPlacement {
 			source = BindingSourceMovementOverride
 		}
 
-		return selected, source, nil
+		return selected, source, false, nil
 	}
 
 	if reusableBinding(affinity) {
-		return s.selectBoundBackend(ctx, request, affinity, pin)
+		selected, source, err := s.selectBoundBackend(ctx, request, affinity, pin)
+		if err == nil {
+			return selected, source, false, nil
+		}
+
+		if !repairableRetainedBindingFailure(affinity, err) {
+			return backend.SelectionResult{}, "", false, err
+		}
+
+		selected, source, err = s.selectInitialBackend(ctx, request, state.AffinityRecord{}, pin)
+		if err != nil {
+			return backend.SelectionResult{}, "", false, err
+		}
+
+		return selected, source, true, nil
 	}
 
-	return s.selectInitialBackend(ctx, request, affinity, pin)
+	selected, source, err := s.selectInitialBackend(ctx, request, affinity, pin)
+
+	return selected, source, false, err
 }
 
 // selectInitialBackend runs the normal selector only when no binding is authoritative.
@@ -329,9 +346,12 @@ func (s *Service) selectInitialBackend(
 	pin state.UserBackendPinRecord,
 ) (backend.SelectionResult, BindingSource, error) {
 	shardTag := initialSelectionShard(request, affinity)
-
 	operatorBackend, err := s.initialOperatorBackendPin(ctx, request, pin, shardTag)
 	if err != nil {
+		return backend.SelectionResult{}, "", err
+	}
+
+	if err := s.repairInitialBackendReservations(ctx, request, shardTag); err != nil {
 		return backend.SelectionResult{}, "", err
 	}
 
@@ -357,6 +377,34 @@ func (s *Service) selectInitialBackend(
 	}
 
 	return selected, source, nil
+}
+
+// repairInitialBackendReservations repairs expired capacity leases before they influence selection.
+func (s *Service) repairInitialBackendReservations(ctx context.Context, request Request, shardTag string) error {
+	candidates, err := s.registry.BackendsForShard(ctx, backend.RegistryRequest{
+		Protocol:    request.Protocol,
+		BackendPool: request.BackendPool,
+		ShardTag:    shardTag,
+	})
+	if err != nil {
+		if backend.IsErrorKind(err, backend.ErrorKindNoBackend) {
+			return nil
+		}
+
+		return err
+	}
+
+	for _, candidate := range candidates {
+		_, err = s.store.ReapBackendReservations(ctx, state.BackendReservationReapRequest{
+			BackendIdentifier: candidate.Identifier,
+			Limit:             reservationRepairLimit,
+		})
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 // selectBoundBackend resolves the requested protocol inside the existing backend node.
@@ -423,8 +471,10 @@ func (s *Service) openSelectedLease(
 	request Request,
 	selected backend.SelectionResult,
 	source BindingSource,
+	repairRetainedBinding bool,
 ) (LeaseHandle, bool, state.AffinityRecord, error) {
 	record := request.sessionRecord(selected.Backend.BackendNode)
+	record.RepairRetainedBinding = repairRetainedBinding
 
 	record.ShardTag = selected.Backend.ShardTag
 	if strings.TrimSpace(record.ShardTag) == "" {
@@ -768,6 +818,30 @@ func reusableBinding(record state.AffinityRecord) bool {
 	default:
 		return record.Status == affinityStatusFound || record.Status == affinityStatusRetained || record.Status == affinityStatusReused
 	}
+}
+
+// repairableRetainedBindingFailure allows idle retained bindings to converge after stale-node errors.
+func repairableRetainedBindingFailure(record state.AffinityRecord, err error) bool {
+	if !retainedBindingWithoutActiveHolders(record) {
+		return false
+	}
+
+	return IsErrorKind(err, ErrorKindBackendNodeUnusable) ||
+		IsErrorKind(err, ErrorKindBackendNodeMissingProtocol) ||
+		IsErrorKind(err, ErrorKindNoBackend)
+}
+
+// retainedBindingWithoutActiveHolders reports whether Redis no longer protects an active node owner.
+func retainedBindingWithoutActiveHolders(record state.AffinityRecord) bool {
+	if !record.Present || strings.TrimSpace(record.BackendNode) == "" {
+		return false
+	}
+
+	if record.ActiveHolderCount != 0 || record.ActiveSessionCount != 0 {
+		return false
+	}
+
+	return record.BindingStatus == state.BindingStatusRetained || record.Status == affinityStatusRetained
 }
 
 // movementOverrideShard returns the explicit move target that may supersede binding.

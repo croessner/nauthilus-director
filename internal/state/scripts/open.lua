@@ -25,6 +25,7 @@ local director_instance_id = ARGV[12]
 local holder_kind = ARGV[13]
 local proposed_backend_node = ARGV[14]
 local retention_ttl_ms = tonumber(ARGV[15])
+local repair_retained_binding = ARGV[16]
 
 local function ambiguous(message)
 	error("NDAMBIGUOUS " .. message)
@@ -188,6 +189,13 @@ else
 			status = "moved_from_override"
 			clear_override = true
 		end
+	end
+
+	if repair_retained_binding == "1" and prior_active_count == 0 and retention_expires_at > now and backend_node ~= "" and proposed_backend_node ~= "" and backend_node ~= proposed_backend_node then
+		shard = requested_shard
+		backend_node = proposed_backend_node
+		binding_generation = tostring(redis.call("HINCRBY", state_key, "binding_generation", 1))
+		status = "retained_binding_repaired"
 	end
 
 	if backend_node ~= "" and proposed_backend_node ~= "" and backend_node ~= proposed_backend_node then

@@ -885,6 +885,60 @@ func TestRedisBackendBindingLifecycle(t *testing.T) {
 	}
 }
 
+// TestRedisOpenRepairsRetainedBindingWhenExplicitlyRequested verifies stale retained repair stays opt-in.
+func TestRedisOpenRepairsRetainedBindingWhenExplicitlyRequested(t *testing.T) {
+	store, client, builder := redisIntegrationStore(t)
+	key := AffinityKey{Tenant: "blue", AccountKey: "retained-repair@example.test"}
+
+	const (
+		firstID    = "retained-repair-first"
+		rejectedID = "retained-repair-rejected"
+		repairedID = "retained-repair-open"
+	)
+	cleanupAffinity(t, client, builder, key, firstID, rejectedID, repairedID)
+
+	first := testSessionRecord(key, firstID)
+	first.RetentionTTL = time.Minute
+
+	if _, err := store.OpenSession(context.Background(), first); err != nil {
+		t.Fatalf("OpenSession first returned error: %v", err)
+	}
+
+	closed, err := store.CloseSession(context.Background(), key, firstID)
+	if err != nil {
+		t.Fatalf("CloseSession first returned error: %v", err)
+	}
+
+	assertBackendBinding(t, closed, "idle", BindingStatusRetained, testShardA, testBackendNodeA, 0)
+
+	rejected := testSessionRecord(key, rejectedID)
+	rejected.ShardTag = testShardB
+	rejected.BackendNode = testBackendNodeB
+	rejected.RetentionTTL = first.RetentionTTL
+
+	rejectedAffinity, err := store.OpenSession(context.Background(), rejected)
+	if err != nil {
+		t.Fatalf("OpenSession rejected returned error: %v", err)
+	}
+
+	assertBackendBinding(t, rejectedAffinity, "backend_node_mismatch", BindingStatusBackendNodeMismatch, testShardA, testBackendNodeA, 0)
+	assertSessionAbsent(t, client, builder, key, rejectedID)
+
+	repaired := testSessionRecord(key, repairedID)
+	repaired.ShardTag = testShardB
+	repaired.BackendNode = testBackendNodeB
+	repaired.RetentionTTL = first.RetentionTTL
+	repaired.RepairRetainedBinding = true
+
+	repairedAffinity, err := store.OpenSession(context.Background(), repaired)
+	if err != nil {
+		t.Fatalf("OpenSession repaired returned error: %v", err)
+	}
+
+	assertBackendBinding(t, repairedAffinity, "retained_binding_repaired", BindingStatusActive, testShardB, testBackendNodeB, 1)
+	assertStoredBackendBindingInShard(t, client, builder, key, testShardB, testBackendNodeB, 1)
+}
+
 // TestRuntimeAggregatesAreIdempotentAndUnderflowSafe verifies repairable counters do not drift on repeats.
 func TestRuntimeAggregatesAreIdempotentAndUnderflowSafe(t *testing.T) {
 	store, _, builder := redisIntegrationStore(t)
@@ -4777,6 +4831,21 @@ func assertBackendBinding(
 func assertStoredBackendBinding(t *testing.T, client *redis.Client, builder KeyBuilder, key AffinityKey, backendNode string, activeCount int) {
 	t.Helper()
 
+	assertStoredBackendBindingInShard(t, client, builder, key, testShardA, backendNode, activeCount)
+}
+
+// assertStoredBackendBindingInShard verifies Redis stores concrete backend binding metadata for a shard.
+func assertStoredBackendBindingInShard(
+	t *testing.T,
+	client *redis.Client,
+	builder KeyBuilder,
+	key AffinityKey,
+	shard string,
+	backendNode string,
+	activeCount int,
+) {
+	t.Helper()
+
 	keys, err := builder.AffinityKeys(key.Tenant, key.AccountKey)
 	if err != nil {
 		t.Fatalf("AffinityKeys returned error: %v", err)
@@ -4784,7 +4853,7 @@ func assertStoredBackendBinding(t *testing.T, client *redis.Client, builder KeyB
 
 	fields := client.HGetAll(context.Background(), keys.State).Val()
 	for name, want := range map[string]string{
-		scriptFieldShardTag:           testShardA,
+		scriptFieldShardTag:           shard,
 		scriptFieldBackendNode:        backendNode,
 		scriptFieldActiveHolderCount:  strconv.Itoa(activeCount),
 		scriptFieldActiveSessionCount: strconv.Itoa(activeCount),

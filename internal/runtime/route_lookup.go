@@ -42,6 +42,7 @@ const (
 	routeLookupBindingSourceNone       = "none"
 	routeLookupReasonBindingMissing    = "backend_node_missing_protocol"
 	routeLookupReasonBindingMismatch   = "backend_node_mismatch"
+	routeLookupReasonRetainedStale     = "retained_binding_stale"
 	routeLookupReasonBindingUnusable   = "backend_node_unusable"
 	routeLookupReasonOK                = "ok"
 	routeLookupReasonOther             = "other"
@@ -1453,6 +1454,10 @@ func routeLookupFailClosedReason(response RouteLookupResponse, affinity RouteLoo
 		return string(backend.ErrorKindNoBackend)
 	}
 
+	if routeLookupRetainedBindingWithoutActiveHolders(affinity) {
+		return routeLookupReasonRetainedStale
+	}
+
 	if routeLookupBoundBackendMissing(response.Backends, affinity.BackendNode) {
 		return routeLookupReasonBindingMissing
 	}
@@ -1462,6 +1467,15 @@ func routeLookupFailClosedReason(response RouteLookupResponse, affinity RouteLoo
 	}
 
 	return routeLookupReasonBindingUnusable
+}
+
+// routeLookupRetainedBindingWithoutActiveHolders reports stale-repair eligibility without mutating state.
+func routeLookupRetainedBindingWithoutActiveHolders(affinity RouteLookupAffinityState) bool {
+	return affinity.Present &&
+		affinity.Retained &&
+		strings.TrimSpace(affinity.BackendNode) != "" &&
+		affinity.ActiveHolders == 0 &&
+		affinity.ActiveSessions == 0
 }
 
 // routeLookupBoundBackendMissing reports whether no same-node protocol endpoint was visible.

@@ -607,8 +607,41 @@ func TestRouteLookupFailClosesWhenBoundBackendNodeLacksProtocol(t *testing.T) {
 		t.Fatalf("Lookup returned error: %v", err)
 	}
 
-	if !response.FailClosed || response.Source != routeLookupSourceFailClosed || response.ReasonClass != routeLookupReasonBindingMissing {
-		t.Fatalf("response = %#v, want fail-closed missing backend-node protocol", response)
+	if !response.FailClosed || response.Source != routeLookupSourceFailClosed || response.ReasonClass != routeLookupReasonRetainedStale {
+		t.Fatalf("response = %#v, want fail-closed stale retained backend-node diagnostic", response)
+	}
+
+	assertNoRouteLookupMutations(t, store)
+}
+
+// TestRouteLookupKeepsActiveBindingMissingProtocolReason verifies active holders are not stale-retained diagnostics.
+func TestRouteLookupKeepsActiveBindingMissingProtocolReason(t *testing.T) {
+	store := &countingRouteState{
+		affinity: state.AffinityRecord{
+			Present:            true,
+			Status:             "found",
+			ShardTag:           routeLookupShardA,
+			BackendNode:        "missing-node",
+			BindingStatus:      state.BindingStatusActive,
+			ActiveSessionCount: 1,
+			ActiveHolderCount:  1,
+			ServerTime:         time.Now().UTC(),
+		},
+	}
+	service := newRouteLookupTestService(t, store, false)
+
+	response, err := service.Lookup(context.Background(), RouteLookupRequest{
+		Protocol:        routeLookupProtocol,
+		AccountKey:      routeLookupAccount,
+		BackendPool:     routeLookupDefaultPool,
+		IncludeAffinity: true,
+	})
+	if err != nil {
+		t.Fatalf("Lookup returned error: %v", err)
+	}
+
+	if !response.FailClosed || response.ReasonClass != routeLookupReasonBindingMissing {
+		t.Fatalf("response = %#v, want active binding missing-protocol fail-closed diagnostic", response)
 	}
 
 	assertNoRouteLookupMutations(t, store)

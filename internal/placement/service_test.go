@@ -173,6 +173,81 @@ func TestServiceReusesRetainedLMTPBindingForIMAPSession(t *testing.T) {
 	}
 }
 
+// TestServiceRepairsStaleRetainedBindingWithoutActiveHolders verifies idle obsolete bindings do not block recovery.
+func TestServiceRepairsStaleRetainedBindingWithoutActiveHolders(t *testing.T) {
+	store := &placementStoreFixture{
+		affinity: state.AffinityRecord{
+			Key:                placementKey(),
+			ShardTag:           placementNode2Shard,
+			BackendNode:        placementNode2,
+			Status:             affinityStatusRetained,
+			Present:            true,
+			BindingStatus:      state.BindingStatusRetained,
+			ActiveHolderCount:  0,
+			ActiveSessionCount: 0,
+			RetentionExpiresAt: time.Now().Add(time.Minute),
+		},
+	}
+	selector := &placementSelectorFixture{registry: placementRegistryFixture()}
+	service := mustPlacementService(t, selector, store)
+
+	lease, err := service.PlaceSession(context.Background(), placementRequest("session-after-stale-retention", placementShardA))
+	if err != nil {
+		t.Fatalf("PlaceSession returned error: %v", err)
+	}
+
+	if selector.nodeCalls != 1 || selector.selectCalls != 1 {
+		t.Fatalf("selector calls node=%d select=%d, want failed retained lookup then normal selection", selector.nodeCalls, selector.selectCalls)
+	}
+
+	if lease.Backend().Backend.Identifier != placementBackendA {
+		t.Fatalf("selected backend = %q, want healthy initial IMAP backend", lease.Backend().Backend.Identifier)
+	}
+
+	if got := lease.Binding().Source; got != BindingSourceInitialPlacement {
+		t.Fatalf("binding source = %q, want %q", got, BindingSourceInitialPlacement)
+	}
+
+	if !store.opened[0].RepairRetainedBinding || store.opened[0].BackendNode != placementNodeA {
+		t.Fatalf("opened repair proposal = %#v, want retained repair onto healthy backend node", store.opened[0])
+	}
+}
+
+// TestServicePreservesActiveBindingWhenBackendNodeIsUnavailable verifies active holders stay fail-closed.
+func TestServicePreservesActiveBindingWhenBackendNodeIsUnavailable(t *testing.T) {
+	store := &placementStoreFixture{
+		affinity: state.AffinityRecord{
+			Key:                placementKey(),
+			ShardTag:           placementNode2Shard,
+			BackendNode:        placementNode2,
+			Status:             affinityStatusFound,
+			Present:            true,
+			BindingStatus:      state.BindingStatusActive,
+			ActiveHolderCount:  1,
+			ActiveSessionCount: 1,
+		},
+	}
+	selector := &placementSelectorFixture{registry: placementRegistryFixture()}
+	service := mustPlacementService(t, selector, store)
+
+	_, err := service.PlaceSession(context.Background(), placementRequest("session-active-unavailable", placementShardA))
+	if err == nil {
+		t.Fatal("PlaceSession returned nil error, want fail-closed active binding")
+	}
+
+	if !IsErrorKind(err, ErrorKindBackendNodeUnusable) {
+		t.Fatalf("PlaceSession error = %v, want %s", err, ErrorKindBackendNodeUnusable)
+	}
+
+	if selector.nodeCalls != 1 || selector.selectCalls != 0 {
+		t.Fatalf("selector calls node=%d select=%d, want active binding only", selector.nodeCalls, selector.selectCalls)
+	}
+
+	if len(store.opened) != 0 {
+		t.Fatalf("opened sessions = %#v, want no placement mutation", store.opened)
+	}
+}
+
 // TestServiceReusesActiveIMAPBindingForLMTPDelivery verifies LMTP delivery uses active login nodes.
 func TestServiceReusesActiveIMAPBindingForLMTPDelivery(t *testing.T) {
 	store := &placementStoreFixture{
@@ -384,6 +459,42 @@ func TestServiceAppliesMatchingSieveBackendPin(t *testing.T) {
 
 	if got := lease.Binding().Source; got != BindingSourceOperatorBackendPin {
 		t.Fatalf("binding source = %q, want %q", got, BindingSourceOperatorBackendPin)
+	}
+}
+
+// TestServiceRepairsReservationsBeforeInitialSelection verifies stale capacity state is repaired first.
+func TestServiceRepairsReservationsBeforeInitialSelection(t *testing.T) {
+	store := &placementStoreFixture{}
+	selector := &placementSelectorFixture{registry: placementRegistryFixture()}
+	service := mustPlacementService(t, selector, store)
+
+	lease, err := service.PlaceSession(context.Background(), placementRequest("session-after-reservation-repair", placementShardA))
+	if err != nil {
+		t.Fatalf("PlaceSession returned error: %v", err)
+	}
+
+	if lease.Backend().Backend.Identifier != placementBackendA {
+		t.Fatalf("selected backend = %q, want initial backend", lease.Backend().Backend.Identifier)
+	}
+
+	if store.reapBackendCalls != 1 {
+		t.Fatalf("backend reservation reap calls = %d, want one candidate repair", store.reapBackendCalls)
+	}
+}
+
+// TestServiceFailsClosedWhenReservationRepairFails verifies Redis repair failures block placement.
+func TestServiceFailsClosedWhenReservationRepairFails(t *testing.T) {
+	store := &placementStoreFixture{reapBackendErr: errors.New("redis unavailable")}
+	selector := &placementSelectorFixture{registry: placementRegistryFixture()}
+	service := mustPlacementService(t, selector, store)
+
+	_, err := service.PlaceSession(context.Background(), placementRequest("session-repair-failure", placementShardA))
+	if err == nil {
+		t.Fatal("PlaceSession returned nil error, want repair failure")
+	}
+
+	if selector.selectCalls != 0 || len(store.opened) != 0 {
+		t.Fatalf("selector/open calls = %d/%d, want fail before selection and mutation", selector.selectCalls, len(store.opened))
 	}
 }
 
@@ -1020,8 +1131,8 @@ func TestServiceCloseLeavesRetainedBinding(t *testing.T) {
 	}
 }
 
-// TestServiceFailsClosedWhenRetainedProtocolEntryIsMissing verifies node-local absence is fatal.
-func TestServiceFailsClosedWhenRetainedProtocolEntryIsMissing(t *testing.T) {
+// TestServiceRepairsRetainedBindingWhenProtocolEntryIsMissing verifies idle node-local absence can recover.
+func TestServiceRepairsRetainedBindingWhenProtocolEntryIsMissing(t *testing.T) {
 	registry := placementRegistryFixture()
 	delete(registry.backends, placementBackendA)
 	registry.backends[placementBackendSameShard] = placementBackend(placementBackendSameShard, placementNodeSameShard, placementShardA)
@@ -1039,17 +1150,21 @@ func TestServiceFailsClosedWhenRetainedProtocolEntryIsMissing(t *testing.T) {
 	selector := &placementSelectorFixture{registry: registry}
 	service := mustPlacementService(t, selector, store)
 
-	_, err := service.PlaceSession(context.Background(), placementRequest("session-5", placementShardA))
-	if err == nil {
-		t.Fatal("PlaceSession returned nil error, want fail-closed missing endpoint")
+	lease, err := service.PlaceSession(context.Background(), placementRequest("session-5", placementShardA))
+	if err != nil {
+		t.Fatalf("PlaceSession returned error: %v", err)
 	}
 
-	if selector.selectCalls != 0 || selector.nodeCalls != 1 {
-		t.Fatalf("selector calls select=%d node=%d, want no same-shard fallback", selector.selectCalls, selector.nodeCalls)
+	if selector.selectCalls != 1 || selector.nodeCalls != 1 {
+		t.Fatalf("selector calls select=%d node=%d, want failed retained lookup then normal selection", selector.selectCalls, selector.nodeCalls)
 	}
 
-	if len(store.opened) != 0 {
-		t.Fatalf("store opened %d session(s), want fail before mutation", len(store.opened))
+	if lease.Backend().Backend.Identifier != placementBackendSameShard {
+		t.Fatalf("selected backend = %q, want repaired same-shard backend", lease.Backend().Backend.Identifier)
+	}
+
+	if len(store.opened) != 1 || !store.opened[0].RepairRetainedBinding {
+		t.Fatalf("opened sessions = %#v, want explicit retained repair proposal", store.opened)
 	}
 }
 
@@ -1202,19 +1317,21 @@ func placementBackendWithProtocol(identifier string, node string, shard string, 
 }
 
 type placementStoreFixture struct {
-	affinity      state.AffinityRecord
-	closeAffinity state.AffinityRecord
-	pin           state.UserBackendPinRecord
-	pins          []state.UserBackendPinRecord
-	opened        []state.SessionRecord
-	attachments   []state.SessionBackendAttachment
-	attachErr     error
-	lastPinRead   state.UserBackendPinGetRequest
-	pinReadCalls  int
-	reserveCalls  int
-	releaseCalls  int
-	attachCalls   int
-	closeCalls    int
+	affinity         state.AffinityRecord
+	closeAffinity    state.AffinityRecord
+	pin              state.UserBackendPinRecord
+	pins             []state.UserBackendPinRecord
+	opened           []state.SessionRecord
+	attachments      []state.SessionBackendAttachment
+	attachErr        error
+	lastPinRead      state.UserBackendPinGetRequest
+	pinReadCalls     int
+	reserveCalls     int
+	reapBackendErr   error
+	reapBackendCalls int
+	releaseCalls     int
+	attachCalls      int
+	closeCalls       int
 }
 
 // OpenSession records the holder proposal and returns accepted affinity state.
@@ -1227,6 +1344,10 @@ func (s *placementStoreFixture) OpenSession(_ context.Context, record state.Sess
 		if s.affinity.Status == "retained" || s.affinity.BindingStatus == state.BindingStatusRetained {
 			status = "retained"
 		}
+	}
+
+	if record.RepairRetainedBinding {
+		status = "retained_binding_repaired"
 	}
 
 	if s.affinity.MoveTargetShard != "" && s.affinity.ActiveHolderCount == 0 && s.affinity.ActiveSessionCount == 0 {
@@ -1319,6 +1440,11 @@ func (s *placementStoreFixture) ReapBackendReservations(
 	context.Context,
 	state.BackendReservationReapRequest,
 ) (state.BackendReservationRecord, error) {
+	s.reapBackendCalls++
+	if s.reapBackendErr != nil {
+		return state.BackendReservationRecord{}, s.reapBackendErr
+	}
+
 	return state.BackendReservationRecord{}, nil
 }
 

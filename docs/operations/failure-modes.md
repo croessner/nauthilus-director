@@ -20,6 +20,7 @@ listener.
 | Missing environment placeholder | Config load fails closed without printing the expanded value. | Required `${NAME}` variable absent from service environment. | `systemctl show nauthilus-director.service --property=EnvironmentFiles`; inspect non-secret env file names. | Set the missing variable to an absolute file path or remove the placeholder. |
 | Redis unavailable | New user-stateful sessions fail; runtime summary or session reads fail. | Redis DNS/network/TLS/auth failure, Sentinel/Cluster mismatch, wrong namespace. | `$CTL status`; `$CTL runtime summary`; Redis health checks from the host. | Restore Redis connectivity. Do not delete runtime keys while active sessions may exist. |
 | Redis ambiguous state | Placement fails closed; route lookup reports ambiguity or backend-node mismatch. | Conflicting active affinity, retained binding, pin or move state. | `$CTL users affinity show <user>`; `$CTL users backend-pin show <user>`; `$CTL route lookup --protocol imap --user <user> --include-affinity` | Clear only inactive stale state after durable routing is correct and no active sessions remain. |
+| Stale retained backend binding | Route lookup with affinity reports `retained_binding_stale`; active holders are zero. | Backend node was removed, protocol endpoint disappeared, or a transient backend outage left retained state pointing at a no-longer-selectable node. | `$CTL route lookup --protocol imap --user <user> --include-affinity`; `$CTL runtime summary`; `$CTL backends list` | Restore backend health/config first. New placement repairs inactive stale retained state; restart is a last resort, not the normal convergence path. |
 | Nauthilus unavailable | Protocol auth fails; authority calls time out or return unavailable. | Nauthilus service down, network/TLS failure, wrong HTTP/gRPC endpoint. | Check Director logs for bounded authority error class; verify Nauthilus readiness from the Director host. | Restore Nauthilus or roll back authority endpoint config and restart. |
 | OIDC caller discovery unavailable | OIDC-enabled authority or control auth fails closed before token/control-introspection use. | Issuer unreachable, direct discovery URL missing issuer pin, discovery URL wrong, TLS trust root missing. | Check `auth.authorities.<name>.oidc.issuer` and optional `discovery_url`; test HTTPS from the host without printing secrets. | Fix issuer/discovery/TLS trust and restart if auth config changed. |
 | SASL bearer discovery unavailable | Bearer-capable listeners fail startup or safe reload before accepting `XOAUTH2` or `OAUTHBEARER`. | Missing OIDC `introspection_endpoint`, wrong `mechanisms.bearer.introspection.issuer`, direct discovery URL missing issuer pin, TLS trust failure. | Check `auth.authorities.<name>.mechanisms.bearer.introspection.*`; verify discovery from the host without printing secrets or tokens. | Fix the introspection issuer/discovery/TLS trust and restart if auth config changed. |
@@ -52,6 +53,9 @@ listener.
   not edit YAML and they do not move mailbox data.
 - Use `users affinity clear` only for inactive stale state after the durable
   routing source is correct.
+- Treat `retained_binding_stale` with zero active holders as a convergence
+  signal. Confirm backend health and let a new placement repair it before
+  restarting Director pods.
 - Do not paste bearer tokens, protected config output, private keys, profile
   payloads or SASL bearer material into tickets or chat.
 - Keep Basic Auth fallback explicit and temporary when migrating authority

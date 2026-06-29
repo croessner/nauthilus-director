@@ -89,18 +89,19 @@ type AffinityRecord struct {
 
 // SessionRecord describes one lease-backed frontend session.
 type SessionRecord struct {
-	ID                 string
-	Key                AffinityKey
-	HolderKind         string
-	Protocol           string
-	ListenerName       string
-	ServiceName        string
-	ShardTag           string
-	BackendNode        string
-	DirectorInstanceID string
-	LeaseTTL           time.Duration
-	IdleGrace          time.Duration
-	RetentionTTL       time.Duration
+	ID                    string
+	Key                   AffinityKey
+	HolderKind            string
+	Protocol              string
+	ListenerName          string
+	ServiceName           string
+	ShardTag              string
+	BackendNode           string
+	DirectorInstanceID    string
+	LeaseTTL              time.Duration
+	IdleGrace             time.Duration
+	RetentionTTL          time.Duration
+	RepairRetainedBinding bool
 }
 
 // SessionBackendAttachment describes selected-backend registration after placement.
