@@ -25,7 +25,7 @@ x-nauthilus-service: &nauthilus-service
 
 x-stalwart-service: &stalwart-service
   build:
-    context: ${STALWART_FDB_BUILD_CONTEXT:-https://github.com/stalwartlabs/stalwart.git#main}
+    context: ${STALWART_FDB_BUILD_CONTEXT:-https://github.com/stalwartlabs/stalwart.git#5f58fdb92b9b3d438f2013d4e121bb8af0ab7300}
     dockerfile: Dockerfile.fdb
   depends_on:
     foundationdb-configure:
@@ -239,7 +239,8 @@ services:
       context: ../..
       dockerfile: contrib/demo-stack/Dockerfile.stalwart-cli
       args:
-        STALWART_CLI_INSTALLER_URL: ${STALWART_CLI_INSTALLER_URL:-https://github.com/stalwartlabs/cli/releases/latest/download/stalwart-cli-installer.sh}
+        STALWART_CLI_INSTALLER_URL: ${STALWART_CLI_INSTALLER_URL:-https://github.com/stalwartlabs/cli/releases/download/v1.0.9/stalwart-cli-installer.sh}
+        STALWART_CLI_INSTALLER_SHA256: ${STALWART_CLI_INSTALLER_SHA256:-2d0d3cab56be67db9d91b9475d2a0d6690f16046d8b401b57b2b2717ec46d391}
     depends_on:
       stalwart-a:
         condition: service_started
@@ -290,7 +291,7 @@ services:
         aliases:
           - director-a
     healthcheck:
-      test: ["CMD", "nauthilus-directorctl", "--address", "http://127.0.0.1:9090", "status"]
+      test: ["CMD", "nauthilus-directorctl", "--address", "https://127.0.0.1:9090", "--tls-ca-file", "/run/nauthilus-director/tls/server.crt", "status"]
       interval: 5s
       timeout: 5s
       retries: 30
@@ -329,7 +330,7 @@ services:
         aliases:
           - director-b
     healthcheck:
-      test: ["CMD", "nauthilus-directorctl", "--address", "http://127.0.0.1:9090", "status"]
+      test: ["CMD", "nauthilus-directorctl", "--address", "https://127.0.0.1:9090", "--tls-ca-file", "/run/nauthilus-director/tls/server.crt", "status"]
       interval: 5s
       timeout: 5s
       retries: 30

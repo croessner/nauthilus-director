@@ -14,10 +14,19 @@ control_token_file="${DIRECTOR_CONTROL_TOKEN_FILE:-/run/nauthilus-director/contr
 control_token="${DIRECTOR_CONTROL_TOKEN:-demo-control-token}"
 oidc_client_secret_file="${DIRECTOR_OIDC_CLIENT_SECRET_FILE:-/run/nauthilus-director/oidc-client-secret}"
 oidc_client_secret="${DIRECTOR_OIDC_CLIENT_SECRET:-demo-director-oidc-secret}"
+director_api_secret_file="${DIRECTOR_API_SECRET_FILE:-/run/nauthilus-director/director-api-secret}"
+director_api_secret="${DIRECTOR_API_SECRET:-director-api-secret}"
+dovecot_master_password_file="${DOVECOT_MASTER_PASSWORD_FILE:-/run/nauthilus-director/dovecot-master-password}"
+dovecot_master_password="${DOVECOT_MASTER_PASSWORD:-demo-secret}"
+mailstore_health_password_file="${MAILSTORE_HEALTH_PASSWORD_FILE:-/run/nauthilus-director/mailstore-health-password}"
+mailstore_health_password="${MAILSTORE_HEALTH_PASSWORD:-demo-secret}"
 
 mkdir -p "${tls_dir}"
 mkdir -p "$(dirname "${control_token_file}")"
 mkdir -p "$(dirname "${oidc_client_secret_file}")"
+mkdir -p "$(dirname "${director_api_secret_file}")"
+mkdir -p "$(dirname "${dovecot_master_password_file}")"
+mkdir -p "$(dirname "${mailstore_health_password_file}")"
 
 if [ ! -s "${cert_file}" ] || [ ! -s "${key_file}" ]; then
   openssl req \
@@ -41,6 +50,21 @@ fi
 if [ ! -s "${oidc_client_secret_file}" ]; then
   printf '%s\n' "${oidc_client_secret}" >"${oidc_client_secret_file}"
   chmod 0600 "${oidc_client_secret_file}"
+fi
+
+if [ ! -s "${director_api_secret_file}" ]; then
+  printf '%s\n' "${director_api_secret}" >"${director_api_secret_file}"
+  chmod 0600 "${director_api_secret_file}"
+fi
+
+if [ ! -s "${dovecot_master_password_file}" ]; then
+  printf '%s\n' "${dovecot_master_password}" >"${dovecot_master_password_file}"
+  chmod 0600 "${dovecot_master_password_file}"
+fi
+
+if [ ! -s "${mailstore_health_password_file}" ]; then
+  printf '%s\n' "${mailstore_health_password}" >"${mailstore_health_password_file}"
+  chmod 0600 "${mailstore_health_password_file}"
 fi
 
 exec /usr/local/bin/nauthilus-director "$@"

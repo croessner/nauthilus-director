@@ -239,6 +239,10 @@ func (i *SASLBearerIntrospector) mapIntrospectionResult(result OIDCIntrospection
 		return resultWithDecision(DecisionRejected, "", "", "bearer token inactive", nil), nil
 	}
 
+	if !result.MatchesAudienceOrResource(i.config.RequiredAudience, i.config.RequiredResource) {
+		return resultWithDecision(DecisionRejected, "", "", "bearer token audience or resource mismatch", nil), nil
+	}
+
 	requiredScope := strings.TrimSpace(i.config.RequiredScope)
 	if requiredScope == "" {
 		requiredScope = defaultBearerIntrospectionRequiredScope
@@ -278,6 +282,10 @@ func validateSASLBearerIntrospectionConfig(introspection config.BearerIntrospect
 
 	if strings.TrimSpace(introspection.RequiredScope) == "" {
 		return configError("oidc required_scope is required")
+	}
+
+	if strings.TrimSpace(introspection.RequiredAudience) == "" && strings.TrimSpace(introspection.RequiredResource) == "" {
+		return configError("oidc required_audience or required_resource is required")
 	}
 
 	if secretBearingBearerClaimName(introspection.AccountClaim) {

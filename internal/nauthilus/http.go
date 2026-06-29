@@ -19,10 +19,13 @@ package nauthilus
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 
 	"github.com/croessner/nauthilus-director/internal/config"
@@ -134,24 +137,105 @@ func NewHTTPClientFromAuthority(
 	client *http.Client,
 	authorityContext AuthorityContext,
 ) (*HTTPClient, error) {
-	if client == nil {
-		client = http.DefaultClient
-	}
-
-	tokenSource, err := httpCallerTokenSource(authority, client)
+	transportClient, err := authorityHTTPClient(authority, client)
 	if err != nil {
 		return nil, err
+	}
+
+	tokenSource, err := httpCallerTokenSource(authority, transportClient)
+	if err != nil {
+		return nil, err
+	}
+
+	basicAuthPassword := config.Secret("")
+	if tokenSource == nil {
+		basicAuthPassword, err = config.ReadOptionalSecretFileValue(config.SecretFileOptions{
+			Field:    "auth.authorities.http.basic_auth.password_file",
+			Path:     authority.HTTP.BasicAuth.PasswordFile,
+			MaxBytes: config.MaxSecretFileBytes,
+		})
+		if err != nil {
+			return nil, configError("failed to read http basic_auth password_file")
+		}
 	}
 
 	return NewHTTPClient(HTTPClientConfig{
 		Endpoint:          authority.HTTP.Endpoint,
 		ContentType:       authority.HTTP.ContentType,
 		BasicAuthUsername: authority.HTTP.BasicAuth.Username,
-		BasicAuthPassword: NewSecret(authority.HTTP.BasicAuth.PasswordFile.Value()),
+		BasicAuthPassword: NewSecret(basicAuthPassword.Value()),
 		TokenSource:       tokenSource,
-		Client:            client,
+		Client:            transportClient,
 		AuthorityContext:  authorityContext,
 	})
+}
+
+// authorityHTTPClient returns an HTTP client with configured authority TLS policy.
+func authorityHTTPClient(authority config.AuthorityConfig, base *http.Client) (*http.Client, error) {
+	if base == nil {
+		base = http.DefaultClient
+	}
+
+	if !authority.HTTP.TLS.Enabled {
+		return base, nil
+	}
+
+	transport, err := authorityHTTPTransport(base.Transport, authority.HTTP.TLS)
+	if err != nil {
+		return nil, err
+	}
+
+	client := *base
+	client.Transport = transport
+
+	return &client, nil
+}
+
+// authorityHTTPTransport clones the base transport before applying TLS policy.
+func authorityHTTPTransport(base http.RoundTripper, tlsConfig config.AuthorityTLSConfig) (*http.Transport, error) {
+	var transport *http.Transport
+	if base == nil {
+		transport = http.DefaultTransport.(*http.Transport).Clone()
+	} else if typed, ok := base.(*http.Transport); ok {
+		transport = typed.Clone()
+	} else {
+		return nil, configError("http tls config requires an http.Transport client")
+	}
+
+	configuredTLS, err := authorityTLSConfig(tlsConfig, "http")
+	if err != nil {
+		return nil, err
+	}
+
+	transport.TLSClientConfig = configuredTLS
+
+	return transport, nil
+}
+
+// authorityTLSConfig loads trust settings shared by credential-bearing authority clients.
+func authorityTLSConfig(tlsConfig config.AuthorityTLSConfig, transportName string) (*tls.Config, error) {
+	rootCAs, err := x509.SystemCertPool()
+	if err != nil {
+		rootCAs = x509.NewCertPool()
+	}
+
+	if caFile := strings.TrimSpace(tlsConfig.CAFile); caFile != "" {
+		certificate, readErr := os.ReadFile(caFile)
+		if readErr != nil {
+			return nil, configError("failed to read " + transportName + " ca file")
+		}
+
+		if !rootCAs.AppendCertsFromPEM(certificate) {
+			return nil, configError("failed to parse " + transportName + " ca file")
+		}
+	}
+
+	return &tls.Config{
+		MinVersion:         tls.VersionTLS12,
+		RootCAs:            rootCAs,
+		ServerName:         strings.TrimSpace(tlsConfig.ServerName),
+		InsecureSkipVerify: tlsConfig.InsecureSkipVerify, //nolint:gosec // Explicit operator-controlled compatibility setting.
+	}, nil
 }
 
 // Authenticate sends a credential-bearing JSON auth request.

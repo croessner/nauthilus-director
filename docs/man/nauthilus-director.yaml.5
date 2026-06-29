@@ -104,8 +104,11 @@ The configured
 .B authority
 must reference an enabled Nauthilus authority with OIDC client credentials.
 Incoming bearer tokens are introspected through Nauthilus; inactive tokens,
-tokens with the wrong audience for the introspecting client, missing required
-scopes and malformed bearer input fail closed.
+tokens without a matching
+.B required_audience
+or
+.BR required_resource ,
+missing required scopes and malformed bearer input fail closed.
 .B required_scopes
 authorize ordinary control reads and mutations.
 .B protected_scopes
@@ -255,8 +258,9 @@ value for bearer-capable mechanisms is
 .BR nauthilus_introspection .
 .PP
 The introspection subtree configures issuer or discovery URL, endpoint
-client-auth material, the required end-user token scope and an optional account
-claim. The default
+client-auth material, the required end-user token audience or resource, the
+required end-user token scope and an optional account claim. A direct discovery
+URL requires a pinned issuer and HTTPS outside loopback. The default
 .B required_scope
 is
 .BR email .

@@ -27,6 +27,7 @@ import (
 	"github.com/croessner/nauthilus-director/internal/backend"
 	"github.com/croessner/nauthilus-director/internal/nauthilus"
 	"github.com/croessner/nauthilus-director/internal/observability"
+	"github.com/croessner/nauthilus-director/internal/protocol/authbinding"
 	"github.com/croessner/nauthilus-director/internal/protocol/saslcred"
 	"github.com/croessner/nauthilus-director/internal/protocol/tlscontext"
 )
@@ -332,6 +333,27 @@ func (c *frontendCredentials) Secret() *credentialSecret {
 	}
 
 	return c.credentials.Secret
+}
+
+// BackendCredentials binds backend authentication to the authority-validated account.
+func (c *frontendCredentials) BackendCredentials(account string) (*frontendCredentials, error) {
+	if c == nil || c.credentials == nil {
+		return nil, errors.New("sieve: frontend credentials unavailable")
+	}
+
+	canonicalAccount, err := authbinding.CanonicalAccount(account)
+	if err != nil {
+		return nil, errors.New("sieve: authenticated account unavailable")
+	}
+
+	return &frontendCredentials{
+		credentials: &saslcred.Credentials{
+			Mechanism: c.credentials.Mechanism,
+			Kind:      c.credentials.Kind,
+			Username:  canonicalAccount,
+			Secret:    c.credentials.Secret,
+		},
+	}, nil
 }
 
 // NauthilusAuthRequest builds the credential-auth request without exposing SASL formatting.

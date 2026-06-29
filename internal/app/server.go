@@ -27,7 +27,6 @@ import (
 	"github.com/croessner/nauthilus-director/internal/backend"
 	"github.com/croessner/nauthilus-director/internal/config"
 	"github.com/croessner/nauthilus-director/internal/listener"
-	"github.com/croessner/nauthilus-director/internal/nauthilus"
 	"github.com/croessner/nauthilus-director/internal/observability"
 	"github.com/croessner/nauthilus-director/internal/placement"
 	"github.com/croessner/nauthilus-director/internal/protocol/imap"
@@ -928,72 +927,12 @@ func routeLookupService(
 		AffinityRead:     store,
 		BackendPinRead:   store,
 		UserHoldRead:     store,
-		IdentityLookup:   routeLookupIdentityLookuper(cfg),
 		ListenerContexts: routeLookupListenerContexts(cfg),
 		DefaultPool:      defaultBackendPool(cfg),
 		DefaultShard:     cfg.Director.Routing.EffectiveDefaultShard(),
 		DefaultTenant:    "default",
 		Observability:    recorder,
 	})
-}
-
-// routeLookupIdentityLookuper returns the default authority lookup client when it is locally constructible.
-func routeLookupIdentityLookuper(cfg config.Config) runtimectl.RouteLookupIdentityLookuper {
-	listenerNames := make([]string, 0, len(cfg.Director.Listeners))
-	for listenerName := range cfg.Director.Listeners {
-		listenerNames = append(listenerNames, listenerName)
-	}
-
-	for _, listenerName := range sortedStrings(listenerNames) {
-		listener := cfg.Director.Listeners[listenerName]
-		if !strings.EqualFold(listener.Protocol, protocolLMTP) {
-			continue
-		}
-
-		authority, ok := cfg.Auth.Authorities[listener.Authority]
-		if !ok {
-			continue
-		}
-
-		client, err := nauthilus.NewClient(authority, nauthilus.ClientOptions{})
-		if err == nil {
-			return nauthilusRouteLookupIdentity{lookuper: client}
-		}
-	}
-
-	return nil
-}
-
-type nauthilusRouteLookupIdentity struct {
-	lookuper nauthilus.IdentityLookuper
-}
-
-// LookupRouteIdentity adapts runtime recipient diagnostics to the Nauthilus no-auth lookup boundary.
-func (l nauthilusRouteLookupIdentity) LookupRouteIdentity(
-	ctx context.Context,
-	request runtimectl.RouteLookupIdentityLookupRequest,
-) (runtimectl.RouteLookupIdentityLookupResult, error) {
-	if l.lookuper == nil {
-		return runtimectl.RouteLookupIdentityLookupResult{}, errors.New("identity lookup unavailable")
-	}
-
-	result, err := l.lookuper.LookupIdentity(ctx, nauthilus.IdentityLookupRequest{
-		Context: nauthilus.RequestContext{
-			Username: request.Username,
-			ClientIP: request.ClientIP,
-			Protocol: request.Protocol,
-			Method:   request.Method,
-		},
-	})
-	if err != nil {
-		return runtimectl.RouteLookupIdentityLookupResult{}, err
-	}
-
-	return runtimectl.RouteLookupIdentityLookupResult{
-		Authenticated: result.Decision == nauthilus.DecisionAuthenticated,
-		Account:       result.Account,
-		Attributes:    result.Attributes,
-	}, nil
 }
 
 // routingResolver builds the shared account-to-shard resolver chain.

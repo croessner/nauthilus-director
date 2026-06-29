@@ -61,6 +61,7 @@ type redisCommonOptions struct {
 	protocol           int
 	username           string
 	password           string
+	sentinelPassword   string
 	maxRetries         int
 	minRetryBackoff    config.Duration
 	maxRetryBackoff    config.Duration
@@ -75,11 +76,33 @@ type redisCommonOptions struct {
 
 // newRedisCommonOptions creates mode-independent Redis client settings.
 func newRedisCommonOptions(cfg config.RedisConfig) (redisCommonOptions, error) {
+	password, err := config.ReadOptionalSecretFile(config.SecretFileOptions{
+		Field:    "storage.redis.auth.password_file",
+		Path:     cfg.Auth.PasswordFile,
+		MaxBytes: config.MaxSecretFileBytes,
+	})
+	if err != nil {
+		return redisCommonOptions{}, err
+	}
+
+	sentinelPassword := ""
+	if redisMode(cfg.Mode) == redisModeSentinel {
+		sentinelPassword, err = config.ReadOptionalSecretFile(config.SecretFileOptions{
+			Field:    "storage.redis.sentinel.password_file",
+			Path:     cfg.Sentinel.PasswordFile,
+			MaxBytes: config.MaxSecretFileBytes,
+		})
+		if err != nil {
+			return redisCommonOptions{}, err
+		}
+	}
+
 	options := redisCommonOptions{
 		databaseNumber:     cfg.DatabaseNumber,
 		protocol:           cfg.Protocol,
 		username:           cfg.Auth.Username,
-		password:           cfg.Auth.PasswordFile.Value(),
+		password:           password,
+		sentinelPassword:   sentinelPassword,
 		maxRetries:         cfg.Retries.MaxAttempts,
 		minRetryBackoff:    cfg.Retries.MinBackoff,
 		maxRetryBackoff:    cfg.Retries.MaxBackoff,
@@ -158,7 +181,7 @@ func (o redisCommonOptions) failoverOptions(cfg config.RedisConfig) *redis.Failo
 		Username:         o.username,
 		Password:         o.password,
 		SentinelUsername: cfg.Sentinel.Username,
-		SentinelPassword: cfg.Sentinel.PasswordFile.Value(),
+		SentinelPassword: o.sentinelPassword,
 		MaxRetries:       o.maxRetries,
 		MinRetryBackoff:  o.minRetryBackoff.Std(),
 		MaxRetryBackoff:  o.maxRetryBackoff.Std(),

@@ -60,10 +60,10 @@ type BackendReader interface {
 
 // BackendMutator exposes Redis-backed backend runtime mutations to REST adapters.
 type BackendMutator interface {
-	SetInService(ctx context.Context, request runtime.SetBackendInServiceRequest) (runtime.BackendMutationResult, error)
+	SetInService(ctx context.Context, request runtime.SetBackendInServiceRequest, policy backend.RuntimeOverridePolicy) (runtime.BackendMutationResult, error)
 	SetWeight(ctx context.Context, request runtime.SetBackendWeightRequest, policy backend.RuntimeOverridePolicy) (runtime.BackendMutationResult, error)
 	SetMaintenance(ctx context.Context, request runtime.SetBackendMaintenanceRequest) (runtime.BackendMutationResult, error)
-	StartDrain(ctx context.Context, request runtime.StartBackendDrainRequest) (runtime.BackendMutationResult, error)
+	StartDrain(ctx context.Context, request runtime.StartBackendDrainRequest, policy backend.RuntimeOverridePolicy) (runtime.BackendMutationResult, error)
 	ClearRuntime(ctx context.Context, request runtime.ClearBackendRuntimeRequest) (runtime.BackendMutationResult, error)
 }
 
@@ -103,14 +103,14 @@ type RuntimeSummaryReader interface {
 
 // UserMutator exposes Redis-backed user runtime mutations to REST adapters.
 type UserMutator interface {
-	MoveUser(ctx context.Context, request runtime.MoveUserRequest) (runtime.UserMutationResult, error)
-	KickUser(ctx context.Context, request runtime.KickUserRequest) (runtime.UserMutationResult, error)
-	ClearUserAffinity(ctx context.Context, request runtime.ClearUserAffinityRequest) (runtime.UserMutationResult, error)
+	MoveUser(ctx context.Context, request runtime.MoveUserRequest, policy runtime.UserRuntimeOverridePolicy) (runtime.UserMutationResult, error)
+	KickUser(ctx context.Context, request runtime.KickUserRequest, policy runtime.UserRuntimeOverridePolicy) (runtime.UserMutationResult, error)
+	ClearUserAffinity(ctx context.Context, request runtime.ClearUserAffinityRequest, policy runtime.UserRuntimeOverridePolicy) (runtime.UserMutationResult, error)
 }
 
 // UserBackendPinMutator exposes user backend-pin mutations to REST adapters.
 type UserBackendPinMutator interface {
-	SetUserBackendPinTarget(ctx context.Context, request runtime.SetUserBackendPinTargetRequest) (runtime.UserBackendPinsMutationResult, error)
+	SetUserBackendPinTarget(ctx context.Context, request runtime.SetUserBackendPinTargetRequest, policy runtime.UserRuntimeOverridePolicy) (runtime.UserBackendPinsMutationResult, error)
 	ClearUserBackendPin(ctx context.Context, request runtime.ClearUserBackendPinRequest) (runtime.UserBackendPinMutationResult, error)
 	ClearUserBackendPins(ctx context.Context, request runtime.ClearUserBackendPinsRequest) (runtime.UserBackendPinsMutationResult, error)
 }
@@ -355,7 +355,7 @@ func (h *Handler) DrainBackend(ctx context.Context, request generated.DrainBacke
 		Drain:             backend.DrainState{Enabled: true, Mode: backend.DrainMode(request.Body.Mode)},
 		Reason:            request.Body.Reason,
 		Actor:             actorFromContext(ctx),
-	})
+	}, h.backendRuntimeOverridePolicy())
 	if err != nil {
 		return generated.DrainBackenddefaultJSONResponse{StatusCode: statusForError(err), Body: h.problemFromError("DrainBackend", err)}, nil
 	}
@@ -378,13 +378,12 @@ func (h *Handler) SetBackendWeight(ctx context.Context, request generated.SetBac
 		return generated.SetBackendWeightdefaultJSONResponse{StatusCode: http.StatusServiceUnavailable, Body: h.runtimeUnavailable("SetBackendWeight")}, nil
 	}
 
-	policy := backend.RuntimeOverridePolicy{Enabled: true, AllowWeightOverride: true}
 	if _, err := h.backendMutator.SetWeight(ctx, runtime.SetBackendWeightRequest{
 		BackendIdentifier: request.Identifier,
 		Weight:            request.Body.Weight,
 		Reason:            reason,
 		Actor:             actorFromContext(ctx),
-	}, policy); err != nil {
+	}, h.backendRuntimeOverridePolicy()); err != nil {
 		return generated.SetBackendWeightdefaultJSONResponse{StatusCode: statusForError(err), Body: h.problemFromError("SetBackendWeight", err)}, nil
 	}
 
@@ -412,7 +411,7 @@ func (h *Handler) MarkBackendOut(ctx context.Context, request generated.MarkBack
 		InService:         false,
 		Reason:            reason,
 		Actor:             actorFromContext(ctx),
-	}); err != nil {
+	}, h.backendRuntimeOverridePolicy()); err != nil {
 		return generated.MarkBackendOutdefaultJSONResponse{StatusCode: statusForError(err), Body: h.problemFromError("MarkBackendOut", err)}, nil
 	}
 
@@ -686,7 +685,11 @@ func (h *Handler) ClearUserAffinity(ctx context.Context, request generated.Clear
 		return generated.ClearUserAffinitydefaultJSONResponse{StatusCode: http.StatusServiceUnavailable, Body: h.runtimeUnavailable("ClearUserAffinity")}, nil
 	}
 
-	if _, err := h.userMutator.ClearUserAffinity(ctx, runtime.ClearUserAffinityRequest{Key: parseUserKey(request.UserKey), Reason: reason, Actor: actorFromContext(ctx)}); err != nil {
+	if _, err := h.userMutator.ClearUserAffinity(
+		ctx,
+		runtime.ClearUserAffinityRequest{Key: parseUserKey(request.UserKey), Reason: reason, Actor: actorFromContext(ctx)},
+		h.userRuntimeOverridePolicy(),
+	); err != nil {
 		return generated.ClearUserAffinitydefaultJSONResponse{StatusCode: statusForError(err), Body: h.problemFromError("ClearUserAffinity", err)}, nil
 	}
 
@@ -719,7 +722,7 @@ func (h *Handler) SetUserAffinity(ctx context.Context, request generated.SetUser
 		Strategy:    runtime.MoveStrategyNewSessionsOnly,
 		Reason:      request.Body.Reason,
 		Actor:       actorFromContext(ctx),
-	})
+	}, h.userRuntimeOverridePolicy())
 	if err != nil {
 		return generated.SetUserAffinitydefaultJSONResponse{StatusCode: statusForError(err), Body: h.problemFromError("SetUserAffinity", err)}, nil
 	}
@@ -835,7 +838,7 @@ func (h *Handler) SetUserBackendPin(ctx context.Context, request generated.SetUs
 		Strategy:          runtime.MoveStrategy(strategy),
 		Reason:            reason,
 		Actor:             actorFromContext(ctx),
-	}); err != nil {
+	}, h.userRuntimeOverridePolicy()); err != nil {
 		return generated.SetUserBackendPindefaultJSONResponse{StatusCode: statusForError(err), Body: h.problemFromError("SetUserBackendPin", err)}, nil
 	}
 
@@ -927,7 +930,11 @@ func (h *Handler) KickUser(ctx context.Context, request generated.KickUserReques
 		return generated.KickUserdefaultJSONResponse{StatusCode: http.StatusServiceUnavailable, Body: h.runtimeUnavailable("KickUser")}, nil
 	}
 
-	if _, err := h.userMutator.KickUser(ctx, runtime.KickUserRequest{Key: parseUserKey(request.UserKey), Reason: request.Body.Reason, Actor: actorFromContext(ctx)}); err != nil {
+	if _, err := h.userMutator.KickUser(
+		ctx,
+		runtime.KickUserRequest{Key: parseUserKey(request.UserKey), Reason: request.Body.Reason, Actor: actorFromContext(ctx)},
+		h.userRuntimeOverridePolicy(),
+	); err != nil {
 		return generated.KickUserdefaultJSONResponse{StatusCode: statusForError(err), Body: h.problemFromError("KickUser", err)}, nil
 	}
 
@@ -950,7 +957,7 @@ func (h *Handler) MoveUser(ctx context.Context, request generated.MoveUserReques
 		Strategy:    runtime.MoveStrategy(request.Body.Strategy),
 		Reason:      request.Body.Reason,
 		Actor:       actorFromContext(ctx),
-	}); err != nil {
+	}, h.userRuntimeOverridePolicy()); err != nil {
 		return generated.MoveUserdefaultJSONResponse{StatusCode: statusForError(err), Body: h.problemFromError("MoveUser", err)}, nil
 	}
 
@@ -1006,6 +1013,24 @@ func (h *Handler) GetReadyz(_ context.Context, _ generated.GetReadyzRequestObjec
 	return generated.GetReadyz200JSONResponse(generated.StatusResponse{Status: statusOK, Checks: &checks}), nil
 }
 
+// backendRuntimeOverridePolicy derives backend mutation policy from the active config snapshot.
+func (h *Handler) backendRuntimeOverridePolicy() backend.RuntimeOverridePolicy {
+	if h == nil || h.snapshot == nil {
+		return backend.RuntimeOverridePolicy{}
+	}
+
+	return backend.NewRuntimeOverridePolicy(h.snapshot.Config.Director.RuntimeOverrides)
+}
+
+// userRuntimeOverridePolicy derives user mutation policy from the active config snapshot.
+func (h *Handler) userRuntimeOverridePolicy() runtime.UserRuntimeOverridePolicy {
+	if h == nil || h.snapshot == nil {
+		return runtime.UserRuntimeOverridePolicy{}
+	}
+
+	return runtime.NewUserRuntimeOverridePolicy(h.snapshot.Config.Director.RuntimeOverrides)
+}
+
 // markBackendInService adapts in/out requests while preserving generated response types.
 func (h *Handler) markBackendInService(
 	ctx context.Context,
@@ -1028,7 +1053,7 @@ func (h *Handler) markBackendInService(
 		InService:         inService,
 		Reason:            reason,
 		Actor:             actorFromContext(ctx),
-	}); err != nil {
+	}, h.backendRuntimeOverridePolicy()); err != nil {
 		return generated.MarkBackendIndefaultJSONResponse{StatusCode: statusForError(err), Body: h.problemFromError(operation, err)}, nil
 	}
 

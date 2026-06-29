@@ -28,6 +28,7 @@ import (
 	"github.com/croessner/nauthilus-director/internal/nauthilus"
 	"github.com/croessner/nauthilus-director/internal/observability"
 	"github.com/croessner/nauthilus-director/internal/placement"
+	"github.com/croessner/nauthilus-director/internal/protocol/authbinding"
 	"github.com/croessner/nauthilus-director/internal/proxy"
 	"github.com/croessner/nauthilus-director/internal/routing"
 	runtimectl "github.com/croessner/nauthilus-director/internal/runtime"
@@ -242,12 +243,8 @@ func (s *Session) routingRequest(
 	credentials *frontendCredentials,
 	result nauthilus.AuthResult,
 ) (routing.RoutingRequest, error) {
-	account := normalizedAccount(result.Account)
-	if account == "" && credentials != nil {
-		account = normalizedAccount(credentials.Username())
-	}
-
-	if account == "" {
+	account, err := authbinding.CanonicalAccount(result.Account)
+	if err != nil {
 		return routing.RoutingRequest{}, errors.New("imap: authenticated account unavailable")
 	}
 
@@ -367,9 +364,21 @@ func (s *Session) transitionAuthenticatedSession(
 
 	s.recordBackendConnect(connectCtx, observationResultOK, "", connectDuration)
 
-	if err := AuthenticateBackend(connection, s.placement.Backend.Backend, credentials); err != nil {
+	backendCredentials, err := credentials.BackendCredentials(s.placement.AuthResult.Account)
+	if err != nil {
 		s.recordBackendAuth(connectCtx, observationResultFailure, reasonClass(err), credentials.Mechanism().Normalized())
 		connectSpan.End(observationResultFailure, reasonClass(err))
+
+		_ = connection.Conn().Close()
+		_ = s.closePlacedSession(context.Background())
+
+		return commandOutcome{}, s.writeTagged(tag, responseNo, authUnavailableText)
+	}
+
+	if err := AuthenticateBackend(connection, s.placement.Backend.Backend, backendCredentials); err != nil {
+		s.recordBackendAuth(connectCtx, observationResultFailure, reasonClass(err), credentials.Mechanism().Normalized())
+		connectSpan.End(observationResultFailure, reasonClass(err))
+
 		_ = connection.Conn().Close()
 		_ = s.closePlacedSession(context.Background())
 

@@ -1201,7 +1201,7 @@ components:
         recipient:
           type: string
           minLength: 1
-          description: LMTP-only recipient identity used for no-auth route diagnostics.
+          description: LMTP-only recipient identity used only with director-owned runtime state; unresolved accounts return a bounded fail-closed diagnostic without Nauthilus lookup.
         tenant:
           type: string
         listener:

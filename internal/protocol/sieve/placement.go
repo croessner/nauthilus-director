@@ -29,6 +29,7 @@ import (
 	"github.com/croessner/nauthilus-director/internal/nauthilus"
 	"github.com/croessner/nauthilus-director/internal/observability"
 	"github.com/croessner/nauthilus-director/internal/placement"
+	"github.com/croessner/nauthilus-director/internal/protocol/authbinding"
 	"github.com/croessner/nauthilus-director/internal/routing"
 	runtimectl "github.com/croessner/nauthilus-director/internal/runtime"
 	"github.com/croessner/nauthilus-director/internal/state"
@@ -191,8 +192,8 @@ func (s *Session) routingRequest(
 	credentials *frontendCredentials,
 	result nauthilus.AuthResult,
 ) (routing.RoutingRequest, error) {
-	account := normalizedAccount(result.Account)
-	if account == "" {
+	account, err := authbinding.CanonicalAccount(result.Account)
+	if err != nil {
 		return routing.RoutingRequest{}, errors.New("sieve: authenticated account unavailable")
 	}
 

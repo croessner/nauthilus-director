@@ -20,6 +20,7 @@ package imap
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -682,6 +683,45 @@ func TestSessionBackendConnectRequestCarriesTrustedListenerEffectiveTuple(t *tes
 	}
 }
 
+// TestSessionBackendAuthBindsToAuthenticatedAccount verifies backend auth does not trust frontend aliases.
+func TestSessionBackendAuthBindsToAuthenticatedAccount(t *testing.T) {
+	authenticator := &recordingAuthenticator{
+		result: nauthilus.AuthResult{
+			Decision: nauthilus.DecisionAuthenticated,
+			Account:  "canonical@example.test",
+		},
+	}
+	router := &recordingRoutingResolver{
+		result: routing.RoutingResult{
+			AccountKey: "canonical@example.test",
+			Tenant:     defaultTenantName,
+			ShardTag:   "mailstore-a",
+		},
+	}
+	store := &recordingSessionStore{}
+	selector := &recordingBackendSelector{result: backend.SelectionResult{Backend: defaultPipelineBackend("mailstore-a-imap")}}
+	authCommands := make(chan string, 1)
+	config := pipelineSessionConfig(authenticator, router, store, selector)
+	config.BackendConnector = &recordingBackendConnector{authCommands: authCommands}
+	harness := startTestSession(t, config)
+
+	harness.expectLine(t, greetingLine)
+	frontendPayload := base64.StdEncoding.EncodeToString([]byte("delegate@example.test\x00frontend@example.test\x00secret-password"))
+	harness.write(t, "A001 AUTHENTICATE PLAIN "+frontendPayload+"\r\n")
+	harness.expectLine(t, "A001 OK Authentication completed\r\n")
+
+	command := backendCommandWithoutTag(t, receiveBackendAuthCommand(t, authCommands))
+	payload := decodeInitialResponse(t, command, "AUTHENTICATE PLAIN ")
+	if payload != "\x00canonical@example.test*director-master\x00master-secret" {
+		t.Fatalf("backend auth payload = %q, want canonical account binding", payload)
+	}
+	for _, forbidden := range []string{"frontend@example.test", "delegate@example.test"} {
+		if strings.Contains(payload, forbidden) {
+			t.Fatalf("backend auth replayed frontend identity %q instead of canonical account", forbidden)
+		}
+	}
+}
+
 // TestSessionProxyWriteFailurePreventsFrontendAuthSuccess verifies preface errors fail closed.
 func TestSessionProxyWriteFailurePreventsFrontendAuthSuccess(t *testing.T) {
 	authenticator := &recordingAuthenticator{result: nauthilus.AuthResult{Decision: nauthilus.DecisionAuthenticated, Account: "alice@example.test"}}
@@ -819,7 +859,8 @@ func TestReplaySecretsAreClearedBeforeProxyMode(t *testing.T) {
 	session.backendConnector = &recordingBackendConnector{}
 	session.proxyRunner = runner
 	session.placement = Placement{
-		Routing: routing.RoutingResult{Tenant: defaultTenantName, AccountKey: "alice@example.test"},
+		AuthResult: nauthilus.AuthResult{Decision: nauthilus.DecisionAuthenticated, Account: "alice@example.test"},
+		Routing:    routing.RoutingResult{Tenant: defaultTenantName, AccountKey: "alice@example.test"},
 		Affinity: state.AffinityRecord{
 			Key: state.AffinityKey{Tenant: defaultTenantName, AccountKey: "alice@example.test"},
 		},
@@ -989,7 +1030,8 @@ func newPlacedTransitionSession(t *testing.T, conn net.Conn, store *recordingSes
 	session.sessionStore = store
 	session.proxyRunner = &recordingProxyRunner{}
 	session.placement = Placement{
-		Routing: routing.RoutingResult{Tenant: defaultTenantName, AccountKey: "alice@example.test"},
+		AuthResult: nauthilus.AuthResult{Decision: nauthilus.DecisionAuthenticated, Account: "alice@example.test"},
+		Routing:    routing.RoutingResult{Tenant: defaultTenantName, AccountKey: "alice@example.test"},
 		Affinity: state.AffinityRecord{
 			Key: state.AffinityKey{Tenant: defaultTenantName, AccountKey: "alice@example.test"},
 		},
@@ -1723,6 +1765,7 @@ type recordingBackendConnector struct {
 	request      backend.ConnectRequest
 	err          error
 	authResponse string
+	authCommands chan<- string
 }
 
 // Connect records the selected backend and prepares a fake auth-capable stream.
@@ -1739,19 +1782,23 @@ func (c *recordingBackendConnector) Connect(_ context.Context, request backend.C
 	connection.tlsActive = true
 	connection.tlsVerified = true
 
-	go serveOneBackendAuthCommand(server, c.authResponse)
+	go serveOneBackendAuthCommand(server, c.authResponse, c.authCommands)
 
 	return connection, nil
 }
 
 // serveOneBackendAuthCommand accepts one backend auth command and then waits for proxy close.
-func serveOneBackendAuthCommand(conn net.Conn, response string) {
+func serveOneBackendAuthCommand(conn net.Conn, response string, commands chan<- string) {
 	defer func() { _ = conn.Close() }()
 
 	reader := bufio.NewReader(conn)
 	line, err := reader.ReadString('\n')
 	if err != nil {
 		return
+	}
+	line = strings.TrimRight(line, "\r\n")
+	if commands != nil {
+		commands <- line
 	}
 
 	tag, _, _ := strings.Cut(strings.TrimSpace(line), " ")
@@ -1765,6 +1812,32 @@ func serveOneBackendAuthCommand(conn net.Conn, response string) {
 
 	_, _ = io.WriteString(conn, tag+" "+response+"\r\n")
 	_, _ = io.Copy(io.Discard, reader)
+}
+
+// receiveBackendAuthCommand returns the observed secret-bearing backend auth line.
+func receiveBackendAuthCommand(t *testing.T, commands <-chan string) string {
+	t.Helper()
+
+	select {
+	case command := <-commands:
+		return command
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for backend auth command")
+	}
+
+	return ""
+}
+
+// backendCommandWithoutTag strips the generated IMAP command tag.
+func backendCommandWithoutTag(t *testing.T, command string) string {
+	t.Helper()
+
+	_, rest, ok := strings.Cut(command, " ")
+	if !ok {
+		t.Fatalf("backend command missing tag: %q", command)
+	}
+
+	return rest
 }
 
 // recordingFailureDialer returns one controlled backend connection.

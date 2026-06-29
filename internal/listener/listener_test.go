@@ -108,6 +108,24 @@ func TestManagerRejectsUnsupportedProtocolBeforeBind(t *testing.T) {
 	}
 }
 
+// TestBuildListenerTLSConfigRejectsRequiredClientCertWithoutCA keeps mTLS gates fail-closed.
+func TestBuildListenerTLSConfigRejectsRequiredClientCertWithoutCA(t *testing.T) {
+	cfg := singleListenerConfig(t, testIMAPSListener, tlsModeImplicit)
+	entry := cfg.Director.Listeners[testIMAPSListener]
+	entry.TLS.RequireClientCert = true
+	entry.TLS.ClientCA = ""
+	cfg.Director.Listeners[testIMAPSListener] = entry
+
+	_, err := buildListenerTLSConfig(entry)
+	if err == nil {
+		t.Fatal("buildListenerTLSConfig accepted require_client_cert without client_ca")
+	}
+
+	if !strings.Contains(err.Error(), "client_ca is required when require_client_cert is true") {
+		t.Fatalf("error = %q, want client CA requirement", err.Error())
+	}
+}
+
 // TestSessionOptionsIncludeAuthorityBearerTokenLimit verifies IMAP sessions inherit authority bearer limits.
 func TestSessionOptionsIncludeAuthorityBearerTokenLimit(t *testing.T) {
 	cfg := singleListenerConfig(t, testIMAPListener, tlsModeStartTLS)

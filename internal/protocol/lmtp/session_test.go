@@ -770,9 +770,12 @@ func TestQueuedPlaintextCommandsAfterSTARTTLSFailClosed(t *testing.T) {
 	harness.expectLine(t, "250-SMTPUTF8\r\n")
 	harness.expectLine(t, "250 STARTTLS\r\n")
 	harness.write(t, "STARTTLS\r\nMAIL FROM:<sender@example.test>\r\nNOOP\r\n")
-	harness.expectLine(t, "220 2.0.0 Ready to start TLS\r\n")
-	harness.expectLine(t, "503 5.5.1 Send LHLO first\r\n")
-	harness.expectLine(t, "503 5.5.1 Send LHLO first\r\n")
+	harness.expectLine(t, "503 5.5.1 STARTTLS cannot be pipelined\r\n")
+	harness.expectDone(t)
+
+	if harness.session.TLSActive() {
+		t.Fatal("pipelined STARTTLS marked the session TLS-active")
+	}
 }
 
 // TestQueuedCommandsAfterFailedAUTHDoNotBypassPeerAuth verifies failed AUTH gates queued transactions.
@@ -3956,8 +3959,12 @@ func startLMTPHarnessWithServerConn(
 
 		_ = client.Close()
 
+		if harness.done == nil {
+			return
+		}
+
 		select {
-		case <-done:
+		case <-harness.done:
 		case <-time.After(time.Second):
 			t.Error("LMTP session did not exit")
 		}
@@ -3996,6 +4003,22 @@ func (h *lmtpHarness) readLine(t *testing.T) string {
 	}
 
 	return line
+}
+
+// expectDone waits for the frontend session to stop after a fatal protocol boundary.
+func (h *lmtpHarness) expectDone(t *testing.T) {
+	t.Helper()
+
+	select {
+	case err := <-h.done:
+		h.done = nil
+
+		if err != nil {
+			t.Fatalf("session returned error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for LMTP session")
+	}
 }
 
 // drainLHLO reads a complete LHLO response with one or more lines.

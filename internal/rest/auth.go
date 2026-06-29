@@ -25,7 +25,6 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"os"
 	"slices"
 	"strings"
 
@@ -288,6 +287,9 @@ func (a ControlAuthenticator) authenticateOIDC(ctx context.Context, token string
 	if err != nil || !result.Active {
 		return ControlAuthState{}, errControlUnauthorized
 	}
+	if !result.MatchesAudienceOrResource(a.config.Auth.OIDC.RequiredAudience, a.config.Auth.OIDC.RequiredResource) {
+		return ControlAuthState{}, errControlForbidden
+	}
 	if !hasRequiredScopes(result.Scopes, a.config.Auth.OIDC.RequiredScopes) {
 		return ControlAuthState{}, errControlForbidden
 	}
@@ -387,27 +389,14 @@ func bearerToken(header string) (string, bool, bool) {
 
 // readStaticBearerToken loads one newline-terminated token from a secret file.
 func readStaticBearerToken(tokenFile config.SecretString) (string, error) {
-	if tokenFile.IsZero() {
-		return "", errControlUnauthorized
-	}
-
-	file, err := os.Open(tokenFile.Value())
+	token, err := config.ReadSecretFile(config.SecretFileOptions{
+		Field:    "runtime.servers.control.auth.bearer.token_file",
+		Path:     tokenFile,
+		MaxBytes: maxStaticBearerTokenBytes,
+	})
 	if err != nil {
 		return "", errControlUnauthorized
 	}
-	defer func() {
-		_ = file.Close()
-	}()
-
-	body, err := io.ReadAll(io.LimitReader(file, maxStaticBearerTokenBytes+1))
-	if err != nil {
-		return "", errControlUnauthorized
-	}
-	if len(body) > maxStaticBearerTokenBytes {
-		return "", errControlUnauthorized
-	}
-
-	token := strings.TrimRight(string(body), "\r\n")
 	if token == "" || strings.ContainsAny(token, " \t\r\n") {
 		return "", errControlUnauthorized
 	}
@@ -417,27 +406,14 @@ func readStaticBearerToken(tokenFile config.SecretString) (string, error) {
 
 // readStaticBasicPassword loads one newline-terminated HTTP Basic password from a secret file.
 func readStaticBasicPassword(passwordFile config.SecretString) (string, error) {
-	if passwordFile.IsZero() {
-		return "", errControlUnauthorized
-	}
-
-	file, err := os.Open(passwordFile.Value())
+	password, err := config.ReadSecretFile(config.SecretFileOptions{
+		Field:    "runtime.servers.control.auth.basic.password_file",
+		Path:     passwordFile,
+		MaxBytes: maxStaticBearerTokenBytes,
+	})
 	if err != nil {
 		return "", errControlUnauthorized
 	}
-	defer func() {
-		_ = file.Close()
-	}()
-
-	body, err := io.ReadAll(io.LimitReader(file, maxStaticBearerTokenBytes+1))
-	if err != nil {
-		return "", errControlUnauthorized
-	}
-	if len(body) > maxStaticBearerTokenBytes {
-		return "", errControlUnauthorized
-	}
-
-	password := strings.TrimRight(string(body), "\r\n")
 	if password == "" {
 		return "", errControlUnauthorized
 	}

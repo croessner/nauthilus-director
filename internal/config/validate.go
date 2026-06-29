@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"net/url"
 	"strings"
 	"unicode"
 )
@@ -159,6 +160,12 @@ func validateRuntime(runtime RuntimeConfig, authorities map[string]AuthorityConf
 		if len(runtime.Servers.Control.Auth.OIDC.RequiredScopes) == 0 {
 			addProblem(problems, "runtime.servers.control.auth.oidc.required_scopes is required when OIDC auth is enabled")
 		}
+		validateOIDCTokenBinding(
+			"runtime.servers.control.auth.oidc",
+			runtime.Servers.Control.Auth.OIDC.RequiredAudience,
+			runtime.Servers.Control.Auth.OIDC.RequiredResource,
+			problems,
+		)
 		if len(runtime.Servers.Control.Auth.OIDC.ProtectedScopes) == 0 {
 			addProblem(problems, "runtime.servers.control.auth.oidc.protected_scopes is required when OIDC auth is enabled")
 		}
@@ -197,6 +204,27 @@ func validateRuntime(runtime RuntimeConfig, authorities map[string]AuthorityConf
 		if strings.TrimSpace(runtime.Servers.Control.TLS.ClientCA) == "" {
 			addProblem(problems, "runtime.servers.control.auth.mtls requires runtime.servers.control.tls.client_ca")
 		}
+	}
+	if runtime.Servers.Control.TLS.RequireClientCert && strings.TrimSpace(runtime.Servers.Control.TLS.ClientCA) == "" {
+		addProblem(
+			problems,
+			"runtime.servers.control.tls.client_ca is required when runtime.servers.control.tls.require_client_cert is true",
+		)
+	}
+	if controlBearerCredentialsEnabled(runtime.Servers.Control.Auth) && !runtime.Servers.Control.TLS.Enabled {
+		if !runtime.Servers.Control.AllowPlaintextLoopback {
+			addProblem(
+				problems,
+				"runtime.servers.control.tls.enabled is required for bearer or OIDC auth on non-loopback control listeners",
+			)
+		} else if !addressHostIsLoopback(runtime.Servers.Control.Address) {
+			addProblem(
+				problems,
+				"runtime.servers.control.allow_plaintext_loopback requires a loopback control listener address",
+			)
+		}
+	} else if runtime.Servers.Control.AllowPlaintextLoopback && !addressHostIsLoopback(runtime.Servers.Control.Address) {
+		addProblem(problems, "runtime.servers.control.allow_plaintext_loopback requires a loopback control listener address")
 	}
 	if runtime.Servers.Control.TLS.Enabled {
 		if strings.TrimSpace(runtime.Servers.Control.TLS.Cert) == "" {
@@ -308,6 +336,7 @@ func validateAuthorities(authorities map[string]AuthorityConfig, problems *[]str
 			if strings.TrimSpace(authority.HTTP.ContentType) == "" {
 				addProblem(problems, path+".http.content_type is required when transport is http")
 			}
+			validateHTTPAuthorityTransport(path+".http", authority, problems)
 			if !authorityOIDCCallerAuthEnabled(authority) && strings.TrimSpace(authority.HTTP.BasicAuth.Username) == "" {
 				addProblem(problems, path+".http.basic_auth.username is required when HTTP basic caller auth is used")
 			}
@@ -318,6 +347,7 @@ func validateAuthorities(authorities map[string]AuthorityConfig, problems *[]str
 			if strings.TrimSpace(authority.GRPC.Address) == "" {
 				addProblem(problems, path+".grpc.address is required when transport is grpc")
 			}
+			validateGRPCAuthorityTransport(path+".grpc", authority, problems)
 			grpcCallerAuthMethods := enabledCount(
 				authority.GRPC.CallerAuth.Basic.Enabled,
 				authority.GRPC.CallerAuth.Bearer.Enabled,
@@ -349,6 +379,87 @@ func validateAuthorities(authorities map[string]AuthorityConfig, problems *[]str
 		}
 		validateBearerMechanism(path+".mechanisms.bearer", authority.Mechanisms.Bearer, problems)
 	}
+}
+
+// validateHTTPAuthorityTransport rejects plaintext credential transport beyond loopback.
+func validateHTTPAuthorityTransport(path string, authority AuthorityConfig, problems *[]string) {
+	endpoint := strings.TrimSpace(authority.HTTP.Endpoint)
+	parsed, err := url.Parse(endpoint)
+	if endpoint == "" || err != nil {
+		return
+	}
+
+	scheme := strings.ToLower(parsed.Scheme)
+	isPlaintext := scheme == "http"
+	isLoopback := addressHostIsLoopback(parsed.Host)
+
+	if authority.HTTP.AllowPlaintextLoopback && (!isPlaintext || !isLoopback) {
+		addProblem(problems, path+".allow_plaintext_loopback requires an http endpoint on a loopback address")
+	}
+	if authorityCarriesCredentials(authority) && isPlaintext && !authority.HTTP.AllowPlaintextLoopback {
+		addProblem(
+			problems,
+			path+".endpoint uses plaintext for credential-bearing authority traffic; enable http.tls with https or set http.allow_plaintext_loopback for loopback-only development",
+		)
+	}
+	if authorityCarriesCredentials(authority) && isPlaintext && authority.HTTP.AllowPlaintextLoopback && !isLoopback {
+		addProblem(problems, path+".allow_plaintext_loopback requires an http endpoint on a loopback address")
+	}
+}
+
+// validateGRPCAuthorityTransport rejects plaintext credential transport beyond loopback.
+func validateGRPCAuthorityTransport(path string, authority AuthorityConfig, problems *[]string) {
+	isLoopback := addressHostIsLoopback(authority.GRPC.Address)
+
+	if authority.GRPC.AllowPlaintextLoopback && (authority.GRPC.TLS.Enabled || !isLoopback) {
+		addProblem(problems, path+".allow_plaintext_loopback requires a loopback address when grpc.tls.enabled is false")
+	}
+	if authorityCarriesCredentials(authority) && !authority.GRPC.TLS.Enabled && !authority.GRPC.AllowPlaintextLoopback {
+		addProblem(
+			problems,
+			path+".tls.enabled is required for credential-bearing authority traffic unless grpc.allow_plaintext_loopback is set for loopback-only development",
+		)
+	}
+	if authorityCarriesCredentials(authority) && !authority.GRPC.TLS.Enabled && authority.GRPC.AllowPlaintextLoopback && !isLoopback {
+		addProblem(problems, path+".allow_plaintext_loopback requires a loopback address when grpc.tls.enabled is false")
+	}
+}
+
+// authorityCarriesCredentials reports whether authority calls can carry reusable secrets.
+func authorityCarriesCredentials(authority AuthorityConfig) bool {
+	return authority.Mechanisms.Password.Enabled ||
+		authority.Mechanisms.Bearer.Enabled ||
+		authorityOIDCCallerAuthEnabled(authority) ||
+		strings.TrimSpace(authority.HTTP.BasicAuth.Username) != "" ||
+		!authority.HTTP.BasicAuth.PasswordFile.IsZero() ||
+		authority.GRPC.CallerAuth.Basic.Enabled ||
+		authority.GRPC.CallerAuth.Bearer.Enabled ||
+		authority.GRPC.CallerAuth.OIDC.Enabled
+}
+
+// controlBearerCredentialsEnabled reports whether reusable control bearer tokens can arrive.
+func controlBearerCredentialsEnabled(auth ControlAuthConfig) bool {
+	return auth.Bearer.Enabled || auth.OIDC.Enabled
+}
+
+// addressHostIsLoopback reports whether an address is bound to a loopback-only host.
+func addressHostIsLoopback(address string) bool {
+	host := strings.TrimSpace(address)
+	if splitHost, _, err := net.SplitHostPort(host); err == nil {
+		host = splitHost
+	}
+
+	host = strings.Trim(strings.ToLower(strings.TrimSpace(host)), "[]")
+	if host == "localhost" {
+		return true
+	}
+
+	ip, err := netip.ParseAddr(host)
+	if err != nil {
+		return false
+	}
+
+	return ip.IsLoopback()
 }
 
 // validateBearerMechanism checks the advertised SASL bearer policy and introspection boundary.
@@ -404,6 +515,7 @@ func validateBearerIntrospection(path string, introspection BearerIntrospectionC
 	if strings.TrimSpace(introspection.RequiredScope) == "" {
 		addProblem(problems, path+".required_scope is required when introspection is enabled")
 	}
+	validateOIDCTokenBinding(path, introspection.RequiredAudience, introspection.RequiredResource, problems)
 	validateBearerAccountClaim(path+".account_claim", introspection.AccountClaim, problems)
 	validateBearerIntrospectionClientAuth(path, introspection, problems)
 
@@ -412,6 +524,40 @@ func validateBearerIntrospection(path string, introspection BearerIntrospectionC
 	default:
 		addProblem(problems, path+".client_assertion_alg must be RS256 or EdDSA")
 	}
+}
+
+// validateOIDCTokenBinding requires one local token audience or resource binding.
+func validateOIDCTokenBinding(path string, requiredAudience string, requiredResource string, problems *[]string) {
+	requiredAudience = strings.TrimSpace(requiredAudience)
+	requiredResource = strings.TrimSpace(requiredResource)
+	if requiredAudience == "" && requiredResource == "" {
+		addProblem(problems, path+".required_audience or "+path+".required_resource is required")
+
+		return
+	}
+
+	if invalidTokenBindingValue(requiredAudience) {
+		addProblem(problems, path+".required_audience must be a single printable value")
+	}
+	if invalidTokenBindingValue(requiredResource) {
+		addProblem(problems, path+".required_resource must be a single printable value")
+	}
+}
+
+// invalidTokenBindingValue rejects ambiguous token binding configuration.
+func invalidTokenBindingValue(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return false
+	}
+
+	for _, char := range value {
+		if !unicode.IsPrint(char) || unicode.IsSpace(char) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // validateBearerIntrospectionClientAuth checks endpoint client-auth material.
@@ -697,6 +843,9 @@ func validateDirector(director DirectorConfig, authorities map[string]AuthorityC
 			addProblem(problems, path+".tls.mode is required")
 		} else if !validListenerTLSMode(listener.TLS.Mode) {
 			addProblem(problems, path+".tls.mode must be starttls, implicit, plaintext, disabled, or none")
+		}
+		if listener.TLS.RequireClientCert && strings.TrimSpace(listener.TLS.ClientCA) == "" {
+			addProblem(problems, path+".tls.client_ca is required when require_client_cert is true")
 		}
 		if listener.ProxyProtocol.Enabled {
 			if len(listener.ProxyProtocol.TrustedCIDRs) == 0 {

@@ -93,7 +93,12 @@ func AuthenticateHealthBackend(connection *BackendConnection, target backend.Bac
 		return fmt.Errorf("%w: health mechanism unavailable", ErrBackendAuthPolicy)
 	}
 
-	command := authenticateCommand(mechanismPlain, backendPlainPayload("", target.Health.Username, target.Health.Password.Value()))
+	password, err := target.Health.PasswordValue("director.backends.health_check.password_file")
+	if err != nil {
+		return fmt.Errorf("%w: invalid health check password_file", ErrBackendAuthPolicy)
+	}
+
+	command := authenticateCommand(mechanismPlain, backendPlainPayload("", target.Health.Username, password))
 	if err := connection.writeCommand(command); err != nil {
 		return err
 	}
@@ -150,7 +155,12 @@ func masterUserAuthCommand(
 		return "", fmt.Errorf("%w: incomplete master_user config", ErrBackendAuthPolicy)
 	}
 
-	return authenticateCommand(mechanismPlain, backendPlainPayload("", username, config.Password.Value())), nil
+	password, err := config.PasswordValue("director.backends.auth.master_user.password_file")
+	if err != nil {
+		return "", fmt.Errorf("%w: invalid master_user password_file", ErrBackendAuthPolicy)
+	}
+
+	return authenticateCommand(mechanismPlain, backendPlainPayload("", username, password)), nil
 }
 
 // credentialReplayCommand selects and builds the configured replay mechanism.

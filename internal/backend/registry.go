@@ -83,10 +83,11 @@ type AuthConfig struct {
 
 // MasterUserConfig contains the configured administrative IMAP login identity.
 type MasterUserConfig struct {
-	Username   string
-	Password   config.SecretString
-	UserFormat string
-	Mechanism  string
+	Username     string
+	Password     config.SecretString
+	PasswordFile bool
+	UserFormat   string
+	Mechanism    string
 }
 
 // CredentialReplayConfig contains the mechanism policy for replaying frontend credentials.
@@ -98,24 +99,27 @@ type CredentialReplayConfig struct {
 
 // SASLConfig contains LMTP director-to-backend service credentials.
 type SASLConfig struct {
-	Mechanism  string
-	Username   string
-	Password   config.SecretString
-	RequireTLS bool
+	Mechanism    string
+	Username     string
+	Password     config.SecretString
+	PasswordFile bool
+	RequireTLS   bool
 }
 
 // OAuthBearerConfig contains LMTP director-to-backend bearer token material.
 type OAuthBearerConfig struct {
 	Token      config.SecretString
+	TokenFile  bool
 	RequireTLS bool
 }
 
 // HealthConfig describes the credentialed backend health-check policy.
 type HealthConfig struct {
-	Enabled   bool
-	DeepCheck bool
-	Username  string
-	Password  config.SecretString
+	Enabled      bool
+	DeepCheck    bool
+	Username     string
+	Password     config.SecretString
+	PasswordFile bool
 }
 
 // Pool describes one configured backend pool and its selector.
@@ -825,10 +829,11 @@ func newBackendAuthConfig(auth config.BackendAuthConfig) AuthConfig {
 	return AuthConfig{
 		Mode: strings.ToLower(strings.TrimSpace(auth.Mode)),
 		MasterUser: MasterUserConfig{
-			Username:   strings.TrimSpace(auth.MasterUser.Username),
-			Password:   auth.MasterUser.PasswordFile,
-			UserFormat: strings.TrimSpace(auth.MasterUser.UserFormat),
-			Mechanism:  strings.ToLower(strings.TrimSpace(auth.MasterUser.Mechanism)),
+			Username:     strings.TrimSpace(auth.MasterUser.Username),
+			Password:     auth.MasterUser.PasswordFile,
+			PasswordFile: !auth.MasterUser.PasswordFile.IsZero(),
+			UserFormat:   strings.TrimSpace(auth.MasterUser.UserFormat),
+			Mechanism:    strings.ToLower(strings.TrimSpace(auth.MasterUser.Mechanism)),
 		},
 		CredentialReplay: CredentialReplayConfig{
 			RequireBackendTLS: auth.CredentialReplay.RequireBackendTLS,
@@ -836,13 +841,15 @@ func newBackendAuthConfig(auth config.BackendAuthConfig) AuthConfig {
 			AllowedMechanisms: normalizeMechanisms(auth.CredentialReplay.AllowedMechanisms),
 		},
 		SASL: SASLConfig{
-			Mechanism:  strings.ToLower(strings.TrimSpace(auth.SASL.Mechanism)),
-			Username:   strings.TrimSpace(auth.SASL.Username),
-			Password:   auth.SASL.PasswordFile,
-			RequireTLS: auth.SASL.RequireTLS,
+			Mechanism:    strings.ToLower(strings.TrimSpace(auth.SASL.Mechanism)),
+			Username:     strings.TrimSpace(auth.SASL.Username),
+			Password:     auth.SASL.PasswordFile,
+			PasswordFile: !auth.SASL.PasswordFile.IsZero(),
+			RequireTLS:   auth.SASL.RequireTLS,
 		},
 		OAuthBearer: OAuthBearerConfig{
 			Token:      auth.OAuthBearer.TokenFile,
+			TokenFile:  !auth.OAuthBearer.TokenFile.IsZero(),
 			RequireTLS: auth.OAuthBearer.RequireTLS,
 		},
 	}
@@ -851,10 +858,11 @@ func newBackendAuthConfig(auth config.BackendAuthConfig) AuthConfig {
 // newBackendHealthConfig copies health config without exposing credentials.
 func newBackendHealthConfig(health config.BackendHealthConfig) HealthConfig {
 	return HealthConfig{
-		Enabled:   health.Enabled,
-		DeepCheck: health.DeepCheck,
-		Username:  strings.TrimSpace(health.Username),
-		Password:  health.PasswordFile,
+		Enabled:      health.Enabled,
+		DeepCheck:    health.DeepCheck,
+		Username:     strings.TrimSpace(health.Username),
+		Password:     health.PasswordFile,
+		PasswordFile: !health.PasswordFile.IsZero(),
 	}
 }
 

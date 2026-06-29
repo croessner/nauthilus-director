@@ -91,11 +91,16 @@ func authenticateSASLBackend(connection *BackendConnection, config backend.SASLC
 		return fmt.Errorf("%w: sasl mechanism unavailable", ErrBackendAuthPolicy)
 	}
 
+	password, err := config.PasswordValue("director.backends.auth.sasl.password_file")
+	if err != nil {
+		return fmt.Errorf("%w: invalid sasl password_file", ErrBackendAuthPolicy)
+	}
+
 	switch mechanism {
 	case mechanismPlain:
-		return authenticatePlainBackend(connection, config.Username, config.Password.Value())
+		return authenticatePlainBackend(connection, config.Username, password)
 	case mechanismLogin:
-		return authenticateLoginBackend(connection, config.Username, config.Password.Value())
+		return authenticateLoginBackend(connection, config.Username, password)
 	default:
 		return fmt.Errorf("%w: unsupported sasl mechanism", ErrBackendAuthPolicy)
 	}
@@ -115,7 +120,12 @@ func authenticateOAuthBearerBackend(connection *BackendConnection, config backen
 		return fmt.Errorf("%w: oauthbearer mechanism unavailable", ErrBackendAuthPolicy)
 	}
 
-	return authenticateInitialResponseBackend(connection, mechanismOAuthBearer, oauthBearerBackendPayload(config.Token.Value()))
+	token, err := config.TokenValue("director.backends.auth.oauthbearer.token_file")
+	if err != nil {
+		return fmt.Errorf("%w: invalid oauthbearer token_file", ErrBackendAuthPolicy)
+	}
+
+	return authenticateInitialResponseBackend(connection, mechanismOAuthBearer, oauthBearerBackendPayload(token))
 }
 
 // authenticatePlainBackend sends AUTH PLAIN with an initial response.

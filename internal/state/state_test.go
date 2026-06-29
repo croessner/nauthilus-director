@@ -1849,6 +1849,110 @@ func TestRedisSessionKillRepairsStaleLocator(t *testing.T) {
 	}
 }
 
+// TestRedisSessionKillRepairsMissingLocatorFromBackendEvidence prevents false missing outcomes.
+func TestRedisSessionKillRepairsMissingLocatorFromBackendEvidence(t *testing.T) {
+	store, client, builder := redisIntegrationStore(t)
+	key := AffinityKey{Tenant: testTenantDefault, AccountKey: "kill-backend-evidence@example.test"}
+	sessionID := "kill-backend-evidence-session"
+	backendID := testBackendIMAP
+
+	cleanupAffinity(t, client, builder, key, sessionID)
+	cleanupBackend(t, client, builder, backendID)
+
+	openAttachedSession(t, store, key, sessionID, backendID)
+
+	sessionKey, err := builder.SessionKey(key.Tenant, key.AccountKey, sessionID)
+	if err != nil {
+		t.Fatalf("SessionKey returned error: %v", err)
+	}
+
+	sessionIndexKey, err := builder.SessionIndexShardKey(sessionID)
+	if err != nil {
+		t.Fatalf("SessionIndexShardKey returned error: %v", err)
+	}
+	if err := client.HDel(context.Background(), sessionIndexKey, sessionID).Err(); err != nil {
+		t.Fatalf("remove session locator: %v", err)
+	}
+
+	backendSessionIndexKey, err := builder.BackendSessionIndexShardKey(backendID, sessionID)
+	if err != nil {
+		t.Fatalf("BackendSessionIndexShardKey returned error: %v", err)
+	}
+	if err := client.SAdd(context.Background(), backendSessionIndexKey, sessionID+"\t"+sessionKey).Err(); err != nil {
+		t.Fatalf("seed backend session evidence: %v", err)
+	}
+
+	record, err := store.KillSession(context.Background(), SessionKillRequest{
+		SessionID: sessionID,
+		Reason:    "operator killed session with stale locator",
+		Actor:     testOperatorActor,
+	})
+	if err != nil {
+		t.Fatalf("KillSession returned error: %v", err)
+	}
+	if record.Status != SessionKillStatusMarked || record.ControlAction != ControlActionKick {
+		t.Fatalf("KillSession record = %#v, want repaired locator and marked session", record)
+	}
+
+	if got := client.HGet(context.Background(), sessionIndexKey, sessionID).Val(); got != sessionKey {
+		t.Fatalf("repaired session locator = %q, want %q", got, sessionKey)
+	}
+
+	heartbeat, err := store.HeartbeatSession(context.Background(), key, sessionID, time.Second)
+	if err != nil {
+		t.Fatalf("HeartbeatSession after repaired kill returned error: %v", err)
+	}
+	if heartbeat.ControlAction != ControlActionKick {
+		t.Fatalf("heartbeat action after repaired kill = %q, want kick", heartbeat.ControlAction)
+	}
+}
+
+// TestRedisSessionKillRepairsBackendEvidenceForMissingHash bounds stale index disagreement.
+func TestRedisSessionKillRepairsBackendEvidenceForMissingHash(t *testing.T) {
+	store, client, builder := redisIntegrationStore(t)
+	key := AffinityKey{Tenant: testTenantDefault, AccountKey: "kill-backend-stale@example.test"}
+	sessionID := "kill-backend-stale-session"
+	backendID := testBackendIMAP
+
+	cleanupAffinity(t, client, builder, key, sessionID)
+	cleanupBackend(t, client, builder, backendID)
+
+	sessionKey, err := builder.SessionKey(key.Tenant, key.AccountKey, sessionID)
+	if err != nil {
+		t.Fatalf("SessionKey returned error: %v", err)
+	}
+
+	backendSessionIndexKey, err := builder.BackendSessionIndexShardKey(backendID, sessionID)
+	if err != nil {
+		t.Fatalf("BackendSessionIndexShardKey returned error: %v", err)
+	}
+	member := sessionID + "\t" + sessionKey
+	if err := client.SAdd(context.Background(), builder.BackendIndexKey(), backendID).Err(); err != nil {
+		t.Fatalf("seed backend index: %v", err)
+	}
+	if err := client.SAdd(context.Background(), backendSessionIndexKey, member).Err(); err != nil {
+		t.Fatalf("seed stale backend session evidence: %v", err)
+	}
+
+	record, err := store.KillSession(context.Background(), SessionKillRequest{
+		SessionID: sessionID,
+		Reason:    "operator killed stale backend evidence",
+		Actor:     testOperatorActor,
+	})
+	if err != nil {
+		t.Fatalf("KillSession returned error: %v", err)
+	}
+	if record.Status != SessionKillStatusStaleIndexRepaired ||
+		record.ControlAction != ControlActionNone ||
+		record.ControlGeneration != "" {
+		t.Fatalf("KillSession record = %#v, want stale backend evidence repair", record)
+	}
+
+	if exists := client.SIsMember(context.Background(), backendSessionIndexKey, member).Val(); exists {
+		t.Fatal("stale backend session evidence still exists after repair")
+	}
+}
+
 // TestRedisSessionKillKeepsInvalidControlGenerationAmbiguous keeps corrupt hashes fail-closed.
 func TestRedisSessionKillKeepsInvalidControlGenerationAmbiguous(t *testing.T) {
 	store, client, builder := redisIntegrationStore(t)
@@ -2440,6 +2544,40 @@ func TestRedisBackendRuntimeScripts(t *testing.T) {
 
 	if _, err := store.CloseSession(context.Background(), secondKey, "runtime-session-2"); err != nil {
 		t.Fatalf("second CloseSession returned error: %v", err)
+	}
+}
+
+// TestRedisBackendDrainMarksSessionAttachedAfterRuntimeState covers attach/drain ordering.
+func TestRedisBackendDrainMarksSessionAttachedAfterRuntimeState(t *testing.T) {
+	store, client, builder := redisIntegrationStore(t)
+	key := AffinityKey{Tenant: "blue", AccountKey: "runtime-backend-drain-race@example.test"}
+	backendID := testBackendIMAP
+	sessionID := "runtime-backend-drain-race-session"
+
+	cleanupAffinity(t, client, builder, key, sessionID)
+	cleanupBackend(t, client, builder, backendID)
+
+	runtimeSet, err := store.SetBackendRuntime(context.Background(), BackendRuntimeMutation{
+		BackendIdentifier: backendID,
+		DrainEnabled:      true,
+		DrainMode:         "hard",
+		Reason:            "host drain before attach",
+	})
+	if err != nil {
+		t.Fatalf("SetBackendRuntime returned error: %v", err)
+	}
+	if runtimeSet.MarkedSessionCount != 0 {
+		t.Fatalf("marked sessions before attach = %d, want 0", runtimeSet.MarkedSessionCount)
+	}
+
+	openAttachedSession(t, store, key, sessionID, backendID)
+
+	heartbeat, err := store.HeartbeatSession(context.Background(), key, sessionID, time.Second)
+	if err != nil {
+		t.Fatalf("HeartbeatSession after drain/attach returned error: %v", err)
+	}
+	if heartbeat.ControlAction != ControlActionDrain {
+		t.Fatalf("heartbeat action after drain/attach = %q, want drain", heartbeat.ControlAction)
 	}
 }
 
@@ -3840,6 +3978,39 @@ func TestRedisHardMaintenanceMarksBackendSessions(t *testing.T) {
 		if heartbeat.ControlAction != ControlActionDrain {
 			t.Fatalf("heartbeat action %s = %q, want drain", item.sessionID, heartbeat.ControlAction)
 		}
+	}
+}
+
+// TestRedisHardMaintenanceMarksSessionAttachedAfterRuntimeState covers attach/hard-maintenance ordering.
+func TestRedisHardMaintenanceMarksSessionAttachedAfterRuntimeState(t *testing.T) {
+	store, client, builder := redisIntegrationStore(t)
+	key := AffinityKey{Tenant: "blue", AccountKey: "runtime-backend-hard-race@example.test"}
+	backendID := testBackendIMAP
+	sessionID := "runtime-backend-hard-race-session"
+
+	cleanupAffinity(t, client, builder, key, sessionID)
+	cleanupBackend(t, client, builder, backendID)
+
+	runtimeSet, err := store.SetBackendRuntime(context.Background(), BackendRuntimeMutation{
+		BackendIdentifier: backendID,
+		MaintenanceMode:   "hard",
+		Reason:            "hard maintenance before attach",
+	})
+	if err != nil {
+		t.Fatalf("SetBackendRuntime hard maintenance returned error: %v", err)
+	}
+	if runtimeSet.MarkedSessionCount != 0 {
+		t.Fatalf("marked sessions before attach = %d, want 0", runtimeSet.MarkedSessionCount)
+	}
+
+	openAttachedSession(t, store, key, sessionID, backendID)
+
+	heartbeat, err := store.HeartbeatSession(context.Background(), key, sessionID, time.Second)
+	if err != nil {
+		t.Fatalf("HeartbeatSession after hard maintenance/attach returned error: %v", err)
+	}
+	if heartbeat.ControlAction != ControlActionDrain {
+		t.Fatalf("heartbeat action after hard maintenance/attach = %q, want drain", heartbeat.ControlAction)
 	}
 }
 

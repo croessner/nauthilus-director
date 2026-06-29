@@ -18,11 +18,8 @@ package nauthilus
 
 import (
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"encoding/base64"
 	"net/http"
-	"os"
 	"strings"
 
 	"github.com/croessner/nauthilus-director/internal/config"
@@ -187,28 +184,12 @@ func grpcTransportCredentials(tlsConfig config.AuthorityTLSConfig) (credentials.
 		return insecure.NewCredentials(), nil
 	}
 
-	rootCAs, err := x509.SystemCertPool()
+	configuredTLS, err := authorityTLSConfig(tlsConfig, "grpc")
 	if err != nil {
-		rootCAs = x509.NewCertPool()
+		return nil, err
 	}
 
-	if caFile := strings.TrimSpace(tlsConfig.CAFile); caFile != "" {
-		certificate, readErr := os.ReadFile(caFile)
-		if readErr != nil {
-			return nil, configError("failed to read grpc ca file")
-		}
-
-		if !rootCAs.AppendCertsFromPEM(certificate) {
-			return nil, configError("failed to parse grpc ca file")
-		}
-	}
-
-	return credentials.NewTLS(&tls.Config{
-		MinVersion:         tls.VersionTLS12,
-		RootCAs:            rootCAs,
-		ServerName:         strings.TrimSpace(tlsConfig.ServerName),
-		InsecureSkipVerify: tlsConfig.InsecureSkipVerify, //nolint:gosec // Explicit operator-controlled compatibility setting.
-	}), nil
+	return credentials.NewTLS(configuredTLS), nil
 }
 
 // grpcCallerAuthorization builds the selected static or OIDC caller auth source.
@@ -228,7 +209,15 @@ func grpcCallerAuthorization(authority config.AuthorityConfig) (string, callerTo
 
 	if callerAuth.Basic.Enabled {
 		username := strings.TrimSpace(callerAuth.Basic.Username)
-		password := callerAuth.Basic.PasswordFile.Value()
+
+		password, err := config.ReadSecretFile(config.SecretFileOptions{
+			Field:    "auth.authorities.grpc.caller_auth.basic.password_file",
+			Path:     callerAuth.Basic.PasswordFile,
+			MaxBytes: config.MaxSecretFileBytes,
+		})
+		if err != nil {
+			return "", nil, configError("failed to read grpc basic caller auth password_file")
+		}
 
 		if username == "" || password == "" {
 			return "", nil, configError("grpc basic caller auth requires username and password")
@@ -238,7 +227,16 @@ func grpcCallerAuthorization(authority config.AuthorityConfig) (string, callerTo
 	}
 
 	if callerAuth.Bearer.Enabled {
-		token := strings.TrimSpace(callerAuth.Bearer.TokenFile.Value())
+		token, err := config.ReadSecretFile(config.SecretFileOptions{
+			Field:    "auth.authorities.grpc.caller_auth.bearer.token_file",
+			Path:     callerAuth.Bearer.TokenFile,
+			MaxBytes: config.MaxSecretFileBytes,
+		})
+		if err != nil {
+			return "", nil, configError("failed to read grpc bearer caller auth token_file")
+		}
+
+		token = strings.TrimSpace(token)
 		if token == "" {
 			return "", nil, configError("grpc bearer caller auth requires token")
 		}

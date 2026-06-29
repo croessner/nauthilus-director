@@ -694,7 +694,13 @@ After successful authentication, the director resolves routing facts, applies ac
 Backend authentication is explicit and configurable. Supported backend auth modes for user-stateful protocols:
 
 - `master_user`: the director authenticates to the backend with a configured master credential and opens the session as the authenticated user.
-- `credential_replay`: the director forwards the original authentication material to the backend after Nauthilus has accepted it.
+- `credential_replay`: the director forwards the original authentication material to the backend after Nauthilus has accepted it, while binding the backend identity to the canonical account returned by Nauthilus.
+
+Frontend usernames, SASL authcid values and SASL authzid values are client
+input. They may be sent to Nauthilus for validation and retained as diagnostic
+login facts, but user-stateful backend authentication and proxy handoff use the
+canonical Nauthilus account unless a future explicit authority-validated
+delegation model is added.
 
 `master_user` mode is hybrid by credential kind. Password frontend credentials
 use the configured master-user login. `XOAUTH2` and `OAUTHBEARER` frontend
@@ -885,9 +891,9 @@ POST /api/v1/route/lookup
 GET  /metrics
 ```
 
-Route lookup is a director-owned routing diagnostic. It does not authenticate credentials. For protocols where the caller supplies an already known identity key, protocol, listener context and optional attributes, the director explains how its configured resolver inputs, Redis affinity, runtime overrides, health and maintenance state would select a backend. For LMTP recipient diagnostics, the director may resolve a supplied recipient through the Nauthilus identity lookup path (`LookupIdentity` for gRPC or `mode=no-auth` for HTTP/JSON) before running the dry-run route explanation.
+Route lookup is a director-owned routing diagnostic. It does not authenticate credentials. For protocols where the caller supplies an already known identity key, protocol, listener context and optional attributes, the director explains how its configured resolver inputs, Redis affinity, runtime overrides, health and maintenance state would select a backend. For LMTP recipient diagnostics without a caller-supplied user key, the director may use only existing director-owned runtime state such as active or retained affinity. If that state cannot resolve the account, the response must return bounded diagnostic uncertainty instead of consulting Nauthilus.
 
-The endpoint must be side-effect free. It may read Redis-backed affinity and runtime state and may perform the explicit LMTP no-auth identity lookup described above, but it must not authenticate credentials, create sessions, refresh leases, open delivery holds, mutate affinity, perform backend auth, connect to backends or trigger Nauthilus credential-authentication calls. Responses must state whether identity input was caller-supplied, read from existing director state or resolved through Nauthilus.
+The endpoint must be side-effect free. It may read Redis-backed affinity and runtime state, but it must not call Nauthilus, authenticate credentials, create sessions, refresh leases, open delivery holds, mutate affinity, perform backend auth, connect to backends or trigger Nauthilus credential-authentication calls. Responses must state whether identity input was caller-supplied, read from existing director state or unresolved locally.
 
 Example request:
 
@@ -1212,7 +1218,7 @@ E2E tests:
 - authenticate through the public protocol listener, then assert backend routing externally
 - verify `auth_attribute` routing from Nauthilus-provided attributes
 - verify active-user stickiness across parallel connections and reconnects
-- verify route lookup does not authenticate credentials, create sessions or mutate Redis; LMTP recipient diagnostics may call only the no-auth Nauthilus identity lookup path
+- verify route lookup does not call Nauthilus, authenticate credentials, create sessions or mutate Redis; LMTP recipient diagnostics may use only director-owned runtime state
 - verify TLS/STARTTLS and backend TLS/SNI behavior with test certificates
 - scrape Prometheus metrics and optionally receive OTLP traces where the test environment provides collectors
 - keep credentials and SASL bearer material out of test logs
@@ -1415,8 +1421,8 @@ gates in `docs/specs/implementation/M8_LMTP_BACKEND_CHUNKING_FOLLOWUP.md`.
   `auth.mode: none`
 - truthfully mediated LMTP capability enforcement, including SMTPUTF8 and
   CHUNKING/BDAT, ENHANCEDSTATUSCODES and 8BITMIME/BODY=8BITMIME boundaries
-- recipient identity lookup through Nauthilus and routing through the resolver
-  model
+- recipient identity lookup for delivery through Nauthilus, with route lookup
+  limited to director-owned diagnostic state
 - delivery-scoped active-affinity holds for concurrent user-stateful placement;
   follow-up work must retain the concrete backend node after delivery close
 - single-backend transaction support

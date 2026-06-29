@@ -19,14 +19,19 @@ package nauthilus
 
 import (
 	"context"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/croessner/nauthilus-director/internal/config"
 )
 
 // TestHTTPAuthenticateSendsStrictNauthilusJSON verifies the outbound JSON contract.
@@ -354,6 +359,74 @@ func TestHTTPTransportErrorsAreSecretSafe(t *testing.T) {
 	assertDoesNotContainSecret(t, err.Error(), "secret-password")
 }
 
+// TestHTTPClientFromAuthorityUsesConfiguredTLS verifies authority TLS policy reaches the transport.
+func TestHTTPClientFromAuthorityUsesConfiguredTLS(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", defaultHTTPContentType)
+		_, _ = writer.Write([]byte(`{"ok":true,"account_field":"uid","attributes":{"uid":["alice@example.test"]}}`))
+	}))
+	defer server.Close()
+
+	caPath := writeHTTPTestCA(t, server.Certificate())
+	authority := config.DefaultConfig().Auth.Authorities["default"]
+	authority.Transport = "http"
+	authority.OIDC.Enabled = false
+	authority.HTTP.Endpoint = server.URL
+	authority.HTTP.TLS.Enabled = true
+	authority.HTTP.TLS.CAFile = caPath
+	authority.HTTP.TLS.ServerName = ""
+	authority.HTTP.BasicAuth.PasswordFile = config.Secret(writeOIDCSecretFile(t, "director-api-secret\n"))
+
+	client, err := NewHTTPClientFromAuthority(authority, nil, AuthorityContext{})
+	if err != nil {
+		t.Fatalf("NewHTTPClientFromAuthority: %v", err)
+	}
+
+	result, err := client.Authenticate(context.Background(), testAuthRequest())
+	if err != nil {
+		t.Fatalf("Authenticate returned error: %v", err)
+	}
+	if result.Decision != DecisionAuthenticated {
+		t.Fatalf("decision = %q, want authenticated", result.Decision)
+	}
+}
+
+// TestHTTPClientFromAuthorityReadsBasicPasswordFile verifies HTTP caller auth uses file contents.
+func TestHTTPClientFromAuthorityReadsBasicPasswordFile(t *testing.T) {
+	authority := config.DefaultConfig().Auth.Authorities["default"]
+	authority.Transport = "http"
+	authority.OIDC.Enabled = false
+	authority.HTTP.Endpoint = "http://authority.example.test/api/v1/auth/json"
+	authority.HTTP.BasicAuth.Username = "director"
+	authority.HTTP.BasicAuth.PasswordFile = config.Secret(writeOIDCSecretFile(t, "director-api-secret\n"))
+
+	client, err := NewHTTPClientFromAuthority(authority, nil, AuthorityContext{})
+	if err != nil {
+		t.Fatalf("NewHTTPClientFromAuthority returned error: %v", err)
+	}
+	if client.basicAuthPassword.Value() != "director-api-secret" {
+		t.Fatalf("basic auth password = %q, want file content", client.basicAuthPassword.Value())
+	}
+	if client.basicAuthPassword.Value() == authority.HTTP.BasicAuth.PasswordFile.Value() {
+		t.Fatal("basic auth password used the password_file path string")
+	}
+}
+
+// TestHTTPClientFromAuthorityFailsClosedOnMissingPasswordFile rejects broken file refs.
+func TestHTTPClientFromAuthorityFailsClosedOnMissingPasswordFile(t *testing.T) {
+	authority := config.DefaultConfig().Auth.Authorities["default"]
+	authority.Transport = "http"
+	authority.OIDC.Enabled = false
+	authority.HTTP.Endpoint = "http://authority.example.test/api/v1/auth/json"
+	authority.HTTP.BasicAuth.Username = "director"
+	authority.HTTP.BasicAuth.PasswordFile = config.Secret(t.TempDir() + "/missing")
+
+	_, err := NewHTTPClientFromAuthority(authority, nil, AuthorityContext{})
+	if err == nil {
+		t.Fatal("NewHTTPClientFromAuthority accepted missing password_file")
+	}
+}
+
 type roundTripFunc func(request *http.Request) (*http.Response, error)
 
 // RoundTrip implements http.RoundTripper for focused transport tests.
@@ -369,6 +442,19 @@ type staticCallerTokenSource struct {
 // BearerToken returns the configured fake caller token.
 func (s staticCallerTokenSource) BearerToken(context.Context) (string, error) {
 	return s.token, s.err
+}
+
+// writeHTTPTestCA writes the test server certificate as a trusted authority file.
+func writeHTTPTestCA(t *testing.T, certificate *x509.Certificate) string {
+	t.Helper()
+
+	path := t.TempDir() + "/authority-ca.pem"
+	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certificate.Raw})
+	if err := os.WriteFile(path, pemBytes, 0o600); err != nil {
+		t.Fatalf("write test CA: %v", err)
+	}
+
+	return path
 }
 
 // newTestHTTPClient creates a test client for the supplied endpoint.

@@ -1076,8 +1076,8 @@ cmd/nauthilus-directorctl/
 - Crashed or closed transactions are repaired through lease expiry or close
   handling.
 - Maintenance, runtime out and drain affect LMTP new placement.
-- LMTP route lookup calls Nauthilus identity lookup only for recipient
-  resolution and never calls Nauthilus credential-authentication.
+- LMTP route lookup uses only director-owned runtime state for recipient
+  diagnostics and never calls Nauthilus identity or credential authentication.
 - LMTP route lookup does not create delivery holds, refresh leases or mutate
   Redis.
 - LMTP route lookup reports identity-resolution source and whether the result is

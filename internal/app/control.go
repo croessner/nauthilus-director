@@ -157,7 +157,7 @@ func controlTLSMinVersion(version string) (uint16, error) {
 func applyControlClientCA(tlsConfig *tls.Config, control config.ControlServerConfig) error {
 	if strings.TrimSpace(control.TLS.ClientCA) == "" {
 		if control.TLS.RequireClientCert {
-			tlsConfig.ClientAuth = tls.RequireAnyClientCert
+			return fmt.Errorf("control tls.client_ca is required when require_client_cert is true")
 		}
 
 		return nil

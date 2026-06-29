@@ -144,11 +144,16 @@ func masterUserAuthCommand(
 		return "", fmt.Errorf("%w: incomplete master_user config", ErrBackendAuthPolicy)
 	}
 
+	password, err := config.PasswordValue("director.backends.auth.master_user.password_file")
+	if err != nil {
+		return "", fmt.Errorf("%w: invalid master_user password_file", ErrBackendAuthPolicy)
+	}
+
 	switch mechanism {
 	case mechanismLogin:
-		return loginCommand(username, config.Password.Value()), nil
+		return loginCommand(username, password), nil
 	default:
-		return plainAuthCommand("", username, config.Password.Value()), nil
+		return plainAuthCommand("", username, password), nil
 	}
 }
 
@@ -163,11 +168,16 @@ func healthCheckCredentials(target backend.Backend) (*frontendCredentials, error
 		return nil, err
 	}
 
+	password, err := target.Health.PasswordValue("director.backends.health_check.password_file")
+	if err != nil {
+		return nil, fmt.Errorf("%w: invalid health check password_file", ErrBackendAuthPolicy)
+	}
+
 	return &frontendCredentials{
 		mechanism: mechanism,
 		kind:      credentialKindPassword,
 		username:  target.Health.Username,
-		secret:    newCredentialSecret(target.Health.Password.Value()),
+		secret:    newCredentialSecret(password),
 	}, nil
 }
 

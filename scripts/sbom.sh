@@ -25,6 +25,60 @@ docker_pull="${DOCKER_PULL:-false}"
 syft_version="${SYFT_VERSION:-v1.16.0}"
 syft_bin="${SYFT_BIN:-${root_dir}/bin/syft}"
 
+# sha256_check verifies release artifacts with the strongest local SHA-256 tool.
+sha256_check() {
+	local checksum_file="$1"
+
+	if command -v sha256sum >/dev/null 2>&1; then
+		sha256sum -c "$checksum_file"
+		return
+	fi
+
+	if command -v shasum >/dev/null 2>&1; then
+		shasum -a 256 -c "$checksum_file"
+		return
+	fi
+
+	printf 'No SHA-256 verifier found (sha256sum/shasum).\n' >&2
+	exit 1
+}
+
+# syft_platform maps the local OS and architecture to Syft release asset names.
+syft_platform() {
+	local os arch
+
+	os="$(uname -s)"
+	arch="$(uname -m)"
+
+	case "$os" in
+		Linux)
+			os="linux"
+			;;
+		Darwin)
+			os="darwin"
+			;;
+		*)
+			printf 'Unsupported OS for automatic syft install: %s\n' "$os" >&2
+			exit 1
+			;;
+	esac
+
+	case "$arch" in
+		x86_64 | amd64)
+			arch="amd64"
+			;;
+		arm64 | aarch64)
+			arch="arm64"
+			;;
+		*)
+			printf 'Unsupported architecture for automatic syft install: %s\n' "$arch" >&2
+			exit 1
+			;;
+	esac
+
+	printf '%s_%s\n' "$os" "$arch"
+}
+
 # pretty_print_json formats generated SPDX JSON when a local formatter exists.
 pretty_print_json() {
 	local target="$1"
@@ -86,8 +140,31 @@ ensure_syft() {
 
 	mkdir -p "$(dirname -- "$syft_bin")"
 
-	curl -sSfL "https://raw.githubusercontent.com/anchore/syft/${syft_version}/install.sh" \
-		| sh -s -- -b "$(dirname -- "$syft_bin")" "$syft_version"
+	local version_no_v platform archive_name release_base tmp_dir selected_checksum
+
+	version_no_v="${syft_version#v}"
+	platform="$(syft_platform)"
+	archive_name="syft_${version_no_v}_${platform}.tar.gz"
+	release_base="https://github.com/anchore/syft/releases/download/${syft_version}"
+	tmp_dir="$(mktemp -d)"
+	trap 'rm -rf "$tmp_dir"' RETURN
+
+	curl -sSfL "${release_base}/${archive_name}" -o "${tmp_dir}/${archive_name}"
+	curl -sSfL "${release_base}/syft_${version_no_v}_checksums.txt" -o "${tmp_dir}/checksums.txt"
+
+	selected_checksum="${tmp_dir}/selected-checksum.txt"
+	awk -v archive="$archive_name" '$2 == archive { print; found = 1 } END { exit found ? 0 : 1 }' \
+		"${tmp_dir}/checksums.txt" >"$selected_checksum" || {
+		printf 'No checksum entry found for %s in Syft %s checksums\n' "$archive_name" "$syft_version" >&2
+		exit 1
+	}
+
+	(
+		cd "$tmp_dir"
+		sha256_check "$selected_checksum"
+		tar -xzf "$archive_name" syft
+		install -m 0755 syft "$syft_bin"
+	)
 
 	if [[ ! -x "$syft_bin" ]]; then
 		printf 'syft installation failed\n' >&2

@@ -195,6 +195,9 @@ func writeDovecotManageSieveProcessConfig(t *testing.T, options interopManageSie
 	if backendTLSMode == "" {
 		backendTLSMode = "starttls"
 	}
+	authorityPasswordPath := writeProcessSecretFile(t, "unused")
+	backendPasswordPath := writeProcessSecretFile(t, options.MasterPassword)
+
 	content := fmt.Sprintf(`patch:
   - op: remove
     path: director.listeners
@@ -239,7 +242,7 @@ auth:
       http:
         endpoint: %q
         basic_auth:
-          password_file: "unused"
+          password_file: %q
 director:
   health:
     interval: 500ms
@@ -405,6 +408,7 @@ director:
 		options.RedisAddress,
 		processAuthorityOIDCYAMLForOptions(t, options.AuthorityOIDC),
 		options.AuthorityURL,
+		authorityPasswordPath,
 		e2eShardTag,
 		options.IMAPAddress,
 		options.ListenerCert,
@@ -420,12 +424,12 @@ director:
 		options.SieveBackendA,
 		backendTLSMode,
 		options.BackendInsecure,
-		options.MasterPassword,
+		backendPasswordPath,
 		e2eShardTagB,
 		options.SieveBackendB,
 		backendTLSMode,
 		options.BackendInsecure,
-		options.MasterPassword,
+		backendPasswordPath,
 	)
 
 	path := filepath.Join(t.TempDir(), "nauthilus-director-managesieve-interop.yml")

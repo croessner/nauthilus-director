@@ -22,6 +22,7 @@ import (
 	"strings"
 
 	"github.com/croessner/nauthilus-director/internal/nauthilus"
+	"github.com/croessner/nauthilus-director/internal/protocol/authbinding"
 )
 
 const (
@@ -163,6 +164,25 @@ func (c *frontendCredentials) Clear() {
 	c.secret.Clear()
 	c.username = ""
 	c.authorizationID = ""
+}
+
+// BackendCredentials binds backend authentication to the authority-validated account.
+func (c *frontendCredentials) BackendCredentials(account string) (*frontendCredentials, error) {
+	if c == nil {
+		return nil, fmt.Errorf("%w: frontend credentials unavailable", ErrCredentialRejected)
+	}
+
+	canonicalAccount, err := authbinding.CanonicalAccount(account)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrCredentialRejected, err)
+	}
+
+	return &frontendCredentials{
+		mechanism: c.mechanism,
+		kind:      c.kind,
+		username:  canonicalAccount,
+		secret:    c.secret,
+	}, nil
 }
 
 // NauthilusAuthRequest builds the later authority request without exposing credential formatting.

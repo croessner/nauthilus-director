@@ -78,7 +78,18 @@ func (s *Session) transitionAuthenticatedSession(
 
 	s.recordBackendConnect(connectCtx, sieveObservationResultOK, sieveReasonOK, connectDuration)
 
-	if err := AuthenticateBackend(connection, s.placement.Backend.Backend, credentials); err != nil {
+	backendCredentials, err := credentials.BackendCredentials(s.placement.AuthResult.Account)
+	if err != nil {
+		authReason := sieveReasonClass(err)
+		s.recordBackendAuth(connectCtx, sieveObservationResultFailure, authReason, credentials.Mechanism().Normalized())
+		connectSpan.End(sieveObservationResultFailure, authReason)
+		_ = connection.Conn().Close()
+		_ = s.closePlacedSession(context.Background())
+
+		return commandOutcome{}, s.writeNo(codeTryLater, "Backend service temporarily unavailable")
+	}
+
+	if err := AuthenticateBackend(connection, s.placement.Backend.Backend, backendCredentials); err != nil {
 		authReason := sieveReasonClass(err)
 		s.recordBackendAuth(connectCtx, sieveObservationResultFailure, authReason, credentials.Mechanism().Normalized())
 		connectSpan.End(sieveObservationResultFailure, authReason)

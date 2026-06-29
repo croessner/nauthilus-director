@@ -199,6 +199,249 @@ func TestMutatingHandlersRejectMissingReasons(t *testing.T) {
 	}
 }
 
+// TestBackendRuntimeHandlersUseConfiguredOverridePolicy verifies REST mutations honor typed config.
+//
+//nolint:funlen // The table keeps backend REST policy denials in one matrix.
+func TestBackendRuntimeHandlersUseConfiguredOverridePolicy(t *testing.T) {
+	testCases := []struct {
+		name    string
+		config  func(*config.Config)
+		request func(*Handler) (any, error)
+	}{
+		{
+			name: "global runtime overrides disabled rejects weight",
+			config: func(cfg *config.Config) {
+				cfg.Director.RuntimeOverrides.Enabled = false
+			},
+			request: func(handler *Handler) (any, error) {
+				return handler.SetBackendWeight(context.Background(), generated.SetBackendWeightRequestObject{
+					Identifier: testBackendIdentifier,
+					Body: &generated.SetBackendWeightJSONRequestBody{
+						Weight: 10,
+						Reason: "adjust weight",
+					},
+				})
+			},
+		},
+		{
+			name: "weight override disabled rejects weight",
+			config: func(cfg *config.Config) {
+				cfg.Director.RuntimeOverrides.Backends.AllowWeightOverride = false
+			},
+			request: func(handler *Handler) (any, error) {
+				return handler.SetBackendWeight(context.Background(), generated.SetBackendWeightRequestObject{
+					Identifier: testBackendIdentifier,
+					Body: &generated.SetBackendWeightJSONRequestBody{
+						Weight: 10,
+						Reason: "adjust weight",
+					},
+				})
+			},
+		},
+		{
+			name: "weight outside bounds rejects weight",
+			config: func(cfg *config.Config) {
+				cfg.Director.RuntimeOverrides.Backends.MinWeight = 10
+				cfg.Director.RuntimeOverrides.Backends.MaxWeight = 20
+			},
+			request: func(handler *Handler) (any, error) {
+				return handler.SetBackendWeight(context.Background(), generated.SetBackendWeightRequestObject{
+					Identifier: testBackendIdentifier,
+					Body: &generated.SetBackendWeightJSONRequestBody{
+						Weight: 25,
+						Reason: "adjust weight",
+					},
+				})
+			},
+		},
+		{
+			name: "in out override disabled rejects mark out",
+			config: func(cfg *config.Config) {
+				cfg.Director.RuntimeOverrides.Backends.AllowInOut = false
+			},
+			request: func(handler *Handler) (any, error) {
+				return handler.MarkBackendOut(context.Background(), generated.MarkBackendOutRequestObject{
+					Identifier: testBackendIdentifier,
+					Body:       &generated.MarkBackendOutJSONRequestBody{Reason: "stop placement"},
+				})
+			},
+		},
+		{
+			name: "in out override disabled rejects mark in",
+			config: func(cfg *config.Config) {
+				cfg.Director.RuntimeOverrides.Backends.AllowInOut = false
+			},
+			request: func(handler *Handler) (any, error) {
+				return handler.MarkBackendIn(context.Background(), generated.MarkBackendInRequestObject{
+					Identifier: testBackendIdentifier,
+					Body:       &generated.MarkBackendInJSONRequestBody{Reason: "resume placement"},
+				})
+			},
+		},
+		{
+			name: "drain override disabled rejects drain",
+			config: func(cfg *config.Config) {
+				cfg.Director.RuntimeOverrides.Backends.AllowDrain = false
+			},
+			request: func(handler *Handler) (any, error) {
+				return handler.DrainBackend(context.Background(), generated.DrainBackendRequestObject{
+					Identifier: testBackendIdentifier,
+					Body: &generated.DrainBackendJSONRequestBody{
+						Mode:   generated.DrainModeSoft,
+						Reason: "host drain",
+					},
+				})
+			},
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			cfg := config.DefaultConfig()
+			testCase.config(&cfg)
+			mutator := &recordingBackendRuntimeMutator{}
+			handler := NewHandler(HandlerOptions{
+				Version:        testHandlerVersion,
+				Snapshot:       &config.Snapshot{Config: cfg},
+				BackendMutator: mutator,
+			})
+
+			response, err := testCase.request(handler)
+			if err != nil {
+				t.Fatalf("handler returned error: %v", err)
+			}
+
+			assertBackendRuntimeProblemStatus(t, response, http.StatusBadRequest)
+			if mutator.calls != 0 {
+				t.Fatalf("mutator calls = %d, want policy denial before mutation", mutator.calls)
+			}
+		})
+	}
+}
+
+// TestUserRuntimeHandlersUseConfiguredOverridePolicy verifies REST user mutations honor typed config.
+//
+//nolint:funlen // The table keeps user REST policy denials in one matrix.
+func TestUserRuntimeHandlersUseConfiguredOverridePolicy(t *testing.T) {
+	testCases := []struct {
+		name    string
+		config  func(*config.Config)
+		request func(*Handler) (any, error)
+	}{
+		{
+			name: "global runtime overrides disabled rejects move",
+			config: func(cfg *config.Config) {
+				cfg.Director.RuntimeOverrides.Enabled = false
+			},
+			request: func(handler *Handler) (any, error) {
+				return handler.MoveUser(context.Background(), generated.MoveUserRequestObject{
+					UserKey: testBackendPinUserKey,
+					Body: &generated.MoveUserJSONRequestBody{
+						Reason:   "move user",
+						Strategy: generated.NewSessionsOnly,
+						ToShard:  testBackendPinShard,
+					},
+				})
+			},
+		},
+		{
+			name: "allow move disabled rejects move",
+			config: func(cfg *config.Config) {
+				cfg.Director.RuntimeOverrides.Users.AllowMove = false
+			},
+			request: func(handler *Handler) (any, error) {
+				return handler.MoveUser(context.Background(), generated.MoveUserRequestObject{
+					UserKey: testBackendPinUserKey,
+					Body: &generated.MoveUserJSONRequestBody{
+						Reason:   "move user",
+						Strategy: generated.NewSessionsOnly,
+						ToShard:  testBackendPinShard,
+					},
+				})
+			},
+		},
+		{
+			name: "move strategy allowlist rejects move",
+			config: func(cfg *config.Config) {
+				cfg.Director.RuntimeOverrides.Users.MoveStrategies = []string{"new_sessions_only"}
+			},
+			request: func(handler *Handler) (any, error) {
+				return handler.MoveUser(context.Background(), generated.MoveUserRequestObject{
+					UserKey: testBackendPinUserKey,
+					Body: &generated.MoveUserJSONRequestBody{
+						Reason:   "move user",
+						Strategy: generated.KickExisting,
+						ToShard:  testBackendPinShard,
+					},
+				})
+			},
+		},
+		{
+			name: "allow kick disabled rejects kick",
+			config: func(cfg *config.Config) {
+				cfg.Director.RuntimeOverrides.Users.AllowKick = false
+			},
+			request: func(handler *Handler) (any, error) {
+				return handler.KickUser(context.Background(), generated.KickUserRequestObject{
+					UserKey: testBackendPinUserKey,
+					Body:    &generated.KickUserJSONRequestBody{Reason: "kick user"},
+				})
+			},
+		},
+		{
+			name: "allow affinity clear disabled rejects clear",
+			config: func(cfg *config.Config) {
+				cfg.Director.RuntimeOverrides.Users.AllowAffinityClear = false
+			},
+			request: func(handler *Handler) (any, error) {
+				return handler.ClearUserAffinity(context.Background(), generated.ClearUserAffinityRequestObject{
+					UserKey: testBackendPinUserKey,
+					Body:    &generated.ClearUserAffinityJSONRequestBody{Reason: "clear affinity"},
+				})
+			},
+		},
+		{
+			name: "backend pin strategy allowlist rejects pin",
+			config: func(cfg *config.Config) {
+				cfg.Director.RuntimeOverrides.Users.MoveStrategies = []string{"new_sessions_only"}
+			},
+			request: func(handler *Handler) (any, error) {
+				return handler.SetUserBackendPin(context.Background(), generated.SetUserBackendPinRequestObject{
+					UserKey: testBackendPinUserKey,
+					Body: &generated.SetUserBackendPinJSONRequestBody{
+						Backend:  testBackendIdentifier,
+						Reason:   testBackendPinReason,
+						Strategy: generated.KickExisting,
+					},
+				})
+			},
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			cfg := config.DefaultConfig()
+			testCase.config(&cfg)
+			userMutator := &recordingUserRuntimeMutator{}
+			pinMutator := &recordingUserBackendPinService{}
+			handler := NewHandler(HandlerOptions{
+				Version:               testHandlerVersion,
+				Snapshot:              &config.Snapshot{Config: cfg},
+				UserMutator:           userMutator,
+				UserBackendPinMutator: pinMutator,
+			})
+
+			response, err := testCase.request(handler)
+			if err != nil {
+				t.Fatalf("handler returned error: %v", err)
+			}
+
+			assertUserRuntimeOverrideProblemStatus(t, response, http.StatusBadRequest)
+			assertNoUserRuntimeAdapterMutation(t, userMutator, pinMutator)
+		})
+	}
+}
+
 // TestDefaultConfigResponseIsRedacted verifies REST config output is redacted by default.
 func TestDefaultConfigResponseIsRedacted(t *testing.T) {
 	handler := NewHandler(HandlerOptions{Version: testHandlerVersion})
@@ -1599,10 +1842,17 @@ func (r *recordingUserBackendPinService) ListUserBackendPins(_ context.Context, 
 	return r.listResult, nil
 }
 
-// SetUserBackendPinTarget records one backend or backend-node set request.
-func (r *recordingUserBackendPinService) SetUserBackendPinTarget(_ context.Context, request runtime.SetUserBackendPinTargetRequest) (runtime.UserBackendPinsMutationResult, error) {
-	r.setCalls++
+// SetUserBackendPinTarget validates policy and records one backend or backend-node set request.
+func (r *recordingUserBackendPinService) SetUserBackendPinTarget(
+	_ context.Context,
+	request runtime.SetUserBackendPinTargetRequest,
+	policy runtime.UserRuntimeOverridePolicy,
+) (runtime.UserBackendPinsMutationResult, error) {
+	if err := request.Validate(policy); err != nil {
+		return runtime.UserBackendPinsMutationResult{}, err
+	}
 
+	r.setCalls++
 	r.targetRequest = request
 	if r.targetErr != nil {
 		return runtime.UserBackendPinsMutationResult{}, r.targetErr
@@ -1701,6 +1951,58 @@ func assertUserHoldProblemStatus(t *testing.T, response any, want int) {
 	assertGeneratedUserProblemStatus(t, response, want, "user-hold")
 }
 
+// assertBackendRuntimeProblemStatus checks backend-runtime generated problem responses.
+//
+//nolint:dupl // Generated response unions require parallel type switches.
+func assertBackendRuntimeProblemStatus(t *testing.T, response any, want int) {
+	t.Helper()
+
+	var got int
+
+	switch typed := response.(type) {
+	case generated.SetBackendWeightdefaultJSONResponse:
+		got = typed.StatusCode
+	case generated.MarkBackendIndefaultJSONResponse:
+		got = typed.StatusCode
+	case generated.MarkBackendOutdefaultJSONResponse:
+		got = typed.StatusCode
+	case generated.DrainBackenddefaultJSONResponse:
+		got = typed.StatusCode
+	default:
+		t.Fatalf("response = %T, want backend-runtime problem", response)
+	}
+
+	if got != want {
+		t.Fatalf("status = %d, want %d", got, want)
+	}
+}
+
+// assertUserRuntimeOverrideProblemStatus checks user-runtime generated problem responses.
+//
+//nolint:dupl // Generated response unions require parallel type switches.
+func assertUserRuntimeOverrideProblemStatus(t *testing.T, response any, want int) {
+	t.Helper()
+
+	var got int
+
+	switch typed := response.(type) {
+	case generated.MoveUserdefaultJSONResponse:
+		got = typed.StatusCode
+	case generated.KickUserdefaultJSONResponse:
+		got = typed.StatusCode
+	case generated.ClearUserAffinitydefaultJSONResponse:
+		got = typed.StatusCode
+	case generated.SetUserBackendPindefaultJSONResponse:
+		got = typed.StatusCode
+	default:
+		t.Fatalf("response = %T, want user-runtime override problem", response)
+	}
+
+	if got != want {
+		t.Fatalf("status = %d, want %d", got, want)
+	}
+}
+
 // assertGeneratedUserProblemStatus checks generated user-runtime problem responses.
 func assertGeneratedUserProblemStatus(t *testing.T, response any, want int, label string) {
 	t.Helper()
@@ -1771,6 +2073,141 @@ func stringPtrValue(value *string) string {
 	}
 
 	return *value
+}
+
+// assertNoUserRuntimeAdapterMutation verifies policy rejection happened before fake persistence.
+func assertNoUserRuntimeAdapterMutation(t *testing.T, user *recordingUserRuntimeMutator, pins *recordingUserBackendPinService) {
+	t.Helper()
+
+	if user.moveCalls != 0 || user.kickCalls != 0 || user.clearCalls != 0 {
+		t.Fatalf("unexpected user runtime calls: %#v", user)
+	}
+
+	if pins.setCalls != 0 || pins.clearCalls != 0 || pins.clearAllCalls != 0 {
+		t.Fatalf("unexpected backend-pin calls: %#v", pins)
+	}
+}
+
+// recordingUserRuntimeMutator validates user policy and records accepted mutations.
+type recordingUserRuntimeMutator struct {
+	moveCalls  int
+	kickCalls  int
+	clearCalls int
+}
+
+// MoveUser validates move policy and records accepted user moves.
+func (r *recordingUserRuntimeMutator) MoveUser(
+	_ context.Context,
+	request runtime.MoveUserRequest,
+	policy runtime.UserRuntimeOverridePolicy,
+) (runtime.UserMutationResult, error) {
+	if err := request.Validate(policy); err != nil {
+		return runtime.UserMutationResult{}, err
+	}
+
+	r.moveCalls++
+
+	return runtime.UserMutationResult{}, nil
+}
+
+// KickUser validates kick policy and records accepted user kicks.
+func (r *recordingUserRuntimeMutator) KickUser(
+	_ context.Context,
+	request runtime.KickUserRequest,
+	policy runtime.UserRuntimeOverridePolicy,
+) (runtime.UserMutationResult, error) {
+	if err := request.Validate(policy); err != nil {
+		return runtime.UserMutationResult{}, err
+	}
+
+	r.kickCalls++
+
+	return runtime.UserMutationResult{}, nil
+}
+
+// ClearUserAffinity validates clear policy and records accepted affinity clears.
+func (r *recordingUserRuntimeMutator) ClearUserAffinity(
+	_ context.Context,
+	request runtime.ClearUserAffinityRequest,
+	policy runtime.UserRuntimeOverridePolicy,
+) (runtime.UserMutationResult, error) {
+	if err := request.Validate(policy); err != nil {
+		return runtime.UserMutationResult{}, err
+	}
+
+	r.clearCalls++
+
+	return runtime.UserMutationResult{}, nil
+}
+
+// recordingBackendRuntimeMutator validates backend policy and records accepted mutations.
+type recordingBackendRuntimeMutator struct {
+	calls int
+}
+
+// SetInService validates in/out policy and records accepted in/out mutations.
+func (r *recordingBackendRuntimeMutator) SetInService(
+	_ context.Context,
+	request runtime.SetBackendInServiceRequest,
+	policy backend.RuntimeOverridePolicy,
+) (runtime.BackendMutationResult, error) {
+	if err := request.Validate(policy); err != nil {
+		return runtime.BackendMutationResult{}, err
+	}
+
+	r.calls++
+
+	return runtime.BackendMutationResult{}, nil
+}
+
+// SetWeight validates weight policy and records accepted weight mutations.
+func (r *recordingBackendRuntimeMutator) SetWeight(
+	_ context.Context,
+	request runtime.SetBackendWeightRequest,
+	policy backend.RuntimeOverridePolicy,
+) (runtime.BackendMutationResult, error) {
+	if err := request.Validate(policy); err != nil {
+		return runtime.BackendMutationResult{}, err
+	}
+
+	r.calls++
+
+	return runtime.BackendMutationResult{}, nil
+}
+
+// SetMaintenance records accepted maintenance mutations.
+func (r *recordingBackendRuntimeMutator) SetMaintenance(
+	context.Context,
+	runtime.SetBackendMaintenanceRequest,
+) (runtime.BackendMutationResult, error) {
+	r.calls++
+
+	return runtime.BackendMutationResult{}, nil
+}
+
+// StartDrain validates drain policy and records accepted drain mutations.
+func (r *recordingBackendRuntimeMutator) StartDrain(
+	_ context.Context,
+	request runtime.StartBackendDrainRequest,
+	policy backend.RuntimeOverridePolicy,
+) (runtime.BackendMutationResult, error) {
+	if err := request.Validate(policy); err != nil {
+		return runtime.BackendMutationResult{}, err
+	}
+
+	r.calls++
+
+	return runtime.BackendMutationResult{}, nil
+}
+
+// ClearRuntime records accepted backend runtime clear mutations.
+func (r *recordingBackendRuntimeMutator) ClearRuntime(
+	context.Context,
+	runtime.ClearBackendRuntimeRequest,
+) (runtime.BackendMutationResult, error) {
+	r.calls++
+
+	return runtime.BackendMutationResult{}, nil
 }
 
 // recordingBackendReader returns stable backend details for REST adapter tests.

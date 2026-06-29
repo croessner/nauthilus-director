@@ -500,14 +500,15 @@ func (s *RedisSessionStore) listRuntimeSessionSetPage(
 		}
 
 		for memberIndex := memberOffset; memberIndex < len(sessionIDs); memberIndex++ {
-			sessionID := sessionIDs[memberIndex]
-			record, visible, present, readErr := s.readRuntimeSessionByID(ctx, sessionID)
+			member := sessionIDs[memberIndex]
+
+			record, visible, present, readErr := s.readRuntimeSessionFromSetMember(ctx, family, member)
 			if readErr != nil {
 				return RuntimeSessionPage{}, readErr
 			}
 
 			if !present {
-				s.removeStaleSetMember(ctx, indexKeys[shard], sessionID)
+				s.removeStaleRuntimeSetMember(ctx, indexKeys[shard], family, member)
 
 				continue
 			}
@@ -557,6 +558,58 @@ func (s *RedisSessionStore) listRuntimeSessionSetPage(
 	}
 
 	return s.recordRuntimeSessionPage(ctx, runtimeSessionSetPageOperation(family), RuntimeSessionPage{Records: records}, limit, pageStarted), nil
+}
+
+// readRuntimeSessionFromSetMember reads user or backend session membership entries.
+func (s *RedisSessionStore) readRuntimeSessionFromSetMember(
+	ctx context.Context,
+	family string,
+	member string,
+) (RuntimeSessionRecord, bool, bool, error) {
+	if family != runtimeReadFamilyBackend {
+		return s.readRuntimeSessionByID(ctx, member)
+	}
+
+	entry, ok := parseBackendSessionIndexMember(member)
+	if !ok {
+		return RuntimeSessionRecord{}, false, false, nil
+	}
+
+	if entry.SessionKey == "" {
+		return s.readRuntimeSessionByID(ctx, entry.SessionID)
+	}
+
+	record, visible, present, err := s.readRuntimeSession(ctx, entry.SessionID, entry.SessionKey)
+	if err != nil || !present {
+		return record, visible, present, err
+	}
+
+	sessionIndexKey, err := s.keys.SessionIndexShardKey(entry.SessionID)
+	if err != nil {
+		return RuntimeSessionRecord{}, false, false, err
+	}
+
+	if err := s.repairSessionLocator(ctx, sessionIndexKey, entry.SessionID, entry.SessionKey); err != nil {
+		return RuntimeSessionRecord{}, false, false, err
+	}
+
+	return record, visible, present, nil
+}
+
+// removeStaleRuntimeSetMember removes stale user or backend membership entries.
+func (s *RedisSessionStore) removeStaleRuntimeSetMember(ctx context.Context, indexKey string, family string, member string) {
+	if family != runtimeReadFamilyBackend {
+		s.removeStaleSetMember(ctx, indexKey, member)
+
+		return
+	}
+
+	entry, ok := parseBackendSessionIndexMember(member)
+	if !ok {
+		return
+	}
+
+	s.removeStaleBackendSessionIndex(ctx, indexKey, entry)
 }
 
 // nextRuntimeHashReadCursor chooses the next opaque cursor for HSCAN over-return.

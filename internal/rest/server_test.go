@@ -199,6 +199,7 @@ func TestOIDCControlAuthEnforcesScopes(t *testing.T) {
 	}{
 		{name: "introspection failure", token: "bad", err: errors.New("introspection failed"), path: pathVersion, wantStatus: http.StatusUnauthorized},
 		{name: "inactive", token: "inactive", result: nauthilus.OIDCIntrospectionResult{Active: false}, path: pathVersion, wantStatus: http.StatusUnauthorized},
+		{name: "missing audience binding", token: "unbound", result: nauthilus.OIDCIntrospectionResult{Active: true, Subject: "operator-a", Scopes: []string{"nauthilus-director.admin"}}, path: pathVersion, wantStatus: http.StatusForbidden},
 		{name: "missing ordinary scope", token: "scope-miss", result: oidcResult("operator-a", []string{"other"}), path: pathVersion, wantStatus: http.StatusForbidden},
 		{name: "ordinary scope", token: "ordinary", result: oidcResult("operator-a", []string{"nauthilus-director.admin"}), path: pathVersion, wantStatus: http.StatusOK},
 		{name: "protected scope missing", token: "ordinary", result: oidcResult("operator-a", []string{"nauthilus-director.admin"}), path: "/api/v1/config/defaults?include_protected=true", wantStatus: http.StatusForbidden},
@@ -626,6 +627,7 @@ func oidcControlConfig() config.ControlServerConfig {
 	control.Auth.OIDC.Validation = "nauthilus"
 	control.Auth.OIDC.RequiredScopes = []string{"nauthilus-director.admin"}
 	control.Auth.OIDC.ProtectedScopes = []string{"nauthilus-director.protected"}
+	control.Auth.OIDC.RequiredAudience = "nauthilus-director"
 	control.Auth.MTLS.Enabled = false
 
 	return control
@@ -672,9 +674,10 @@ func mtlsControlConfig() config.ControlServerConfig {
 // oidcResult returns one active fake Nauthilus introspection result.
 func oidcResult(subject string, scopes []string) nauthilus.OIDCIntrospectionResult {
 	return nauthilus.OIDCIntrospectionResult{
-		Active:  true,
-		Subject: subject,
-		Scopes:  scopes,
+		Active:   true,
+		Subject:  subject,
+		Audience: "nauthilus-director",
+		Scopes:   scopes,
 	}
 }
 

@@ -19,6 +19,8 @@ package backend
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -302,7 +304,7 @@ func TestStaticRegistryRejectsUnixSocketBackendAddress(t *testing.T) {
 
 // TestStaticRegistryFailsClosedOnPoolProtocolMismatch rejects ambiguous config.
 func TestStaticRegistryFailsClosedOnPoolProtocolMismatch(t *testing.T) {
-	cfg := config.DefaultConfig()
+	cfg := backendConfigWithSecretFiles(t, config.DefaultConfig())
 	pool := cfg.Director.BackendPools[testPoolIMAP]
 	pool.Backends = []string{testBackendIDLMTP}
 	cfg.Director.BackendPools[testPoolIMAP] = pool
@@ -329,6 +331,120 @@ func TestBackendHealthSecretRedaction(t *testing.T) {
 
 	if !strings.Contains(formatted, "<redacted>") {
 		t.Fatalf("formatted health password = %s, want redaction marker", formatted)
+	}
+}
+
+// TestBackendSecretMethodsReadBackendSecretFiles verifies backend auth and health use file contents.
+func TestBackendSecretMethodsReadBackendSecretFiles(t *testing.T) {
+	cfg := config.DefaultConfig()
+	backendConfig := cfg.Director.Backends[testBackendID]
+	masterPath := writeBackendSecretFile(t, "master-secret\n")
+	healthPath := writeBackendSecretFile(t, "health-secret\n")
+	backendConfig.Auth.MasterUser.PasswordFile = config.Secret(masterPath)
+	backendConfig.HealthCheck.PasswordFile = config.Secret(healthPath)
+	cfg.Director.Backends[testBackendID] = backendConfig
+
+	registry, err := NewStaticRegistry(cfg.Director)
+	if err != nil {
+		t.Fatalf("NewStaticRegistry returned error: %v", err)
+	}
+
+	entry, err := registry.Lookup(context.Background(), testBackendID)
+	if err != nil {
+		t.Fatalf("Lookup returned error: %v", err)
+	}
+
+	masterSecret, err := entry.Auth.MasterUser.PasswordValue("director.backends.auth.master_user.password_file")
+	if err != nil {
+		t.Fatalf("PasswordValue returned error: %v", err)
+	}
+
+	if masterSecret != "master-secret" {
+		t.Fatalf("master password = %q, want file content", masterSecret)
+	}
+
+	if masterSecret == masterPath {
+		t.Fatal("master password used the password_file path string")
+	}
+
+	healthSecret, err := entry.Health.PasswordValue("director.backends.health_check.password_file")
+	if err != nil {
+		t.Fatalf("Health PasswordValue returned error: %v", err)
+	}
+
+	if healthSecret != "health-secret" {
+		t.Fatalf("health password = %q, want file content", healthSecret)
+	}
+
+	if healthSecret == healthPath {
+		t.Fatal("health password used the password_file path string")
+	}
+}
+
+// TestBackendSecretMethodsReadSASLAndOAuthSecretFiles covers LMTP service credentials.
+func TestBackendSecretMethodsReadSASLAndOAuthSecretFiles(t *testing.T) {
+	cfg := config.DefaultConfig()
+	backendConfig := cfg.Director.Backends[testBackendIDLMTP]
+	passwordPath := writeBackendSecretFile(t, "lmtp-password\n")
+	tokenPath := writeBackendSecretFile(t, "lmtp-token\n")
+	backendConfig.Auth.SASL.PasswordFile = config.Secret(passwordPath)
+	backendConfig.Auth.OAuthBearer.TokenFile = config.Secret(tokenPath)
+	cfg.Director.Backends[testBackendIDLMTP] = backendConfig
+
+	registry := mustStaticRegistry(t, cfg)
+
+	entry, err := registry.Lookup(context.Background(), testBackendIDLMTP)
+	if err != nil {
+		t.Fatalf("Lookup returned error: %v", err)
+	}
+
+	saslSecret, err := entry.Auth.SASL.PasswordValue("director.backends.auth.sasl.password_file")
+	if err != nil {
+		t.Fatalf("SASL PasswordValue returned error: %v", err)
+	}
+
+	if saslSecret != "lmtp-password" {
+		t.Fatalf("SASL password = %q, want file content", saslSecret)
+	}
+
+	if saslSecret == passwordPath {
+		t.Fatal("SASL password used the password_file path string")
+	}
+
+	tokenSecret, err := entry.Auth.OAuthBearer.TokenValue("director.backends.auth.oauthbearer.token_file")
+	if err != nil {
+		t.Fatalf("TokenValue returned error: %v", err)
+	}
+
+	if tokenSecret != "lmtp-token" {
+		t.Fatalf("OAuth token = %q, want file content", tokenSecret)
+	}
+
+	if tokenSecret == tokenPath {
+		t.Fatal("OAuth token used the token_file path string")
+	}
+}
+
+// TestBackendSecretMethodsFailClosedOnMissingBackendSecretFile rejects broken backend refs.
+func TestBackendSecretMethodsFailClosedOnMissingBackendSecretFile(t *testing.T) {
+	cfg := backendConfigWithSecretFiles(t, config.DefaultConfig())
+	backendConfig := cfg.Director.Backends[testBackendID]
+	backendConfig.Auth.MasterUser.PasswordFile = config.Secret(filepath.Join(t.TempDir(), "missing"))
+	cfg.Director.Backends[testBackendID] = backendConfig
+
+	registry, err := NewStaticRegistry(cfg.Director)
+	if err != nil {
+		t.Fatalf("NewStaticRegistry returned error: %v", err)
+	}
+
+	entry, err := registry.Lookup(context.Background(), testBackendID)
+	if err != nil {
+		t.Fatalf("Lookup returned error: %v", err)
+	}
+
+	_, err = entry.Auth.MasterUser.PasswordValue("director.backends.auth.master_user.password_file")
+	if err == nil {
+		t.Fatal("PasswordValue accepted missing password_file")
 	}
 }
 
@@ -471,6 +587,7 @@ func singleBackendConfig(mode string, weight int) config.Config {
 func mustStaticRegistry(t *testing.T, cfg config.Config) *StaticRegistry {
 	t.Helper()
 
+	cfg = backendConfigWithSecretFiles(t, cfg)
 	registry, err := NewStaticRegistry(cfg.Director)
 	if err != nil {
 		t.Fatalf("NewStaticRegistry returned error: %v", err)
@@ -489,4 +606,49 @@ func mustStaticSelector(t *testing.T, cfg config.Config, policy SelectionPolicy)
 	}
 
 	return selector
+}
+
+// backendConfigWithSecretFiles replaces default file-looking fixture values with real temp files.
+func backendConfigWithSecretFiles(t *testing.T, cfg config.Config) config.Config {
+	t.Helper()
+
+	for name, backendConfig := range cfg.Director.Backends {
+		if !backendConfig.Auth.MasterUser.PasswordFile.IsZero() && !pathExists(backendConfig.Auth.MasterUser.PasswordFile.Value()) {
+			backendConfig.Auth.MasterUser.PasswordFile = config.Secret(writeBackendSecretFile(t, "master-secret\n"))
+		}
+
+		if !backendConfig.Auth.SASL.PasswordFile.IsZero() && !pathExists(backendConfig.Auth.SASL.PasswordFile.Value()) {
+			backendConfig.Auth.SASL.PasswordFile = config.Secret(writeBackendSecretFile(t, "sasl-secret\n"))
+		}
+
+		if !backendConfig.Auth.OAuthBearer.TokenFile.IsZero() && !pathExists(backendConfig.Auth.OAuthBearer.TokenFile.Value()) {
+			backendConfig.Auth.OAuthBearer.TokenFile = config.Secret(writeBackendSecretFile(t, "oauth-token\n"))
+		}
+
+		if !backendConfig.HealthCheck.PasswordFile.IsZero() && !pathExists(backendConfig.HealthCheck.PasswordFile.Value()) {
+			backendConfig.HealthCheck.PasswordFile = config.Secret(writeBackendSecretFile(t, "health-secret\n"))
+		}
+
+		cfg.Director.Backends[name] = backendConfig
+	}
+
+	return cfg
+}
+
+// pathExists reports whether a configured secret fixture already points to a file.
+func pathExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// writeBackendSecretFile writes one backend secret fixture.
+func writeBackendSecretFile(t *testing.T, content string) string {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "secret")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write backend secret file: %v", err)
+	}
+
+	return path
 }

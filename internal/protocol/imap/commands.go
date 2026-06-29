@@ -38,7 +38,7 @@ func (s *Session) handlePreauthCommand(ctx context.Context, command preauthComma
 	case commandLogout:
 		return commandOutcome{closeSession: true}, s.handleLogout(command)
 	case commandStartTLS:
-		return commandOutcome{}, s.handleStartTLS(command)
+		return s.handleStartTLS(command)
 	case commandID:
 		return commandOutcome{}, s.handleID(command)
 	case commandLogin:

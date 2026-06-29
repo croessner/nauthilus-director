@@ -45,10 +45,13 @@ auth:
 
 The Director discovers Nauthilus metadata from the issuer's
 `/.well-known/openid-configuration` unless an explicit discovery URL is
-configured. Discovery must provide usable `token_endpoint` and
-`introspection_endpoint` values and must advertise the configured client auth
-methods. Missing metadata fails closed when OIDC caller auth, control-plane
-OIDC validation or SASL bearer introspection requires it.
+configured. A direct `discovery_url` still requires the matching `issuer` as a
+local issuer pin and must use HTTPS unless it points to loopback HTTP for local
+development. Discovery must provide usable `token_endpoint` and
+`introspection_endpoint` values, return the pinned issuer, and advertise the
+configured client auth methods. Missing or mismatched metadata fails closed
+when OIDC caller auth, control-plane OIDC validation or SASL bearer
+introspection requires it.
 
 Direct `token_endpoint` overrides are compatibility settings. Prefer discovery
 unless a deployment has a documented reason to pin a token endpoint.
@@ -264,11 +267,13 @@ then rotate any failed OIDC secret material.
 | Failure | Operator symptom | Safe response |
 | --- | --- | --- |
 | Discovery unavailable | Startup, reload validation or first token acquisition fails closed for OIDC-enabled authority. | Check issuer/discovery URL reachability from the Director host, TLS trust roots and Nauthilus OIDC availability. |
+| Direct discovery rejected | Startup, reload validation or first OIDC use fails before fetching metadata. | Configure `issuer` together with `discovery_url`, and use HTTPS unless the URL is loopback HTTP for local development. |
 | Token endpoint unavailable | Protocol auth paths that need Nauthilus fail once no unexpired cached caller token is available. | Check Nauthilus token endpoint health and network/TLS path; do not fall back silently. |
 | Bad client secret or private key | Token endpoint returns an authentication error; no caller token is cached. | Verify mounted secret file path, ownership and Nauthilus client registration; rotate the secret if exposed. |
 | Expired token plus refresh failure | Existing unexpired cache cannot be used; authority calls fail closed. | Repair Nauthilus or network path and let the process acquire a new token. |
 | Insufficient authority scope | Nauthilus rejects the backchannel request. | Add the missing backchannel scope to the Nauthilus client and restart after config validation. |
 | Control token audience mismatch | Nauthilus introspection returns inactive for the operator token. | Issue the control token for the Director control OIDC client audience expected by Nauthilus introspection. |
+| Control token unbound locally | Control requests return `403` even though the token is active and scoped. | Set `runtime.servers.control.auth.oidc.required_audience` or `required_resource` to the local token binding and issue tokens with a matching `aud` or `resource` claim. |
 | Control token missing protected scope | Normal control commands work; protected config or pprof returns `403`. | Use a short-lived token with the protected scope only for the protected operation. |
 | Control introspection inactive or denied | Control requests return `401` or `403` without revealing token detail. | Check token lifetime, audience, client registration, `oidc.client_credentials.introspection_endpoint_auth_method` and Nauthilus logs. |
-| Mail SASL bearer introspection denied | `XOAUTH2` or `OAUTHBEARER` auth is rejected or temporarily fails without token detail. | Check `mechanisms.bearer.introspection.required_scope`, `account_claim`, endpoint client-auth method, Nauthilus introspection logs and backend replay policy. |
+| Mail SASL bearer introspection denied | `XOAUTH2` or `OAUTHBEARER` auth is rejected or temporarily fails without token detail. | Check `mechanisms.bearer.introspection.required_audience` or `required_resource`, `required_scope`, `account_claim`, endpoint client-auth method, Nauthilus introspection logs and backend replay policy. |

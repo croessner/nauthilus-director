@@ -245,7 +245,14 @@ func (s *RedisSessionStore) AttachSelectedBackend(
 	}
 
 	record.BackendActiveCount = activeCount
-	s.writeRepairableAttachIndexes(ctx, attachment, sessionKey, record.LeaseExpiresAt)
+	if err := s.writeRepairableAttachIndexes(ctx, attachment, sessionKey, record.LeaseExpiresAt); err != nil {
+		return SessionBackendRecord{}, err
+	}
+
+	if err := s.markAttachedSessionForActiveBackendRuntime(ctx, attachment, sessionKey); err != nil {
+		return SessionBackendRecord{}, err
+	}
+
 	s.upsertSessionAggregateFromSession(ctx, attachment.SessionID, sessionKey)
 
 	return record, nil
@@ -828,40 +835,51 @@ func (s *RedisSessionStore) writeRepairableAttachIndexes(
 	attachment SessionBackendAttachment,
 	sessionKey string,
 	leaseExpiresAt time.Time,
-) {
+) error {
 	backendSessionIndexKey, err := s.keys.BackendSessionIndexShardKey(attachment.BackendIdentifier, attachment.SessionID)
 	if err != nil {
 		s.recordRedisOperation(redisContext(ctx), "attach_backend_session_index", time.Now(), err)
 
-		return
+		return err
 	}
 
 	userSessionIndexKey, err := s.keys.UserSessionIndexShardKey(attachment.Key.Tenant, attachment.Key.AccountKey, attachment.SessionID)
 	if err != nil {
 		s.recordRedisOperation(redisContext(ctx), "attach_user_session_index", time.Now(), err)
 
-		return
+		return err
 	}
 
 	sessionIndexKey, err := s.keys.SessionIndexShardKey(attachment.SessionID)
 	if err != nil {
 		s.recordRedisOperation(redisContext(ctx), "attach_session_index", time.Now(), err)
 
-		return
+		return err
 	}
 
 	sessionDueIndexKey, err := s.keys.SessionDueIndexShardKey(attachment.SessionID)
 	if err != nil {
 		s.recordRedisOperation(redisContext(ctx), "attach_session_due_index", time.Now(), err)
 
-		return
+		return err
 	}
 
-	s.runRepairableIndexCommand(ctx, "attach_backend_index", func(redisCtx context.Context) error {
+	if err := s.runRequiredRepairableIndexCommand(ctx, "attach_backend_index", func(redisCtx context.Context) error {
 		return s.client.SAdd(redisCtx, s.keys.BackendIndexKey(), attachment.BackendIdentifier).Err()
-	})
-	s.runRepairableIndexCommand(ctx, "attach_backend_session_index", func(redisCtx context.Context) error {
-		return s.client.SAdd(redisCtx, backendSessionIndexKey, attachment.SessionID).Err()
+	}); err != nil {
+		return err
+	}
+
+	member := encodeBackendSessionIndexMember(attachment.SessionID, sessionKey)
+
+	if err := s.runRequiredRepairableIndexCommand(ctx, "attach_backend_session_index", func(redisCtx context.Context) error {
+		return s.client.SAdd(redisCtx, backendSessionIndexKey, member).Err()
+	}); err != nil {
+		return err
+	}
+
+	s.runRepairableIndexCommand(ctx, "attach_backend_session_legacy_index", func(redisCtx context.Context) error {
+		return s.client.SRem(redisCtx, backendSessionIndexKey, attachment.SessionID).Err()
 	})
 	s.runRepairableIndexCommand(ctx, "attach_user_session_index", func(redisCtx context.Context) error {
 		return s.client.SAdd(redisCtx, userSessionIndexKey, attachment.SessionID).Err()
@@ -880,6 +898,8 @@ func (s *RedisSessionStore) writeRepairableAttachIndexes(
 			"backend_sessions_key", backendSessionIndexKey,
 		).Err()
 	})
+
+	return nil
 }
 
 // writeRepairableCloseIndexes updates secondary indexes after authoritative close.
@@ -927,7 +947,12 @@ func (s *RedisSessionStore) writeRepairableCloseIndexes(ctx context.Context, del
 	}
 
 	s.runRepairableIndexCommand(ctx, "close_backend_session_index", func(redisCtx context.Context) error {
-		return s.client.SRem(redisCtx, backendSessionIndexKey, delta.SessionID).Err()
+		sessionKey, keyErr := s.keys.SessionKey(delta.Tenant, delta.AccountKey, delta.SessionID)
+		if keyErr != nil {
+			return keyErr
+		}
+
+		return s.client.SRem(redisCtx, backendSessionIndexKey, delta.SessionID, encodeBackendSessionIndexMember(delta.SessionID, sessionKey)).Err()
 	})
 
 	if delta.BackendCounted {
@@ -1001,6 +1026,16 @@ func (s *RedisSessionStore) runRepairableIndexCommand(ctx context.Context, opera
 	started := time.Now()
 	err := ClassifyRedisError(operation, command(redisCtx))
 	s.recordRedisOperation(redisCtx, operation, started, err)
+}
+
+// runRequiredRepairableIndexCommand records a required repair write and returns failures.
+func (s *RedisSessionStore) runRequiredRepairableIndexCommand(ctx context.Context, operation string, command func(context.Context) error) error {
+	redisCtx := redisContext(ctx)
+	started := time.Now()
+	err := ClassifyRedisError(operation, command(redisCtx))
+	s.recordRedisOperation(redisCtx, operation, started, err)
+
+	return err
 }
 
 // runRepairableIndexCountCommand records a repairable write and counts successful removals.

@@ -147,10 +147,11 @@ type RuntimeStateBackendReservationsConfig struct {
 }
 
 type ControlServerConfig struct {
-	Enabled bool              `mapstructure:"enabled" yaml:"enabled"`
-	Address string            `mapstructure:"address" yaml:"address" validate:"required"`
-	Auth    ControlAuthConfig `mapstructure:"auth" yaml:"auth" validate:"required"`
-	TLS     ControlTLSConfig  `mapstructure:"tls" yaml:"tls" validate:"required"`
+	Enabled                bool              `mapstructure:"enabled" yaml:"enabled"`
+	Address                string            `mapstructure:"address" yaml:"address" validate:"required"`
+	AllowPlaintextLoopback bool              `mapstructure:"allow_plaintext_loopback" yaml:"allow_plaintext_loopback"`
+	Auth                   ControlAuthConfig `mapstructure:"auth" yaml:"auth" validate:"required"`
+	TLS                    ControlTLSConfig  `mapstructure:"tls" yaml:"tls" validate:"required"`
 }
 
 type ControlAuthConfig struct {
@@ -172,11 +173,13 @@ type ControlBearerAuthConfig struct {
 }
 
 type ControlOIDCAuthConfig struct {
-	Enabled         bool     `mapstructure:"enabled" yaml:"enabled"`
-	Authority       string   `mapstructure:"authority" yaml:"authority"`
-	Validation      string   `mapstructure:"validation" yaml:"validation"`
-	RequiredScopes  []string `mapstructure:"required_scopes" yaml:"required_scopes"`
-	ProtectedScopes []string `mapstructure:"protected_scopes" yaml:"protected_scopes"`
+	Enabled          bool     `mapstructure:"enabled" yaml:"enabled"`
+	Authority        string   `mapstructure:"authority" yaml:"authority"`
+	Validation       string   `mapstructure:"validation" yaml:"validation"`
+	RequiredAudience string   `mapstructure:"required_audience" yaml:"required_audience"`
+	RequiredResource string   `mapstructure:"required_resource" yaml:"required_resource"`
+	RequiredScopes   []string `mapstructure:"required_scopes" yaml:"required_scopes"`
+	ProtectedScopes  []string `mapstructure:"protected_scopes" yaml:"protected_scopes"`
 }
 
 type ControlMTLSAuthConfig struct {

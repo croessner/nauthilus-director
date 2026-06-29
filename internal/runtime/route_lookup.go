@@ -33,35 +33,36 @@ import (
 const operationRouteLookup = "route_lookup"
 
 const (
-	routeLookupBackendPinAbsent       = "backend_pin_absent"
-	routeLookupBackendPinApplied      = "backend_pin_applied"
-	routeLookupBackendPinExcluded     = "backend_pin_excluded"
-	routeLookupBackendPinMismatch     = "backend_pin_mismatch"
-	routeLookupBackendPinOtherScopes  = "backend_pin_other_scopes"
-	routeLookupBackendPinReadFailed   = "backend_pin_read_failed"
-	routeLookupBindingSourceNone      = "none"
-	routeLookupReasonBindingMissing   = "backend_node_missing_protocol"
-	routeLookupReasonBindingMismatch  = "backend_node_mismatch"
-	routeLookupReasonBindingUnusable  = "backend_node_unusable"
-	routeLookupReasonOK               = "ok"
-	routeLookupReasonOther            = "other"
-	routeLookupStatusRetained         = "retained"
-	routeLookupSourceActiveAffinity   = "active_affinity"
-	routeLookupSourceFailClosed       = "fail_closed"
-	routeLookupSourceInitialPlacement = "initial_placement"
-	routeLookupSourceMovementOverride = "movement_override"
-	routeLookupSourceRetainedBinding  = "retained_backend_binding"
-	routeLookupIdentityActiveAffinity = "active_affinity"
-	routeLookupIdentityCallerSupplied = "caller_supplied"
-	routeLookupIdentityNauthilus      = "nauthilus_lookup"
-	routeLookupIdentityNotApplicable  = "not_applicable"
-	routeLookupIdentityMethod         = "recipient_lookup"
-	routeLookupReasonOperatorPin      = "operator_backend_pin"
-	routeLookupProtocolLMTP           = "lmtp"
-	routeLookupUserHoldAbsent         = "user_hold_absent"
-	routeLookupUserHoldActive         = "user_hold_active"
-	routeLookupUserHoldExpired        = "user_hold_expired"
-	routeLookupUserHoldReadFailed     = "user_hold_read_failed"
+	routeLookupBackendPinAbsent        = "backend_pin_absent"
+	routeLookupBackendPinApplied       = "backend_pin_applied"
+	routeLookupBackendPinExcluded      = "backend_pin_excluded"
+	routeLookupBackendPinMismatch      = "backend_pin_mismatch"
+	routeLookupBackendPinOtherScopes   = "backend_pin_other_scopes"
+	routeLookupBackendPinReadFailed    = "backend_pin_read_failed"
+	routeLookupBindingSourceNone       = "none"
+	routeLookupReasonBindingMissing    = "backend_node_missing_protocol"
+	routeLookupReasonBindingMismatch   = "backend_node_mismatch"
+	routeLookupReasonBindingUnusable   = "backend_node_unusable"
+	routeLookupReasonOK                = "ok"
+	routeLookupReasonOther             = "other"
+	routeLookupStatusRetained          = "retained"
+	routeLookupSourceActiveAffinity    = "active_affinity"
+	routeLookupSourceFailClosed        = "fail_closed"
+	routeLookupSourceInitialPlacement  = "initial_placement"
+	routeLookupSourceMovementOverride  = "movement_override"
+	routeLookupSourceRetainedBinding   = "retained_backend_binding"
+	routeLookupIdentityActiveAffinity  = "active_affinity"
+	routeLookupIdentityCallerSupplied  = "caller_supplied"
+	routeLookupIdentityRetainedBinding = "retained_backend_binding"
+	routeLookupIdentityUnresolved      = "director_state_unresolved"
+	routeLookupIdentityNotApplicable   = "not_applicable"
+	routeLookupReasonAccountUnresolved = "account_unresolved"
+	routeLookupReasonOperatorPin       = "operator_backend_pin"
+	routeLookupProtocolLMTP            = "lmtp"
+	routeLookupUserHoldAbsent          = "user_hold_absent"
+	routeLookupUserHoldActive          = "user_hold_active"
+	routeLookupUserHoldExpired         = "user_hold_expired"
+	routeLookupUserHoldReadFailed      = "user_hold_read_failed"
 )
 
 // RouteLookupRequest describes a side-effect-free route diagnostic request.
@@ -184,11 +185,6 @@ type RouteLookupIdentityState struct {
 	AccountResolved bool
 }
 
-// RouteLookupIdentityLookuper resolves LMTP recipients without credential authentication.
-type RouteLookupIdentityLookuper interface {
-	LookupRouteIdentity(ctx context.Context, request RouteLookupIdentityLookupRequest) (RouteLookupIdentityLookupResult, error)
-}
-
 // RouteLookupBackendPinReader reads backend-pin state without mutating leases.
 type RouteLookupBackendPinReader interface {
 	ListUserBackendPins(ctx context.Context, request state.UserBackendPinsListRequest) (state.UserBackendPinsRecord, error)
@@ -202,21 +198,6 @@ type RouteLookupBackendNodeSelector interface {
 // RouteLookupUserHoldReader reads placement-hold state without mutating or waiting.
 type RouteLookupUserHoldReader interface {
 	CheckUserHold(ctx context.Context, request state.UserHoldCheckRequest) (state.UserHoldRecord, error)
-}
-
-// RouteLookupIdentityLookupRequest carries secret-free identity lookup context.
-type RouteLookupIdentityLookupRequest struct {
-	Username string
-	ClientIP string
-	Protocol string
-	Method   string
-}
-
-// RouteLookupIdentityLookupResult carries canonical account facts for route lookup.
-type RouteLookupIdentityLookupResult struct {
-	Authenticated bool
-	Account       string
-	Attributes    map[string][]string
 }
 
 // RouteLookupResponse describes the read-only route lookup outcome.
@@ -243,7 +224,6 @@ type RouteLookupServiceOptions struct {
 	AffinityRead     state.AffinityStore
 	BackendPinRead   RouteLookupBackendPinReader
 	UserHoldRead     RouteLookupUserHoldReader
-	IdentityLookup   RouteLookupIdentityLookuper
 	ListenerContexts []RouteLookupListenerContext
 	DefaultPool      string
 	DefaultShard     string
@@ -260,7 +240,6 @@ type RouteLookupService struct {
 	affinityRead     state.AffinityStore
 	backendPinRead   RouteLookupBackendPinReader
 	userHoldRead     RouteLookupUserHoldReader
-	identityLookup   RouteLookupIdentityLookuper
 	listenerContexts map[string]RouteLookupListenerContext
 	defaultPools     map[string]string
 	defaultPool      string
@@ -296,7 +275,6 @@ func NewRouteLookupService(options RouteLookupServiceOptions) (*RouteLookupServi
 		affinityRead:     options.AffinityRead,
 		backendPinRead:   options.BackendPinRead,
 		userHoldRead:     options.UserHoldRead,
-		identityLookup:   options.IdentityLookup,
 		listenerContexts: routeLookupListenerContexts(options.ListenerContexts),
 		defaultPools:     routeLookupDefaultPools(options.ListenerContexts),
 		defaultPool:      strings.TrimSpace(options.DefaultPool),
@@ -347,6 +325,12 @@ func (s *RouteLookupService) Lookup(ctx context.Context, request RouteLookupRequ
 		s.recordRouteLookup(ctx, request, runtimeObservationResultFailure, "identity", RouteLookupResponse{}, time.Since(started))
 
 		return RouteLookupResponse{}, err
+	}
+	if !identity.AccountResolved {
+		response := routeLookupUnresolvedIdentityResponse(request, identity)
+		s.recordRouteLookup(ctx, request, runtimeObservationResultOK, response.ReasonClass, response, time.Since(started))
+
+		return response, nil
 	}
 
 	routingResult, err := s.resolver.Resolve(ctx, routing.RoutingRequest{
@@ -614,7 +598,7 @@ func (s *RouteLookupService) defaultPoolForProtocol(protocol string) string {
 	return s.defaultPool
 }
 
-// resolveLookupIdentity resolves optional LMTP recipient input before routing.
+// resolveLookupIdentity resolves optional LMTP recipient input from Director-owned state only.
 func (s *RouteLookupService) resolveLookupIdentity(ctx context.Context, request *RouteLookupRequest) (RouteLookupIdentityState, error) {
 	if request.AccountKey != "" {
 		return RouteLookupIdentityState{
@@ -633,37 +617,33 @@ func (s *RouteLookupService) resolveLookupIdentity(ctx context.Context, request 
 		return RouteLookupIdentityState{Source: routeLookupIdentityNotApplicable}, newRuntimeError(ErrorKindInvalidRequest, operationRouteLookup, "recipient invalid")
 	}
 
-	if identity := s.resolveIdentityFromActiveAffinity(ctx, request, recipient); identity.AccountResolved {
+	if identity := s.resolveIdentityFromDirectorState(ctx, request, recipient); identity.AccountResolved {
 		return identity, nil
 	}
 
-	if s.identityLookup == nil {
-		return RouteLookupIdentityState{Source: routeLookupIdentityNotApplicable}, newRuntimeError(ErrorKindUnavailable, operationRouteLookup, "identity lookup required")
-	}
-
-	result, err := s.identityLookup.LookupRouteIdentity(ctx, RouteLookupIdentityLookupRequest{
-		Username: recipient,
-		ClientIP: request.ClientIP,
-		Protocol: request.Protocol,
-		Method:   routeLookupIdentityMethod,
-	})
-	if err != nil {
-		return RouteLookupIdentityState{Source: routeLookupIdentityNauthilus, NauthilusUsed: true}, err
-	}
-
-	if !result.Authenticated || strings.TrimSpace(result.Account) == "" {
-		return RouteLookupIdentityState{Source: routeLookupIdentityNauthilus, NauthilusUsed: true}, newRuntimeError(ErrorKindUnavailable, operationRouteLookup, "identity lookup failed")
-	}
-
-	request.AccountKey = strings.ToLower(strings.TrimSpace(result.Account))
-	request.Attributes = mergeLookupAttributes(result.Attributes, request.Attributes)
-
 	return RouteLookupIdentityState{
-		Source:          routeLookupIdentityNauthilus,
-		Authoritative:   true,
-		NauthilusUsed:   true,
-		AccountResolved: true,
+		Source:          routeLookupIdentityUnresolved,
+		Authoritative:   false,
+		NauthilusUsed:   false,
+		AccountResolved: false,
 	}, nil
+}
+
+// routeLookupUnresolvedIdentityResponse returns bounded uncertainty without consulting authority systems.
+func routeLookupUnresolvedIdentityResponse(request RouteLookupRequest, identity RouteLookupIdentityState) RouteLookupResponse {
+	return RouteLookupResponse{
+		Routing: RouteLookupRoutingState{
+			Tenant:         request.Tenant,
+			RequestedShard: request.RequestedShard,
+			RoutingSource:  routeLookupReasonAccountUnresolved,
+		},
+		BackendPin:  RouteLookupBackendPinState{ReasonClass: routeLookupBackendPinAbsent},
+		UserHold:    RouteLookupUserHoldState{ReasonClass: routeLookupUserHoldAbsent},
+		Identity:    identity,
+		Source:      routeLookupSourceFailClosed,
+		FailClosed:  true,
+		ReasonClass: routeLookupReasonAccountUnresolved,
+	}
 }
 
 // routeLookupRecipientIdentity derives the LMTP lookup identity without importing protocol state.
@@ -728,8 +708,8 @@ func routeLookupStripSourceRoute(address string) string {
 	return ""
 }
 
-// resolveIdentityFromActiveAffinity uses an existing active pin before external lookup.
-func (s *RouteLookupService) resolveIdentityFromActiveAffinity(
+// resolveIdentityFromDirectorState uses existing Director-owned affinity state for recipient routing.
+func (s *RouteLookupService) resolveIdentityFromDirectorState(
 	ctx context.Context,
 	request *RouteLookupRequest,
 	lookupName string,
@@ -747,7 +727,17 @@ func (s *RouteLookupService) resolveIdentityFromActiveAffinity(
 		Tenant:     request.Tenant,
 		AccountKey: accountKey,
 	})
-	if err != nil || !record.Present || record.ActiveSessionCount <= 0 || strings.TrimSpace(record.ShardTag) == "" {
+	if err != nil || !record.Present || strings.TrimSpace(record.ShardTag) == "" {
+		return RouteLookupIdentityState{Source: routeLookupIdentityNotApplicable}
+	}
+
+	var identitySource string
+	switch {
+	case routeLookupAffinityActive(record):
+		identitySource = routeLookupIdentityActiveAffinity
+	case routeLookupAffinityRetained(record):
+		identitySource = routeLookupIdentityRetainedBinding
+	default:
 		return RouteLookupIdentityState{Source: routeLookupIdentityNotApplicable}
 	}
 
@@ -755,7 +745,7 @@ func (s *RouteLookupService) resolveIdentityFromActiveAffinity(
 	request.IncludeAffinity = true
 
 	return RouteLookupIdentityState{
-		Source:          routeLookupIdentityActiveAffinity,
+		Source:          identitySource,
 		Authoritative:   false,
 		NauthilusUsed:   false,
 		AccountResolved: true,
@@ -1551,24 +1541,6 @@ func cloneAttributes(attributes map[string][]string) map[string][]string {
 	}
 
 	return cloned
-}
-
-// mergeLookupAttributes combines authority facts with caller-supplied safe diagnostics.
-func mergeLookupAttributes(authority map[string][]string, caller map[string][]string) map[string][]string {
-	merged := cloneAttributes(authority)
-	if len(caller) == 0 {
-		return merged
-	}
-
-	if merged == nil {
-		merged = make(map[string][]string, len(caller))
-	}
-
-	for key, values := range caller {
-		merged[key] = append([]string(nil), values...)
-	}
-
-	return merged
 }
 
 // recordRouteLookup emits one side-effect-free lookup observation.

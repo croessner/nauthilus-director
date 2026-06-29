@@ -79,9 +79,9 @@ func TestGRPCNetworkClientAuthenticatesAgainstProtoService(t *testing.T) {
 
 // TestGRPCNetworkClientRejectsAmbiguousCallerAuth verifies caller-auth config fails closed.
 func TestGRPCNetworkClientRejectsAmbiguousCallerAuth(t *testing.T) {
-	authority := testGRPCAuthority("127.0.0.1:1")
+	authority := testGRPCAuthority(t, "127.0.0.1:1")
 	authority.GRPC.CallerAuth.Bearer.Enabled = true
-	authority.GRPC.CallerAuth.Bearer.TokenFile = config.Secret("bearer-token")
+	authority.GRPC.CallerAuth.Bearer.TokenFile = config.Secret(writeOIDCSecretFile(t, "bearer-token\n"))
 
 	_, err := newNetworkGRPCAuthService(authority, AuthorityContext{})
 	if err == nil {
@@ -167,7 +167,7 @@ func TestGRPCNetworkAuthorityContextPreservesCallerAuthMetadata(t *testing.T) {
 		service, server := newTestProtoAuthorityWithConfig(t, authorityContext, func(authority config.AuthorityConfig) config.AuthorityConfig {
 			authority.GRPC.CallerAuth.Basic.Enabled = false
 			authority.GRPC.CallerAuth.Bearer.Enabled = true
-			authority.GRPC.CallerAuth.Bearer.TokenFile = config.Secret("static-bearer-token")
+			authority.GRPC.CallerAuth.Bearer.TokenFile = config.Secret(writeOIDCSecretFile(t, "static-bearer-token\n"))
 
 			return authority
 		})
@@ -337,7 +337,7 @@ func newTestProtoAuthorityWithConfig(
 		_ = listener.Close()
 	})
 
-	authority := testGRPCAuthority(listener.Addr().String())
+	authority := testGRPCAuthority(t, listener.Addr().String())
 	if configure != nil {
 		authority = configure(authority)
 	}
@@ -350,8 +350,54 @@ func newTestProtoAuthorityWithConfig(
 	return service, server
 }
 
+// TestGRPCCallerAuthReadsSecretFiles verifies basic and bearer caller auth use file contents.
+func TestGRPCCallerAuthReadsSecretFiles(t *testing.T) {
+	basicAuthority := testGRPCAuthority(t, "127.0.0.1:1")
+	basicHeader, _, err := grpcCallerAuthorization(basicAuthority)
+	if err != nil {
+		t.Fatalf("newGRPCCallerAuth basic returned error: %v", err)
+	}
+	if basicHeader != "Basic "+base64.StdEncoding.EncodeToString([]byte("director:director-api-secret")) {
+		t.Fatalf("basic header = %q, want file content", basicHeader)
+	}
+	if strings.Contains(basicHeader, basicAuthority.GRPC.CallerAuth.Basic.PasswordFile.Value()) {
+		t.Fatal("basic header used the password_file path string")
+	}
+
+	bearerPath := writeOIDCSecretFile(t, "static-bearer-token\n")
+	bearerAuthority := testGRPCAuthority(t, "127.0.0.1:1")
+	bearerAuthority.GRPC.CallerAuth.Basic.Enabled = false
+	bearerAuthority.GRPC.CallerAuth.Basic.PasswordFile = config.Secret("")
+	bearerAuthority.GRPC.CallerAuth.Bearer.Enabled = true
+	bearerAuthority.GRPC.CallerAuth.Bearer.TokenFile = config.Secret(bearerPath)
+
+	bearerHeader, _, err := grpcCallerAuthorization(bearerAuthority)
+	if err != nil {
+		t.Fatalf("newGRPCCallerAuth bearer returned error: %v", err)
+	}
+	if bearerHeader != "Bearer static-bearer-token" {
+		t.Fatalf("bearer header = %q, want file content", bearerHeader)
+	}
+	if strings.Contains(bearerHeader, bearerPath) {
+		t.Fatal("bearer header used the token_file path string")
+	}
+}
+
+// TestGRPCCallerAuthFailsClosedOnMissingSecretFile rejects broken file refs.
+func TestGRPCCallerAuthFailsClosedOnMissingSecretFile(t *testing.T) {
+	authority := testGRPCAuthority(t, "127.0.0.1:1")
+	authority.GRPC.CallerAuth.Basic.PasswordFile = config.Secret(t.TempDir() + "/missing")
+
+	_, _, err := grpcCallerAuthorization(authority)
+	if err == nil {
+		t.Fatal("newGRPCCallerAuth accepted a missing password_file")
+	}
+}
+
 // testGRPCAuthority creates a minimal insecure local authority config for network tests.
-func testGRPCAuthority(address string) config.AuthorityConfig {
+func testGRPCAuthority(t *testing.T, address string) config.AuthorityConfig {
+	t.Helper()
+
 	return config.AuthorityConfig{
 		GRPC: config.AuthorityGRPCTransportConfig{
 			Address: address,
@@ -359,7 +405,7 @@ func testGRPCAuthority(address string) config.AuthorityConfig {
 				Basic: config.BasicCallerAuthConfig{
 					Enabled:      true,
 					Username:     "director",
-					PasswordFile: config.Secret("director-api-secret"),
+					PasswordFile: config.Secret(writeOIDCSecretFile(t, "director-api-secret\n")),
 				},
 			},
 		},

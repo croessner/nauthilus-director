@@ -947,6 +947,86 @@ func TestGRPCCallerAuthValidationRequiresBasicUsername(t *testing.T) {
 	)
 }
 
+// TestHTTPAuthorityPlaintextRemoteRequiresExplicitLoopbackOptIn keeps credential replay encrypted off-host.
+func TestHTTPAuthorityPlaintextRemoteRequiresExplicitLoopbackOptIn(t *testing.T) {
+	cfg := DefaultConfig()
+	authority := cfg.Auth.Authorities["default"]
+	authority.Transport = "http"
+	authority.HTTP.Endpoint = "http://10.0.0.2:8080/api/v1/auth/json"
+	authority.HTTP.AllowPlaintextLoopback = false
+	authority.HTTP.TLS.Enabled = false
+	cfg.Auth.Authorities["default"] = authority
+
+	expectValidationError(t, cfg, "auth.authorities.default.http.endpoint uses plaintext for credential-bearing authority traffic")
+}
+
+// TestGRPCAuthorityPlaintextRemoteRequiresExplicitLoopbackOptIn keeps caller metadata encrypted off-host.
+func TestGRPCAuthorityPlaintextRemoteRequiresExplicitLoopbackOptIn(t *testing.T) {
+	cfg := DefaultConfig()
+	authority := cfg.Auth.Authorities["default"]
+	authority.Transport = "grpc"
+	authority.GRPC.Address = "10.0.0.2:50051"
+	authority.GRPC.TLS.Enabled = false
+	cfg.Auth.Authorities["default"] = authority
+
+	expectValidationError(t, cfg, "auth.authorities.default.grpc.tls.enabled is required for credential-bearing authority traffic")
+}
+
+// TestGRPCAuthorityPlaintextLoopbackOptInValidates documents the local development boundary.
+func TestGRPCAuthorityPlaintextLoopbackOptInValidates(t *testing.T) {
+	cfg := DefaultConfig()
+	authority := cfg.Auth.Authorities["default"]
+	authority.Transport = "grpc"
+	authority.GRPC.Address = "127.0.0.1:50051"
+	authority.GRPC.AllowPlaintextLoopback = true
+	authority.GRPC.TLS.Enabled = false
+	cfg.Auth.Authorities["default"] = authority
+
+	if err := NewLoader().Validate(cfg); err != nil {
+		t.Fatalf("Validate rejected explicit loopback plaintext gRPC authority: %v", err)
+	}
+}
+
+// TestControlBearerOIDCPlaintextRemoteListenerRequiresTLS protects reusable control credentials.
+func TestControlBearerOIDCPlaintextRemoteListenerRequiresTLS(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Runtime.Servers.Control.Address = "0.0.0.0:9090"
+	cfg.Runtime.Servers.Control.AllowPlaintextLoopback = false
+	cfg.Runtime.Servers.Control.TLS.Enabled = false
+
+	expectValidationError(t, cfg, "runtime.servers.control.tls.enabled is required for bearer or OIDC auth on non-loopback control listeners")
+}
+
+// TestControlOIDCRequiresLocalTokenBinding keeps active control tokens audience-bound.
+func TestControlOIDCRequiresLocalTokenBinding(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Runtime.Servers.Control.Auth.OIDC.RequiredAudience = " "
+	cfg.Runtime.Servers.Control.Auth.OIDC.RequiredResource = " "
+
+	expectValidationError(t, cfg, "runtime.servers.control.auth.oidc.required_audience or runtime.servers.control.auth.oidc.required_resource is required")
+}
+
+// TestControlRequireClientCertRequiresClientCA rejects any-client-cert transport gates.
+func TestControlRequireClientCertRequiresClientCA(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Runtime.Servers.Control.TLS.Enabled = true
+	cfg.Runtime.Servers.Control.TLS.RequireClientCert = true
+	cfg.Runtime.Servers.Control.TLS.ClientCA = ""
+
+	expectValidationError(t, cfg, "runtime.servers.control.tls.client_ca is required when runtime.servers.control.tls.require_client_cert is true")
+}
+
+// TestListenerRequireClientCertRequiresClientCA rejects unverified client certificate gates.
+func TestListenerRequireClientCertRequiresClientCA(t *testing.T) {
+	cfg := DefaultConfig()
+	entry := cfg.Director.Listeners["imaps"]
+	entry.TLS.RequireClientCert = true
+	entry.TLS.ClientCA = ""
+	cfg.Director.Listeners["imaps"] = entry
+
+	expectValidationError(t, cfg, "director.listeners.imaps.tls.client_ca is required when require_client_cert is true")
+}
+
 // TestOIDCCallerAuthValidationRejectsIncompleteClientCredentials keeps caller auth fail-closed.
 func TestOIDCCallerAuthValidationRejectsIncompleteClientCredentials(t *testing.T) {
 	tests := []struct {
@@ -1103,6 +1183,9 @@ func TestBearerIntrospectionDefaultsUseDedicatedBoundary(t *testing.T) {
 	if bearer.Introspection.RequiredScope != defaultBearerRequiredScope {
 		t.Fatalf("required scope = %q, want %q", bearer.Introspection.RequiredScope, defaultBearerRequiredScope)
 	}
+	if bearer.Introspection.RequiredAudience != "nauthilus-director-sasl" {
+		t.Fatalf("required audience = %q, want nauthilus-director-sasl", bearer.Introspection.RequiredAudience)
+	}
 	if !bearer.Introspection.ClientSecretFile.IsZero() && bearer.Introspection.ClientSecretFile.Value() == cfg.Auth.Authorities["default"].OIDC.ClientCredentials.ClientSecretFile.Value() {
 		t.Fatal("bearer introspection unexpectedly reuses caller-auth client secret file")
 	}
@@ -1122,6 +1205,7 @@ func TestGeneratedConfigReferencesIncludeBearerIntrospectionPaths(t *testing.T) 
 	for _, want := range []string{
 		"introspection:",
 		"validation: nauthilus_introspection",
+		"required_audience: nauthilus-director-sasl",
 		"required_scope: email",
 	} {
 		if !strings.Contains(defaults, want) {
@@ -1133,7 +1217,11 @@ func TestGeneratedConfigReferencesIncludeBearerIntrospectionPaths(t *testing.T) 
 	}
 
 	for _, want := range []string{
+		"`auth.authorities.default.mechanisms.bearer.introspection.required_audience`",
+		"`auth.authorities.default.mechanisms.bearer.introspection.required_resource`",
 		"`auth.authorities.default.mechanisms.bearer.introspection.required_scope`",
+		"`runtime.servers.control.auth.oidc.required_audience`",
+		"`runtime.servers.control.auth.oidc.required_resource`",
 		"`auth.authorities.default.mechanisms.bearer.introspection.client_secret_file` | string | `<redacted>` | stable | yes",
 		"Mail SASL bearer-token introspection policy",
 		"Director-to-Nauthilus caller-token request scopes only",
@@ -1167,6 +1255,7 @@ func TestGeneratedConfigReferencesIncludeBearerIntrospectionPaths(t *testing.T) 
 	for _, want := range []string{
 		"mechanisms.bearer.introspection",
 		"nauthilus_introspection",
+		"required_audience",
 		"required_scope",
 	} {
 		if !strings.Contains(manpage, want) {
@@ -1187,6 +1276,7 @@ func TestBearerIntrospectionValidationAcceptsCompleteConfig(t *testing.T) {
 		ClientID:         " nauthilus-director-sasl ",
 		ClientSecretFile: Secret("/run/nauthilus-director/sasl-client-secret"),
 		AuthMethod:       " CLIENT_SECRET_POST ",
+		RequiredAudience: " nauthilus-director-sasl ",
 		RequiredScope:    " email ",
 		AccountClaim:     " dovecot_account ",
 	}
@@ -1202,6 +1292,9 @@ func TestBearerIntrospectionValidationAcceptsCompleteConfig(t *testing.T) {
 	}
 	if got := bearer.Introspection.RequiredScope; got != defaultBearerRequiredScope {
 		t.Fatalf("normalized required_scope = %q, want %q", got, defaultBearerRequiredScope)
+	}
+	if got := bearer.Introspection.RequiredAudience; got != "nauthilus-director-sasl" {
+		t.Fatalf("normalized required_audience = %q, want nauthilus-director-sasl", got)
 	}
 	if got := bearer.Introspection.AccountClaim; got != "dovecot_account" {
 		t.Fatalf("normalized account_claim = %q, want dovecot_account", got)
@@ -1254,6 +1347,14 @@ func TestBearerIntrospectionValidationRequiresCompleteConfig(t *testing.T) {
 				bearer.Introspection.RequiredScope = " "
 			},
 			want: "auth.authorities.default.mechanisms.bearer.introspection.required_scope is required",
+		},
+		{
+			name: "missing token binding",
+			mutate: func(bearer *BearerMechanismConfig) {
+				bearer.Introspection.RequiredAudience = " "
+				bearer.Introspection.RequiredResource = " "
+			},
+			want: "auth.authorities.default.mechanisms.bearer.introspection.required_audience or auth.authorities.default.mechanisms.bearer.introspection.required_resource is required",
 		},
 		{
 			name: "unsupported auth method",
@@ -2180,7 +2281,7 @@ func TestConfigDumpRedactsLMTPProtectedValuesByDefault(t *testing.T) {
 	}
 }
 
-// TestSieveDefaultsValidate verifies M6.1 listener and backend examples are typed.
+// TestSieveDefaultsValidate verifies ManageSieve listener and backend examples are typed.
 func TestSieveDefaultsValidate(t *testing.T) {
 	cfg := DefaultConfig()
 
@@ -2321,7 +2422,7 @@ func TestSieveCredentialReplayRequiresVerifiedBackendTLS(t *testing.T) {
 	expectValidationError(t, cfg, "director.backends.mailstore-a-sieve.auth.credential_replay requires verified backend TLS")
 }
 
-// TestConfigDumpRedactsSieveProtectedValuesByDefault preserves M6 protected metadata.
+// TestConfigDumpRedactsSieveProtectedValuesByDefault preserves Sieve protected metadata.
 func TestConfigDumpRedactsSieveProtectedValuesByDefault(t *testing.T) {
 	dump, err := NewLoader().DumpDefaults(DumpOptions{Format: "yaml"})
 	if err != nil {
@@ -2340,7 +2441,7 @@ func TestConfigDumpRedactsSieveProtectedValuesByDefault(t *testing.T) {
 	}
 }
 
-// TestGeneratedConfigReferencesIncludeSievePaths verifies generated M6 docs and metadata.
+// TestGeneratedConfigReferencesIncludeSievePaths verifies generated Sieve docs and metadata.
 func TestGeneratedConfigReferencesIncludeSievePaths(t *testing.T) {
 	defaults := readTextFile(t, filepath.Join("..", "..", "docs", "reference", "config-defaults.yaml"))
 	paths := readTextFile(t, filepath.Join("..", "..", "docs", "reference", "config-paths.md"))
@@ -2388,7 +2489,7 @@ func TestGeneratedConfigReferencesIncludeSievePaths(t *testing.T) {
 	}
 }
 
-// TestPOP3DefaultsValidate verifies M7.1 listener and backend examples are typed.
+// TestPOP3DefaultsValidate verifies POP3 listener and backend examples are typed.
 func TestPOP3DefaultsValidate(t *testing.T) {
 	cfg := DefaultConfig()
 
@@ -2516,7 +2617,7 @@ func TestPOP3CredentialReplayRequiresVerifiedBackendTLS(t *testing.T) {
 	expectValidationError(t, cfg, "director.backends.mailstore-a-pop3.auth.credential_replay requires verified backend TLS")
 }
 
-// TestConfigDumpRedactsPOP3ProtectedValuesByDefault preserves M7 protected metadata.
+// TestConfigDumpRedactsPOP3ProtectedValuesByDefault preserves POP3 protected metadata.
 func TestConfigDumpRedactsPOP3ProtectedValuesByDefault(t *testing.T) {
 	dump, err := NewLoader().DumpDefaults(DumpOptions{Format: "yaml"})
 	if err != nil {
@@ -2535,7 +2636,7 @@ func TestConfigDumpRedactsPOP3ProtectedValuesByDefault(t *testing.T) {
 	}
 }
 
-// TestGeneratedConfigReferencesIncludePOP3Paths verifies generated M7 docs and metadata.
+// TestGeneratedConfigReferencesIncludePOP3Paths verifies generated POP3 docs and metadata.
 func TestGeneratedConfigReferencesIncludePOP3Paths(t *testing.T) {
 	defaults := readTextFile(t, filepath.Join("..", "..", "docs", "reference", "config-defaults.yaml"))
 	paths := readTextFile(t, filepath.Join("..", "..", "docs", "reference", "config-paths.md"))
@@ -2802,7 +2903,8 @@ func TestExpansionMapKeysAndSafeMissingErrors(t *testing.T) {
 
 // TestRedactionAndProtectedDump verifies that -P is the only path to protected dump values.
 func TestRedactionAndProtectedDump(t *testing.T) {
-	t.Setenv("DIRECTOR_REDIS_PASSWORD_FILE", "/run/secrets/redis-password")
+	secretPath := writeSecretFile(t, "resolved-redis-secret\n")
+	t.Setenv("DIRECTOR_REDIS_PASSWORD_FILE", secretPath)
 	path := writeConfigFile(t, t.TempDir(), "secret.yaml", `storage:
   redis:
     auth:
@@ -2817,8 +2919,11 @@ func TestRedactionAndProtectedDump(t *testing.T) {
 	if err != nil {
 		t.Fatalf("redacted dump: %v", err)
 	}
-	if strings.Contains(string(redacted), "/run/secrets/redis-password") {
+	if strings.Contains(string(redacted), secretPath) {
 		t.Fatalf("redacted dump leaked secret path:\n%s", redacted)
+	}
+	if strings.Contains(string(redacted), "resolved-redis-secret") {
+		t.Fatalf("redacted dump leaked secret file content:\n%s", redacted)
 	}
 	if !strings.Contains(string(redacted), redactedSecret) {
 		t.Fatalf("redacted dump does not contain redaction marker:\n%s", redacted)
@@ -2828,8 +2933,11 @@ func TestRedactionAndProtectedDump(t *testing.T) {
 	if err != nil {
 		t.Fatalf("protected dump: %v", err)
 	}
-	if !strings.Contains(string(protected), "/run/secrets/redis-password") {
+	if !strings.Contains(string(protected), secretPath) {
 		t.Fatalf("protected dump did not include secret path:\n%s", protected)
+	}
+	if strings.Contains(string(protected), "resolved-redis-secret") {
+		t.Fatalf("protected dump leaked resolved secret file content:\n%s", protected)
 	}
 	if snapshot.Config.Storage.Redis.Auth.PasswordFile.String() != redactedSecret {
 		t.Fatal("SecretString.String did not remain redacted outside config dump")

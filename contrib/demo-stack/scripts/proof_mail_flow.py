@@ -140,7 +140,7 @@ def load_config() -> DemoConfig:
         keep_backend_pin=bool_env("DEMO_KEEP_BACKEND_PIN", False),
         hold_duration_seconds=int_env("DEMO_HOLD_DURATION_SECONDS", 30),
         hold_probe_seconds=float(os.environ.get("DEMO_HOLD_PROBE_SECONDS", "2")),
-        control_url=os.environ.get("DEMO_CONTROL_URL", "http://127.0.0.1:9090").rstrip("/"),
+        control_url=os.environ.get("DEMO_CONTROL_URL", "https://127.0.0.1:9090").rstrip("/"),
         control_token=load_control_token(),
         imap_host=os.environ.get("DEMO_IMAP_HOST", "127.0.0.1"),
         imaps_port=int_env("DEMO_IMAPS_PORT", 8993),
@@ -157,6 +157,22 @@ def user_path(config: DemoConfig, suffix: str) -> str:
 
     encoded = urllib.parse.quote(config.user, safe="")
     return f"/api/v1/users/{encoded}{suffix}"
+
+
+def control_ssl_context(config: DemoConfig) -> ssl.SSLContext | None:
+    """Create a TLS context for the demo control API."""
+
+    if not config.control_url.lower().startswith("https://"):
+        return None
+
+    cafile = os.environ.get("DEMO_CONTROL_CAFILE", "").strip()
+    if cafile:
+        return ssl.create_default_context(cafile=cafile)
+
+    context = ssl.create_default_context()
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    return context
 
 
 def request_json(
@@ -185,7 +201,11 @@ def request_json(
     )
 
     try:
-        with urllib.request.urlopen(request, timeout=config.wait_seconds) as response:
+        with urllib.request.urlopen(
+            request,
+            timeout=config.wait_seconds,
+            context=control_ssl_context(config),
+        ) as response:
             body = response.read()
             if response.status not in statuses:
                 raise ProofError(f"{method} {path} returned HTTP {response.status}")

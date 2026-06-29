@@ -3,6 +3,7 @@ auth:
         default:
             grpc:
                 address: 127.0.0.1:50051
+                allow_plaintext_loopback: false
                 authority: nauthilus.example.org
                 caller_auth:
                     basic:
@@ -20,6 +21,7 @@ auth:
                     insecure_skip_verify: false
                     server_name: nauthilus.example.org
             http:
+                allow_plaintext_loopback: true
                 basic_auth:
                     password_file: <redacted>
                     username: nauthilus-director
@@ -45,6 +47,8 @@ auth:
                         discovery_url: ""
                         enabled: true
                         issuer: https://auth.example.org
+                        required_audience: nauthilus-director-sasl
+                        required_resource: ""
                         required_scope: email
                     names:
                         - xoauth2
@@ -852,6 +856,7 @@ runtime:
     servers:
         control:
             address: 127.0.0.1:9090
+            allow_plaintext_loopback: true
             auth:
                 basic:
                     enabled: false
@@ -867,6 +872,8 @@ runtime:
                     enabled: true
                     protected_scopes:
                         - nauthilus-director.protected
+                    required_audience: nauthilus-director
+                    required_resource: ""
                     required_scopes:
                         - nauthilus-director.admin
                     validation: nauthilus

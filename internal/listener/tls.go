@@ -85,7 +85,7 @@ func tlsMinVersion(version string) (uint16, error) {
 func applyClientCA(tlsConfig *tls.Config, listener config.ListenerConfig) error {
 	if strings.TrimSpace(listener.TLS.ClientCA) == "" {
 		if listener.TLS.RequireClientCert {
-			tlsConfig.ClientAuth = tls.RequireAnyClientCert
+			return fmt.Errorf("listener tls.client_ca is required when require_client_cert is true")
 		}
 
 		return nil

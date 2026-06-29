@@ -59,6 +59,7 @@ const (
 	oidcIntrospectionTokenParam     = "token"
 	oidcClaimActive                 = "active"
 	oidcClaimAuthorizedParty        = "azp"
+	oidcClaimResource               = "resource"
 	oidcClaimScope                  = "scope"
 	jwtClaimAudience                = "aud"
 	jwtClaimIssuer                  = "iss"
@@ -78,12 +79,13 @@ type callerTokenSource interface {
 
 // OIDCIntrospectionResult contains secret-safe token introspection claims.
 type OIDCIntrospectionResult struct {
-	Active   bool
-	Subject  string
-	ClientID string
-	Audience string
-	Scopes   []string
-	Claims   map[string]any
+	Active    bool
+	Subject   string
+	ClientID  string
+	Audience  string
+	Resources []string
+	Scopes    []string
+	Claims    map[string]any
 }
 
 // OIDCIntrospector validates incoming control-plane bearer tokens through Nauthilus.
@@ -477,6 +479,14 @@ func fetchOIDCDiscoveryMetadata(
 // resolveOIDCDiscoveryURL resolves the configured issuer or direct discovery URL.
 func resolveOIDCDiscoveryURL(options oidcDiscoveryOptions) (string, error) {
 	if discoveryURL := strings.TrimSpace(options.DiscoveryURL); discoveryURL != "" {
+		if strings.TrimSpace(options.Issuer) == "" {
+			return "", configError("oidc issuer is required when discovery_url is configured")
+		}
+
+		if err := validateOIDCEndpointURL(discoveryURL, "oidc discovery_url"); err != nil {
+			return "", err
+		}
+
 		return discoveryURL, nil
 	}
 
@@ -485,7 +495,12 @@ func resolveOIDCDiscoveryURL(options oidcDiscoveryOptions) (string, error) {
 		return "", configError("oidc issuer or discovery_url is required")
 	}
 
-	return issuer + defaultOIDCDiscoveryPath, nil
+	discoveryURL := issuer + defaultOIDCDiscoveryPath
+	if err := validateOIDCEndpointURL(discoveryURL, "oidc discovery_url"); err != nil {
+		return "", err
+	}
+
+	return discoveryURL, nil
 }
 
 // validateOIDCDiscoveryDocument checks Nauthilus metadata before endpoint use.
@@ -942,14 +957,13 @@ func (a oidcEndpointClientAuth) readClientPrivateKey() ([]byte, error) {
 // clientSecret resolves inline protected secret material or a mounted secret file.
 func (a oidcEndpointClientAuth) clientSecret() (string, error) {
 	if !a.ClientSecretFile.IsZero() {
-		content, err := os.ReadFile(a.ClientSecretFile.Value())
+		secret, err := config.ReadSecretFile(config.SecretFileOptions{
+			Field:    "oidc client_secret_file",
+			Path:     a.ClientSecretFile,
+			MaxBytes: config.MaxSecretFileBytes,
+		})
 		if err != nil {
 			return "", configError("failed to read oidc client_secret_file")
-		}
-
-		secret := strings.TrimRight(string(content), "\r\n")
-		if secret == "" {
-			return "", configError("oidc client_secret_file is empty")
 		}
 
 		return secret, nil
@@ -1112,13 +1126,30 @@ func introspectionFromClaimsForOperation(claims map[string]any, operation authOp
 	}
 
 	return OIDCIntrospectionResult{
-		Active:   true,
-		Subject:  stringClaim(claims, jwtClaimSubject),
-		ClientID: firstNonEmptyClaim(claims, oidcFormClientID, oidcClaimAuthorizedParty),
-		Audience: audienceClaim(claims[jwtClaimAudience]),
-		Scopes:   scopesClaim(claims[oidcClaimScope]),
-		Claims:   cloneClaims(claims),
+		Active:    true,
+		Subject:   stringClaim(claims, jwtClaimSubject),
+		ClientID:  firstNonEmptyClaim(claims, oidcFormClientID, oidcClaimAuthorizedParty),
+		Audience:  audienceClaim(claims[jwtClaimAudience]),
+		Resources: resourceClaim(claims[oidcClaimResource]),
+		Scopes:    scopesClaim(claims[oidcClaimScope]),
+		Claims:    cloneClaims(claims),
 	}, nil
+}
+
+// MatchesAudienceOrResource reports whether local token binding policy accepts the response.
+func (r OIDCIntrospectionResult) MatchesAudienceOrResource(requiredAudience string, requiredResource string) bool {
+	requiredAudience = strings.TrimSpace(requiredAudience)
+
+	requiredResource = strings.TrimSpace(requiredResource)
+	if requiredAudience == "" && requiredResource == "" {
+		return false
+	}
+
+	if requiredAudience != "" && containsClaimValue(fieldsWithoutEmpty(r.Audience), requiredAudience) {
+		return true
+	}
+
+	return requiredResource != "" && containsClaimValue(r.Resources, requiredResource)
 }
 
 // stringClaim returns one trimmed string claim.
@@ -1165,6 +1196,40 @@ func audienceClaim(value any) string {
 	default:
 		return ""
 	}
+}
+
+// resourceClaim normalizes string and array resource claim shapes.
+func resourceClaim(value any) []string {
+	switch typed := value.(type) {
+	case string:
+		return fieldsWithoutEmpty(typed)
+	case []any:
+		resources := make([]string, 0, len(typed))
+		for _, entry := range typed {
+			text, ok := entry.(string)
+			if !ok {
+				continue
+			}
+
+			resources = append(resources, fieldsWithoutEmpty(text)...)
+		}
+
+		return resources
+	default:
+		return nil
+	}
+}
+
+// containsClaimValue reports exact token-binding matches after normalization.
+func containsClaimValue(values []string, want string) bool {
+	want = strings.TrimSpace(want)
+	for _, value := range values {
+		if strings.TrimSpace(value) == want {
+			return true
+		}
+	}
+
+	return false
 }
 
 // scopesClaim normalizes string and array scope response shapes.

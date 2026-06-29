@@ -73,8 +73,8 @@ Route lookup:
 - reads affinity with `LookupAffinity`;
 - reads backend pins with `ListUserBackendPins`;
 - reads placement holds with `CheckUserHold`;
-- may perform only the explicit LMTP no-auth identity lookup path when the
-  caller supplies an LMTP recipient instead of an account key;
+- uses only director-owned runtime state for LMTP recipient diagnostics when
+  the caller supplies a recipient instead of an account key;
 - explains backend selection without calling placement `OpenSession`,
   `HeartbeatSession`, `CloseSession`, `KickUser`, `KillSession`,
   `ClearUserAffinity`, backend reservation or backend mutation paths.

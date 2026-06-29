@@ -124,6 +124,8 @@ jobs:
             echo "VERSION=${RELEASE_TAG}"
             echo "REVISION=${release_commit}"
             echo "SOURCE=https://github.com/${{ github.repository }}"
+            echo "GO_IMAGE=${golang_image}@${golang_digest}"
+            echo "CERTS_IMAGE=${certs_image}@${certs_digest}"
             echo 'EOF'
             echo 'labels<<EOF'
             echo "org.opencontainers.image.description=${OCI_IMAGE_DESCRIPTION}"

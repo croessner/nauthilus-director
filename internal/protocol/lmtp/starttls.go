@@ -36,6 +36,12 @@ func (s *Session) handleSTARTTLS(ctx context.Context, command frontendCommand) (
 		return commandOutcome{}, s.writeEnhanced(responseStatusBadSequence, enhancedBadSequence, startTLSUnavailableText)
 	}
 
+	if s.reader.Buffered() > 0 {
+		s.recordCommand(ctx, lmtpObservationOperationSTARTTLS, lmtpObservationResultFailure, lmtpReasonProtocol, nil)
+
+		return commandOutcome{closeSession: true}, s.writeEnhanced(responseStatusBadSequence, enhancedBadSequence, startTLSInjectionText)
+	}
+
 	if err := s.writeEnhanced(responseStatusReady, enhancedOK, startTLSText); err != nil {
 		return commandOutcome{}, err
 	}

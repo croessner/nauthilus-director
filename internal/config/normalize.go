@@ -86,6 +86,8 @@ func (b BearerIntrospectionConfig) Normalize() BearerIntrospectionConfig {
 	b.ClientKeyID = strings.TrimSpace(b.ClientKeyID)
 	b.ClientAssertionAlg = strings.TrimSpace(b.ClientAssertionAlg)
 	b.AuthMethod = strings.ToLower(strings.TrimSpace(b.AuthMethod))
+	b.RequiredAudience = strings.TrimSpace(b.RequiredAudience)
+	b.RequiredResource = strings.TrimSpace(b.RequiredResource)
 	b.RequiredScope = strings.TrimSpace(b.RequiredScope)
 	b.AccountClaim = strings.TrimSpace(b.AccountClaim)
 

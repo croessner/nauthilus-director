@@ -90,7 +90,7 @@ for _, session_id in ipairs(due_sessions) do
 
 			local backend_sessions_key = redis.call("HGET", session_key, "backend_sessions_key")
 			if backend_sessions_key ~= false and backend_sessions_key ~= nil and backend_sessions_key ~= "" then
-				redis.call("SREM", backend_sessions_key, session_id)
+				redis.call("SREM", backend_sessions_key, session_id, session_id .. "\t" .. session_key)
 			end
 
 			local user_sessions_key = redis.call("HGET", session_key, "user_sessions_key")

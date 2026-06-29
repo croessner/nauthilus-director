@@ -238,7 +238,12 @@ func TestSASLBearerIntrospectionPolicyMapping(t *testing.T) {
 		},
 		{
 			name:         "missing required scope rejected",
-			payload:      map[string]any{"active": true, "scope": "profile", "account": "account-a"},
+			payload:      map[string]any{"active": true, "aud": testBearerClientID, "scope": "profile", "account": "account-a"},
+			wantDecision: DecisionRejected,
+		},
+		{
+			name:         "missing audience binding rejected",
+			payload:      map[string]any{"active": true, "scope": "email", "account": "account-a"},
 			wantDecision: DecisionRejected,
 		},
 		{
@@ -252,6 +257,7 @@ func TestSASLBearerIntrospectionPolicyMapping(t *testing.T) {
 			name: "list scope accepted",
 			payload: map[string]any{
 				"active":     true,
+				"aud":        testBearerClientID,
 				"scope":      []string{"openid", "email"},
 				"account":    "account-a",
 				"session_id": "session-a",
@@ -264,6 +270,7 @@ func TestSASLBearerIntrospectionPolicyMapping(t *testing.T) {
 			name: "configured account claim authoritative",
 			payload: map[string]any{
 				"active":          true,
+				"aud":             testBearerClientID,
 				"scope":           "email",
 				"account":         "wrong-account",
 				"dovecot_account": "right-account",
@@ -276,6 +283,7 @@ func TestSASLBearerIntrospectionPolicyMapping(t *testing.T) {
 			name: "missing configured account claim rejected",
 			payload: map[string]any{
 				"active":  true,
+				"aud":     testBearerClientID,
 				"scope":   "email",
 				"account": "fallback-account",
 			},
@@ -286,6 +294,7 @@ func TestSASLBearerIntrospectionPolicyMapping(t *testing.T) {
 			name: "default account chain chooses first safe value",
 			payload: map[string]any{
 				"active":             true,
+				"aud":                testBearerClientID,
 				"scope":              "email",
 				"account":            "",
 				"account_key":        "account-key",
@@ -469,13 +478,14 @@ func captureSASLBearerIntrospectionRequest(
 // testBearerIntrospectionConfig returns a complete SASL bearer introspection config.
 func testBearerIntrospectionConfig(issuer string, authMethod string) config.BearerIntrospectionConfig {
 	return config.BearerIntrospectionConfig{
-		Enabled:       true,
-		Issuer:        issuer,
-		DiscoveryURL:  issuer + defaultOIDCDiscoveryPath,
-		ClientID:      testBearerClientID,
-		ClientSecret:  config.Secret(testBearerSecret),
-		AuthMethod:    authMethod,
-		RequiredScope: "email",
+		Enabled:          true,
+		Issuer:           issuer,
+		DiscoveryURL:     issuer + defaultOIDCDiscoveryPath,
+		ClientID:         testBearerClientID,
+		ClientSecret:     config.Secret(testBearerSecret),
+		AuthMethod:       authMethod,
+		RequiredAudience: testBearerClientID,
+		RequiredScope:    "email",
 	}
 }
 
@@ -521,6 +531,7 @@ func testBearerRequest() BearerIntrospectionRequest {
 func activeBearerPayload() map[string]any {
 	return map[string]any{
 		"active":     true,
+		"aud":        testBearerClientID,
 		"scope":      "openid email",
 		"account":    "account-a",
 		"session_id": "session-a",

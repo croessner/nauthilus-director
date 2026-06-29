@@ -104,7 +104,7 @@ func TestBackendRuntimeRequestsRejectEmptyReasons(t *testing.T) {
 		{
 			name: "backend in out",
 			validate: func() error {
-				return SetBackendInServiceRequest{BackendIdentifier: runtimeTestBackendIdentifier, InService: true}.Validate()
+				return SetBackendInServiceRequest{BackendIdentifier: runtimeTestBackendIdentifier, InService: true}.Validate(policy)
 			},
 		},
 		{
@@ -128,7 +128,7 @@ func TestBackendRuntimeRequestsRejectEmptyReasons(t *testing.T) {
 				return StartBackendDrainRequest{
 					BackendIdentifier: runtimeTestBackendIdentifier,
 					Drain:             backend.DrainState{Enabled: true, Mode: backend.DrainModeSoft},
-				}.Validate()
+				}.Validate(policy)
 			},
 		},
 		{
@@ -138,6 +138,420 @@ func TestBackendRuntimeRequestsRejectEmptyReasons(t *testing.T) {
 			},
 		},
 	})
+}
+
+// TestBackendRuntimePolicyRejectsDisabledOperations keeps configured override switches fail-closed.
+//
+//nolint:funlen,dupl // The table intentionally enumerates backend policy denial cases.
+func TestBackendRuntimePolicyRejectsDisabledOperations(t *testing.T) {
+	testCases := []struct {
+		name   string
+		policy backend.RuntimeOverridePolicy
+		mutate func(*BackendService, backend.RuntimeOverridePolicy) error
+	}{
+		{
+			name:   "global weight disabled",
+			policy: backend.RuntimeOverridePolicy{},
+			mutate: func(service *BackendService, policy backend.RuntimeOverridePolicy) error {
+				_, err := service.SetWeight(context.Background(), SetBackendWeightRequest{
+					BackendIdentifier: runtimeTestBackendIdentifier,
+					Weight:            10,
+					Reason:            "adjust weight",
+				}, policy)
+
+				return err
+			},
+		},
+		{
+			name:   "global in out disabled",
+			policy: backend.RuntimeOverridePolicy{},
+			mutate: func(service *BackendService, policy backend.RuntimeOverridePolicy) error {
+				_, err := service.SetInService(context.Background(), SetBackendInServiceRequest{
+					BackendIdentifier: runtimeTestBackendIdentifier,
+					InService:         false,
+					Reason:            "stop placement",
+				}, policy)
+
+				return err
+			},
+		},
+		{
+			name:   "global drain disabled",
+			policy: backend.RuntimeOverridePolicy{},
+			mutate: func(service *BackendService, policy backend.RuntimeOverridePolicy) error {
+				_, err := service.StartDrain(context.Background(), StartBackendDrainRequest{
+					BackendIdentifier: runtimeTestBackendIdentifier,
+					Drain:             backend.DrainState{Enabled: true, Mode: backend.DrainModeSoft},
+					Reason:            "host drain",
+				}, policy)
+
+				return err
+			},
+		},
+		{
+			name: "weight override disabled",
+			policy: backend.RuntimeOverridePolicy{
+				Enabled:             true,
+				AllowWeightOverride: false,
+				MinWeight:           0,
+				MaxWeight:           100,
+			},
+			mutate: func(service *BackendService, policy backend.RuntimeOverridePolicy) error {
+				_, err := service.SetWeight(context.Background(), SetBackendWeightRequest{
+					BackendIdentifier: runtimeTestBackendIdentifier,
+					Weight:            10,
+					Reason:            "adjust weight",
+				}, policy)
+
+				return err
+			},
+		},
+		{
+			name: "weight outside bounds",
+			policy: backend.RuntimeOverridePolicy{
+				Enabled:             true,
+				AllowWeightOverride: true,
+				MinWeight:           10,
+				MaxWeight:           20,
+			},
+			mutate: func(service *BackendService, policy backend.RuntimeOverridePolicy) error {
+				_, err := service.SetWeight(context.Background(), SetBackendWeightRequest{
+					BackendIdentifier: runtimeTestBackendIdentifier,
+					Weight:            25,
+					Reason:            "adjust weight",
+				}, policy)
+
+				return err
+			},
+		},
+		{
+			name: "in out override disabled",
+			policy: backend.RuntimeOverridePolicy{
+				Enabled:             true,
+				AllowWeightOverride: true,
+				AllowInOut:          false,
+				AllowDrain:          true,
+			},
+			mutate: func(service *BackendService, policy backend.RuntimeOverridePolicy) error {
+				_, err := service.SetInService(context.Background(), SetBackendInServiceRequest{
+					BackendIdentifier: runtimeTestBackendIdentifier,
+					InService:         false,
+					Reason:            "stop placement",
+				}, policy)
+
+				return err
+			},
+		},
+		{
+			name: "drain override disabled",
+			policy: backend.RuntimeOverridePolicy{
+				Enabled:             true,
+				AllowWeightOverride: true,
+				AllowInOut:          true,
+				AllowDrain:          false,
+			},
+			mutate: func(service *BackendService, policy backend.RuntimeOverridePolicy) error {
+				_, err := service.StartDrain(context.Background(), StartBackendDrainRequest{
+					BackendIdentifier: runtimeTestBackendIdentifier,
+					Drain:             backend.DrainState{Enabled: true, Mode: backend.DrainModeSoft},
+					Reason:            "host drain",
+				}, policy)
+
+				return err
+			},
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			store := &recordingBackendStateStore{record: backendRuntimeRecord()}
+			service := NewBackendService(store, nil)
+
+			err := testCase.mutate(service, testCase.policy)
+			if !backend.IsErrorKind(err, backend.ErrorKindInvalidRequest) {
+				t.Fatalf("mutation error = %v, want backend invalid request", err)
+			}
+
+			if store.setCalls != 0 {
+				t.Fatalf("store calls = %d, want policy denial before persistence", store.setCalls)
+			}
+		})
+	}
+}
+
+// TestBackendRuntimePolicyAllowsConfiguredMutations verifies allowed backend operations reach persistence.
+//
+//nolint:funlen // The table keeps allowed backend mutation assertions together.
+func TestBackendRuntimePolicyAllowsConfiguredMutations(t *testing.T) {
+	policy := backend.RuntimeOverridePolicy{
+		Enabled:             true,
+		AllowWeightOverride: true,
+		AllowInOut:          true,
+		AllowDrain:          true,
+		MinWeight:           0,
+		MaxWeight:           100,
+	}
+
+	testCases := []struct {
+		name   string
+		mutate func(*BackendService) error
+		assert func(*testing.T, state.BackendRuntimeMutation)
+	}{
+		{
+			name: "weight",
+			mutate: func(service *BackendService) error {
+				_, err := service.SetWeight(context.Background(), SetBackendWeightRequest{
+					BackendIdentifier: " " + runtimeTestBackendIdentifier + " ",
+					Weight:            50,
+					Reason:            "adjust weight",
+				}, policy)
+
+				return err
+			},
+			assert: func(t *testing.T, mutation state.BackendRuntimeMutation) {
+				t.Helper()
+				if mutation.Weight == nil || *mutation.Weight != 50 {
+					t.Fatalf("weight mutation = %#v, want weight 50", mutation)
+				}
+			},
+		},
+		{
+			name: "in out",
+			mutate: func(service *BackendService) error {
+				_, err := service.SetInService(context.Background(), SetBackendInServiceRequest{
+					BackendIdentifier: " " + runtimeTestBackendIdentifier + " ",
+					InService:         false,
+					Reason:            "stop placement",
+				}, policy)
+
+				return err
+			},
+			assert: func(t *testing.T, mutation state.BackendRuntimeMutation) {
+				t.Helper()
+				if mutation.InService == nil || *mutation.InService {
+					t.Fatalf("in/out mutation = %#v, want in_service=false", mutation)
+				}
+			},
+		},
+		{
+			name: "drain",
+			mutate: func(service *BackendService) error {
+				_, err := service.StartDrain(context.Background(), StartBackendDrainRequest{
+					BackendIdentifier: " " + runtimeTestBackendIdentifier + " ",
+					Drain:             backend.DrainState{Enabled: true, Mode: backend.DrainModeSoft},
+					Reason:            "host drain",
+				}, policy)
+
+				return err
+			},
+			assert: func(t *testing.T, mutation state.BackendRuntimeMutation) {
+				t.Helper()
+				if !mutation.DrainEnabled || mutation.DrainMode != string(backend.DrainModeSoft) {
+					t.Fatalf("drain mutation = %#v, want enabled soft drain", mutation)
+				}
+			},
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			store := &recordingBackendStateStore{record: backendRuntimeRecord()}
+			service := NewBackendService(store, nil)
+
+			if err := testCase.mutate(service); err != nil {
+				t.Fatalf("mutation returned error: %v", err)
+			}
+
+			if store.setCalls != 1 {
+				t.Fatalf("store calls = %d, want 1", store.setCalls)
+			}
+			if store.mutation.BackendIdentifier != runtimeTestBackendIdentifier {
+				t.Fatalf("backend identifier = %q, want trimmed %q", store.mutation.BackendIdentifier, runtimeTestBackendIdentifier)
+			}
+			testCase.assert(t, store.mutation)
+		})
+	}
+}
+
+// TestUserRuntimePolicyRejectsDisabledOperations keeps user override switches fail-closed.
+//
+//nolint:funlen,dupl // The table intentionally enumerates user policy denial cases.
+func TestUserRuntimePolicyRejectsDisabledOperations(t *testing.T) {
+	testCases := []struct {
+		name   string
+		policy UserRuntimeOverridePolicy
+		mutate func(*UserService, *UserBackendPinService, UserRuntimeOverridePolicy) error
+		assert func(*testing.T, *recordingUserStateStore, *recordingBackendPinStateStore)
+	}{
+		{
+			name:   "global move disabled",
+			policy: UserRuntimeOverridePolicy{},
+			mutate: func(user *UserService, _ *UserBackendPinService, policy UserRuntimeOverridePolicy) error {
+				_, err := user.MoveUser(context.Background(), MoveUserRequest{
+					Key:         UserKey{Tenant: runtimeTestTenant, UserHash: runtimeTestUserHash},
+					TargetShard: routeLookupShardA,
+					Strategy:    MoveStrategyNewSessionsOnly,
+					Reason:      "move user",
+				}, policy)
+
+				return err
+			},
+			assert: assertNoUserOrBackendPinMutation,
+		},
+		{
+			name: "move disabled",
+			policy: UserRuntimeOverridePolicy{
+				Enabled:               true,
+				AllowMove:             false,
+				AllowKick:             true,
+				AllowAffinityClear:    true,
+				AllowedMoveStrategies: []MoveStrategy{MoveStrategyNewSessionsOnly},
+			},
+			mutate: func(user *UserService, _ *UserBackendPinService, policy UserRuntimeOverridePolicy) error {
+				_, err := user.MoveUser(context.Background(), MoveUserRequest{
+					Key:         UserKey{Tenant: runtimeTestTenant, UserHash: runtimeTestUserHash},
+					TargetShard: routeLookupShardA,
+					Strategy:    MoveStrategyNewSessionsOnly,
+					Reason:      "move user",
+				}, policy)
+
+				return err
+			},
+			assert: assertNoUserOrBackendPinMutation,
+		},
+		{
+			name: "move strategy disabled",
+			policy: UserRuntimeOverridePolicy{
+				Enabled:               true,
+				AllowMove:             true,
+				AllowKick:             true,
+				AllowAffinityClear:    true,
+				AllowedMoveStrategies: []MoveStrategy{MoveStrategyNewSessionsOnly},
+			},
+			mutate: func(user *UserService, _ *UserBackendPinService, policy UserRuntimeOverridePolicy) error {
+				_, err := user.MoveUser(context.Background(), MoveUserRequest{
+					Key:         UserKey{Tenant: runtimeTestTenant, UserHash: runtimeTestUserHash},
+					TargetShard: routeLookupShardA,
+					Strategy:    MoveStrategyKickExisting,
+					Reason:      "move user",
+				}, policy)
+
+				return err
+			},
+			assert: assertNoUserOrBackendPinMutation,
+		},
+		{
+			name: "kick disabled",
+			policy: UserRuntimeOverridePolicy{
+				Enabled:               true,
+				AllowMove:             true,
+				AllowKick:             false,
+				AllowAffinityClear:    true,
+				AllowedMoveStrategies: []MoveStrategy{MoveStrategyNewSessionsOnly, MoveStrategyKickExisting},
+			},
+			mutate: func(user *UserService, _ *UserBackendPinService, policy UserRuntimeOverridePolicy) error {
+				_, err := user.KickUser(context.Background(), KickUserRequest{
+					Key:    UserKey{Tenant: runtimeTestTenant, UserHash: runtimeTestUserHash},
+					Reason: "kick user",
+				}, policy)
+
+				return err
+			},
+			assert: assertNoUserOrBackendPinMutation,
+		},
+		{
+			name: "affinity clear disabled",
+			policy: UserRuntimeOverridePolicy{
+				Enabled:               true,
+				AllowMove:             true,
+				AllowKick:             true,
+				AllowAffinityClear:    false,
+				AllowedMoveStrategies: []MoveStrategy{MoveStrategyNewSessionsOnly, MoveStrategyKickExisting},
+			},
+			mutate: func(user *UserService, _ *UserBackendPinService, policy UserRuntimeOverridePolicy) error {
+				_, err := user.ClearUserAffinity(context.Background(), ClearUserAffinityRequest{
+					Key:    UserKey{Tenant: runtimeTestTenant, UserHash: runtimeTestUserHash},
+					Reason: "clear affinity",
+				}, policy)
+
+				return err
+			},
+			assert: assertNoUserOrBackendPinMutation,
+		},
+		{
+			name:   "global backend pin disabled",
+			policy: UserRuntimeOverridePolicy{},
+			mutate: func(_ *UserService, pins *UserBackendPinService, policy UserRuntimeOverridePolicy) error {
+				_, err := pins.SetUserBackendPinTarget(context.Background(), SetUserBackendPinTargetRequest{
+					Key:               UserKey{Tenant: runtimeTestTenant, UserHash: runtimeTestUserHash},
+					BackendIdentifier: routeLookupBackendA,
+					Strategy:          MoveStrategyNewSessionsOnly,
+					Reason:            runtimeTestBackendPinReason,
+				}, policy)
+
+				return err
+			},
+			assert: assertNoUserOrBackendPinMutation,
+		},
+		{
+			name: "backend pin move disabled",
+			policy: UserRuntimeOverridePolicy{
+				Enabled:               true,
+				AllowMove:             false,
+				AllowKick:             true,
+				AllowAffinityClear:    true,
+				AllowedMoveStrategies: []MoveStrategy{MoveStrategyNewSessionsOnly},
+			},
+			mutate: func(_ *UserService, pins *UserBackendPinService, policy UserRuntimeOverridePolicy) error {
+				_, err := pins.SetUserBackendPinTarget(context.Background(), SetUserBackendPinTargetRequest{
+					Key:               UserKey{Tenant: runtimeTestTenant, UserHash: runtimeTestUserHash},
+					BackendIdentifier: routeLookupBackendA,
+					Strategy:          MoveStrategyNewSessionsOnly,
+					Reason:            runtimeTestBackendPinReason,
+				}, policy)
+
+				return err
+			},
+			assert: assertNoUserOrBackendPinMutation,
+		},
+		{
+			name: "backend pin strategy disabled",
+			policy: UserRuntimeOverridePolicy{
+				Enabled:               true,
+				AllowMove:             true,
+				AllowKick:             true,
+				AllowAffinityClear:    true,
+				AllowedMoveStrategies: []MoveStrategy{MoveStrategyNewSessionsOnly},
+			},
+			mutate: func(_ *UserService, pins *UserBackendPinService, policy UserRuntimeOverridePolicy) error {
+				_, err := pins.SetUserBackendPinTarget(context.Background(), SetUserBackendPinTargetRequest{
+					Key:               UserKey{Tenant: runtimeTestTenant, UserHash: runtimeTestUserHash},
+					BackendIdentifier: routeLookupBackendA,
+					Strategy:          MoveStrategyKickExisting,
+					Reason:            runtimeTestBackendPinReason,
+				}, policy)
+
+				return err
+			},
+			assert: assertNoUserOrBackendPinMutation,
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			userStore := &recordingUserStateStore{}
+			pinStore := &recordingBackendPinStateStore{}
+			user := NewUserService(userStore, nil)
+			pins := NewUserBackendPinService(pinStore, nil)
+
+			err := testCase.mutate(user, pins, testCase.policy)
+			if !IsErrorKind(err, ErrorKindInvalidRequest) {
+				t.Fatalf("mutation error = %v, want invalid_request", err)
+			}
+
+			testCase.assert(t, userStore, pinStore)
+		})
+	}
 }
 
 // TestUserAndSessionRuntimeRequestsRejectEmptyReasons verifies user/session mutation validation.
@@ -477,7 +891,7 @@ func TestUserBackendPinDerivesTargetFromRegistry(t *testing.T) {
 		BackendIdentifier: " " + routeLookupBackendA + " ",
 		Strategy:          MoveStrategyKickExisting,
 		Reason:            runtimeTestBackendPinReason,
-	})
+	}, defaultUserRuntimeOverridePolicy())
 	if err != nil {
 		t.Fatalf("SetUserBackendPin returned error: %v", err)
 	}
@@ -518,7 +932,7 @@ func TestUserBackendPinUnknownBackendMapsToRuntimeNotFound(t *testing.T) {
 		BackendIdentifier: "missing-backend",
 		Strategy:          MoveStrategyNewSessionsOnly,
 		Reason:            runtimeTestBackendPinReason,
-	})
+	}, defaultUserRuntimeOverridePolicy())
 	if !IsErrorKind(err, ErrorKindNotFound) {
 		t.Fatalf("SetUserBackendPin error = %v, want not_found", err)
 	}
@@ -545,7 +959,7 @@ func TestUserBackendPinTargetConcreteBackendDerivesOneScopedPin(t *testing.T) {
 		BackendIdentifier: routeLookupBackendA,
 		Strategy:          MoveStrategyNewSessionsOnly,
 		Reason:            runtimeTestBackendPinReason,
-	})
+	}, defaultUserRuntimeOverridePolicy())
 	if err != nil {
 		t.Fatalf("SetUserBackendPinTarget returned error: %v", err)
 	}
@@ -581,7 +995,7 @@ func TestUserBackendPinTargetBackendNodeResolvesConfiguredScopes(t *testing.T) {
 		BackendNode: runtimeTestBackendNodeA,
 		Strategy:    MoveStrategyKickExisting,
 		Reason:      runtimeTestBackendPinReason,
-	})
+	}, defaultUserRuntimeOverridePolicy())
 	if err != nil {
 		t.Fatalf("SetUserBackendPinTarget returned error: %v", err)
 	}
@@ -625,7 +1039,7 @@ func TestUserBackendPinTargetBackendNodeScopedFilterResolvesOnePin(t *testing.T)
 		BackendPool: routeLookupPoolSieve,
 		Strategy:    MoveStrategyNewSessionsOnly,
 		Reason:      runtimeTestBackendPinReason,
-	})
+	}, defaultUserRuntimeOverridePolicy())
 	if err != nil {
 		t.Fatalf("SetUserBackendPinTarget returned error: %v", err)
 	}
@@ -657,7 +1071,7 @@ func TestUserBackendPinTargetBackendNodeRejectsUnknownNode(t *testing.T) {
 		BackendNode: "missing-node",
 		Strategy:    MoveStrategyNewSessionsOnly,
 		Reason:      runtimeTestBackendPinReason,
-	})
+	}, defaultUserRuntimeOverridePolicy())
 	if !IsErrorKind(err, ErrorKindNotFound) {
 		t.Fatalf("SetUserBackendPinTarget error = %v, want not_found", err)
 	}
@@ -682,7 +1096,7 @@ func TestUserBackendPinTargetBackendNodeRejectsDuplicateScope(t *testing.T) {
 		BackendNode: "node-a",
 		Strategy:    MoveStrategyNewSessionsOnly,
 		Reason:      runtimeTestBackendPinReason,
-	})
+	}, defaultUserRuntimeOverridePolicy())
 	if !IsErrorKind(err, ErrorKindConflict) {
 		t.Fatalf("SetUserBackendPinTarget error = %v, want conflict", err)
 	}
@@ -709,7 +1123,7 @@ func TestUserBackendPinTargetBackendNodeRejectsMissingRequiredScope(t *testing.T
 		BackendNode: runtimeTestBackendNodeA,
 		Strategy:    MoveStrategyNewSessionsOnly,
 		Reason:      runtimeTestBackendPinReason,
-	})
+	}, defaultUserRuntimeOverridePolicy())
 	if !IsErrorKind(err, ErrorKindConflict) {
 		t.Fatalf("SetUserBackendPinTarget error = %v, want conflict", err)
 	}
@@ -737,7 +1151,7 @@ func TestUserBackendPinTargetBackendNodeRejectsCrossShardData(t *testing.T) {
 		BackendNode: "node-a",
 		Strategy:    MoveStrategyNewSessionsOnly,
 		Reason:      runtimeTestBackendPinReason,
-	})
+	}, defaultUserRuntimeOverridePolicy())
 	if !IsErrorKind(err, ErrorKindConflict) {
 		t.Fatalf("SetUserBackendPinTarget error = %v, want conflict", err)
 	}
@@ -764,7 +1178,7 @@ func TestUserBackendPinTargetBackendNodeRejectsInvalidRegistryData(t *testing.T)
 		BackendNode: "node-a",
 		Strategy:    MoveStrategyNewSessionsOnly,
 		Reason:      runtimeTestBackendPinReason,
-	})
+	}, defaultUserRuntimeOverridePolicy())
 	if !IsErrorKind(err, ErrorKindUnavailable) {
 		t.Fatalf("SetUserBackendPinTarget error = %v, want unavailable", err)
 	}
@@ -790,7 +1204,7 @@ func TestUserBackendPinTargetBackendNodeRejectsAmbiguousProtocolFilter(t *testin
 		Protocol:    "imap",
 		Strategy:    MoveStrategyNewSessionsOnly,
 		Reason:      runtimeTestBackendPinReason,
-	})
+	}, defaultUserRuntimeOverridePolicy())
 	if !IsErrorKind(err, ErrorKindInvalidRequest) {
 		t.Fatalf("SetUserBackendPinTarget error = %v, want invalid_request", err)
 	}
@@ -867,7 +1281,7 @@ func TestUserBackendPinTargetKickExistingUsesOneControlledMutation(t *testing.T)
 		BackendNode: runtimeTestBackendNodeA,
 		Strategy:    MoveStrategyKickExisting,
 		Reason:      runtimeTestBackendPinReason,
-	})
+	}, defaultUserRuntimeOverridePolicy())
 	if err != nil {
 		t.Fatalf("SetUserBackendPinTarget returned error: %v", err)
 	}
@@ -911,7 +1325,7 @@ func TestUserBackendPinTargetNonKickStrategiesDoNotCloseLocalSessions(t *testing
 				BackendPool: routeLookupDefaultPool,
 				Strategy:    strategy,
 				Reason:      runtimeTestBackendPinReason,
-			})
+			}, defaultUserRuntimeOverridePolicy())
 			if err != nil {
 				t.Fatalf("SetUserBackendPinTarget returned error: %v", err)
 			}
@@ -947,7 +1361,7 @@ func TestUserBackendPinAuditMetadataIsBounded(t *testing.T) {
 		Strategy:          MoveStrategyKickExisting,
 		Reason:            runtimeTestBackendPinReason,
 		Actor:             actor,
-	})
+	}, defaultUserRuntimeOverridePolicy())
 	if err != nil {
 		t.Fatalf("SetUserBackendPin returned error: %v", err)
 	}
@@ -965,7 +1379,7 @@ func TestUserBackendPinOperationsRecordBoundedObservability(t *testing.T) {
 		BackendIdentifier: routeLookupBackendA,
 		Strategy:          MoveStrategyKickExisting,
 		Reason:            runtimeTestBackendPinReason,
-	})
+	}, defaultUserRuntimeOverridePolicy())
 	if err != nil {
 		t.Fatalf("SetUserBackendPin returned error: %v", err)
 	}
@@ -1115,7 +1529,7 @@ func TestUserKickClosesEveryLocalSessionForAffinity(t *testing.T) {
 	if _, err := service.KickUser(context.Background(), KickUserRequest{
 		Key:    userKey,
 		Reason: "operator requested reconnect",
-	}); err != nil {
+	}, defaultUserRuntimeOverridePolicy()); err != nil {
 		t.Fatalf("KickUser returned error: %v", err)
 	}
 
@@ -1381,7 +1795,7 @@ func TestBackendDrainClosesEveryLocalSessionForBackend(t *testing.T) {
 		BackendIdentifier: runtimeTestBackendIdentifier,
 		Drain:             backend.DrainState{Enabled: true, Mode: backend.DrainModeHard},
 		Reason:            "host drain",
-	}); err != nil {
+	}, backend.RuntimeOverridePolicy{Enabled: true, AllowDrain: true}); err != nil {
 		t.Fatalf("StartDrain returned error: %v", err)
 	}
 
@@ -1477,7 +1891,7 @@ func TestReaperRunOnceRespectsMaxPassDuration(t *testing.T) {
 	}
 
 	if elapsed := time.Since(started); elapsed > time.Second {
-		t.Fatalf("RunOnce elapsed %s, want prompt deadline", elapsed)
+		t.Fatalf("RunOnce elapsed %s, want short deadline", elapsed)
 	}
 }
 
@@ -1492,6 +1906,21 @@ func assertInvalidRuntimeRequests(t *testing.T, testCases []runtimeValidationCas
 			}
 		})
 	}
+}
+
+// backendRuntimeRecord returns a valid backend runtime mutation result for tests.
+func backendRuntimeRecord() state.BackendRuntimeRecord {
+	return state.BackendRuntimeRecord{
+		Status:            "updated",
+		BackendIdentifier: runtimeTestBackendIdentifier,
+		Generation:        "11",
+		ServerTime:        time.Unix(100, 0),
+	}
+}
+
+// defaultUserRuntimeOverridePolicy returns the repository default user mutation policy.
+func defaultUserRuntimeOverridePolicy() UserRuntimeOverridePolicy {
+	return NewUserRuntimeOverridePolicy(config.DefaultConfig().Director.RuntimeOverrides)
 }
 
 // assertBackendPinAuditBase checks core backend-pin audit fields.
@@ -1570,6 +1999,17 @@ func assertNoBackendPinMutation(t *testing.T, store *recordingBackendPinStateSto
 	if store.setCalled || store.setAllCalled || store.clearCalled || store.clearAllCalled {
 		t.Fatalf("unexpected backend-pin mutation calls: %#v", store)
 	}
+}
+
+// assertNoUserOrBackendPinMutation verifies validation failed before state mutation.
+func assertNoUserOrBackendPinMutation(t *testing.T, userStore *recordingUserStateStore, pinStore *recordingBackendPinStateStore) {
+	t.Helper()
+
+	if userStore.moveCalled || userStore.kickCalled || userStore.clearCalled {
+		t.Fatalf("unexpected user mutation calls: %#v", userStore)
+	}
+
+	assertNoBackendPinMutation(t, pinStore)
 }
 
 // fakeBackendPinBackend creates registry identity records for resolution tests.
@@ -1716,15 +2156,22 @@ type recordingUserStateStore struct {
 	moveRecord  state.UserRuntimeRecord
 	kickRecord  state.UserRuntimeRecord
 	clearRecord state.UserRuntimeRecord
+	moveCalled  bool
+	kickCalled  bool
+	clearCalled bool
 }
 
 // MoveUser returns the configured user move record.
 func (s *recordingUserStateStore) MoveUser(context.Context, state.UserMoveRequest) (state.UserRuntimeRecord, error) {
+	s.moveCalled = true
+
 	return s.moveRecord, nil
 }
 
 // KickUser returns the configured user kick record.
 func (s *recordingUserStateStore) KickUser(context.Context, state.UserKickRequest) (state.UserRuntimeRecord, error) {
+	s.kickCalled = true
+
 	return s.kickRecord, nil
 }
 
@@ -1733,6 +2180,8 @@ func (s *recordingUserStateStore) ClearUserAffinity(
 	context.Context,
 	state.UserClearRequest,
 ) (state.UserRuntimeRecord, error) {
+	s.clearCalled = true
+
 	return s.clearRecord, nil
 }
 
@@ -1866,14 +2315,20 @@ func (s *recordingSessionStateStore) ReapSessions(
 }
 
 type recordingBackendStateStore struct {
-	record state.BackendRuntimeRecord
+	record    state.BackendRuntimeRecord
+	mutation  state.BackendRuntimeMutation
+	setCalls  int
+	clearCall int
 }
 
 // SetBackendRuntime returns the configured backend runtime record.
 func (s *recordingBackendStateStore) SetBackendRuntime(
-	context.Context,
-	state.BackendRuntimeMutation,
+	_ context.Context,
+	mutation state.BackendRuntimeMutation,
 ) (state.BackendRuntimeRecord, error) {
+	s.setCalls++
+	s.mutation = mutation
+
 	return s.record, nil
 }
 
@@ -1882,5 +2337,7 @@ func (s *recordingBackendStateStore) ClearBackendRuntime(
 	context.Context,
 	state.BackendRuntimeClearRequest,
 ) (state.BackendRuntimeRecord, error) {
+	s.clearCall++
+
 	return s.record, nil
 }

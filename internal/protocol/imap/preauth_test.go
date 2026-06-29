@@ -70,8 +70,9 @@ func TestCapabilityCleartextPostStartTLSAndImplicitTLS(t *testing.T) {
 
 	postStartTLS := startTestSession(t, testPreauthConfig(TLSModeStartTLS, false))
 	postStartTLS.expectLine(t, greetingLine)
-	postStartTLS.write(t, "A001 STARTTLS\r\nA002 CAPABILITY\r\n")
+	postStartTLS.write(t, "A001 STARTTLS\r\n")
 	postStartTLS.expectLine(t, "A001 OK Begin TLS negotiation now\r\n")
+	postStartTLS.write(t, "A002 CAPABILITY\r\n")
 	postStartTLS.expectLine(t, testCapabilityTLS)
 	postStartTLS.expectLine(t, "A002 OK CAPABILITY completed\r\n")
 	if !postStartTLS.session.TLSActive() {
@@ -83,6 +84,23 @@ func TestCapabilityCleartextPostStartTLSAndImplicitTLS(t *testing.T) {
 	implicit.write(t, "A001 CAPABILITY\r\n")
 	implicit.expectLine(t, testCapabilityTLS)
 	implicit.expectLine(t, "A001 OK CAPABILITY completed\r\n")
+}
+
+// TestSTARTTLSRejectsPipelinedCleartext verifies STARTTLS fails closed on buffered plaintext.
+func TestSTARTTLSRejectsPipelinedCleartext(t *testing.T) {
+	harness := startTestSession(t, testPreauthConfig(TLSModeStartTLS, false))
+	harness.expectLine(t, greetingLine)
+
+	harness.write(t, "A001 STARTTLS\r\nA002 CAPABILITY\r\n")
+	harness.expectLine(t, "A001 BAD STARTTLS cannot be pipelined\r\n")
+
+	if err := harness.wait(t); err != nil {
+		t.Fatalf("session wait: %v", err)
+	}
+
+	if harness.session.TLSActive() {
+		t.Fatal("pipelined STARTTLS marked the session TLS-active")
+	}
 }
 
 // TestNauthilusContextReportsFrontendTLS verifies SSL facts reach the auth request context.

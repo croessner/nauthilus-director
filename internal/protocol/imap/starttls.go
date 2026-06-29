@@ -21,33 +21,39 @@ import (
 	"crypto/tls"
 )
 
+const startTLSInjectionMessage = "STARTTLS cannot be pipelined"
+
 // handleStartTLS validates STARTTLS availability and updates the logical TLS state.
-func (s *Session) handleStartTLS(command preauthCommand) error {
+func (s *Session) handleStartTLS(command preauthCommand) (commandOutcome, error) {
 	if err := validateNoArguments(command); err != nil {
-		return s.writeTagged(command.tag, responseBad, "Invalid STARTTLS command")
+		return commandOutcome{}, s.writeTagged(command.tag, responseBad, "Invalid STARTTLS command")
 	}
 
 	if !s.startTLSAdvertised() {
-		return s.writeTagged(command.tag, responseBad, "STARTTLS is not available")
+		return commandOutcome{}, s.writeTagged(command.tag, responseBad, "STARTTLS is not available")
+	}
+
+	if s.reader.Buffered() > 0 {
+		return commandOutcome{closeSession: true}, s.writeTagged(command.tag, responseBad, startTLSInjectionMessage)
 	}
 
 	if err := s.writeTagged(command.tag, responseOK, "Begin TLS negotiation now"); err != nil {
-		return err
+		return commandOutcome{}, err
 	}
 
 	if s.context.FrontendTLSConfig == nil {
 		s.tlsActive = true
 
-		return nil
+		return commandOutcome{}, nil
 	}
 
 	if err := s.writer.Flush(); err != nil {
-		return err
+		return commandOutcome{}, err
 	}
 
 	tlsConn := tls.Server(s.conn, s.context.FrontendTLSConfig.Clone())
 	if err := tlsConn.Handshake(); err != nil {
-		return err
+		return commandOutcome{}, err
 	}
 
 	s.conn = tlsConn
@@ -55,7 +61,7 @@ func (s *Session) handleStartTLS(command preauthCommand) error {
 	s.writer = bufio.NewWriter(tlsConn)
 	s.tlsActive = true
 
-	return nil
+	return commandOutcome{}, nil
 }
 
 // startTLSAdvertised reports whether STARTTLS is configured and currently usable.

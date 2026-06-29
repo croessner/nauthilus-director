@@ -27,7 +27,7 @@ GOLANGCI_LINT ?= golangci-lint
 GOLANGCI_NEW_FROM_REV ?= HEAD
 GO ?= go
 GOVULNCHECK ?= govulncheck
-GOVULNCHECK_GOFLAGS ?= -mod=mod
+GOVULNCHECK_GOFLAGS ?= -mod=vendor
 GOVULNCHECK_SCAN ?= package
 POC_DIR := poc
 E2E_SCRIPT ?= ./test/e2e/run.sh
@@ -195,6 +195,9 @@ docs-check:
 check-packaging:
 	bash ./scripts/check-packaging.sh
 
+check-release-hardening:
+	bash ./scripts/check-release-hardening.sh
+
 systemd-verify:
 	@set -e; \
 	if ! command -v $(SYSTEMD_ANALYZE) >/dev/null 2>&1; then \
@@ -287,7 +290,7 @@ check-docs:
 copyright-check:
 	sh ./scripts/check-go-headers.sh
 
-guardrails: docs-check check-packaging copyright-check check-openapi fix vet lint test race e2e build-check
+guardrails: docs-check check-packaging check-release-hardening copyright-check check-openapi fix vet lint test race e2e build-check
 
 govulncheck:
 	@command -v $(GOVULNCHECK) >/dev/null 2>&1 || { echo "$(GOVULNCHECK) not found. Install it with: go install golang.org/x/vuln/cmd/govulncheck@latest"; exit 1; }
@@ -358,4 +361,4 @@ poc-race:
 version:
 	@echo $(VERSION)
 
-.PHONY: all build install install-bin install-man uninstall uninstall-bin uninstall-man build-check clean fix vet lint-config lint test race e2e e2e-interop docs-check check-packaging systemd-verify docker-build docker-smoke generate-openapi check-openapi generate-docs check-docs copyright-check guardrails govulncheck release-guardrails install-hooks scale-smoke scale-stress poc-test poc-race version
+.PHONY: all build install install-bin install-man uninstall uninstall-bin uninstall-man build-check clean fix vet lint-config lint test race e2e e2e-interop docs-check check-packaging check-release-hardening systemd-verify docker-build docker-smoke generate-openapi check-openapi generate-docs check-docs copyright-check guardrails govulncheck release-guardrails install-hooks scale-smoke scale-stress poc-test poc-race version

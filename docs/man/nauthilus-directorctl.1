@@ -584,9 +584,9 @@ and
 with caller-supplied user facts.
 It does not accept credentials, SASL blobs, message numbers, UIDLs, message
 sizes, message content or mailbox data.
-LMTP recipient diagnostics may resolve the supplied recipient through the
-configured Nauthilus no-auth identity lookup path before explaining the dry-run
-route.
+LMTP recipient diagnostics may use only existing director-owned runtime state.
+If the account cannot be resolved locally, the command returns a bounded
+fail-closed diagnostic instead of calling Nauthilus.
 Route lookup does not authenticate credentials, create sessions, refresh
 leases, connect to backends or mutate runtime state.
 The

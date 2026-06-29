@@ -84,6 +84,7 @@ const (
 	noopText                 = "OK"
 	quitText                 = "Bye"
 	rsetText                 = "Transaction reset"
+	startTLSInjectionText    = "STARTTLS cannot be pipelined"
 	startTLSText             = "Ready to start TLS"
 	startTLSUnavailableText  = "STARTTLS is not available"
 	unsupportedText          = "Command not implemented"

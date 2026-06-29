@@ -21,6 +21,12 @@ Production policy:
 
 Bind the control listener to a private address by default. Loopback binding is
 not a replacement for configured authentication; it is only one layer.
+Bearer and OIDC control authentication require
+`runtime.servers.control.tls.enabled: true` whenever the listener is bound beyond
+loopback. Plain HTTP control access is accepted only for loopback listeners with
+`runtime.servers.control.allow_plaintext_loopback: true`; it is intended for
+local development, container-internal health checks, or SSH-forwarded workflows,
+not for remotely reachable bearer-token transport.
 
 ## Authentication Modes
 
@@ -50,10 +56,38 @@ mounted secret file and compares the token in constant time. Prefer
 `NAUTHILUS_DIRECTORCTL_BEARER_TOKEN_FILE=<path>` for production shells. Inline
 token flags are intended for explicit operator use and tests.
 
+Configuration fields whose names end in `_file` are mounted secret-file
+references, not inline secret values. Redis passwords, Nauthilus HTTP/gRPC
+caller credentials, backend authentication credentials, health-check
+credentials, control static auth files and OIDC client secret files read the
+referenced regular file with bounded size checks. Missing, unreadable, empty,
+directory or oversized files fail closed with secret-safe diagnostics. Existing
+configs that placed literal passwords or tokens in `*_file` fields must move the
+literal value into a mounted file and configure the field with that path.
+
 mTLS auth requires `runtime.servers.control.tls.enabled: true`, a configured
 control certificate and key, and `runtime.servers.control.tls.client_ca`.
 Clients use `nauthilus-directorctl --tls-ca-file <path> --tls-client-cert
 <path> --tls-client-key <path>`.
+Any control TLS configuration with `require_client_cert: true` must configure
+`client_ca`; listeners fail closed instead of accepting arbitrary client
+certificates.
+
+## Nauthilus Authority Transport
+
+HTTP and gRPC Nauthilus authority calls can carry Director caller credentials
+and end-user password or bearer material. Use TLS for all non-loopback
+authority targets. The only plaintext exception is loopback-local development:
+set `auth.authorities.<name>.http.allow_plaintext_loopback: true` for an
+`http://127.0.0.1/...` endpoint, or
+`auth.authorities.<name>.grpc.allow_plaintext_loopback: true` with
+`grpc.tls.enabled: false` for a loopback gRPC address. The opt-in is rejected
+for wildcard, LAN, or public addresses.
+
+When `auth.authorities.<name>.http.tls.enabled: true`, the HTTP authority client
+uses the configured `ca_file`, `server_name`, and explicit
+`insecure_skip_verify` compatibility setting. gRPC authority TLS uses the same
+trust vocabulary.
 
 ## Control CLI Transport
 

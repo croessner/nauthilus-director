@@ -84,7 +84,12 @@ func AuthenticateHealthBackend(connection *BackendConnection, target backend.Bac
 		return fmt.Errorf("%w: health userpass unavailable", ErrBackendAuthPolicy)
 	}
 
-	return authenticateUserPass(connection, target.Health.Username, target.Health.Password.Value())
+	password, err := target.Health.PasswordValue("director.backends.health_check.password_file")
+	if err != nil {
+		return fmt.Errorf("%w: invalid health check password_file", ErrBackendAuthPolicy)
+	}
+
+	return authenticateUserPass(connection, target.Health.Username, password)
 }
 
 // authenticateMasterUserBackend logs in using the configured master-user POP3 USER/PASS flow.
@@ -102,7 +107,12 @@ func authenticateMasterUserBackend(connection *BackendConnection, config backend
 		return fmt.Errorf("%w: incomplete master_user config", ErrBackendAuthPolicy)
 	}
 
-	return authenticateUserPass(connection, username, config.Password.Value())
+	password, err := config.PasswordValue("director.backends.auth.master_user.password_file")
+	if err != nil {
+		return fmt.Errorf("%w: invalid master_user password_file", ErrBackendAuthPolicy)
+	}
+
+	return authenticateUserPass(connection, username, password)
 }
 
 // authenticateCredentialReplayBackend replays only explicitly allowed frontend credentials.

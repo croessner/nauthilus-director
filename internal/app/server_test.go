@@ -20,7 +20,16 @@ package app
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"math/big"
 	"net"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -142,6 +151,26 @@ func TestSessionHandlerFactoryDispatchesSieve(t *testing.T) {
 	}
 }
 
+// TestControlTLSConfigRejectsRequiredClientCertWithoutCA keeps control mTLS gates fail-closed.
+func TestControlTLSConfigRejectsRequiredClientCertWithoutCA(t *testing.T) {
+	certPath, keyPath := writeAppTestCertificate(t)
+	control := config.DefaultConfig().Runtime.Servers.Control
+	control.TLS.Enabled = true
+	control.TLS.Cert = certPath
+	control.TLS.Key = config.Secret(keyPath)
+	control.TLS.RequireClientCert = true
+	control.TLS.ClientCA = ""
+
+	_, err := controlTLSConfig(control)
+	if err == nil {
+		t.Fatal("controlTLSConfig accepted require_client_cert without client_ca")
+	}
+
+	if !strings.Contains(err.Error(), "client_ca is required when require_client_cert is true") {
+		t.Fatalf("error = %q, want client CA requirement", err.Error())
+	}
+}
+
 // TestSessionHandlerFactoryDispatchesPOP3 verifies the app path recognizes POP3 listeners.
 func TestSessionHandlerFactoryDispatchesPOP3(t *testing.T) {
 	factory := sessionHandlerFactory(nil, nil, nil, nil, nil, 0, nil, nil, "test-version")
@@ -163,4 +192,45 @@ func TestSessionHandlerFactoryDispatchesPOP3(t *testing.T) {
 	if len(handlerConfig.AuthMechanisms) != 3 {
 		t.Fatalf("POP3 auth methods = %v, want default userpass and bearer methods", handlerConfig.AuthMechanisms)
 	}
+}
+
+// writeAppTestCertificate writes a temporary self-signed TLS certificate pair.
+func writeAppTestCertificate(t *testing.T) (string, string) {
+	t.Helper()
+
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate private key: %v", err)
+	}
+
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "control.test"},
+		NotBefore:    time.Now().Add(-time.Minute),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		DNSNames:     []string{"control.test"},
+	}
+
+	certDER, err := x509.CreateCertificate(rand.Reader, template, template, &privateKey.PublicKey, privateKey)
+	if err != nil {
+		t.Fatalf("create certificate: %v", err)
+	}
+
+	dir := t.TempDir()
+	certPath := filepath.Join(dir, "control.crt")
+	keyPath := filepath.Join(dir, "control.key")
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(privateKey)})
+
+	if err := os.WriteFile(certPath, certPEM, 0o600); err != nil {
+		t.Fatalf("write certificate: %v", err)
+	}
+
+	if err := os.WriteFile(keyPath, keyPEM, 0o600); err != nil {
+		t.Fatalf("write key: %v", err)
+	}
+
+	return certPath, keyPath
 }

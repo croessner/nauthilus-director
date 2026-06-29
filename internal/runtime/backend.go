@@ -108,8 +108,12 @@ func NewBackendService(store BackendStateStore, local *LocalSessionRegistry, opt
 }
 
 // SetInService changes the runtime in/out overlay without terminating active sessions.
-func (s *BackendService) SetInService(ctx context.Context, request SetBackendInServiceRequest) (BackendMutationResult, error) {
-	if err := request.Validate(); err != nil {
+func (s *BackendService) SetInService(
+	ctx context.Context,
+	request SetBackendInServiceRequest,
+	policy backend.RuntimeOverridePolicy,
+) (BackendMutationResult, error) {
+	if err := request.Validate(policy); err != nil {
 		return BackendMutationResult{}, err
 	}
 
@@ -220,8 +224,12 @@ func (s *BackendService) SetMaintenance(
 }
 
 // StartDrain starts an auditable backend drain and closes local attached streams.
-func (s *BackendService) StartDrain(ctx context.Context, request StartBackendDrainRequest) (BackendMutationResult, error) {
-	if err := request.Validate(); err != nil {
+func (s *BackendService) StartDrain(
+	ctx context.Context,
+	request StartBackendDrainRequest,
+	policy backend.RuntimeOverridePolicy,
+) (BackendMutationResult, error) {
+	if err := request.Validate(policy); err != nil {
 		return BackendMutationResult{}, err
 	}
 
@@ -292,12 +300,16 @@ func (s *BackendService) ClearRuntime(ctx context.Context, request ClearBackendR
 }
 
 // Validate checks the in/out request before it crosses a persistence boundary.
-func (r SetBackendInServiceRequest) Validate() error {
+func (r SetBackendInServiceRequest) Validate(policy backend.RuntimeOverridePolicy) error {
 	if err := requireBackendIdentifier(operationBackendInOut, r.BackendIdentifier); err != nil {
 		return err
 	}
 
-	return requireReason(operationBackendInOut, r.Reason)
+	if err := requireReason(operationBackendInOut, r.Reason); err != nil {
+		return err
+	}
+
+	return r.RuntimeOverride().Validate(policy)
 }
 
 // Validate checks the weight request before it crosses a persistence boundary.
@@ -331,7 +343,7 @@ func (r SetBackendMaintenanceRequest) Validate() error {
 }
 
 // Validate checks the drain request before it crosses a persistence boundary.
-func (r StartBackendDrainRequest) Validate() error {
+func (r StartBackendDrainRequest) Validate(policy backend.RuntimeOverridePolicy) error {
 	if err := requireBackendIdentifier(operationBackendDrain, r.BackendIdentifier); err != nil {
 		return err
 	}
@@ -340,9 +352,7 @@ func (r StartBackendDrainRequest) Validate() error {
 		return err
 	}
 
-	_, err := r.Drain.Normalize()
-
-	return err
+	return r.RuntimeOverride().Validate(policy)
 }
 
 // Validate checks the runtime clear request before it crosses a persistence boundary.

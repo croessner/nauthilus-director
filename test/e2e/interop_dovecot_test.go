@@ -331,6 +331,8 @@ func writeDovecotClusterProcessConfig(t *testing.T, options interopClusterProces
 	}
 	backendAuth := credentialReplayBackendAuth(false)
 	listenerCertPath, listenerKeyPath, _ := writeTestCertificate(t)
+	authorityPasswordPath := writeProcessSecretFile(t, "unused")
+	healthPasswordPath := writeProcessSecretFile(t, e2ePassword)
 	var content strings.Builder
 	fmt.Fprintf(&content, `patch:
   - op: remove
@@ -376,7 +378,7 @@ auth:
       http:
         endpoint: %q
         basic_auth:
-          password_file: "unused"
+          password_file: %q
 director:
   routing:
     default_shard: %q
@@ -410,6 +412,7 @@ director:
 		options.RedisAddress,
 		processAuthorityOIDCYAMLForOptions(t, options.AuthorityOIDC),
 		options.AuthorityURL,
+		authorityPasswordPath,
 		interopDefaultShard,
 		options.DirectorAddress,
 		listenerCertPath,
@@ -418,7 +421,7 @@ director:
 	)
 
 	for _, configured := range interopClusterBackends(options.BackendAddresses) {
-		writeDovecotClusterBackendConfig(&content, configured, backendTLS, backendAuth)
+		writeDovecotClusterBackendConfig(&content, configured, backendTLS, backendAuth, healthPasswordPath)
 	}
 
 	path := filepath.Join(t.TempDir(), "nauthilus-director-cluster.yml")
@@ -435,6 +438,7 @@ func writeDovecotClusterBackendConfig(
 	configured interopClusterBackend,
 	backendTLS config.BackendTLSConfig,
 	backendAuth backend.AuthConfig,
+	healthPasswordPath string,
 ) {
 	fmt.Fprintf(content, `    %s:
       protocol: imap
@@ -478,7 +482,7 @@ func writeDovecotClusterBackendConfig(
 		backendAuth.CredentialReplay.PreserveMechanism,
 		quotedYAMLStrings(backendAuth.CredentialReplay.AllowedMechanisms),
 		interopHealthUsername,
-		e2ePassword,
+		healthPasswordPath,
 	)
 }
 

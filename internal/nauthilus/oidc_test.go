@@ -135,6 +135,43 @@ func TestOIDCDiscoveryRejectsInvalidMetadata(t *testing.T) {
 	}
 }
 
+// TestOIDCDiscoveryRejectsUnsafeDirectURL validates local discovery URL policy before fetch.
+func TestOIDCDiscoveryRejectsUnsafeDirectURL(t *testing.T) {
+	tests := []struct {
+		name    string
+		options oidcDiscoveryOptions
+		want    string
+	}{
+		{
+			name: "plain http outside loopback",
+			options: oidcDiscoveryOptions{
+				Issuer:       "https://auth.example.test",
+				DiscoveryURL: "http://auth.example.test/.well-known/openid-configuration",
+			},
+			want: "https outside loopback",
+		},
+		{
+			name: "direct discovery without issuer pin",
+			options: oidcDiscoveryOptions{
+				DiscoveryURL: "https://auth.example.test/.well-known/openid-configuration",
+			},
+			want: "issuer",
+		},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			_, err := resolveOIDCDiscoveryURL(testCase.options)
+			if err == nil {
+				t.Fatal("resolveOIDCDiscoveryURL accepted unsafe direct discovery URL")
+			}
+			if !strings.Contains(err.Error(), testCase.want) {
+				t.Fatalf("error = %q, want %q", err.Error(), testCase.want)
+			}
+		})
+	}
+}
+
 // TestOIDCTokenAcquisitionSupportsSecretAuthMethods verifies secret-backed token endpoint auth.
 func TestOIDCTokenAcquisitionSupportsSecretAuthMethods(t *testing.T) {
 	tests := []struct {

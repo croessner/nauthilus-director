@@ -8,12 +8,17 @@ ARG ALPINE_IMAGE=alpine:3.23
 
 FROM ${ALPINE_IMAGE}
 
-ARG STALWART_CLI_INSTALLER_URL=https://github.com/stalwartlabs/cli/releases/latest/download/stalwart-cli-installer.sh
+ARG STALWART_CLI_INSTALLER_URL=https://github.com/stalwartlabs/cli/releases/download/v1.0.9/stalwart-cli-installer.sh
+ARG STALWART_CLI_INSTALLER_SHA256=2d0d3cab56be67db9d91b9475d2a0d6690f16046d8b401b57b2b2717ec46d391
 
 ENV PATH="/root/.local/bin:/root/.cargo/bin:/usr/local/bin:${PATH}"
 
 RUN apk add --no-cache ca-certificates curl tar xz \
-    && curl --proto '=https' --tlsv1.2 -LsSf "${STALWART_CLI_INSTALLER_URL}" | sh \
+    && test -n "${STALWART_CLI_INSTALLER_SHA256}" \
+    && curl --proto '=https' --tlsv1.2 -LsSf "${STALWART_CLI_INSTALLER_URL}" -o /tmp/stalwart-cli-installer.sh \
+    && printf '%s  %s\n' "${STALWART_CLI_INSTALLER_SHA256}" /tmp/stalwart-cli-installer.sh | sha256sum -c - \
+    && sh /tmp/stalwart-cli-installer.sh \
+    && rm -f /tmp/stalwart-cli-installer.sh \
     && stalwart-cli --version
 
 CMD ["stalwart-cli", "--help"]

@@ -129,6 +129,9 @@ func writePOP3GRPCProcessConfig(t *testing.T, options pop3GRPCProcessConfigOptio
 	if pop3BackendTLSMode == "" {
 		pop3BackendTLSMode = "plaintext"
 	}
+	callerPasswordPath := writeProcessSecretFile(t, e2ePOP3GRPCCallerSecret)
+	backendPasswordPath := writeProcessSecretFile(t, e2ePassword)
+
 	content := fmt.Sprintf(`patch:
   - op: remove
     path: director.listeners
@@ -173,6 +176,7 @@ auth:
       grpc:
         address: %q
         authority: ""
+        allow_plaintext_loopback: true
         caller_auth:
           basic:
             enabled: true
@@ -252,7 +256,7 @@ director:
 		processAuthorityYAML(t, processAuthorityOIDCOptions{}, options.AuthorityBearer),
 		options.GRPCAddress,
 		e2ePOP3GRPCCallerUser,
-		e2ePOP3GRPCCallerSecret,
+		callerPasswordPath,
 		e2eShardTag,
 		options.POP3Address,
 		listenerAuthorityContextYAML(nil, options.AuthorityContextGRPCMetadata),
@@ -262,7 +266,7 @@ director:
 		options.POP3Backend,
 		pop3BackendTLSMode,
 		options.POP3BackendTLSCAFile,
-		e2ePassword,
+		backendPasswordPath,
 	)
 	content = strings.ReplaceAll(content, "\t", "")
 

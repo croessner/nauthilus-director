@@ -462,6 +462,8 @@ func writeSieveProductionProcessConfig(t *testing.T, options sieveProductionProc
       max_ttl: 24h
 `
 	}
+	authorityPasswordPath := writeProcessSecretFile(t, "unused")
+	backendPasswordPath := writeProcessSecretFile(t, e2ePassword)
 
 	content := fmt.Sprintf(`patch:
   - op: remove
@@ -507,7 +509,7 @@ auth:
       http:
         endpoint: %q
         basic_auth:
-          password_file: "unused"
+          password_file: %q
 director:
   health:
     interval: 200ms
@@ -618,6 +620,7 @@ director:
 		options.RedisAddress,
 		processAuthorityYAML(t, processAuthorityOIDCOptions{}, options.AuthorityBearer),
 		options.AuthorityURL,
+		authorityPasswordPath,
 		userHold,
 		e2eShardTag,
 		options.IMAPAddress,
@@ -632,7 +635,7 @@ director:
 		options.SievesAddress,
 		certPath,
 		keyPath,
-		sieveProductionBackendsYAML(options),
+		sieveProductionBackendsYAML(options, backendPasswordPath),
 	)
 	content = strings.ReplaceAll(content, "\t", "")
 
@@ -645,7 +648,7 @@ director:
 }
 
 // sieveProductionBackendsYAML renders matching backend-node entries across IMAP, LMTP and Sieve.
-func sieveProductionBackendsYAML(options sieveProductionProcessConfigOptions) string {
+func sieveProductionBackendsYAML(options sieveProductionProcessConfigOptions, backendPasswordPath string) string {
 	sieveBackendTLSMode := strings.TrimSpace(options.SieveBackendTLSMode)
 	if sieveBackendTLSMode == "" {
 		sieveBackendTLSMode = "plaintext"
@@ -666,7 +669,7 @@ func sieveProductionBackendsYAML(options sieveProductionProcessConfigOptions) st
         mode: master_user
         master_user:
           username: director-master
-          password_file: backend-master-secret
+          password_file: %q
           user_format: "{user}*{master_user}"
           mechanism: plain
       health_check:
@@ -686,7 +689,7 @@ func sieveProductionBackendsYAML(options sieveProductionProcessConfigOptions) st
         mode: master_user
         master_user:
           username: director-master
-          password_file: backend-master-secret
+          password_file: %q
           user_format: "{user}*{master_user}"
           mechanism: plain
       health_check:
@@ -741,7 +744,7 @@ func sieveProductionBackendsYAML(options sieveProductionProcessConfigOptions) st
         mode: master_user
         master_user:
           username: director-master
-          password_file: backend-master-secret
+          password_file: %q
           user_format: "{user}*{master_user}"
           mechanism: plain
         credential_replay:
@@ -770,7 +773,7 @@ func sieveProductionBackendsYAML(options sieveProductionProcessConfigOptions) st
         mode: master_user
         master_user:
           username: director-master
-          password_file: backend-master-secret
+          password_file: %q
           user_format: "{user}*{master_user}"
           mechanism: plain
         credential_replay:
@@ -781,8 +784,10 @@ func sieveProductionBackendsYAML(options sieveProductionProcessConfigOptions) st
         enabled: false
 `, e2eShardTag,
 		options.IMAPBackends[e2eBackendAID],
+		backendPasswordPath,
 		e2eShardTagB,
 		options.IMAPBackends[e2eBackendBID],
+		backendPasswordPath,
 		e2eShardTag,
 		options.LMTPBackends[e2eLMTPBackendAID],
 		e2eShardTagB,
@@ -791,10 +796,12 @@ func sieveProductionBackendsYAML(options sieveProductionProcessConfigOptions) st
 		options.SieveBackends[e2eSieveBackendAID],
 		sieveBackendTLSMode,
 		options.SieveBackendTLSCAFile,
+		backendPasswordPath,
 		e2eShardTagB,
 		options.SieveBackends[e2eSieveBackendBID],
 		sieveBackendTLSMode,
 		options.SieveBackendTLSCAFile,
+		backendPasswordPath,
 	)
 }
 

@@ -181,10 +181,26 @@ def load_config() -> DemoConfig:
         sieve_host=os.environ.get("DEMO_SIEVE_HOST", "127.0.0.1"),
         sieve_port=int_env("DEMO_SIEVE_PORT", 4190),
         sieves_port=int_env("DEMO_SIEVES_PORT", 8490),
-        control_url=os.environ.get("DEMO_CONTROL_URL", "http://127.0.0.1:9090").rstrip("/"),
+        control_url=os.environ.get("DEMO_CONTROL_URL", "https://127.0.0.1:9090").rstrip("/"),
         control_token=load_control_token(),
         wait_seconds=float(os.environ.get("DEMO_WAIT_SECONDS", "20")),
     )
+
+
+def control_ssl_context(config: DemoConfig) -> ssl.SSLContext | None:
+    """Create a TLS context for the demo control API."""
+
+    if not config.control_url.lower().startswith("https://"):
+        return None
+
+    cafile = os.environ.get("DEMO_CONTROL_CAFILE", "").strip()
+    if cafile:
+        return ssl.create_default_context(cafile=cafile)
+
+    context = ssl.create_default_context()
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    return context
 
 
 def require_capability(response: list[str], capability: str) -> None:
@@ -210,7 +226,11 @@ def request_json(config: DemoConfig, path: str, payload: dict[str, object]) -> d
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=config.wait_seconds) as response:
+        with urllib.request.urlopen(
+            request,
+            timeout=config.wait_seconds,
+            context=control_ssl_context(config),
+        ) as response:
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.URLError as exc:
         raise ProofError(f"could not reach control API at {config.control_url}: {exc}") from exc

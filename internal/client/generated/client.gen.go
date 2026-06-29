@@ -544,7 +544,7 @@ type RouteLookupRequest struct {
 	Listener        *string              `json:"listener,omitempty"`
 	Protocol        string               `json:"protocol"`
 
-	// Recipient LMTP-only recipient identity used for no-auth route diagnostics.
+	// Recipient LMTP-only recipient identity used only with director-owned runtime state; unresolved accounts return a bounded fail-closed diagnostic without Nauthilus lookup.
 	Recipient   *string `json:"recipient,omitempty"`
 	ServiceName *string `json:"service_name,omitempty"`
 	Tenant      *string `json:"tenant,omitempty"`

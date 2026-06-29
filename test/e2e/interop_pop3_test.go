@@ -182,6 +182,8 @@ func writeDovecotPOP3ProcessConfig(t *testing.T, options dovecotPOP3ProcessConfi
 	t.Helper()
 
 	listenerCertPath, listenerKeyPath, _ := writeTestCertificate(t)
+	authorityPasswordPath := writeProcessSecretFile(t, "unused")
+	backendPasswordPath := writeProcessSecretFile(t, os.Getenv("NAUTHILUS_DIRECTOR_INTEROP_MASTER_PASSWORD"))
 	content := fmt.Sprintf(`patch:
   - op: remove
     path: director.listeners
@@ -226,7 +228,7 @@ auth:
       http:
         endpoint: %q
         basic_auth:
-          password_file: "unused"
+          password_file: %q
 director:
   routing:
     default_shard: %q
@@ -386,6 +388,7 @@ director:
 		options.RedisAddress,
 		processAuthorityOIDCYAMLForOptions(t, options.AuthorityOIDC),
 		options.AuthorityURL,
+		authorityPasswordPath,
 		e2eShardTag,
 		options.IMAPAddress,
 		listenerCertPath,
@@ -402,7 +405,7 @@ director:
 		options.LMTPBackend,
 		e2eShardTag,
 		options.POP3Backend,
-		os.Getenv("NAUTHILUS_DIRECTOR_INTEROP_MASTER_PASSWORD"),
+		backendPasswordPath,
 	)
 
 	path := filepath.Join(t.TempDir(), "nauthilus-director-pop3-interop.yml")

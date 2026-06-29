@@ -638,6 +638,51 @@ func TestAuthenticatedSieveFeedsSharedRoutingAndPlacement(t *testing.T) {
 	}
 }
 
+// TestAuthenticatedSieveBackendAuthBindsToAuthenticatedAccount verifies backend auth ignores frontend aliases.
+func TestAuthenticatedSieveBackendAuthBindsToAuthenticatedAccount(t *testing.T) {
+	authenticator := &recordingAuthenticator{
+		result: nauthilus.AuthResult{
+			Decision: nauthilus.DecisionAuthenticated,
+			Account:  "canonical@example.test",
+		},
+	}
+	resolver := &recordingRoutingResolver{
+		result: routing.RoutingResult{
+			AccountKey: "canonical@example.test",
+			Tenant:     "default",
+			ShardTag:   "mailstore-a",
+		},
+	}
+	placer := &recordingSessionPlacer{}
+	authCommands := make(chan string, 1)
+	config := testPlacementSessionConfig(TLSModeImplicit, authenticator, resolver, placer)
+	config.BackendConnector = &recordingSieveBackendConnector{authCommands: authCommands}
+	harness := startSieveHarness(t, config)
+	harness.expectGreeting(t,
+		testGreetingImplementation,
+		testGreetingVersion,
+		testGreetingSieve,
+		testGreetingLanguage,
+		testGreetingSASLTLS,
+		testGreetingOK,
+	)
+
+	frontendPayload := base64.StdEncoding.EncodeToString([]byte("delegate@example.test\x00frontend@example.test\x00routing-secret"))
+	harness.write(t, "AUTHENTICATE \"PLAIN\" \""+frontendPayload+"\"\r\n")
+	harness.expectLine(t, "OK \"Authentication successful\"\r\n")
+	harness.expectDone(t)
+
+	payload := decodeSieveInitialResponse(t, receiveSieveBackendAuthCommand(t, authCommands), mechanismPlain)
+	if payload != "\x00canonical@example.test*director-master\x00backend-master-secret" {
+		t.Fatalf("backend auth payload = %q, want canonical account binding", payload)
+	}
+	for _, forbidden := range []string{"frontend@example.test", "delegate@example.test"} {
+		if strings.Contains(payload, forbidden) {
+			t.Fatalf("backend auth replayed frontend identity %q instead of canonical account", forbidden)
+		}
+	}
+}
+
 // TestAuthenticatedSieveConnectsSelectedBackendBeforeSuccess verifies the backend request boundary.
 func TestAuthenticatedSieveConnectsSelectedBackendBeforeSuccess(t *testing.T) {
 	authenticator := &recordingAuthenticator{
@@ -1520,6 +1565,7 @@ type recordingSieveBackendConnector struct {
 	authResponse    string
 	backendBuffered string
 	backendCloses   int
+	authCommands    chan<- string
 }
 
 // Connect records backend connect facts and returns a prepared auth-capable stream.
@@ -1546,8 +1592,12 @@ func (c *recordingSieveBackendConnector) Connect(_ context.Context, request back
 		defer func() { _ = server.Close() }()
 
 		reader := bufio.NewReader(server)
-		if _, err := reader.ReadString('\n'); err != nil {
+		line, err := reader.ReadString('\n')
+		if err != nil {
 			return
+		}
+		if c.authCommands != nil {
+			c.authCommands <- strings.TrimRight(line, "\r\n")
 		}
 
 		_, _ = io.WriteString(server, response+"\r\n"+c.backendBuffered)
@@ -1623,6 +1673,20 @@ func (c *observingProxyBackendConnector) Connect(_ context.Context, _ backend.Co
 	connection.tlsVerified = true
 
 	return connection, nil
+}
+
+// receiveSieveBackendAuthCommand returns the observed backend AUTHENTICATE command.
+func receiveSieveBackendAuthCommand(t *testing.T, commands <-chan string) string {
+	t.Helper()
+
+	select {
+	case command := <-commands:
+		return command
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for Sieve backend auth command")
+	}
+
+	return ""
 }
 
 // singleObservation returns the only opaque byte observation from the fake backend.

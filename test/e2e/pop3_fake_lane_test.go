@@ -14,7 +14,7 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-//nolint:dupl,funlen,goconst,gocyclo,wsl_v5 // E2E transcripts stay visible for M7 review.
+//nolint:dupl,funlen,goconst,gocyclo,wsl_v5 // E2E transcripts stay visible for POP3 review.
 package e2e
 
 import (
@@ -54,9 +54,9 @@ const (
 	e2ePOP3ShardBAccount    = "pop3-b@example.test"
 	e2ePOP3SieveAccount     = "pop3-sieve@example.test"
 	e2ePOP3MaintenanceUser  = "pop3-maintenance@example.test"
-	e2ePOP3UIDLSentinel     = "UIDL-M7-OPAQUE-SENTINEL"
-	e2ePOP3SubjectSentinel  = "Subject: POP3 M7 sentinel"
-	e2ePOP3BodySentinel     = "opaque message body for M7"
+	e2ePOP3UIDLSentinel     = "UIDL-POP3-OPAQUE-SENTINEL"
+	e2ePOP3SubjectSentinel  = "Subject: POP3 opaque sentinel"
+	e2ePOP3BodySentinel     = "opaque message body for POP3"
 	e2ePOP3MessageSentinel  = e2ePOP3SubjectSentinel + "\r\n\r\n" + e2ePOP3BodySentinel
 	e2ePOP3XOAuth2Token     = "e2e-pop3-xoauth2-token-sentinel"
 	e2ePOP3OAuthBearerToken = "e2e-pop3-oauthbearer-token-sentinel"
@@ -482,6 +482,8 @@ func writePOP3ProductionProcessConfig(t *testing.T, options pop3ProductionProces
 	t.Helper()
 
 	certPath, keyPath, _ := writeTestCertificate(t)
+	authorityPasswordPath := writeProcessSecretFile(t, "unused")
+	backendPasswordPath := writeProcessSecretFile(t, e2ePassword)
 	content := fmt.Sprintf(`patch:
   - op: remove
     path: director.listeners
@@ -520,7 +522,7 @@ auth:
       http:
         endpoint: %q
         basic_auth:
-          password_file: "unused"
+          password_file: %q
 director:
   health:
     interval: 200ms
@@ -655,6 +657,7 @@ director:
 		options.RedisAddress,
 		processAuthorityYAML(t, processAuthorityOIDCOptions{}, options.AuthorityBearer),
 		options.AuthorityURL,
+		authorityPasswordPath,
 		options.UserHoldMaxWait.String(),
 		options.UserHoldPollInterval.String(),
 		e2eShardTag,
@@ -673,7 +676,7 @@ director:
 		options.POP3SAddress,
 		certPath,
 		keyPath,
-		pop3ProductionBackendsYAML(options),
+		pop3ProductionBackendsYAML(options, backendPasswordPath),
 	)
 	content = strings.ReplaceAll(content, "\t", "")
 
@@ -686,7 +689,7 @@ director:
 }
 
 // pop3ProductionBackendsYAML renders matching backend-node entries across protocols.
-func pop3ProductionBackendsYAML(options pop3ProductionProcessConfigOptions) string {
+func pop3ProductionBackendsYAML(options pop3ProductionProcessConfigOptions, backendPasswordPath string) string {
 	pop3BackendTLSMode := strings.TrimSpace(options.POP3BackendTLSMode)
 	if pop3BackendTLSMode == "" {
 		pop3BackendTLSMode = "plaintext"
@@ -862,30 +865,30 @@ func pop3ProductionBackendsYAML(options pop3ProductionProcessConfigOptions) stri
         enabled: false
 `, e2eShardTag,
 		options.IMAPBackends[e2eBackendAID],
-		e2ePassword,
+		backendPasswordPath,
 		e2eShardTagB,
 		options.IMAPBackends[e2eBackendBID],
-		e2ePassword,
+		backendPasswordPath,
 		e2eShardTag,
 		options.LMTPBackends[e2eLMTPBackendAID],
 		e2eShardTagB,
 		options.LMTPBackends[e2eLMTPBackendBID],
 		e2eShardTag,
 		options.SieveBackends[e2eSieveBackendAID],
-		e2ePassword,
+		backendPasswordPath,
 		e2eShardTagB,
 		options.SieveBackends[e2eSieveBackendBID],
-		e2ePassword,
+		backendPasswordPath,
 		e2eShardTag,
 		options.POP3Backends[e2ePOP3BackendAID],
 		pop3BackendTLSMode,
 		options.POP3BackendTLSCAFile,
-		e2ePassword,
+		backendPasswordPath,
 		e2eShardTagB,
 		options.POP3Backends[e2ePOP3BackendBID],
 		pop3BackendTLSMode,
 		options.POP3BackendTLSCAFile,
-		e2ePassword,
+		backendPasswordPath,
 	)
 }
 

@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/croessner/nauthilus-director/internal/backend"
+	"github.com/croessner/nauthilus-director/internal/config"
 	"github.com/croessner/nauthilus-director/internal/observability"
 	"github.com/croessner/nauthilus-director/internal/state"
 )
@@ -57,10 +58,93 @@ const (
 	MoveStrategyNewSessionsOnly MoveStrategy = "new_sessions_only"
 )
 
+// UserRuntimeOverridePolicy mirrors safe user runtime mutation config switches.
+type UserRuntimeOverridePolicy struct {
+	Enabled               bool
+	AllowMove             bool
+	AllowKick             bool
+	AllowAffinityClear    bool
+	AllowedMoveStrategies []MoveStrategy
+}
+
 // UserKey identifies user runtime state without storing a raw username.
 type UserKey struct {
 	Tenant   string
 	UserHash string
+}
+
+// NewUserRuntimeOverridePolicy builds user runtime policy from typed config.
+func NewUserRuntimeOverridePolicy(runtimeOverrides config.RuntimeOverridesConfig) UserRuntimeOverridePolicy {
+	strategies := make([]MoveStrategy, 0, len(runtimeOverrides.Users.MoveStrategies))
+	for _, value := range runtimeOverrides.Users.MoveStrategies {
+		strategy := MoveStrategy(strings.TrimSpace(value))
+		if validMoveStrategy(strategy) {
+			strategies = append(strategies, strategy)
+		}
+	}
+
+	return UserRuntimeOverridePolicy{
+		Enabled:               runtimeOverrides.Enabled,
+		AllowMove:             runtimeOverrides.Users.AllowMove,
+		AllowKick:             runtimeOverrides.Users.AllowKick,
+		AllowAffinityClear:    runtimeOverrides.Users.AllowAffinityClear,
+		AllowedMoveStrategies: strategies,
+	}
+}
+
+// ValidateMove rejects disallowed user movement before runtime state changes.
+func (p UserRuntimeOverridePolicy) ValidateMove(operation string, strategy MoveStrategy) error {
+	if !p.Enabled {
+		return newRuntimeError(ErrorKindInvalidRequest, operation, "runtime overrides disabled")
+	}
+
+	if !p.AllowMove {
+		return newRuntimeError(ErrorKindInvalidRequest, operation, "user move disabled")
+	}
+
+	if !p.allowsMoveStrategy(strategy) {
+		return newRuntimeError(ErrorKindInvalidRequest, operation, "user move strategy disabled")
+	}
+
+	return nil
+}
+
+// ValidateKick rejects user kick when runtime policy disables it.
+func (p UserRuntimeOverridePolicy) ValidateKick(operation string) error {
+	if !p.Enabled {
+		return newRuntimeError(ErrorKindInvalidRequest, operation, "runtime overrides disabled")
+	}
+
+	if !p.AllowKick {
+		return newRuntimeError(ErrorKindInvalidRequest, operation, "user kick disabled")
+	}
+
+	return nil
+}
+
+// ValidateAffinityClear rejects affinity clear when runtime policy disables it.
+func (p UserRuntimeOverridePolicy) ValidateAffinityClear(operation string) error {
+	if !p.Enabled {
+		return newRuntimeError(ErrorKindInvalidRequest, operation, "runtime overrides disabled")
+	}
+
+	if !p.AllowAffinityClear {
+		return newRuntimeError(ErrorKindInvalidRequest, operation, "user affinity clear disabled")
+	}
+
+	return nil
+}
+
+// allowsMoveStrategy treats the configured list as a strict positive allowlist.
+func (p UserRuntimeOverridePolicy) allowsMoveStrategy(strategy MoveStrategy) bool {
+	normalized := MoveStrategy(strings.TrimSpace(string(strategy)))
+	for _, allowed := range p.AllowedMoveStrategies {
+		if MoveStrategy(strings.TrimSpace(string(allowed))) == normalized {
+			return true
+		}
+	}
+
+	return false
 }
 
 // UserRuntimeState describes mutable user placement and control state.
@@ -646,12 +730,13 @@ func (s *UserHoldService) waitForActiveUserHold(
 func (s *UserBackendPinService) SetUserBackendPin(
 	ctx context.Context,
 	request SetUserBackendPinRequest,
+	policy UserRuntimeOverridePolicy,
 ) (UserBackendPinMutationResult, error) {
 	request.Key = request.Key.Normalize()
 	request.BackendIdentifier = strings.TrimSpace(request.BackendIdentifier)
 	request.Strategy = MoveStrategy(strings.TrimSpace(string(request.Strategy)))
 
-	if err := request.Validate(); err != nil {
+	if err := request.Validate(policy); err != nil {
 		return UserBackendPinMutationResult{}, err
 	}
 
@@ -702,9 +787,10 @@ func (s *UserBackendPinService) SetUserBackendPin(
 func (s *UserBackendPinService) SetUserBackendPinTarget(
 	ctx context.Context,
 	request SetUserBackendPinTargetRequest,
+	policy UserRuntimeOverridePolicy,
 ) (UserBackendPinsMutationResult, error) {
 	request = request.Normalize()
-	if err := request.Validate(); err != nil {
+	if err := request.Validate(policy); err != nil {
 		return UserBackendPinsMutationResult{}, err
 	}
 
@@ -716,7 +802,7 @@ func (s *UserBackendPinService) SetUserBackendPinTarget(
 			Reason:             request.Reason,
 			Actor:              request.Actor,
 			ExpectedGeneration: request.ExpectedGeneration,
-		})
+		}, policy)
 		if err != nil {
 			return UserBackendPinsMutationResult{}, err
 		}
@@ -740,7 +826,7 @@ func (s *UserBackendPinService) SetUserBackendPinTarget(
 		Reason:             request.Reason,
 		Actor:              request.Actor,
 		ExpectedGeneration: request.ExpectedGeneration,
-	})
+	}, policy)
 }
 
 // backendPinSetStoreRequest maps validated operator input into store shape.
@@ -762,11 +848,12 @@ func backendPinSetStoreRequest(request SetUserBackendPinRequest, target UserBack
 func (s *UserBackendPinService) SetUserBackendPins(
 	ctx context.Context,
 	request SetUserBackendPinsRequest,
+	policy UserRuntimeOverridePolicy,
 ) (UserBackendPinsMutationResult, error) {
 	request.Key = request.Key.Normalize()
 	request.Strategy = MoveStrategy(strings.TrimSpace(string(request.Strategy)))
 
-	if err := request.Validate(); err != nil {
+	if err := request.Validate(policy); err != nil {
 		return UserBackendPinsMutationResult{}, err
 	}
 
@@ -952,14 +1039,14 @@ func (s *UserBackendPinService) ClearUserBackendPins(
 }
 
 // MoveUser records a placement move and locally closes streams for kick-existing moves.
-func (s *UserService) MoveUser(ctx context.Context, request MoveUserRequest) (UserMutationResult, error) {
+func (s *UserService) MoveUser(ctx context.Context, request MoveUserRequest, policy UserRuntimeOverridePolicy) (UserMutationResult, error) {
 	request.Key = request.Key.Normalize()
-	if err := request.Validate(); err != nil {
-		return UserMutationResult{}, err
-	}
-
 	request.Strategy = MoveStrategy(strings.TrimSpace(string(request.Strategy)))
 	request.TargetShard = strings.TrimSpace(request.TargetShard)
+
+	if err := request.Validate(policy); err != nil {
+		return UserMutationResult{}, err
+	}
 
 	if s == nil || s.store == nil {
 		return UserMutationResult{}, newRuntimeError(ErrorKindInvalidRequest, operationUserMove, "user store required")
@@ -1004,9 +1091,9 @@ func (s *UserService) MoveUser(ctx context.Context, request MoveUserRequest) (Us
 }
 
 // KickUser marks all active sessions for one affinity key and closes local streams promptly.
-func (s *UserService) KickUser(ctx context.Context, request KickUserRequest) (UserMutationResult, error) {
+func (s *UserService) KickUser(ctx context.Context, request KickUserRequest, policy UserRuntimeOverridePolicy) (UserMutationResult, error) {
 	request.Key = request.Key.Normalize()
-	if err := request.Validate(); err != nil {
+	if err := request.Validate(policy); err != nil {
 		return UserMutationResult{}, err
 	}
 
@@ -1049,9 +1136,13 @@ func (s *UserService) KickUser(ctx context.Context, request KickUserRequest) (Us
 }
 
 // ClearUserAffinity clears inactive affinity state without closing active sessions.
-func (s *UserService) ClearUserAffinity(ctx context.Context, request ClearUserAffinityRequest) (UserMutationResult, error) {
+func (s *UserService) ClearUserAffinity(
+	ctx context.Context,
+	request ClearUserAffinityRequest,
+	policy UserRuntimeOverridePolicy,
+) (UserMutationResult, error) {
 	request.Key = request.Key.Normalize()
-	if err := request.Validate(); err != nil {
+	if err := request.Validate(policy); err != nil {
 		return UserMutationResult{}, err
 	}
 
@@ -1085,55 +1176,63 @@ func (s *UserService) ClearUserAffinity(ctx context.Context, request ClearUserAf
 }
 
 // Validate checks the move request before it crosses a persistence boundary.
-func (r MoveUserRequest) Validate() error {
-	if err := r.Key.Validate(operationUserMove); err != nil {
-		return err
-	}
-
-	if strings.TrimSpace(r.TargetShard) == "" {
-		return newRuntimeError(ErrorKindInvalidRequest, operationUserMove, "target shard required")
-	}
-
-	if !validMoveStrategy(r.Strategy) {
-		return newRuntimeError(ErrorKindInvalidRequest, operationUserMove, "unsupported move strategy")
-	}
-
-	return requireReason(operationUserMove, r.Reason)
+func (r MoveUserRequest) Validate(policies ...UserRuntimeOverridePolicy) error {
+	return validateUserMoveLikeRequest(
+		operationUserMove,
+		r.Key,
+		r.TargetShard,
+		"target shard required",
+		r.Strategy,
+		r.Reason,
+		policies,
+	)
 }
 
 // Validate checks the kick request before it crosses a persistence boundary.
-func (r KickUserRequest) Validate() error {
+func (r KickUserRequest) Validate(policies ...UserRuntimeOverridePolicy) error {
 	if err := r.Key.Validate(operationUserKick); err != nil {
 		return err
 	}
 
-	return requireReason(operationUserKick, r.Reason)
+	if err := requireReason(operationUserKick, r.Reason); err != nil {
+		return err
+	}
+
+	if len(policies) > 0 {
+		return policies[0].ValidateKick(operationUserKick)
+	}
+
+	return nil
 }
 
 // Validate checks the affinity clear request before it crosses a persistence boundary.
-func (r ClearUserAffinityRequest) Validate() error {
+func (r ClearUserAffinityRequest) Validate(policies ...UserRuntimeOverridePolicy) error {
 	if err := r.Key.Validate(operationUserAffinityClear); err != nil {
 		return err
 	}
 
-	return requireReason(operationUserAffinityClear, r.Reason)
-}
-
-// Validate checks the backend-pin set request before registry or state access.
-func (r SetUserBackendPinRequest) Validate() error {
-	if err := r.Key.Validate(operationUserBackendPinSet); err != nil {
+	if err := requireReason(operationUserAffinityClear, r.Reason); err != nil {
 		return err
 	}
 
-	if strings.TrimSpace(r.BackendIdentifier) == "" {
-		return newRuntimeError(ErrorKindInvalidRequest, operationUserBackendPinSet, "backend identifier required")
+	if len(policies) > 0 {
+		return policies[0].ValidateAffinityClear(operationUserAffinityClear)
 	}
 
-	if !validMoveStrategy(r.Strategy) {
-		return newRuntimeError(ErrorKindInvalidRequest, operationUserBackendPinSet, "unsupported move strategy")
-	}
+	return nil
+}
 
-	return requireReason(operationUserBackendPinSet, r.Reason)
+// Validate checks the backend-pin set request before registry or state access.
+func (r SetUserBackendPinRequest) Validate(policies ...UserRuntimeOverridePolicy) error {
+	return validateUserMoveLikeRequest(
+		operationUserBackendPinSet,
+		r.Key,
+		r.BackendIdentifier,
+		"backend identifier required",
+		r.Strategy,
+		r.Reason,
+		policies,
+	)
 }
 
 // Normalize returns a backend-pin target request with canonical comparable fields.
@@ -1151,7 +1250,7 @@ func (r SetUserBackendPinTargetRequest) Normalize() SetUserBackendPinTargetReque
 // Validate checks a backend or backend-node pin request before resolution.
 //
 //nolint:gocyclo // The request grammar enumerates fail-closed operator error classes explicitly.
-func (r SetUserBackendPinTargetRequest) Validate() error {
+func (r SetUserBackendPinTargetRequest) Validate(policies ...UserRuntimeOverridePolicy) error {
 	if err := r.Key.Validate(operationUserBackendPinSet); err != nil {
 		return err
 	}
@@ -1174,11 +1273,19 @@ func (r SetUserBackendPinTargetRequest) Validate() error {
 		return newRuntimeError(ErrorKindInvalidRequest, operationUserBackendPinSet, "unsupported move strategy")
 	}
 
-	return requireReason(operationUserBackendPinSet, r.Reason)
+	if err := requireReason(operationUserBackendPinSet, r.Reason); err != nil {
+		return err
+	}
+
+	if len(policies) > 0 {
+		return policies[0].ValidateMove(operationUserBackendPinSet, r.Strategy)
+	}
+
+	return nil
 }
 
 // Validate checks resolved multi-scope backend-pin requests before state access.
-func (r SetUserBackendPinsRequest) Validate() error {
+func (r SetUserBackendPinsRequest) Validate(policies ...UserRuntimeOverridePolicy) error {
 	if err := r.Key.Validate(operationUserBackendPinSet); err != nil {
 		return err
 	}
@@ -1193,6 +1300,12 @@ func (r SetUserBackendPinsRequest) Validate() error {
 
 	if err := requireReason(operationUserBackendPinSet, r.Reason); err != nil {
 		return err
+	}
+
+	if len(policies) > 0 {
+		if err := policies[0].ValidateMove(operationUserBackendPinSet, r.Strategy); err != nil {
+			return err
+		}
 	}
 
 	seen := make(map[string]struct{}, len(r.Targets))
@@ -1409,6 +1522,39 @@ func validMoveStrategy(strategy MoveStrategy) bool {
 	default:
 		return false
 	}
+}
+
+// validateUserMoveLikeRequest centralizes move-policy checks shared by moves and backend pins.
+func validateUserMoveLikeRequest(
+	operation string,
+	key UserKey,
+	target string,
+	targetMessage string,
+	strategy MoveStrategy,
+	reason string,
+	policies []UserRuntimeOverridePolicy,
+) error {
+	if err := key.Validate(operation); err != nil {
+		return err
+	}
+
+	if strings.TrimSpace(target) == "" {
+		return newRuntimeError(ErrorKindInvalidRequest, operation, targetMessage)
+	}
+
+	if !validMoveStrategy(strategy) {
+		return newRuntimeError(ErrorKindInvalidRequest, operation, "unsupported move strategy")
+	}
+
+	if err := requireReason(operation, reason); err != nil {
+		return err
+	}
+
+	if len(policies) > 0 {
+		return policies[0].ValidateMove(operation, strategy)
+	}
+
+	return nil
 }
 
 // validateBackendPinRequestScope requires protocol and backend pool together.

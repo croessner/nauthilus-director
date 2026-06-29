@@ -167,11 +167,15 @@ func TestServerBinaryPublicLMTPBearerPeerIntrospectionFlow(t *testing.T) {
 	waitForControlReady(t, controlURL, process)
 
 	beforeRouteLookup := authority.SASLBearerIntrospectionCount()
+	beforeRouteLookupRequests := authority.RequestCount()
 	routeOutput := runDirectorctl(t, ctl, controlURL, "route", "lookup", "--protocol", e2eLMTPProtocol, "--recipient", e2eLMTPRecipientA, "--listener", e2eLMTPListenerName, "--include-affinity")
-	assertCLIOutputFields(t, routeOutput, "selected_backend="+e2eLMTPBackendAID, "identity_source=nauthilus_lookup")
+	assertCLIOutputFields(t, routeOutput, "source=fail_closed", "reason=account_unresolved", "identity_source=director_state_unresolved", "identity_nauthilus=false")
 	assertOutputOmits(t, routeOutput, e2eLMTPXOAuth2Token, e2eLMTPOAuthBearerToken)
 	if authority.SASLBearerIntrospectionCount() != beforeRouteLookup {
 		t.Fatal("LMTP route lookup called bearer introspection")
+	}
+	if authority.RequestCount() != beforeRouteLookupRequests {
+		t.Fatal("LMTP route lookup called Nauthilus identity lookup")
 	}
 
 	backchannelBeforeAuth := authority.RequestCount()
@@ -864,17 +868,23 @@ func exerciseStartTLSLMTPFlow(
 	_ = retainedClient.Close()
 	waitForRESTSessionCount(t, controlURL, 0)
 	time.Sleep(3 * time.Second)
-	expiredRouteOutput := waitForLMTPRouteSource(t, ctl, controlURL, e2eLMTPRecipientA, "initial_placement")
+	expiredRouteOutput := waitForLMTPRouteSource(t, ctl, controlURL, e2eLMTPRecipientA, "fail_closed")
 	if strings.Contains(expiredRouteOutput, "affinity_binding_source=retained_backend_binding") {
-		t.Fatalf("expired LMTP route lookup output = %q, want initial placement after retention expiry", expiredRouteOutput)
+		t.Fatalf("expired LMTP route lookup output = %q, want no retained backend-node binding", expiredRouteOutput)
+	}
+	if !strings.Contains(expiredRouteOutput, "reason=account_unresolved") || !strings.Contains(expiredRouteOutput, "identity_nauthilus=false") {
+		t.Fatalf("expired LMTP route lookup output = %q, want bounded unresolved identity diagnostic", expiredRouteOutput)
 	}
 	authority.ExpectLookupMode(t, e2eLMTPRecipientA, "no-auth")
 	authority.ExpectLookupMode(t, e2eLMTPRecipientASecond, "no-auth")
+	beforeMixedRouteLookup := authority.RequestCount()
 	routeOutput := runDirectorctl(t, ctl, controlURL, "route", "lookup", "--protocol", e2eLMTPProtocol, "--recipient", e2eLMTPRecipientMixed, "--listener", e2eLMTPListenerName, "--include-affinity")
-	if !strings.Contains(routeOutput, "selected_backend="+e2eLMTPBackendAID) || !strings.Contains(routeOutput, "identity_source=nauthilus_lookup") {
-		t.Fatalf("route lookup output = %q, want LMTP backend and no-auth identity source", routeOutput)
+	if !strings.Contains(routeOutput, "source=fail_closed") || !strings.Contains(routeOutput, "reason=account_unresolved") || !strings.Contains(routeOutput, "identity_source=director_state_unresolved") {
+		t.Fatalf("route lookup output = %q, want bounded unresolved identity diagnostic", routeOutput)
 	}
-	authority.ExpectLookupMode(t, e2eLMTPRecipientMixed, "no-auth")
+	if authority.RequestCount() != beforeMixedRouteLookup {
+		t.Fatal("LMTP route lookup called Nauthilus identity lookup")
+	}
 }
 
 // exerciseBDATAndMixedStatusFlow proves BDAT streaming and mixed final status relay.
@@ -1094,6 +1104,9 @@ func writeLMTPProcessConfig(t *testing.T, options lmtpProcessConfigOptions) stri
 	if backendRetentionTTL == "" {
 		backendRetentionTTL = "15m"
 	}
+	authorityPasswordPath := writeProcessSecretFile(t, "unused")
+	backendPasswordPath := writeProcessSecretFile(t, e2ePassword)
+	healthPasswordPath := writeProcessSecretFile(t, e2ePassword)
 
 	content := fmt.Sprintf(`patch:
   - op: remove
@@ -1139,7 +1152,7 @@ auth:
       http:
         endpoint: %q
         basic_auth:
-          password_file: "unused"
+          password_file: %q
 director:
   health:
     interval: 200ms
@@ -1267,7 +1280,7 @@ director:
         mode: %q
         master_user:
           username: director-master
-          password_file: backend-master-secret
+          password_file: %q
           user_format: "{user}*{master_user}"
           mechanism: plain
         credential_replay:
@@ -1296,7 +1309,7 @@ director:
         mode: %q
         master_user:
           username: director-master
-          password_file: backend-master-secret
+          password_file: %q
           user_format: "{user}*{master_user}"
           mechanism: plain
         credential_replay:
@@ -1360,6 +1373,7 @@ director:
 		options.RedisAddress,
 		processAuthorityYAML(t, options.AuthorityOIDC, options.AuthorityBearer),
 		options.AuthorityURL,
+		authorityPasswordPath,
 		backendRetentionTTL,
 		e2eShardTag,
 		options.IMAPAddress,
@@ -1387,11 +1401,13 @@ director:
 		imapBackendTLSMode,
 		options.IMAPBackendTLSInsecure,
 		imapBackendAuthMode,
+		backendPasswordPath,
 		e2eShardTagB,
 		options.IMAPBackends[e2eBackendBID],
 		imapBackendTLSMode,
 		options.IMAPBackendTLSInsecure,
 		imapBackendAuthMode,
+		backendPasswordPath,
 		e2eShardTag,
 		options.LMTPBackends[e2eLMTPBackendAID],
 		options.LMTPBackendHAProxy[e2eLMTPBackendAID],
@@ -1399,7 +1415,7 @@ director:
 		options.LMTPBackendTLSInsecure,
 		options.LMTPBackendHealth[e2eLMTPBackendAID],
 		options.LMTPBackendDeepHealth[e2eLMTPBackendAID],
-		e2ePassword,
+		healthPasswordPath,
 		e2eShardTagB,
 		options.LMTPBackends[e2eLMTPBackendBID],
 		options.LMTPBackendHAProxy[e2eLMTPBackendBID],
@@ -1407,7 +1423,7 @@ director:
 		options.LMTPBackendTLSInsecure,
 		options.LMTPBackendHealth[e2eLMTPBackendBID],
 		options.LMTPBackendDeepHealth[e2eLMTPBackendBID],
-		e2ePassword,
+		healthPasswordPath,
 	)
 	content = strings.ReplaceAll(content, "\t", "")
 

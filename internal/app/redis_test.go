@@ -17,6 +17,8 @@
 package app
 
 import (
+	"os"
+	"path/filepath"
 	"slices"
 	"testing"
 
@@ -31,7 +33,7 @@ const (
 
 // TestNewRedisClientCreatesClusterClientForSingleSeed verifies cluster mode does not fall back to standalone.
 func TestNewRedisClientCreatesClusterClientForSingleSeed(t *testing.T) {
-	cfg := redisClientTestConfig()
+	cfg := redisClientTestConfig(t)
 	cfg.Mode = redisModeCluster
 	cfg.Cluster.Addresses = []string{redisTestClusterAddress}
 	cfg.Cluster.MaxRedirects = 13
@@ -59,7 +61,7 @@ func TestNewRedisClientCreatesClusterClientForSingleSeed(t *testing.T) {
 
 // TestNewRedisClientPropagatesClusterReplicaReadOptions verifies read-only routing reaches go-redis cluster options.
 func TestNewRedisClientPropagatesClusterReplicaReadOptions(t *testing.T) {
-	cfg := redisClientTestConfig()
+	cfg := redisClientTestConfig(t)
 	cfg.Mode = redisModeCluster
 	cfg.Cluster.RouteReadsToReplicas = true
 	cfg.Cluster.RouteByLatency = true
@@ -83,7 +85,7 @@ func TestNewRedisClientPropagatesClusterReplicaReadOptions(t *testing.T) {
 
 // TestNewRedisClientCreatesStandaloneClientFromStandaloneMode verifies inactive cluster seeds do not select cluster topology.
 func TestNewRedisClientCreatesStandaloneClientFromStandaloneMode(t *testing.T) {
-	cfg := redisClientTestConfig()
+	cfg := redisClientTestConfig(t)
 	cfg.Mode = redisModeStandalone
 	cfg.Cluster.Addresses = []string{"redis-cluster-a.example.test:6379", "redis-cluster-b.example.test:6379"}
 	cfg.Cluster.RouteRandomly = true
@@ -106,7 +108,7 @@ func TestNewRedisClientCreatesStandaloneClientFromStandaloneMode(t *testing.T) {
 
 // TestNewRedisClientCreatesFailoverClientWithoutClusterRouteFlags verifies sentinel mode ignores inactive cluster routing.
 func TestNewRedisClientCreatesFailoverClientWithoutClusterRouteFlags(t *testing.T) {
-	cfg := redisClientTestConfig()
+	cfg := redisClientTestConfig(t)
 	cfg.Mode = redisModeSentinel
 	cfg.Cluster.RouteReadsToReplicas = true
 	cfg.Cluster.RouteByLatency = true
@@ -132,8 +134,49 @@ func TestNewRedisClientCreatesFailoverClientWithoutClusterRouteFlags(t *testing.
 	}
 }
 
+// TestNewRedisClientReadsPasswordFiles verifies file-backed Redis secrets reach go-redis options.
+func TestNewRedisClientReadsPasswordFiles(t *testing.T) {
+	cfg := redisClientTestConfig(t)
+	cfg.Mode = redisModeSentinel
+
+	common, err := newRedisCommonOptions(cfg)
+	if err != nil {
+		t.Fatalf("newRedisCommonOptions returned error: %v", err)
+	}
+
+	if common.password != "redis-password" {
+		t.Fatalf("redis password = %q, want file content", common.password)
+	}
+
+	if common.password == cfg.Auth.PasswordFile.Value() {
+		t.Fatal("redis password used the password_file path string")
+	}
+
+	options := common.failoverOptions(cfg)
+	if options.SentinelPassword != "sentinel-password" {
+		t.Fatalf("sentinel password = %q, want file content", options.SentinelPassword)
+	}
+
+	if options.SentinelPassword == cfg.Sentinel.PasswordFile.Value() {
+		t.Fatal("sentinel password used the password_file path string")
+	}
+}
+
+// TestNewRedisClientFailsClosedOnMissingPasswordFile rejects broken secret refs.
+func TestNewRedisClientFailsClosedOnMissingPasswordFile(t *testing.T) {
+	cfg := redisClientTestConfig(t)
+	cfg.Auth.PasswordFile = config.Secret(filepath.Join(t.TempDir(), "missing"))
+
+	_, err := newRedisClient(cfg)
+	if err == nil {
+		t.Fatal("newRedisClient accepted missing redis password_file")
+	}
+}
+
 // redisClientTestConfig returns a Redis config that can build clients without opening sockets.
-func redisClientTestConfig() config.RedisConfig {
+func redisClientTestConfig(t *testing.T) config.RedisConfig {
+	t.Helper()
+
 	cfg := config.DefaultConfig().Storage.Redis
 	cfg.TLS.Enabled = false
 	cfg.PoolSize = 1
@@ -142,10 +185,22 @@ func redisClientTestConfig() config.RedisConfig {
 	cfg.Cluster.Addresses = []string{redisTestClusterAddress}
 	cfg.Sentinel.MasterName = "mailstore"
 	cfg.Sentinel.Addresses = []string{"redis-sentinel.example.test:26379"}
-	cfg.Auth.PasswordFile = config.Secret("redis-password")
-	cfg.Sentinel.PasswordFile = config.Secret("sentinel-password")
+	cfg.Auth.PasswordFile = config.Secret(writeRedisSecretFile(t, "redis-password\n"))
+	cfg.Sentinel.PasswordFile = config.Secret(writeRedisSecretFile(t, "sentinel-password\n"))
 
 	return cfg
+}
+
+// writeRedisSecretFile writes one Redis secret test file.
+func writeRedisSecretFile(t *testing.T, content string) string {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "secret")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write Redis secret file: %v", err)
+	}
+
+	return path
 }
 
 // closeRedisClient closes a constructed Redis client and fails the test on cleanup errors.

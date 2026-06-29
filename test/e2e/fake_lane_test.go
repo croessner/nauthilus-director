@@ -1360,7 +1360,7 @@ func TestServerBinaryListenerDrainResumeKeepsActiveStream(t *testing.T) {
 	expectRuntimeClosedConnection(t, activeClient)
 }
 
-// TestServerBinarySieveListenersAndRouteLookup proves Sieve M6.1 wiring through the real process.
+// TestServerBinarySieveListenersAndRouteLookup proves ManageSieve wiring through the real process.
 func TestServerBinarySieveListenersAndRouteLookup(t *testing.T) {
 	binary := e2eServerBinary(t)
 	ctl := buildDirectorctl(t)
@@ -1472,7 +1472,7 @@ func TestMaxConnectionsPreventOverbookingThroughPublicIMAP(t *testing.T) {
 		SessionStore:  store,
 		TLSMode:       imap.TLSModeStartTLS,
 	}
-	cfg := e2eConfig(options)
+	cfg := e2eConfig(t, options)
 	selector := mustRuntimeSelector(t, cfg, store)
 	options.BackendSelector = selector
 
@@ -1592,13 +1592,13 @@ func TestPublicSTARTTLSAndImplicitTLSSockets(t *testing.T) {
 	expectLine(t, bufio.NewReader(implicit), "* OK nauthilus-director IMAP session ready\r\n")
 }
 
-// TestSieveListenersAndRouteLookupPublicBoundaries proves M6.1 listener dispatch over public boundaries.
+// TestSieveListenersAndRouteLookupPublicBoundaries proves ManageSieve listener dispatch over public boundaries.
 func TestSieveListenersAndRouteLookupPublicBoundaries(t *testing.T) {
 	certPath, keyPath, _ := writeTestCertificate(t)
 	redisFixture := startValkeySessionStore(t)
 	store := newTrackingSessionStore(redisFixture.store)
 	recorder := newCapturedRecorder()
-	cfg := e2eSieveConfig(certPath, keyPath)
+	cfg := e2eSieveConfig(t, certPath, keyPath)
 	selector := mustRuntimeSelector(t, cfg, store)
 	manager := startSieveDirector(t, cfg, recorder)
 	defer stopListenerManager(t, manager)
@@ -1684,7 +1684,7 @@ func TestRuntimeControlPublicBoundaries(t *testing.T) {
 		SessionStore:     store,
 		TLSMode:          imap.TLSModeStartTLS,
 	}
-	cfg := e2eConfig(options)
+	cfg := e2eConfig(t, options)
 	selector := mustRuntimeSelector(t, cfg, store)
 	options.BackendSelector = selector
 
@@ -1965,6 +1965,7 @@ type processAuthorityBearerOptions struct {
 	ClientSecret     string
 	ClientSecretFile string
 	AuthMethod       string
+	RequiredAudience string
 	RequiredScope    string
 	AccountClaim     string
 }
@@ -2107,6 +2108,9 @@ func writeProcessConfig(t *testing.T, options processConfigOptions) string {
 		imapAuthMechanisms = []string{"plain"}
 	}
 	listenerCertPath, listenerKeyPath, _ := writeTestCertificate(t)
+	authorityPasswordPath := writeProcessSecretFile(t, "unused")
+	backendPasswordPath := writeProcessSecretFile(t, backendAuth.MasterUser.Password.Value())
+	healthPasswordPath := writeProcessSecretFile(t, e2ePassword)
 
 	content := fmt.Sprintf(`patch:
   - op: remove
@@ -2152,7 +2156,7 @@ auth:
       http:
         endpoint: %q
         basic_auth:
-          password_file: "unused"
+          password_file: %q
 director:
   health:
     interval: 200ms
@@ -2212,6 +2216,7 @@ director:
 		options.RedisAddress,
 		processAuthorityYAML(t, options.AuthorityOIDC, options.AuthorityBearer),
 		options.AuthorityURL,
+		authorityPasswordPath,
 		processUserHoldConfigYAML(options),
 		options.DirectorAddress,
 		listenerCertPath,
@@ -2230,7 +2235,7 @@ director:
 		backendTLS.InsecureSkipVerify,
 		backendAuth.Mode,
 		backendAuth.MasterUser.Username,
-		backendAuth.MasterUser.Password.Value(),
+		backendPasswordPath,
 		backendAuth.MasterUser.UserFormat,
 		backendAuth.MasterUser.Mechanism,
 		backendAuth.CredentialReplay.RequireBackendTLS,
@@ -2238,13 +2243,25 @@ director:
 		quotedYAMLStrings(backendAuth.CredentialReplay.AllowedMechanisms),
 		options.BackendHealthEnabled,
 		options.BackendHealthDeepCheck,
-		e2ePassword,
+		healthPasswordPath,
 	)
 	content = strings.ReplaceAll(content, "\t", "")
 
 	path := filepath.Join(t.TempDir(), "nauthilus-director.yml")
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatalf("write process config: %v", err)
+	}
+
+	return path
+}
+
+// writeProcessSecretFile writes one temporary secret file for generated process configs.
+func writeProcessSecretFile(t *testing.T, value string) string {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "process-secret")
+	if err := os.WriteFile(path, []byte(value+"\n"), 0o600); err != nil {
+		t.Fatalf("write process secret file: %v", err)
 	}
 
 	return path
@@ -2260,6 +2277,8 @@ func writeSieveProcessConfig(t *testing.T, options processConfigOptions, sieveAd
 	}
 	listenerCertPath, listenerKeyPath, _ := writeTestCertificate(t)
 	backendAuth := masterUserBackendAuth()
+	authorityPasswordPath := writeProcessSecretFile(t, "unused")
+	backendPasswordPath := writeProcessSecretFile(t, backendAuth.MasterUser.Password.Value())
 
 	content := fmt.Sprintf(`patch:
   - op: remove
@@ -2305,7 +2324,7 @@ auth:
       http:
         endpoint: %q
         basic_auth:
-          password_file: "unused"
+          password_file: %q
 director:
   health:
     interval: 200ms
@@ -2401,6 +2420,7 @@ director:
 		options.RedisAddress,
 		processAuthorityOIDCYAMLForOptions(t, options.AuthorityOIDC),
 		options.AuthorityURL,
+		authorityPasswordPath,
 		sieveAddress,
 		listenerCertPath,
 		listenerKeyPath,
@@ -2410,13 +2430,13 @@ director:
 		e2eShardTag,
 		backendAuth.Mode,
 		backendAuth.MasterUser.Username,
-		backendAuth.MasterUser.Password.Value(),
+		backendPasswordPath,
 		backendAuth.MasterUser.UserFormat,
 		backendAuth.MasterUser.Mechanism,
 		e2eShardTag,
 		backendAuth.Mode,
 		backendAuth.MasterUser.Username,
-		backendAuth.MasterUser.Password.Value(),
+		backendPasswordPath,
 		backendAuth.MasterUser.UserFormat,
 		backendAuth.MasterUser.Mechanism,
 	)
@@ -2454,6 +2474,7 @@ func writeBackendPinProcessConfig(t *testing.T, options processConfigOptions, ba
 	}
 	listenerCertPath, listenerKeyPath, _ := writeTestCertificate(t)
 	backends = sortedProcessBackends(backends)
+	authorityPasswordPath := writeProcessSecretFile(t, "unused")
 
 	content := fmt.Sprintf(`patch:
   - op: remove
@@ -2499,7 +2520,7 @@ auth:
       http:
         endpoint: %q
         basic_auth:
-          password_file: "unused"
+          password_file: %q
 director:
   health:
     interval: 200ms
@@ -2531,12 +2552,13 @@ director:
 		options.RedisAddress,
 		processAuthorityOIDCYAMLForOptions(t, options.AuthorityOIDC),
 		options.AuthorityURL,
+		authorityPasswordPath,
 		processUserHoldConfigYAML(options),
 		options.DirectorAddress,
 		listenerCertPath,
 		listenerKeyPath,
 		quotedYAMLStrings(processBackendIdentifiers(backends)),
-		processBackendConfigYAML(backends, backendTLS, backendAuth),
+		processBackendConfigYAML(t, backends, backendTLS, backendAuth),
 	)
 	content = strings.ReplaceAll(content, "\t", "")
 
@@ -2596,16 +2618,21 @@ func processUserHoldConfigYAML(options processConfigOptions) string {
 
 // processBackendConfigYAML renders backend definitions for the real-process fixture.
 func processBackendConfigYAML(
+	t *testing.T,
 	backends []processBackendDefinition,
 	backendTLS config.BackendTLSConfig,
 	backendAuth backend.AuthConfig,
 ) string {
+	t.Helper()
+
 	var builder strings.Builder
 	for _, configured := range backends {
 		shard := strings.TrimSpace(configured.Shard)
 		if shard == "" {
 			shard = e2eShardTag
 		}
+		backendPasswordPath := writeProcessSecretFile(t, backendAuth.MasterUser.Password.Value())
+		healthPasswordPath := writeProcessSecretFile(t, e2ePassword)
 
 		fmt.Fprintf(&builder, `    %s:
       protocol: imap
@@ -2654,7 +2681,7 @@ func processBackendConfigYAML(
 			backendTLS.InsecureSkipVerify,
 			backendAuth.Mode,
 			backendAuth.MasterUser.Username,
-			backendAuth.MasterUser.Password.Value(),
+			backendPasswordPath,
 			backendAuth.MasterUser.UserFormat,
 			backendAuth.MasterUser.Mechanism,
 			backendAuth.CredentialReplay.RequireBackendTLS,
@@ -2662,7 +2689,7 @@ func processBackendConfigYAML(
 			quotedYAMLStrings(backendAuth.CredentialReplay.AllowedMechanisms),
 			configured.HealthEnabled,
 			configured.HealthDeepCheck,
-			e2ePassword,
+			healthPasswordPath,
 		)
 	}
 
@@ -2785,7 +2812,7 @@ func appendAuthorityContextMapYAML(builder *strings.Builder, name string, values
 func startDirector(t *testing.T, options directorOptions) directorInstance {
 	t.Helper()
 
-	cfg := e2eConfig(options)
+	cfg := e2eConfig(t, options)
 	store := options.SessionStore
 	if store == nil {
 		store = newMemorySessionStore()
@@ -2900,7 +2927,7 @@ func startDirector(t *testing.T, options directorOptions) directorInstance {
 	return directorInstance{address: address, manager: manager}
 }
 
-// startSieveDirector starts only M6.1 ManageSieve listeners over the shared manager path.
+// startSieveDirector starts only ManageSieve listeners over the shared manager path.
 func startSieveDirector(t *testing.T, cfg config.Config, recorder observability.Recorder) *listener.Manager {
 	t.Helper()
 
@@ -2999,7 +3026,9 @@ func assertListenerSnapshot(t *testing.T, manager *listener.Manager, name string
 }
 
 // e2eConfig builds a narrow typed config for one public IMAP listener and backend.
-func e2eConfig(options directorOptions) config.Config {
+func e2eConfig(t *testing.T, options directorOptions) config.Config {
+	t.Helper()
+
 	cfg := config.DefaultConfig()
 	listenerConfig := cfg.Director.Listeners[e2eListenerName]
 	listenerConfig.Address = "127.0.0.1:0"
@@ -3016,6 +3045,7 @@ func e2eConfig(options directorOptions) config.Config {
 		authority.OIDC.Enabled = false
 		authority.OIDC.ClientCredentials.Enabled = false
 		authority.HTTP.Endpoint = options.AuthorityURL
+		authority.HTTP.BasicAuth.PasswordFile = config.Secret(writeProcessSecretFile(t, "unused"))
 		cfg.Auth.Authorities["default"] = authority
 	}
 
@@ -3033,6 +3063,10 @@ func e2eConfig(options directorOptions) config.Config {
 			MinTLSVersion: "TLS1.2",
 		}
 	}
+	backendAuth := options.BackendAuth
+	if strings.TrimSpace(backendAuth.Mode) == "" {
+		backendAuth = masterUserBackendAuth()
+	}
 	cfg.Director.Backends = make(map[string]config.BackendConfig, len(cfg.Director.BackendPools[e2eBackendPool].Backends))
 	for _, identifier := range cfg.Director.BackendPools[e2eBackendPool].Backends {
 		maxConnections := 100
@@ -3047,7 +3081,7 @@ func e2eConfig(options directorOptions) config.Config {
 			MaxConnections: maxConnections,
 			Maintenance:    "disabled",
 			TLS:            backendTLS,
-			Auth:           backendAuthConfig(options.BackendAuth),
+			Auth:           backendAuthConfig(t, backendAuth),
 			HealthCheck: config.BackendHealthConfig{
 				Enabled: false,
 			},
@@ -3072,7 +3106,9 @@ func authorityContextConfigValues(values map[string]string) map[string]config.Au
 }
 
 // e2eSieveConfig builds a narrow typed config for public STARTTLS and implicit ManageSieve listeners.
-func e2eSieveConfig(certPath string, keyPath string) config.Config {
+func e2eSieveConfig(t *testing.T, certPath string, keyPath string) config.Config {
+	t.Helper()
+
 	cfg := config.DefaultConfig()
 	sieveListener := cfg.Director.Listeners[e2eSieveListener]
 	sieveListener.Address = "127.0.0.1:0"
@@ -3097,15 +3133,17 @@ func e2eSieveConfig(certPath string, keyPath string) config.Config {
 		},
 	}
 	cfg.Director.Backends = map[string]config.BackendConfig{
-		e2eSieveBackendAID: e2eSieveBackendConfig(e2eSieveBackendAID, "127.0.0.1:1"),
-		e2eSieveBackendBID: e2eSieveBackendConfig(e2eSieveBackendBID, "127.0.0.1:2"),
+		e2eSieveBackendAID: e2eSieveBackendConfig(t, e2eSieveBackendAID, "127.0.0.1:1"),
+		e2eSieveBackendBID: e2eSieveBackendConfig(t, e2eSieveBackendBID, "127.0.0.1:2"),
 	}
 
 	return cfg
 }
 
 // e2eSieveBackendConfig creates a verified-TLS backend entry without opening sockets.
-func e2eSieveBackendConfig(identifier string, address string) config.BackendConfig {
+func e2eSieveBackendConfig(t *testing.T, identifier string, address string) config.BackendConfig {
+	t.Helper()
+
 	return config.BackendConfig{
 		Protocol:       e2eSieveProtocol,
 		ShardTag:       e2eShardTag,
@@ -3118,7 +3156,7 @@ func e2eSieveBackendConfig(identifier string, address string) config.BackendConf
 			ServerName:    identifier + ".example.test",
 			MinTLSVersion: "TLS1.2",
 		},
-		Auth: backendAuthConfig(masterUserBackendAuth()),
+		Auth: backendAuthConfig(t, masterUserBackendAuth()),
 		HealthCheck: config.BackendHealthConfig{
 			Enabled: false,
 		},
@@ -3159,12 +3197,19 @@ func e2eBackendShard(options directorOptions, identifier string) string {
 }
 
 // backendAuthConfig maps backend-domain auth settings back into typed config.
-func backendAuthConfig(auth backend.AuthConfig) config.BackendAuthConfig {
+func backendAuthConfig(t *testing.T, auth backend.AuthConfig) config.BackendAuthConfig {
+	t.Helper()
+
+	passwordFile := config.Secret("")
+	if !auth.MasterUser.Password.IsZero() {
+		passwordFile = config.Secret(writeProcessSecretFile(t, auth.MasterUser.Password.Value()))
+	}
+
 	return config.BackendAuthConfig{
 		Mode: auth.Mode,
 		MasterUser: config.BackendMasterUserConfig{
 			Username:     auth.MasterUser.Username,
-			PasswordFile: auth.MasterUser.Password,
+			PasswordFile: passwordFile,
 			UserFormat:   auth.MasterUser.UserFormat,
 			Mechanism:    auth.MasterUser.Mechanism,
 		},
@@ -3872,6 +3917,10 @@ func processAuthorityBearerYAML(t *testing.T, options processAuthorityBearerOpti
 	if requiredScope == "" {
 		requiredScope = e2eSASLRequiredScope
 	}
+	requiredAudience := strings.TrimSpace(options.RequiredAudience)
+	if requiredAudience == "" {
+		requiredAudience = clientID
+	}
 
 	return fmt.Sprintf(`      mechanisms:
         bearer:
@@ -3890,12 +3939,15 @@ func processAuthorityBearerYAML(t *testing.T, options processAuthorityBearerOpti
             client_key_id: ""
             client_assertion_alg: ""
             auth_method: %q
+            required_audience: %q
+            required_resource: ""
             required_scope: %q
             account_claim: %q
 `, strings.TrimRight(strings.TrimSpace(options.Issuer), "/"),
 		clientID,
 		clientSecretFile,
 		authMethod,
+		requiredAudience,
 		requiredScope,
 		strings.TrimSpace(options.AccountClaim),
 	)
@@ -3998,12 +4050,13 @@ func processAuthorityOIDCForFake(authority *fakeHTTPAuthority, scopes []string) 
 // processAuthorityBearerForFake returns SASL bearer introspection config for the fake issuer.
 func processAuthorityBearerForFake(authority *fakeHTTPAuthority) processAuthorityBearerOptions {
 	return processAuthorityBearerOptions{
-		Enabled:       true,
-		Issuer:        authority.Issuer(),
-		ClientID:      e2eSASLClientID,
-		ClientSecret:  e2eSASLClientSecret,
-		AuthMethod:    "client_secret_basic",
-		RequiredScope: e2eSASLRequiredScope,
+		Enabled:          true,
+		Issuer:           authority.Issuer(),
+		ClientID:         e2eSASLClientID,
+		ClientSecret:     e2eSASLClientSecret,
+		AuthMethod:       "client_secret_basic",
+		RequiredAudience: e2eSASLClientID,
+		RequiredScope:    e2eSASLRequiredScope,
 	}
 }
 
@@ -5777,6 +5830,7 @@ func (f *fakeHTTPAuthority) writeSASLBearerIntrospection(writer http.ResponseWri
 	}
 	response := map[string]any{
 		"active":  fixture.Active,
+		"aud":     f.oidc.introspectionClientID,
 		"scope":   strings.Join(scopes, " "),
 		"account": fixture.Account,
 		"tenant":  fixture.Tenant,

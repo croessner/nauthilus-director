@@ -52,8 +52,9 @@ func DefaultConfig() Config {
 			},
 			Servers: RuntimeServersConfig{
 				Control: ControlServerConfig{
-					Enabled: true,
-					Address: "127.0.0.1:9090",
+					Enabled:                true,
+					Address:                "127.0.0.1:9090",
+					AllowPlaintextLoopback: true,
 					Auth: ControlAuthConfig{
 						Basic: ControlBasicAuthConfig{},
 						Bearer: ControlBearerAuthConfig{
@@ -61,11 +62,12 @@ func DefaultConfig() Config {
 							TokenFile: Secret("/etc/nauthilus-director/control-token"),
 						},
 						OIDC: ControlOIDCAuthConfig{
-							Enabled:         true,
-							Authority:       "default",
-							Validation:      "nauthilus",
-							RequiredScopes:  []string{"nauthilus-director.admin"},
-							ProtectedScopes: []string{"nauthilus-director.protected"},
+							Enabled:          true,
+							Authority:        "default",
+							Validation:       "nauthilus",
+							RequiredAudience: "nauthilus-director",
+							RequiredScopes:   []string{"nauthilus-director.admin"},
+							ProtectedScopes:  []string{"nauthilus-director.protected"},
 						},
 						MTLS: ControlMTLSAuthConfig{},
 					},
@@ -228,6 +230,7 @@ func defaultAuthority() AuthorityConfig {
 					ClientID:         "nauthilus-director-sasl",
 					ClientSecretFile: Secret("/etc/nauthilus-director/nauthilus-introspection-client-secret"),
 					AuthMethod:       oidcClientSecretBasic,
+					RequiredAudience: "nauthilus-director-sasl",
 					RequiredScope:    defaultBearerRequiredScope,
 				},
 			},
@@ -254,8 +257,9 @@ func defaultAuthority() AuthorityConfig {
 			},
 		},
 		HTTP: AuthorityHTTPTransportConfig{
-			Endpoint:    "http://127.0.0.1:8080/api/v1/auth/json",
-			ContentType: "application/json",
+			Endpoint:               "http://127.0.0.1:8080/api/v1/auth/json",
+			ContentType:            "application/json",
+			AllowPlaintextLoopback: true,
 			BasicAuth: BasicAuthConfig{
 				Username:     "nauthilus-director",
 				PasswordFile: Secret("/etc/nauthilus-director/nauthilus-http-password"),

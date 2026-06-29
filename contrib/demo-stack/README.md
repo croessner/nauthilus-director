@@ -133,6 +133,9 @@ docker compose up --build -d
 The default Stalwart Docker image does not include FoundationDB support. The
 demo therefore builds the Stalwart containers from the upstream
 `Dockerfile.fdb` build context named by `STALWART_FDB_BUILD_CONTEXT` in `.env`.
+The example environment pins that build context to the Stalwart commit currently
+validated by this stack, because moving branches can change the generated image
+without a repository diff.
 The first `docker compose up --build -d` can take a long time, especially on
 older machines, because this compiles the FoundationDB-enabled Stalwart image.
 That first build can look quiet for several minutes. Later starts reuse the
@@ -168,6 +171,10 @@ Useful host ports:
 | HAProxy stats | `8404` |
 | Director A control API | `9090` |
 | Director B control API | `9091` |
+
+The Director control API is HTTPS-only when accessed through the published host
+ports. The proof scripts default to `https://127.0.0.1:9090` and trust the
+ephemeral demo certificate only for local proof traffic.
 
 ## Smoke Test
 
@@ -257,7 +264,7 @@ docker compose up -d director-a director-b
 ```bash
 docker compose ps
 docker compose logs -f foundationdb foundationdb-configure director-a director-b nauthilus-a nauthilus-b nauthilus-haproxy stalwart-a stalwart-b stalwart-configure
-docker compose exec director-a nauthilus-directorctl --address http://127.0.0.1:9090 status
+docker compose exec director-a nauthilus-directorctl --address https://127.0.0.1:9090 --tls-ca-file /run/nauthilus-director/tls/server.crt status
 ```
 
 ## Stop

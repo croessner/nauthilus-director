@@ -59,6 +59,8 @@ type BearerIntrospectionConfig struct {
 	ClientKeyID          string       `mapstructure:"client_key_id" yaml:"client_key_id"`
 	ClientAssertionAlg   string       `mapstructure:"client_assertion_alg" yaml:"client_assertion_alg"`
 	AuthMethod           string       `mapstructure:"auth_method" yaml:"auth_method"`
+	RequiredAudience     string       `mapstructure:"required_audience" yaml:"required_audience"`
+	RequiredResource     string       `mapstructure:"required_resource" yaml:"required_resource"`
 	RequiredScope        string       `mapstructure:"required_scope" yaml:"required_scope"`
 	AccountClaim         string       `mapstructure:"account_claim" yaml:"account_claim"`
 }
@@ -90,10 +92,11 @@ type AuthorityOIDCClientCredentialsConfig struct {
 }
 
 type AuthorityHTTPTransportConfig struct {
-	Endpoint    string             `mapstructure:"endpoint" yaml:"endpoint"`
-	ContentType string             `mapstructure:"content_type" yaml:"content_type"`
-	BasicAuth   BasicAuthConfig    `mapstructure:"basic_auth" yaml:"basic_auth" validate:"required"`
-	TLS         AuthorityTLSConfig `mapstructure:"tls" yaml:"tls" validate:"required"`
+	Endpoint               string             `mapstructure:"endpoint" yaml:"endpoint"`
+	ContentType            string             `mapstructure:"content_type" yaml:"content_type"`
+	AllowPlaintextLoopback bool               `mapstructure:"allow_plaintext_loopback" yaml:"allow_plaintext_loopback"`
+	BasicAuth              BasicAuthConfig    `mapstructure:"basic_auth" yaml:"basic_auth" validate:"required"`
+	TLS                    AuthorityTLSConfig `mapstructure:"tls" yaml:"tls" validate:"required"`
 }
 
 type BasicAuthConfig struct {
@@ -109,10 +112,11 @@ type AuthorityTLSConfig struct {
 }
 
 type AuthorityGRPCTransportConfig struct {
-	Address    string               `mapstructure:"address" yaml:"address"`
-	Authority  string               `mapstructure:"authority" yaml:"authority"`
-	CallerAuth GRPCCallerAuthConfig `mapstructure:"caller_auth" yaml:"caller_auth" validate:"required"`
-	TLS        AuthorityTLSConfig   `mapstructure:"tls" yaml:"tls" validate:"required"`
+	Address                string               `mapstructure:"address" yaml:"address"`
+	Authority              string               `mapstructure:"authority" yaml:"authority"`
+	AllowPlaintextLoopback bool                 `mapstructure:"allow_plaintext_loopback" yaml:"allow_plaintext_loopback"`
+	CallerAuth             GRPCCallerAuthConfig `mapstructure:"caller_auth" yaml:"caller_auth" validate:"required"`
+	TLS                    AuthorityTLSConfig   `mapstructure:"tls" yaml:"tls" validate:"required"`
 }
 
 type GRPCCallerAuthConfig struct {

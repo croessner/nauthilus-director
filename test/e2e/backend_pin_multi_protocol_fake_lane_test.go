@@ -328,6 +328,8 @@ func writeMultiProtocolBackendPinProcessConfig(t *testing.T, options multiProtoc
 	t.Helper()
 
 	certPath, keyPath, _ := writeTestCertificate(t)
+	authorityPasswordPath := writeProcessSecretFile(t, "unused")
+	backendPasswordPath := writeProcessSecretFile(t, e2ePassword)
 	content := fmt.Sprintf(`patch:
   - op: remove
     path: director.listeners
@@ -372,7 +374,7 @@ auth:
       http:
         endpoint: %q
         basic_auth:
-          password_file: "unused"
+          password_file: %q
 director:
   health:
     interval: 200ms
@@ -468,6 +470,7 @@ director:
 		options.RedisAddress,
 		processAuthorityYAML(t, processAuthorityOIDCOptions{}, processAuthorityBearerOptions{}),
 		options.AuthorityURL,
+		authorityPasswordPath,
 		e2eMultiPinNode2,
 		options.IMAPAddress,
 		certPath,
@@ -481,7 +484,7 @@ director:
 		quotedYAMLStrings([]string{e2eMultiPinNode2IMAP, e2eMultiPinCanaryIMAP}),
 		quotedYAMLStrings([]string{e2eMultiPinNode2LMTP, e2eMultiPinCanaryLMTP}),
 		quotedYAMLStrings([]string{e2eMultiPinNode2Sieve, e2eMultiPinCanarySieve}),
-		multiProtocolBackendPinBackendsYAML(options),
+		multiProtocolBackendPinBackendsYAML(options, backendPasswordPath),
 	)
 	content = strings.ReplaceAll(content, "\t", "")
 
@@ -494,7 +497,7 @@ director:
 }
 
 // multiProtocolBackendPinBackendsYAML renders the node2 plus canary backend set.
-func multiProtocolBackendPinBackendsYAML(options multiProtocolBackendPinProcessConfigOptions) string {
+func multiProtocolBackendPinBackendsYAML(options multiProtocolBackendPinProcessConfigOptions, backendPasswordPath string) string {
 	return fmt.Sprintf(`    %s:
       protocol: imap
       shard_tag: %q
@@ -510,7 +513,7 @@ func multiProtocolBackendPinBackendsYAML(options multiProtocolBackendPinProcessC
         mode: master_user
         master_user:
           username: director-master
-          password_file: backend-master-secret
+          password_file: %q
           user_format: "{user}*{master_user}"
           mechanism: plain
       health_check:
@@ -530,7 +533,7 @@ func multiProtocolBackendPinBackendsYAML(options multiProtocolBackendPinProcessC
         mode: master_user
         master_user:
           username: director-master
-          password_file: backend-master-secret
+          password_file: %q
           user_format: "{user}*{master_user}"
           mechanism: plain
       health_check:
@@ -580,7 +583,7 @@ func multiProtocolBackendPinBackendsYAML(options multiProtocolBackendPinProcessC
         mode: master_user
         master_user:
           username: director-master
-          password_file: backend-master-secret
+          password_file: %q
           user_format: "{user}*{master_user}"
           mechanism: plain
       health_check:
@@ -600,17 +603,21 @@ func multiProtocolBackendPinBackendsYAML(options multiProtocolBackendPinProcessC
         mode: master_user
         master_user:
           username: director-master
-          password_file: backend-master-secret
+          password_file: %q
           user_format: "{user}*{master_user}"
           mechanism: plain
       health_check:
         enabled: false
 `, e2eMultiPinNode2IMAP, e2eMultiPinNode2, e2eMultiPinNode2, options.IMAPBackends[e2eMultiPinNode2IMAP],
+		backendPasswordPath,
 		e2eMultiPinCanaryIMAP, e2eMultiPinCanaryNode, e2eMultiPinCanaryNode, options.IMAPBackends[e2eMultiPinCanaryIMAP],
+		backendPasswordPath,
 		e2eMultiPinNode2LMTP, e2eMultiPinNode2, e2eMultiPinNode2, options.LMTPBackends[e2eMultiPinNode2LMTP],
 		e2eMultiPinCanaryLMTP, e2eMultiPinCanaryNode, e2eMultiPinCanaryNode, options.LMTPBackends[e2eMultiPinCanaryLMTP],
 		e2eMultiPinNode2Sieve, e2eMultiPinNode2, e2eMultiPinNode2, options.SieveBackends[e2eMultiPinNode2Sieve],
+		backendPasswordPath,
 		e2eMultiPinCanarySieve, e2eMultiPinCanaryNode, e2eMultiPinCanaryNode, options.SieveBackends[e2eMultiPinCanarySieve],
+		backendPasswordPath,
 	)
 }
 

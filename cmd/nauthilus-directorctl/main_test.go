@@ -1650,6 +1650,70 @@ func TestRouteLookupTextOutputIncludesBackendPinDiagnostics(t *testing.T) {
 	}
 }
 
+// TestRouteLookupTextOutputIncludesUnresolvedIdentityDiagnostics keeps fail-closed output deterministic.
+func TestRouteLookupTextOutputIncludesUnresolvedIdentityDiagnostics(t *testing.T) {
+	fake := newFakeControlClient()
+	fake.routeResponse = &generated.RouteLookupResponse{
+		AffectedBy: generated.RouteLookupEffects{},
+		BackendPin: generated.RouteLookupBackendPin{
+			Applied: false,
+			Present: false,
+			Reason:  "backend_pin_absent",
+		},
+		FailClosed: true,
+		Healthy:    false,
+		IdentityResolution: &generated.RouteLookupIdentityResolution{
+			AccountResolved: false,
+			Authoritative:   false,
+			NauthilusUsed:   false,
+			Source:          "director_state_unresolved",
+		},
+		Reason: "account_unresolved",
+		Routing: generated.RouteLookupRouting{
+			Source:           "account_unresolved",
+			UsedDefaultShard: false,
+		},
+		Source:   "fail_closed",
+		ShardTag: "",
+		UserHold: generated.RouteLookupUserHold{
+			PlacementDeferred: false,
+			Present:           false,
+			Reason:            "user_hold_absent",
+		},
+	}
+
+	stdout, stderr, code := runWithFakeClient([]string{
+		"route", "lookup",
+		"--protocol", "lmtp",
+		"--recipient", "Alias@example.test",
+		"--attribute", "mailShard=secret-shard-marker",
+	}, fake)
+	if code != 0 {
+		t.Fatalf("route lookup returned exit code %d, want 0; stderr=%q", code, stderr)
+	}
+
+	for _, want := range []string{
+		`selected_backend=""`,
+		"source=fail_closed",
+		"fail_closed=true",
+		"reason=account_unresolved",
+		"identity_source=director_state_unresolved",
+		"identity_authoritative=false",
+		"identity_nauthilus=false",
+		"identity_account_resolved=false",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("route lookup output missing %q:\n%s", want, stdout)
+		}
+	}
+
+	for _, forbidden := range []string{"Alias@example.test", "secret-shard-marker"} {
+		if strings.Contains(stdout, forbidden) {
+			t.Fatalf("route lookup output leaked %q:\n%s", forbidden, stdout)
+		}
+	}
+}
+
 // TestHTTPStatusAndUsageExitCodes verifies stable local and remote failure mapping.
 func TestHTTPStatusAndUsageExitCodes(t *testing.T) {
 	fake := newFakeControlClient()
