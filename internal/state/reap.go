@@ -68,6 +68,8 @@ func (s *RedisSessionStore) ReapSessions(ctx context.Context, request ReapReques
 		total.ScannedSessions += record.ScannedSessions
 		total.ExpiredSessions += record.ExpiredSessions
 		total.StaleIndexEntries += record.StaleIndexEntries
+		total.AggregateMarkersRemoved += record.AggregateMarkersRemoved
+		total.IdleAffinitiesAdded += record.IdleAffinitiesAdded
 		total.RepairedBackends += s.releaseReapedBackendReservations(ctx, record.releases)
 		s.removeReapedSessionAggregates(ctx, record.aggregateRemovals)
 		s.addReapedIdleAffinities(ctx, record.idleAffinities)
@@ -164,11 +166,14 @@ func parseReapRecord(value any) (ReapRecord, error) {
 	}
 
 	record.aggregateRemovals = parseAggregateRemovalSessions(fields["aggregate_removals"])
+	record.AggregateMarkersRemoved = len(record.aggregateRemovals)
 
 	record.idleAffinities, err = parseAggregateIdleAffinities(fields["idle_affinities"])
 	if err != nil {
 		return ReapRecord{}, err
 	}
+
+	record.IdleAffinitiesAdded = len(record.idleAffinities)
 
 	record.ServerTime, err = parseTimeField(fields, "server_time_ms")
 	if err != nil {

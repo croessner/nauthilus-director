@@ -229,6 +229,8 @@ func TestNestedCommandsUseGeneratedClient(t *testing.T) {
 		{name: "users move", args: []string{"users", "move", "user-a", "--to-shard", "shard-b", "--strategy", "kick_existing", "--reason", "rebalance"}, wantCalls: []string{"MoveUser"}},
 		{name: "users kick", args: []string{"users", "kick", "user-a", "--reason", "abuse"}, wantCalls: []string{"KickUser"}},
 		{name: "runtime summary", args: []string{"runtime", "summary"}, wantCalls: []string{"GetRuntimeSummary"}},
+		{name: "runtime reap", args: []string{"runtime", "reap", "--reason", "cleanup", "--limit", "10", "--max-pass-duration", "5s"}, wantCalls: []string{"ReapRuntime"}},
+		{name: "runtime reconcile aggregates", args: []string{"runtime", "reconcile", "aggregates", "--reason", "cleanup", "--limit", "10", "--max-pass-duration", "5s"}, wantCalls: []string{"ReconcileRuntimeAggregates"}},
 		{name: "route lookup", args: []string{"route", "lookup", "--protocol", "imap", "--user", "user-a", "--listener", "imap", "--attribute", "tier=gold"}, wantCalls: []string{"LookupRoute"}},
 		{name: "reload", args: []string{"reload"}, wantCalls: []string{"Reload"}},
 	}
@@ -268,6 +270,8 @@ func TestMutatingCommandsRequireReason(t *testing.T) {
 		{"users", "hold", "clear", "user-a"},
 		{"users", "move", "user-a", "--to-shard", "shard-b", "--strategy", "kick_existing"},
 		{"users", "kick", "user-a"},
+		{"runtime", "reap", "--limit", "10", "--max-pass-duration", "5s"},
+		{"runtime", "reconcile", "aggregates", "--limit", "10", "--max-pass-duration", "5s"},
 	}
 
 	for _, args := range tests {
@@ -914,6 +918,110 @@ func TestRuntimeSummaryUsesGeneratedClient(t *testing.T) {
 		if !strings.Contains(stdout, want) {
 			t.Fatalf("runtime summary stdout = %q, want %q", stdout, want)
 		}
+	}
+}
+
+// TestRuntimeReapCommandUsesGeneratedDTO verifies runtime reap uses the generated SDK request.
+func TestRuntimeReapCommandUsesGeneratedDTO(t *testing.T) {
+	fake := newFakeControlClient()
+
+	stdout, stderr, code := runWithFakeClient([]string{"runtime", "reap", "--reason", "cleanup", "--limit", "25", "--max-pass-duration", "5s", "--dry-run"}, fake)
+	if code != 0 {
+		t.Fatalf("runtime reap returned exit code %d, want 0; stdout=%q stderr=%q", code, stdout, stderr)
+	}
+
+	if !reflect.DeepEqual(fake.calls, []string{"ReapRuntime"}) {
+		t.Fatalf("calls = %#v, want ReapRuntime", fake.calls)
+	}
+	if fake.reapRuntimeRequest.Reason != "cleanup" ||
+		fake.reapRuntimeRequest.Limit != 25 ||
+		fake.reapRuntimeRequest.MaxPassDuration != "5s" ||
+		fake.reapRuntimeRequest.DryRun == nil ||
+		!*fake.reapRuntimeRequest.DryRun {
+		t.Fatalf("reap request = %#v, want generated DTO values", fake.reapRuntimeRequest)
+	}
+	for _, want := range []string{
+		"status=reaped",
+		"scanned_sessions=25",
+		"expired_sessions=7",
+		"stale_index_entries=2",
+		"repaired_backends=3",
+		"aggregate_markers_removed=7",
+		"idle_affinities_added=4",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("runtime reap stdout = %q, want %q", stdout, want)
+		}
+	}
+}
+
+// TestRuntimeAggregateReconcileCommandUsesGeneratedDTO verifies aggregate repair uses the generated SDK request.
+func TestRuntimeAggregateReconcileCommandUsesGeneratedDTO(t *testing.T) {
+	fake := newFakeControlClient()
+
+	stdout, stderr, code := runWithFakeClient([]string{"runtime", "reconcile", "aggregates", "--reason", "cleanup", "--limit", "1000", "--max-pass-duration", "5s", "--scope", "active_sessions", "--dry-run"}, fake)
+	if code != 0 {
+		t.Fatalf("runtime reconcile aggregates returned exit code %d, want 0; stdout=%q stderr=%q", code, stdout, stderr)
+	}
+
+	if !reflect.DeepEqual(fake.calls, []string{"ReconcileRuntimeAggregates"}) {
+		t.Fatalf("calls = %#v, want ReconcileRuntimeAggregates", fake.calls)
+	}
+	if fake.reconcileRuntimeAggregatesRequest.Reason != "cleanup" ||
+		fake.reconcileRuntimeAggregatesRequest.Limit != 1000 ||
+		fake.reconcileRuntimeAggregatesRequest.MaxPassDuration != "5s" ||
+		fake.reconcileRuntimeAggregatesRequest.Scope != generated.ActiveSessions ||
+		fake.reconcileRuntimeAggregatesRequest.DryRun == nil ||
+		!*fake.reconcileRuntimeAggregatesRequest.DryRun {
+		t.Fatalf("aggregate reconcile request = %#v, want generated DTO values", fake.reconcileRuntimeAggregatesRequest)
+	}
+	for _, want := range []string{
+		"status=reconciled",
+		"scanned_markers=1000",
+		"stale_markers_removed=2",
+		"markers_upserted=0",
+		"counter_fields_changed=4",
+		"counter_fields_removed=1",
+		"authoritative_conflicts=0",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("runtime reconcile stdout = %q, want %q", stdout, want)
+		}
+	}
+}
+
+// TestRuntimeRepairUsageValidationKeepsRequestsLocal rejects malformed repair commands before transport.
+func TestRuntimeRepairUsageValidationKeepsRequestsLocal(t *testing.T) {
+	tests := []struct {
+		name       string
+		args       []string
+		wantStderr string
+	}{
+		{name: "reap missing limit", args: []string{"runtime", "reap", "--reason", "cleanup", "--max-pass-duration", "5s"}, wantStderr: "--limit"},
+		{name: "reap invalid limit", args: []string{"runtime", "reap", "--reason", "cleanup", "--limit", "0", "--max-pass-duration", "5s"}, wantStderr: "positive integer"},
+		{name: "reap missing duration", args: []string{"runtime", "reap", "--reason", "cleanup", "--limit", "10"}, wantStderr: "--max-pass-duration"},
+		{name: "reap invalid duration", args: []string{"runtime", "reap", "--reason", "cleanup", "--limit", "10", "--max-pass-duration", "soon"}, wantStderr: "valid Go duration"},
+		{name: "reap subsecond duration", args: []string{"runtime", "reap", "--reason", "cleanup", "--limit", "10", "--max-pass-duration", "500ms"}, wantStderr: "whole seconds"},
+		{name: "reconcile invalid scope", args: []string{"runtime", "reconcile", "aggregates", "--reason", "cleanup", "--limit", "10", "--max-pass-duration", "5s", "--scope", "everything"}, wantStderr: "--scope"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fake := newFakeControlClient()
+			stdout, stderr, code := runWithFakeClient(test.args, fake)
+			if code != 2 {
+				t.Fatalf("run returned exit code %d, want 2; stderr=%q", code, stderr)
+			}
+			if stdout != "" {
+				t.Fatalf("stdout = %q, want empty output", stdout)
+			}
+			if !strings.Contains(stderr, test.wantStderr) {
+				t.Fatalf("stderr = %q, want %q", stderr, test.wantStderr)
+			}
+			if len(fake.calls) != 0 {
+				t.Fatalf("calls = %#v, want none", fake.calls)
+			}
+		})
 	}
 }
 
@@ -2123,47 +2231,51 @@ func readManpage(t *testing.T, name string) string {
 
 // fakeControlClient records generated interface calls and returns stable responses.
 type fakeControlClient struct {
-	calls                  []string
-	address                string
-	timeout                time.Duration
-	defaultConfigParams    *generated.GetDefaultConfigParams
-	nonDefaultConfigParams *generated.GetNonDefaultConfigParams
-	listSessionsParams     *generated.ListSessionsParams
-	listUsersParams        *generated.ListUsersParams
-	listSessionsHistory    []generated.ListSessionsParams
-	listUsersHistory       []generated.ListUsersParams
-	listSessionPages       []generated.SessionListResponse
-	listUserPages          []generated.UserListResponse
-	listSessionsCalls      int
-	listUsersCalls         int
-	deleteSessionID        generated.SessionID
-	deleteSessionRequest   generated.DeleteSessionJSONRequestBody
-	deleteSessionResponse  *generated.DeleteSessionResponse
-	kickUserKey            generated.UserKey
-	kickUserRequest        generated.KickUserJSONRequestBody
-	kickUserResponse       *generated.KickUserResponse
-	runtimeSummary         *generated.RuntimeSummaryResponse
-	routeRequest           generated.RouteLookupRequest
-	routeResponse          *generated.RouteLookupResponse
-	listenerDrainRequest   generated.ListenerDrainRequest
-	listenerResumeRequest  generated.ListenerResumeRequest
-	backendPinResponse     *generated.UserBackendPin
-	setBackendPinUserKey   generated.UserKey
-	setBackendPinRequest   generated.UserBackendPinRequest
-	clearBackendPinUserKey generated.UserKey
-	clearBackendPinRequest generated.UserBackendPinClearRequest
-	holdResponse           *generated.UserHold
-	getHoldUserKey         generated.UserKey
-	setHoldUserKey         generated.UserKey
-	setHoldRequest         generated.UserHoldRequest
-	clearHoldUserKey       generated.UserKey
-	clearHoldRequest       generated.UserHoldClearRequest
-	defaultConfigStatus    int
-	defaultConfigProblem   *generated.ErrorResponse
-	getBackendStatus       int
-	getBackendProblem      *generated.ErrorResponse
-	getListenerStatus      int
-	getListenerProblem     *generated.ErrorResponse
+	calls                              []string
+	address                            string
+	timeout                            time.Duration
+	defaultConfigParams                *generated.GetDefaultConfigParams
+	nonDefaultConfigParams             *generated.GetNonDefaultConfigParams
+	listSessionsParams                 *generated.ListSessionsParams
+	listUsersParams                    *generated.ListUsersParams
+	listSessionsHistory                []generated.ListSessionsParams
+	listUsersHistory                   []generated.ListUsersParams
+	listSessionPages                   []generated.SessionListResponse
+	listUserPages                      []generated.UserListResponse
+	listSessionsCalls                  int
+	listUsersCalls                     int
+	deleteSessionID                    generated.SessionID
+	deleteSessionRequest               generated.DeleteSessionJSONRequestBody
+	deleteSessionResponse              *generated.DeleteSessionResponse
+	kickUserKey                        generated.UserKey
+	kickUserRequest                    generated.KickUserJSONRequestBody
+	kickUserResponse                   *generated.KickUserResponse
+	reapRuntimeRequest                 generated.ReapRuntimeJSONRequestBody
+	reapRuntimeResponse                *generated.ReapRuntimeResponse
+	reconcileRuntimeAggregatesRequest  generated.ReconcileRuntimeAggregatesJSONRequestBody
+	reconcileRuntimeAggregatesResponse *generated.ReconcileRuntimeAggregatesResponse
+	runtimeSummary                     *generated.RuntimeSummaryResponse
+	routeRequest                       generated.RouteLookupRequest
+	routeResponse                      *generated.RouteLookupResponse
+	listenerDrainRequest               generated.ListenerDrainRequest
+	listenerResumeRequest              generated.ListenerResumeRequest
+	backendPinResponse                 *generated.UserBackendPin
+	setBackendPinUserKey               generated.UserKey
+	setBackendPinRequest               generated.UserBackendPinRequest
+	clearBackendPinUserKey             generated.UserKey
+	clearBackendPinRequest             generated.UserBackendPinClearRequest
+	holdResponse                       *generated.UserHold
+	getHoldUserKey                     generated.UserKey
+	setHoldUserKey                     generated.UserKey
+	setHoldRequest                     generated.UserHoldRequest
+	clearHoldUserKey                   generated.UserKey
+	clearHoldRequest                   generated.UserHoldClearRequest
+	defaultConfigStatus                int
+	defaultConfigProblem               *generated.ErrorResponse
+	getBackendStatus                   int
+	getBackendProblem                  *generated.ErrorResponse
+	getListenerStatus                  int
+	getListenerProblem                 *generated.ErrorResponse
 }
 
 // newFakeControlClient creates a fake generated client with successful defaults.
@@ -2736,6 +2848,64 @@ func (fake *fakeControlClient) DeleteSessionWithResponse(_ context.Context, sess
 	}
 
 	return &generated.DeleteSessionResponse{HTTPResponse: httpResponse(http.StatusAccepted), JSON202: sessionKillResponse()}, nil
+}
+
+// ReapRuntimeWithBodyWithResponse records unsupported raw-body usage.
+func (fake *fakeControlClient) ReapRuntimeWithBodyWithResponse(context.Context, string, io.Reader, ...generated.RequestEditorFn) (*generated.ReapRuntimeResponse, error) {
+	fake.record("ReapRuntimeWithBody")
+	return nil, nil
+}
+
+// ReapRuntimeWithResponse records and returns a runtime reap response.
+func (fake *fakeControlClient) ReapRuntimeWithResponse(_ context.Context, body generated.ReapRuntimeJSONRequestBody, _ ...generated.RequestEditorFn) (*generated.ReapRuntimeResponse, error) {
+	fake.record("ReapRuntime")
+	fake.reapRuntimeRequest = body
+	if fake.reapRuntimeResponse != nil {
+		return fake.reapRuntimeResponse, nil
+	}
+
+	return &generated.ReapRuntimeResponse{
+		HTTPResponse: httpResponse(http.StatusOK),
+		JSON200: &generated.RuntimeReapResponse{
+			AggregateMarkersRemoved: 7,
+			ExpiredSessions:         7,
+			IdleAffinitiesAdded:     4,
+			RepairedBackends:        3,
+			ScannedSessions:         25,
+			ServerTime:              time.Unix(100, 0),
+			StaleIndexEntries:       2,
+			Status:                  generated.RuntimeReapResponseStatusReaped,
+		},
+	}, nil
+}
+
+// ReconcileRuntimeAggregatesWithBodyWithResponse records unsupported raw-body usage.
+func (fake *fakeControlClient) ReconcileRuntimeAggregatesWithBodyWithResponse(context.Context, string, io.Reader, ...generated.RequestEditorFn) (*generated.ReconcileRuntimeAggregatesResponse, error) {
+	fake.record("ReconcileRuntimeAggregatesWithBody")
+	return nil, nil
+}
+
+// ReconcileRuntimeAggregatesWithResponse records and returns an aggregate repair response.
+func (fake *fakeControlClient) ReconcileRuntimeAggregatesWithResponse(_ context.Context, body generated.ReconcileRuntimeAggregatesJSONRequestBody, _ ...generated.RequestEditorFn) (*generated.ReconcileRuntimeAggregatesResponse, error) {
+	fake.record("ReconcileRuntimeAggregates")
+	fake.reconcileRuntimeAggregatesRequest = body
+	if fake.reconcileRuntimeAggregatesResponse != nil {
+		return fake.reconcileRuntimeAggregatesResponse, nil
+	}
+
+	return &generated.ReconcileRuntimeAggregatesResponse{
+		HTTPResponse: httpResponse(http.StatusOK),
+		JSON200: &generated.RuntimeAggregateReconcileResponse{
+			AuthoritativeConflicts: 0,
+			CounterFieldsChanged:   4,
+			CounterFieldsRemoved:   1,
+			MarkersUpserted:        0,
+			ScannedMarkers:         1000,
+			ServerTime:             time.Unix(200, 0),
+			StaleMarkersRemoved:    2,
+			Status:                 generated.RuntimeAggregateReconcileResponseStatusReconciled,
+		},
+	}, nil
 }
 
 // GetSessionWithResponse records and returns session detail data.

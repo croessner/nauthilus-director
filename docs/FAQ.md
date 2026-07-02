@@ -24,6 +24,7 @@ unless the text explicitly calls out an external system.
 - [How do I close one bad connection without kicking the whole user?](#how-do-i-close-one-bad-connection-without-kicking-the-whole-user)
 - [How do I list runtime state without accidentally walking everything?](#how-do-i-list-runtime-state-without-accidentally-walking-everything)
 - [How do I inspect configuration without leaking secrets?](#how-do-i-inspect-configuration-without-leaking-secrets)
+- [How do I clean up stale runtime state after a shard-tag rename or controlled migration?](#how-do-i-clean-up-stale-runtime-state-after-a-shard-tag-rename-or-controlled-migration)
 - [How do I clean up after an interrupted operator workflow?](#how-do-i-clean-up-after-an-interrupted-operator-workflow)
 
 ## What should I check first when a Director instance looks wrong?
@@ -41,8 +42,9 @@ $CTL listeners list
 ```
 
 Use `status` to distinguish process health and readiness from routing state.
-Use `runtime summary` for aggregate session and repair counters. Then narrow the
-question to a backend, listener, user or session:
+Use `runtime summary` for repairable aggregate session and repair counters. It
+is not routing authority. Then narrow the question to a backend, listener, user
+or session:
 
 ```bash
 $CTL backends show mailstore-a-imap
@@ -319,7 +321,7 @@ Use this order when a mailbox migration needs runtime evidence before the next
 user is processed:
 
 ```text
-route lookup -> hold -> kick/kill -> wait or reap -> verify sessions -> clear affinity -> continue
+route lookup -> hold -> kick/kill -> runtime reap -> verify sessions/users -> clear inactive affinity -> runtime reconcile aggregates -> verify summary and route lookup
 ```
 
 Route lookup comes first because it explains current routing, active affinity,
@@ -344,14 +346,23 @@ $CTL sessions kill "$SESSION_ID" --reason "target remaining session"
 ```
 
 Wait for remote replicas to observe heartbeat control or for leases to expire.
-If a bounded repair pass is exposed in the current build, run it before deciding
-that a holder is still active; otherwise wait for the configured reaper cadence.
+Then run one bounded reaper pass before deciding that a holder is still active:
+
+```bash
+$CTL runtime reap \
+  --reason "lease cleanup before inactive affinity clear" \
+  --limit 1000 \
+  --max-pass-duration 5s
+```
+
+Use `--dry-run` first when the operator only needs a non-mutating preview.
 Verify with runtime reads and affinity diagnostics, not Redis inspection. Hidden
 LMTP delivery holders do not appear in `users sessions`, so the affinity holder
 count must also be inactive before normal clear:
 
 ```bash
 $CTL users sessions "$USER"
+$CTL users list --limit 100
 $CTL users affinity show "$USER"
 $CTL route lookup \
   --protocol imap \
@@ -372,6 +383,32 @@ $CTL users affinity clear "$USER" --reason "clear inactive affinity after migrat
 drain, hard maintenance or mailbox-data movement. Normal affinity clear refuses
 active holders; an active-clear path is an explicit exceptional operation, not
 the migration default.
+
+If the authoritative session and user reads are clean but `runtime summary`
+still shows obsolete aggregate values, reconcile aggregate-only drift as a
+separate explicit step:
+
+```bash
+$CTL runtime reconcile aggregates \
+  --reason "repair aggregate summary after migration" \
+  --limit 1000 \
+  --max-pass-duration 5s
+```
+
+Then verify summary and route diagnostics:
+
+```bash
+$CTL runtime summary
+$CTL route lookup \
+  --protocol imap \
+  --user "$USER" \
+  --backend-pool imap-default \
+  --include-affinity
+```
+
+Route lookup is verification only. It does not reap sessions, reconcile
+aggregates, clear affinity, authenticate credentials or create protocol
+sessions.
 
 ## Which move strategy should I use?
 
@@ -585,6 +622,10 @@ counts:
 $CTL runtime summary
 ```
 
+Treat summary output as repairable operator evidence. It is intentionally not
+routing authority and should be reconciled with `runtime reconcile aggregates`
+when aggregate-only drift remains after authoritative reads are clean.
+
 ## How do I inspect configuration without leaking secrets?
 
 Config dumps are read from the running Director. Redaction is the default:
@@ -604,6 +645,70 @@ $CTL config dump --non-default --protected --format yaml
 
 Do not use protected output in chat, ticket comments or shell history unless the
 operational process explicitly allows it.
+
+## How do I clean up stale runtime state after a shard-tag rename or controlled migration?
+
+Use the official runtime-control path. Do not edit Redis manually as the normal
+cleanup mechanism.
+
+First verify that route lookup is only reporting state and not causing it:
+
+```bash
+$CTL route lookup \
+  --protocol imap \
+  --user "$USER" \
+  --backend-pool imap-default \
+  --include-affinity
+```
+
+Close or mark holders through the runtime API:
+
+```bash
+$CTL users kick "$USER" --reason "controlled migration cleanup"
+$CTL sessions kill "$SESSION_ID" --reason "target stale visible session"
+```
+
+Run the bounded reaper for expired leases and repairable due/session locators:
+
+```bash
+$CTL runtime reap \
+  --reason "controlled migration lease cleanup" \
+  --limit 1000 \
+  --max-pass-duration 5s
+```
+
+Verify authoritative reads. Remember that hidden LMTP delivery holders are not
+shown in normal session lists, so affinity diagnostics must also show inactive
+holders before normal affinity clear:
+
+```bash
+$CTL sessions list --all
+$CTL users list --all
+$CTL users affinity show "$USER"
+```
+
+Clear retained inactive affinity only when the durable routing source, move or
+backend pin is already correct and holders are absent:
+
+```bash
+$CTL users affinity clear "$USER" \
+  --reason "clear inactive affinity after shard-tag migration"
+```
+
+If `runtime summary` still reports obsolete aggregate counts after
+authoritative sessions and users are clean, repair aggregate-only drift:
+
+```bash
+$CTL runtime reconcile aggregates \
+  --reason "repair aggregate summary after shard-tag migration" \
+  --limit 1000 \
+  --max-pass-duration 5s
+```
+
+Stop and investigate when a command reports fail-closed authoritative
+corruption, for example `ambiguous_state` or nonzero authoritative conflicts.
+Those results are not stale-index cleanup. They preserve evidence that must be
+understood before continuing.
 
 ## How do I clean up after an interrupted operator workflow?
 
@@ -638,3 +743,8 @@ Do not use `affinity clear` as a substitute for `users move`, `users kick`,
 `sessions kill`, backend drain, hard maintenance or mailbox data migration. It
 removes inactive runtime affinity or pending override state; it is not a
 migration workflow by itself.
+
+If the interrupted workflow left expired leases or aggregate-only summary drift,
+use `runtime reap` and `runtime reconcile aggregates` with bounded limits and
+auditable reasons. If authoritative state is corrupt, stop and investigate
+instead of treating repair commands as a broad cleanup.

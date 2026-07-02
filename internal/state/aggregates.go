@@ -14,6 +14,7 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
+//nolint:funlen,gocyclo,wsl_v5 // Aggregate repair keeps bounded Redis cursor and counter convergence paths together.
 package state
 
 import (
@@ -39,9 +40,41 @@ const (
 	aggregateFieldBackendReservations   = "backend_reservations"
 	aggregateFieldExpiredSessions       = "expired_sessions"
 	aggregateFieldStaleIndexEntries     = "stale_index_entries"
+	aggregateReconcileCursorFamily      = "aggregate_sessions"
 	aggregateOperation                  = "runtime_aggregates"
 	aggregateUnknownDimension           = "unknown"
+	aggregateStatusPreview              = "preview"
+	aggregateStatusReconciled           = "reconciled"
+
+	// RuntimeAggregateReconcileScopeAll lets operators request every implemented aggregate repair family.
+	RuntimeAggregateReconcileScopeAll = "all"
+	// RuntimeAggregateReconcileScopeActiveSessions limits repair to active-session markers and counters.
+	RuntimeAggregateReconcileScopeActiveSessions = "active_sessions"
 )
+
+// RuntimeAggregateReconcileRequest bounds a repair pass over runtime aggregates.
+type RuntimeAggregateReconcileRequest struct {
+	Limit           int
+	MaxPassDuration time.Duration
+	DryRun          bool
+	Scope           string
+	Cursor          string
+}
+
+// RuntimeAggregateReconcileRecord reports one bounded aggregate repair pass.
+type RuntimeAggregateReconcileRecord struct {
+	Status                 string
+	Scope                  string
+	ScannedMarkers         int
+	StaleMarkersRemoved    int
+	MarkersUpserted        int
+	CounterFieldsChanged   int
+	CounterFieldsRemoved   int
+	AuthoritativeConflicts int
+	Partial                bool
+	NextCursor             string
+	ServerTime             time.Time
+}
 
 // RuntimeAggregateSummary describes repairable operator totals without listing sessions.
 type RuntimeAggregateSummary struct {
@@ -110,6 +143,16 @@ type aggregateCounter struct {
 	Field     string
 }
 
+type aggregateCounterSnapshot map[string]map[string]int
+
+type aggregateReconcileMarkerResult struct {
+	staleRemoved bool
+	upserted     bool
+	conflict     bool
+	final        aggregateSessionDimensions
+	countFinal   bool
+}
+
 // RuntimeAggregateSummary returns repairable operator totals without scanning runtime sessions.
 func (s *RedisSessionStore) RuntimeAggregateSummary(ctx context.Context) (RuntimeAggregateSummary, error) {
 	if s == nil || s.client == nil {
@@ -149,6 +192,393 @@ func (s *RedisSessionStore) RuntimeAggregateSummary(ctx context.Context) (Runtim
 		BackendCapacity:  backendCapacity,
 		Repairs:          repairs,
 	}, nil
+}
+
+// ReconcileRuntimeAggregates repairs bounded active-session aggregate marker drift.
+func (s *RedisSessionStore) ReconcileRuntimeAggregates(
+	ctx context.Context,
+	request RuntimeAggregateReconcileRequest,
+) (RuntimeAggregateReconcileRecord, error) {
+	if s == nil || s.client == nil {
+		return RuntimeAggregateReconcileRecord{}, newStateError(RedisErrorKindConfig, aggregateOperation, "session store required", nil)
+	}
+
+	if err := validateRuntimeAggregateReconcileRequest(request); err != nil {
+		return RuntimeAggregateReconcileRecord{}, err
+	}
+
+	scope := normalizeRuntimeAggregateReconcileScope(request.Scope)
+	cursor, err := s.decodeRuntimeReadCursor(request.Cursor, aggregateReconcileCursorFamily, 1)
+	if err != nil {
+		return RuntimeAggregateReconcileRecord{}, err
+	}
+
+	status := aggregateStatusReconciled
+	if request.DryRun {
+		status = aggregateStatusPreview
+	}
+
+	record := RuntimeAggregateReconcileRecord{
+		Status:     status,
+		Scope:      scope,
+		ServerTime: time.Now().UTC(),
+	}
+	expectedCounters := newAggregateCounterSnapshot()
+	deadline := time.Now().Add(request.MaxPassDuration)
+	redisCtx := redisContext(ctx)
+	markerKey := s.keys.AggregateSessionMarkerKey()
+	remaining := request.Limit
+	scanCursor := cursor.RedisCursor
+	entryOffset := cursor.Offset
+	completeFromStart := strings.TrimSpace(request.Cursor) == ""
+
+	for remaining > 0 {
+		if !time.Now().Before(deadline) {
+			record.Partial = true
+			record.NextCursor = s.encodeRuntimeReadCursor(aggregateReconcileCursorFamily, 0, scanCursor, entryOffset)
+
+			return record, nil
+		}
+
+		started := time.Now()
+		entries, next, scanErr := s.client.HScan(redisCtx, markerKey, scanCursor, "*", int64(remaining)).Result()
+		if scanErr != nil {
+			classified := ClassifyRedisError(aggregateOperation, scanErr)
+			s.recordRedisOperation(redisCtx, "aggregate_reconcile_marker_scan", started, classified)
+
+			return RuntimeAggregateReconcileRecord{}, classified
+		}
+
+		s.recordRedisOperation(redisCtx, "aggregate_reconcile_marker_scan", started, nil)
+
+		pairCount := len(entries) / 2
+		if entryOffset > pairCount {
+			entryOffset = pairCount
+		}
+
+		nextOffset := entryOffset
+		for pairIndex := entryOffset; pairIndex < pairCount && remaining > 0; pairIndex++ {
+			if !time.Now().Before(deadline) {
+				record.Partial = true
+				record.NextCursor = s.encodeRuntimeReadCursor(aggregateReconcileCursorFamily, 0, scanCursor, pairIndex)
+
+				return record, nil
+			}
+
+			index := pairIndex * 2
+			result, reconcileErr := s.reconcileRuntimeAggregateMarker(ctx, markerKey, entries[index], entries[index+1], request.DryRun)
+			if reconcileErr != nil {
+				return RuntimeAggregateReconcileRecord{}, reconcileErr
+			}
+
+			record.ScannedMarkers++
+			remaining--
+			nextOffset = pairIndex + 1
+
+			if result.staleRemoved {
+				record.StaleMarkersRemoved++
+			}
+
+			if result.upserted {
+				record.MarkersUpserted++
+			}
+
+			if result.conflict {
+				record.AuthoritativeConflicts++
+			}
+
+			if result.countFinal {
+				expectedCounters.Add(result.final)
+			}
+		}
+
+		if remaining == 0 {
+			nextCursor := s.nextRuntimeHashReadCursor(aggregateReconcileCursorFamily, 0, 1, scanCursor, next, nextOffset, pairCount)
+			if nextCursor != "" {
+				record.Partial = true
+				record.NextCursor = nextCursor
+			}
+
+			break
+		}
+
+		if next == 0 {
+			break
+		}
+
+		scanCursor = next
+		entryOffset = 0
+	}
+
+	if completeFromStart && !record.Partial {
+		changed, removed, reconcileErr := s.reconcileAggregateCountersFromSnapshot(ctx, expectedCounters, request.DryRun)
+		if reconcileErr != nil {
+			return RuntimeAggregateReconcileRecord{}, reconcileErr
+		}
+
+		record.CounterFieldsChanged = changed
+		record.CounterFieldsRemoved = removed
+	}
+
+	record.ServerTime = time.Now().UTC()
+
+	return record, nil
+}
+
+// validateRuntimeAggregateReconcileRequest rejects unbounded aggregate repair.
+func validateRuntimeAggregateReconcileRequest(request RuntimeAggregateReconcileRequest) error {
+	if request.Limit <= 0 {
+		return newStateError(RedisErrorKindAmbiguousState, aggregateOperation, "limit must be greater than zero", nil)
+	}
+
+	if request.MaxPassDuration <= 0 {
+		return newStateError(RedisErrorKindAmbiguousState, aggregateOperation, "max pass duration required", nil)
+	}
+
+	if normalizeRuntimeAggregateReconcileScope(request.Scope) == "" {
+		return newStateError(RedisErrorKindAmbiguousState, aggregateOperation, "scope invalid", nil)
+	}
+
+	return nil
+}
+
+// normalizeRuntimeAggregateReconcileScope maps accepted public scope names.
+func normalizeRuntimeAggregateReconcileScope(scope string) string {
+	switch strings.ToLower(strings.TrimSpace(scope)) {
+	case "", RuntimeAggregateReconcileScopeAll:
+		return RuntimeAggregateReconcileScopeAll
+	case RuntimeAggregateReconcileScopeActiveSessions, "active-sessions":
+		return RuntimeAggregateReconcileScopeActiveSessions
+	default:
+		return ""
+	}
+}
+
+// reconcileRuntimeAggregateMarker repairs one marker after authoritative reads.
+func (s *RedisSessionStore) reconcileRuntimeAggregateMarker(
+	ctx context.Context,
+	markerKey string,
+	sessionID string,
+	encoded string,
+	dryRun bool,
+) (aggregateReconcileMarkerResult, error) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return aggregateReconcileMarkerResult{conflict: true}, nil
+	}
+
+	marker, markerOK := decodeAggregateSessionDimensions(encoded, sessionID)
+	record, visible, present, err := s.readRuntimeSessionByID(ctx, sessionID)
+	if err != nil {
+		return aggregateReconcileMarkerResult{conflict: true}, nil
+	}
+
+	if !present {
+		if dryRun {
+			return aggregateReconcileMarkerResult{staleRemoved: true}, nil
+		}
+
+		removed, removeErr := s.removeRuntimeAggregateMarker(ctx, markerKey, sessionID)
+		if removeErr != nil {
+			return aggregateReconcileMarkerResult{}, removeErr
+		}
+
+		if markerOK && removed {
+			s.decrementAggregateCounters(ctx, marker)
+		}
+
+		return aggregateReconcileMarkerResult{staleRemoved: removed}, nil
+	}
+
+	if !visible || !markerOK {
+		return aggregateReconcileMarkerResult{conflict: true}, nil
+	}
+
+	expected := aggregateSessionDimensionsFromRecord(record)
+	if marker.equal(expected) {
+		return aggregateReconcileMarkerResult{final: expected, countFinal: true}, nil
+	}
+
+	if dryRun {
+		return aggregateReconcileMarkerResult{upserted: true, final: expected, countFinal: true}, nil
+	}
+
+	encodedExpected, encodeErr := expected.encode()
+	if encodeErr != nil {
+		return aggregateReconcileMarkerResult{}, encodeErr
+	}
+
+	if err := s.replaceRuntimeAggregateMarker(ctx, markerKey, sessionID, encodedExpected); err != nil {
+		return aggregateReconcileMarkerResult{}, err
+	}
+
+	s.decrementAggregateCounters(ctx, marker)
+	s.incrementAggregateCounters(ctx, expected)
+
+	return aggregateReconcileMarkerResult{upserted: true, final: expected, countFinal: true}, nil
+}
+
+// removeRuntimeAggregateMarker deletes one repairable marker without touching authoritative state.
+func (s *RedisSessionStore) removeRuntimeAggregateMarker(ctx context.Context, markerKey string, sessionID string) (bool, error) {
+	redisCtx := redisContext(ctx)
+	started := time.Now()
+	removed, err := s.client.HDel(redisCtx, markerKey, sessionID).Result()
+	classified := ClassifyRedisError(aggregateOperation, err)
+	s.recordRedisOperation(redisCtx, "aggregate_reconcile_marker_remove", started, classified)
+
+	return removed > 0, classified
+}
+
+// replaceRuntimeAggregateMarker stores authoritative dimensions for an existing marker.
+func (s *RedisSessionStore) replaceRuntimeAggregateMarker(ctx context.Context, markerKey string, sessionID string, encoded string) error {
+	redisCtx := redisContext(ctx)
+	started := time.Now()
+	err := s.client.HSet(redisCtx, markerKey, sessionID, encoded).Err()
+	classified := ClassifyRedisError(aggregateOperation, err)
+	s.recordRedisOperation(redisCtx, "aggregate_reconcile_marker_upsert", started, classified)
+
+	return classified
+}
+
+// reconcileAggregateCountersFromSnapshot converges dimension counters after a complete marker scan.
+func (s *RedisSessionStore) reconcileAggregateCountersFromSnapshot(
+	ctx context.Context,
+	expected aggregateCounterSnapshot,
+	dryRun bool,
+) (int, int, error) {
+	changed := 0
+	removed := 0
+
+	for _, dimension := range aggregateSessionCounterDimensions() {
+		dimensionChanged, dimensionRemoved, err := s.reconcileAggregateDimensionCounter(ctx, dimension, expected[dimension], dryRun)
+		if err != nil {
+			return changed, removed, err
+		}
+
+		changed += dimensionChanged
+		removed += dimensionRemoved
+	}
+
+	return changed, removed, nil
+}
+
+// reconcileAggregateDimensionCounter updates one bounded aggregate dimension hash.
+func (s *RedisSessionStore) reconcileAggregateDimensionCounter(
+	ctx context.Context,
+	dimension string,
+	expected map[string]int,
+	dryRun bool,
+) (int, int, error) {
+	key := s.keys.AggregateActiveDimensionKey(dimension)
+	values, err := s.aggregateHash(redisContext(ctx), key, "aggregate_reconcile_counter_read")
+	if err != nil {
+		return 0, 0, err
+	}
+
+	fields := make(map[string]struct{}, len(values)+len(expected))
+	for field := range values {
+		fields[field] = struct{}{}
+	}
+
+	for field := range expected {
+		fields[field] = struct{}{}
+	}
+
+	ordered := make([]string, 0, len(fields))
+	for field := range fields {
+		if strings.TrimSpace(field) != "" {
+			ordered = append(ordered, field)
+		}
+	}
+
+	sort.Strings(ordered)
+
+	changed := 0
+	removed := 0
+	for _, field := range ordered {
+		want := expected[field]
+		have := parseAggregateCount(values[field])
+		if want <= 0 {
+			if _, ok := values[field]; !ok {
+				continue
+			}
+
+			removed++
+			if !dryRun {
+				if err := s.writeRuntimeAggregateCounter(ctx, key, field, 0); err != nil {
+					return changed, removed, err
+				}
+			}
+
+			continue
+		}
+
+		if have == want {
+			continue
+		}
+
+		changed++
+		if !dryRun {
+			if err := s.writeRuntimeAggregateCounter(ctx, key, field, want); err != nil {
+				return changed, removed, err
+			}
+		}
+	}
+
+	return changed, removed, nil
+}
+
+// writeRuntimeAggregateCounter sets or removes one repairable counter field.
+func (s *RedisSessionStore) writeRuntimeAggregateCounter(ctx context.Context, key string, field string, count int) error {
+	redisCtx := redisContext(ctx)
+	started := time.Now()
+	var err error
+	if count <= 0 {
+		err = s.client.HDel(redisCtx, key, field).Err()
+	} else {
+		err = s.client.HSet(redisCtx, key, field, count).Err()
+	}
+
+	classified := ClassifyRedisError(aggregateOperation, err)
+	s.recordRedisOperation(redisCtx, "aggregate_reconcile_counter_write", started, classified)
+
+	return classified
+}
+
+// newAggregateCounterSnapshot creates empty counter buckets for every active dimension.
+func newAggregateCounterSnapshot() aggregateCounterSnapshot {
+	snapshot := make(aggregateCounterSnapshot)
+	for _, dimension := range aggregateSessionCounterDimensions() {
+		snapshot[dimension] = make(map[string]int)
+	}
+
+	return snapshot
+}
+
+// Add records the final aggregate dimensions for one visible session marker.
+func (s aggregateCounterSnapshot) Add(dimensions aggregateSessionDimensions) {
+	for _, counter := range dimensions.counters() {
+		if counter.Dimension == "" || counter.Field == "" {
+			continue
+		}
+
+		if s[counter.Dimension] == nil {
+			s[counter.Dimension] = make(map[string]int)
+		}
+
+		s[counter.Dimension][counter.Field]++
+	}
+}
+
+// aggregateSessionCounterDimensions returns the bounded active-session dimensions.
+func aggregateSessionCounterDimensions() []string {
+	return []string{
+		aggregateDimensionProtocol,
+		aggregateDimensionListener,
+		aggregateDimensionService,
+		aggregateDimensionShardTag,
+		aggregateDimensionBackend,
+	}
 }
 
 // aggregateActiveSessionSummary reads active-session aggregates by bounded dimensions.

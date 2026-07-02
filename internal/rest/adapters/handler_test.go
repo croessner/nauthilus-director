@@ -1442,6 +1442,159 @@ func TestDeleteSessionRuntimeFailureFailsClosed(t *testing.T) {
 	}
 }
 
+// TestRuntimeReapHandlerMapsRequest verifies generated reap DTOs stop at the REST adapter.
+//
+//nolint:gocyclo // The test keeps generated request and response mapping in one contract proof.
+func TestRuntimeReapHandlerMapsRequest(t *testing.T) {
+	dryRun := true
+	mutator := &recordingSessionMutator{
+		reapResult: runtime.ReapSessionsResult{
+			Status:                  "preview",
+			ScannedSessions:         25,
+			ExpiredSessions:         7,
+			StaleIndexEntries:       2,
+			RepairedBackends:        3,
+			AggregateMarkersRemoved: 7,
+			IdleAffinitiesAdded:     4,
+			ServerTime:              time.Unix(100, 0),
+		},
+	}
+	handler := NewHandler(HandlerOptions{
+		Version:        testHandlerVersion,
+		SessionMutator: mutator,
+	})
+
+	response, err := handler.ReapRuntime(context.Background(), generated.ReapRuntimeRequestObject{
+		Body: &generated.ReapRuntimeJSONRequestBody{
+			DryRun:          &dryRun,
+			Limit:           25,
+			MaxPassDuration: "5s",
+			Reason:          "repair stale leases",
+		},
+	})
+	if err != nil {
+		t.Fatalf("ReapRuntime returned error: %v", err)
+	}
+
+	okResponse, ok := response.(generated.ReapRuntime200JSONResponse)
+	if !ok {
+		t.Fatalf("ReapRuntime response = %T, want 200", response)
+	}
+
+	body := generated.RuntimeReapResponse(okResponse)
+	if body.Status != generated.RuntimeReapResponseStatusPreview ||
+		body.ScannedSessions != 25 ||
+		body.ExpiredSessions != 7 ||
+		body.StaleIndexEntries != 2 ||
+		body.RepairedBackends != 3 ||
+		body.AggregateMarkersRemoved != 7 ||
+		body.IdleAffinitiesAdded != 4 {
+		t.Fatalf("reap body = %#v, want preview counts", body)
+	}
+
+	if mutator.reapCalls != 1 ||
+		mutator.reapRequest.Reason != "repair stale leases" ||
+		mutator.reapRequest.Limit != 25 ||
+		mutator.reapRequest.MaxPassDuration != 5*time.Second ||
+		!mutator.reapRequest.DryRun {
+		t.Fatalf("reap request = %#v after %d calls, want generated-boundary mapping", mutator.reapRequest, mutator.reapCalls)
+	}
+}
+
+// TestAggregateReconcileHandlerMapsRequest verifies aggregate repair uses the runtime domain service.
+//
+//nolint:gocyclo // The test keeps generated aggregate repair mapping in one contract proof.
+func TestAggregateReconcileHandlerMapsRequest(t *testing.T) {
+	dryRun := true
+	reconciler := &recordingRuntimeAggregateReconciler{
+		result: runtime.RuntimeAggregateReconcileResult{
+			Status:                 "preview",
+			Scope:                  runtime.RuntimeAggregateReconcileScopeActiveSessions,
+			ScannedMarkers:         1000,
+			StaleMarkersRemoved:    2,
+			MarkersUpserted:        1,
+			CounterFieldsChanged:   4,
+			CounterFieldsRemoved:   1,
+			AuthoritativeConflicts: 0,
+			ServerTime:             time.Unix(200, 0),
+		},
+	}
+	handler := NewHandler(HandlerOptions{
+		Version:                    testHandlerVersion,
+		RuntimeAggregateReconciler: reconciler,
+	})
+
+	response, err := handler.ReconcileRuntimeAggregates(context.Background(), generated.ReconcileRuntimeAggregatesRequestObject{
+		Body: &generated.ReconcileRuntimeAggregatesJSONRequestBody{
+			DryRun:          &dryRun,
+			Limit:           1000,
+			MaxPassDuration: "5s",
+			Reason:          "repair aggregate drift",
+			Scope:           generated.ActiveSessions,
+		},
+	})
+	if err != nil {
+		t.Fatalf("ReconcileRuntimeAggregates returned error: %v", err)
+	}
+
+	okResponse, ok := response.(generated.ReconcileRuntimeAggregates200JSONResponse)
+	if !ok {
+		t.Fatalf("ReconcileRuntimeAggregates response = %T, want 200", response)
+	}
+
+	body := generated.RuntimeAggregateReconcileResponse(okResponse)
+	if body.Status != generated.RuntimeAggregateReconcileResponseStatusPreview ||
+		body.ScannedMarkers != 1000 ||
+		body.StaleMarkersRemoved != 2 ||
+		body.MarkersUpserted != 1 ||
+		body.CounterFieldsChanged != 4 ||
+		body.CounterFieldsRemoved != 1 ||
+		body.AuthoritativeConflicts != 0 {
+		t.Fatalf("aggregate reconcile body = %#v, want preview counts", body)
+	}
+
+	if reconciler.calls != 1 ||
+		reconciler.request.Reason != "repair aggregate drift" ||
+		reconciler.request.Limit != 1000 ||
+		reconciler.request.MaxPassDuration != 5*time.Second ||
+		reconciler.request.Scope != runtime.RuntimeAggregateReconcileScopeActiveSessions ||
+		!reconciler.request.DryRun {
+		t.Fatalf("aggregate reconcile request = %#v after %d calls, want runtime-domain mapping", reconciler.request, reconciler.calls)
+	}
+}
+
+// TestAggregateReconcileHandlerFailsClosed verifies authoritative ambiguity stays unavailable.
+func TestAggregateReconcileHandlerFailsClosed(t *testing.T) {
+	reconciler := &recordingRuntimeAggregateReconciler{
+		err: newRuntimeError(runtime.ErrorKindUnavailable, "runtime_aggregate_reconcile", "authoritative conflict"),
+	}
+	handler := NewHandler(HandlerOptions{
+		Version:                    testHandlerVersion,
+		RuntimeAggregateReconciler: reconciler,
+	})
+
+	response, err := handler.ReconcileRuntimeAggregates(context.Background(), generated.ReconcileRuntimeAggregatesRequestObject{
+		Body: &generated.ReconcileRuntimeAggregatesJSONRequestBody{
+			Limit:           10,
+			MaxPassDuration: "5s",
+			Reason:          "repair aggregate drift",
+			Scope:           generated.ActiveSessions,
+		},
+	})
+	if err != nil {
+		t.Fatalf("ReconcileRuntimeAggregates returned error: %v", err)
+	}
+
+	problem, ok := response.(generated.ReconcileRuntimeAggregatesdefaultJSONResponse)
+	if !ok {
+		t.Fatalf("ReconcileRuntimeAggregates response = %T, want problem", response)
+	}
+
+	if problem.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", problem.StatusCode)
+	}
+}
+
 // TestSummaryHandlerUsesAggregateReader verifies summaries do not call list readers.
 func TestSummaryHandlerUsesAggregateReader(t *testing.T) {
 	reader := &recordingRuntimeReadService{summary: runtime.Summary{
@@ -2231,10 +2384,14 @@ func (r *recordingBackendReader) GetBackend(context.Context, string) (backend.Ef
 
 // recordingSessionMutator captures one generated-boundary session mutation.
 type recordingSessionMutator struct {
-	calls   int
-	request runtime.KillSessionRequest
-	result  runtime.SessionMutationResult
-	err     error
+	calls       int
+	request     runtime.KillSessionRequest
+	result      runtime.SessionMutationResult
+	err         error
+	reapCalls   int
+	reapRequest runtime.ReapSessionsRequest
+	reapResult  runtime.ReapSessionsResult
+	reapErr     error
 }
 
 // KillSession records the domain request and returns the configured outcome.
@@ -2243,6 +2400,39 @@ func (r *recordingSessionMutator) KillSession(_ context.Context, request runtime
 	r.request = request
 	if r.err != nil {
 		return runtime.SessionMutationResult{}, r.err
+	}
+
+	return r.result, nil
+}
+
+// ReapSessions records the domain reap request and returns the configured outcome.
+func (r *recordingSessionMutator) ReapSessions(_ context.Context, request runtime.ReapSessionsRequest) (runtime.ReapSessionsResult, error) {
+	r.reapCalls++
+	r.reapRequest = request
+	if r.reapErr != nil {
+		return runtime.ReapSessionsResult{}, r.reapErr
+	}
+
+	return r.reapResult, nil
+}
+
+// recordingRuntimeAggregateReconciler captures one generated-boundary aggregate repair request.
+type recordingRuntimeAggregateReconciler struct {
+	calls   int
+	request runtime.RuntimeAggregateReconcileRequest
+	result  runtime.RuntimeAggregateReconcileResult
+	err     error
+}
+
+// ReconcileRuntimeAggregates records the domain request and returns the configured outcome.
+func (r *recordingRuntimeAggregateReconciler) ReconcileRuntimeAggregates(
+	_ context.Context,
+	request runtime.RuntimeAggregateReconcileRequest,
+) (runtime.RuntimeAggregateReconcileResult, error) {
+	r.calls++
+	r.request = request
+	if r.err != nil {
+		return runtime.RuntimeAggregateReconcileResult{}, r.err
 	}
 
 	return r.result, nil

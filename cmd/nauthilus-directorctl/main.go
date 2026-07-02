@@ -111,6 +111,25 @@ type controlResponseDiagnostic struct {
 	err         error
 }
 
+// runtimeRepairCommandRequest stores validated shared repair flags.
+type runtimeRepairCommandRequest struct {
+	reason          string
+	limit           int
+	maxPassDuration string
+	dryRun          bool
+}
+
+// dryRunPtr returns the generated optional dry-run field only when enabled.
+func (request runtimeRepairCommandRequest) dryRunPtr() *bool {
+	if !request.dryRun {
+		return nil
+	}
+
+	value := true
+
+	return &value
+}
+
 // Error describes a malformed generated-client response without body contents.
 func (err *controlResponseDiagnostic) Error() string {
 	return "control response could not be decoded"
@@ -515,7 +534,7 @@ func newUserHoldCommand(stdout io.Writer, stderr io.Writer) *cobra.Command {
 func newRuntimeCommand(stdout io.Writer, stderr io.Writer) *cobra.Command {
 	command := &cobra.Command{
 		Use:   "runtime",
-		Short: "Inspect aggregate runtime state",
+		Short: "Inspect and repair aggregate runtime state",
 		RunE:  cobraHandler(stdout, stderr, application.runRuntime),
 	}
 	command.AddCommand(&cobra.Command{
@@ -523,6 +542,33 @@ func newRuntimeCommand(stdout io.Writer, stderr io.Writer) *cobra.Command {
 		Short: "Show aggregate runtime totals",
 		RunE:  cobraHandler(stdout, stderr, application.runRuntimeSummary),
 	})
+	reap := &cobra.Command{
+		Use:   "reap",
+		Short: "Run one bounded runtime reap pass",
+		RunE:  cobraHandler(stdout, stderr, application.runRuntimeReap, "reason", "limit", "max-pass-duration", "dry-run"),
+	}
+	addRuntimeRepairFlags(reap)
+	command.AddCommand(reap)
+	command.AddCommand(newRuntimeReconcileCommand(stdout, stderr))
+
+	return command
+}
+
+// newRuntimeReconcileCommand builds runtime reconciliation commands.
+func newRuntimeReconcileCommand(stdout io.Writer, stderr io.Writer) *cobra.Command {
+	command := &cobra.Command{
+		Use:   "reconcile",
+		Short: "Repair aggregate runtime indexes",
+		RunE:  cobraHandler(stdout, stderr, application.runRuntimeReconcile),
+	}
+	aggregates := &cobra.Command{
+		Use:   "aggregates",
+		Short: "Reconcile repairable runtime aggregates",
+		RunE:  cobraHandler(stdout, stderr, application.runRuntimeReconcileAggregates, "reason", "limit", "max-pass-duration", "scope", "dry-run"),
+	}
+	addRuntimeRepairFlags(aggregates)
+	aggregates.Flags().String("scope", "", "aggregate scope: all, active_sessions, backend_capacity, idle_affinities or repairs")
+	command.AddCommand(aggregates)
 
 	return command
 }
@@ -602,6 +648,14 @@ func addPaginationFlags(command *cobra.Command) {
 	command.Flags().String("cursor", "", "opaque pagination cursor")
 	command.Flags().String("limit", "", "page size")
 	command.Flags().Bool("all", false, "iterate all pages")
+}
+
+// addRuntimeRepairFlags adds shared bounded repair flags.
+func addRuntimeRepairFlags(command *cobra.Command) {
+	command.Flags().String("reason", "", "auditable reason")
+	command.Flags().String("limit", "", "maximum records to inspect")
+	command.Flags().String("max-pass-duration", "", "maximum pass duration")
+	command.Flags().Bool("dry-run", false, "preview without mutating runtime state")
 }
 
 // cobraHandler adapts existing generated-client command handlers to Cobra.
@@ -2433,9 +2487,114 @@ func (app application) runRuntime(args []string) int {
 	switch args[0] {
 	case "summary":
 		return app.runRuntimeSummary(args[1:])
+	case "reap":
+		return app.runRuntimeReap(args[1:])
+	case "reconcile":
+		return app.runRuntimeReconcile(args[1:])
 	default:
 		return app.usageError("unknown runtime subcommand %q", args[0])
 	}
+}
+
+// runRuntimeReap asks the Director to run one bounded expired-session repair pass.
+func (app application) runRuntimeReap(args []string) int {
+	line, err := parseCommandLine(args, []commandFlag{
+		valueFlag("reason"),
+		valueFlag("limit"),
+		valueFlag("max-pass-duration"),
+		boolFlag("dry-run"),
+	})
+	if err != nil {
+		return app.usageError("%v", err)
+	}
+	if len(line.positionals) != 0 {
+		return app.usageError("runtime reap does not accept positional arguments")
+	}
+
+	request, code := app.runtimeRepairRequest(line, "runtime reap")
+	if code != 0 {
+		return code
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), app.options.Timeout)
+	defer cancel()
+
+	client, code := app.client()
+	if code != 0 {
+		return code
+	}
+
+	response, err := client.ReapRuntimeWithResponse(ctx, generated.ReapRuntimeJSONRequestBody{
+		DryRun:          request.dryRunPtr(),
+		Limit:           request.limit,
+		MaxPassDuration: request.maxPassDuration,
+		Reason:          request.reason,
+	})
+	if err != nil {
+		return app.requestError("runtime reap", err)
+	}
+
+	return app.handleReapRuntimeResponse(response)
+}
+
+// runRuntimeReconcile dispatches runtime reconcile subcommands.
+func (app application) runRuntimeReconcile(args []string) int {
+	if len(args) == 0 {
+		return app.usageError("runtime reconcile requires a subcommand")
+	}
+	if args[0] != "aggregates" {
+		return app.usageError("unknown runtime reconcile subcommand %q", args[0])
+	}
+
+	return app.runRuntimeReconcileAggregates(args[1:])
+}
+
+// runRuntimeReconcileAggregates asks the Director to repair aggregate-only drift.
+func (app application) runRuntimeReconcileAggregates(args []string) int {
+	line, err := parseCommandLine(args, []commandFlag{
+		valueFlag("reason"),
+		valueFlag("limit"),
+		valueFlag("max-pass-duration"),
+		valueFlag("scope"),
+		boolFlag("dry-run"),
+	})
+	if err != nil {
+		return app.usageError("%v", err)
+	}
+	if len(line.positionals) != 0 {
+		return app.usageError("runtime reconcile aggregates does not accept positional arguments")
+	}
+
+	request, code := app.runtimeRepairRequest(line, "runtime reconcile aggregates")
+	if code != 0 {
+		return code
+	}
+
+	scope, code := app.runtimeAggregateReconcileScope(line)
+	if code != 0 {
+		return code
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), app.options.Timeout)
+	defer cancel()
+
+	client, code := app.client()
+	if code != 0 {
+		return code
+	}
+
+	response, err := client.ReconcileRuntimeAggregatesWithResponse(ctx, generated.ReconcileRuntimeAggregatesJSONRequestBody{
+		DryRun:          request.dryRunPtr(),
+		Limit:           request.limit,
+		MaxPassDuration: request.maxPassDuration,
+		Reason:          request.reason,
+		Scope:           scope,
+	})
+	if err != nil {
+		return app.requestError("runtime reconcile aggregates", err)
+	}
+
+	return app.handleReconcileRuntimeAggregatesResponse(response)
 }
 
 // runRuntimeSummary prints repairable aggregate runtime totals.
@@ -2705,6 +2864,30 @@ func (app application) handleDeleteSessionResponse(response *generated.DeleteSes
 	}
 }
 
+// handleReapRuntimeResponse renders one runtime reap result.
+func (app application) handleReapRuntimeResponse(response *generated.ReapRuntimeResponse) int {
+	if response.StatusCode() != http.StatusOK {
+		return app.serverError("runtime reap", response.StatusCode(), firstProblem(response.JSON400, response.JSON401, response.JSON403, response.JSON503, response.JSONDefault))
+	}
+	if response.JSON200 == nil {
+		return app.serverError("runtime reap", http.StatusBadGateway, nil)
+	}
+
+	return app.writeRuntimeReapResponse(response.JSON200)
+}
+
+// handleReconcileRuntimeAggregatesResponse renders one aggregate reconcile result.
+func (app application) handleReconcileRuntimeAggregatesResponse(response *generated.ReconcileRuntimeAggregatesResponse) int {
+	if response.StatusCode() != http.StatusOK {
+		return app.serverError("runtime reconcile aggregates", response.StatusCode(), firstProblem(response.JSON400, response.JSON401, response.JSON403, response.JSON503, response.JSONDefault))
+	}
+	if response.JSON200 == nil {
+		return app.serverError("runtime reconcile aggregates", http.StatusBadGateway, nil)
+	}
+
+	return app.writeRuntimeAggregateReconcileResponse(response.JSON200)
+}
+
 // handleClearUserAffinityResponse renders an affinity clear response.
 func (app application) handleClearUserAffinityResponse(response *generated.ClearUserAffinityResponse) int {
 	if response.StatusCode() != http.StatusAccepted {
@@ -2821,6 +3004,52 @@ func (app application) writeSessionKillResponse(response *generated.SessionKillR
 		}
 
 		_, err = fmt.Fprintln(writer)
+
+		return err
+	})
+}
+
+// writeRuntimeReapResponse writes bounded runtime reap output in text or JSON mode.
+func (app application) writeRuntimeReapResponse(response *generated.RuntimeReapResponse) int {
+	if response == nil {
+		return app.serverError("runtime reap", http.StatusBadGateway, nil)
+	}
+
+	return app.writeObject(response, func(writer io.Writer) error {
+		_, err := fmt.Fprintf(
+			writer,
+			"status=%s scanned_sessions=%d expired_sessions=%d stale_index_entries=%d repaired_backends=%d aggregate_markers_removed=%d idle_affinities_added=%d\n",
+			response.Status,
+			response.ScannedSessions,
+			response.ExpiredSessions,
+			response.StaleIndexEntries,
+			response.RepairedBackends,
+			response.AggregateMarkersRemoved,
+			response.IdleAffinitiesAdded,
+		)
+
+		return err
+	})
+}
+
+// writeRuntimeAggregateReconcileResponse writes bounded aggregate repair output in text or JSON mode.
+func (app application) writeRuntimeAggregateReconcileResponse(response *generated.RuntimeAggregateReconcileResponse) int {
+	if response == nil {
+		return app.serverError("runtime reconcile aggregates", http.StatusBadGateway, nil)
+	}
+
+	return app.writeObject(response, func(writer io.Writer) error {
+		_, err := fmt.Fprintf(
+			writer,
+			"status=%s scanned_markers=%d stale_markers_removed=%d markers_upserted=%d counter_fields_changed=%d counter_fields_removed=%d authoritative_conflicts=%d\n",
+			response.Status,
+			response.ScannedMarkers,
+			response.StaleMarkersRemoved,
+			response.MarkersUpserted,
+			response.CounterFieldsChanged,
+			response.CounterFieldsRemoved,
+			response.AuthoritativeConflicts,
+		)
 
 		return err
 	})
@@ -3581,6 +3810,70 @@ func optionalPositiveInt(line parsedCommandLine, name string) (*int, error) {
 	}
 
 	return &parsed, nil
+}
+
+// runtimeRepairRequest validates shared runtime repair command flags.
+func (app application) runtimeRepairRequest(line parsedCommandLine, operation string) (runtimeRepairCommandRequest, int) {
+	reason, ok := requiredValue(line, "reason")
+	if !ok {
+		return runtimeRepairCommandRequest{}, app.usageError("%s requires --reason", operation)
+	}
+
+	limit, err := optionalPositiveInt(line, "limit")
+	if err != nil {
+		return runtimeRepairCommandRequest{}, app.usageError("%v", err)
+	}
+	if limit == nil {
+		return runtimeRepairCommandRequest{}, app.usageError("%s requires --limit", operation)
+	}
+
+	durationText, ok := requiredValue(line, "max-pass-duration")
+	if !ok {
+		return runtimeRepairCommandRequest{}, app.usageError("%s requires --max-pass-duration", operation)
+	}
+
+	duration, err := parseRuntimeRepairDuration(operation, durationText)
+	if err != nil {
+		return runtimeRepairCommandRequest{}, app.usageError("%v", err)
+	}
+
+	return runtimeRepairCommandRequest{
+		reason:          reason,
+		limit:           *limit,
+		maxPassDuration: duration,
+		dryRun:          line.bool("dry-run"),
+	}, 0
+}
+
+// runtimeAggregateReconcileScope validates the optional aggregate reconcile scope flag.
+func (app application) runtimeAggregateReconcileScope(line parsedCommandLine) (generated.RuntimeAggregateReconcileRequestScope, int) {
+	scopeText := strings.ReplaceAll(strings.ToLower(strings.TrimSpace(line.value("scope"))), "-", "_")
+	if scopeText == "" {
+		return generated.All, 0
+	}
+
+	scope := generated.RuntimeAggregateReconcileRequestScope(scopeText)
+	if !scope.Valid() {
+		return "", app.usageError("runtime reconcile aggregates requires --scope to be all, active_sessions, backend_capacity, idle_affinities or repairs")
+	}
+
+	return scope, 0
+}
+
+// parseRuntimeRepairDuration converts a Go duration into a canonical whole-second string.
+func parseRuntimeRepairDuration(operation string, value string) (string, error) {
+	duration, err := time.ParseDuration(strings.TrimSpace(value))
+	if err != nil {
+		return "", fmt.Errorf("%s requires a valid Go duration for --max-pass-duration", operation)
+	}
+	if duration <= 0 {
+		return "", fmt.Errorf("%s requires a positive --max-pass-duration", operation)
+	}
+	if duration%time.Second != 0 {
+		return "", fmt.Errorf("%s requires --max-pass-duration to use whole seconds", operation)
+	}
+
+	return duration.String(), nil
 }
 
 // parseHoldDurationSeconds converts a Go duration into whole REST seconds.

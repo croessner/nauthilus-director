@@ -1527,6 +1527,15 @@ Valkey, fake Nauthilus and public IMAP backend sockets. Completion evidence
 lives in
 `docs/specs/implementation/M8_RUNTIME_SESSION_HOLDER_CONTROL_FOLLOWUP.md`.
 
+The runtime reap and aggregate reconcile control follow-up is complete.
+Operators can run bounded, audited `runtime reap` and
+`runtime reconcile aggregates` operations through generated REST and
+`nauthilus-directorctl` without editing Redis directly. The fake-service E2E
+lane proves expired-lease repair, aggregate-only drift repair, active holder
+preservation, explicit inactive affinity clear after holder absence and route
+lookup remaining non-mutating through the production binary, HTTPS/authenticated
+control listener, Valkey, fake Nauthilus and public IMAP backend sockets.
+
 - hardened production Docker image and Docker smoke proof
 - restrictive systemd unit and reload path through `nauthilus-directorctl reload`
 - safe reload semantics shared by REST, CLI and systemd

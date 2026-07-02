@@ -543,6 +543,90 @@ JSON output stays the generated accepted response body.
 Show repairable aggregate runtime totals without listing every active session.
 The output is operator summary state and is not routing authority.
 .TP
+.BI "runtime reap --reason " text " --limit " n " --max-pass-duration " duration
+Run one bounded runtime reaper pass through the existing session reaper path.
+The command repairs expired session leases and repairable due/session locators,
+and reports backend reservation repairs, aggregate markers removed and idle
+affinities added when the reaper proves those changes.
+It does not clear retained inactive affinity; use
+.B users affinity clear
+only after holder verification.
+The
+.B --reason
+flag is required for audit,
+.B --limit
+must be positive and no larger than the server maximum, and
+.B --max-pass-duration
+uses a positive whole-second Go duration such as
+.BR 5s .
+Add
+.B --dry-run
+for a non-mutating preview.
+Text output is a single scriptable line:
+.RS
+.nf
+status=reaped scanned_sessions=... expired_sessions=... stale_index_entries=... repaired_backends=... aggregate_markers_removed=... idle_affinities_added=...
+.fi
+.RE
+With
+.B --dry-run
+the status is
+.BR preview .
+JSON output prints the generated
+.B RuntimeReapResponse
+body.
+.TP
+.BI "runtime reconcile aggregates --reason " text " --limit " n " --max-pass-duration " duration
+Reconcile repairable runtime aggregate marker and counter drift from
+authoritative runtime state.
+This command is intended for aggregate-only drift, for example when
+.B runtime summary
+still shows obsolete counts after
+.B sessions list
+and
+.B users list
+are clean.
+It does not decide routing, authenticate credentials, clear affinity or rewrite
+YAML configuration.
+The
+.B --reason
+flag is required for audit,
+.B --limit
+must be positive and no larger than the server maximum, and
+.B --max-pass-duration
+uses a positive whole-second Go duration such as
+.BR 5s .
+The optional
+.BI "--scope " scope
+accepts
+.BR all ,
+.BR active_sessions ,
+.BR backend_capacity ,
+.BR idle_affinities
+or
+.BR repairs ;
+omitting it sends
+.BR all .
+The current state repair pass reconciles active-session aggregate markers and
+counters from authoritative session reads and reports authoritative conflicts
+without deleting corrupt authoritative state.
+Add
+.B --dry-run
+for a non-mutating preview.
+Text output is a single scriptable line:
+.RS
+.nf
+status=reconciled scanned_markers=... stale_markers_removed=... markers_upserted=... counter_fields_changed=... counter_fields_removed=... authoritative_conflicts=...
+.fi
+.RE
+With
+.B --dry-run
+the status is
+.BR preview .
+JSON output prints the generated
+.B RuntimeAggregateReconcileResponse
+body.
+.TP
 .BI "route lookup --protocol imap --user " user-key
 .br
 .BI "route lookup --protocol sieve --user " user-key

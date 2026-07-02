@@ -11,6 +11,7 @@ Verified source paths:
 - `internal/state/sessions.go`
 - `internal/state/runtime.go`
 - `internal/state/runtime_read.go`
+- `internal/state/aggregates.go`
 - `internal/state/reap.go`
 - `internal/state/backend_reservations.go`
 - `internal/state/scripts/*.lua`
@@ -28,6 +29,7 @@ Verified source paths:
 - `internal/backend/runtime_selector.go`
 - `internal/runtime/route_lookup.go`
 - `internal/runtime/sessions.go`
+- `internal/runtime/aggregates.go`
 
 ## Core Model
 
@@ -635,12 +637,26 @@ invalid generations, mismatched session IDs or conflicting affinity facts; those
 conditions remain `ambiguous_state` so operators see a fail-closed corruption
 signal instead of a silent cleanup.
 
+Runtime-wide repair controls keep the same authority boundary:
+
+- `SessionService.ReapSessions` is the public runtime-domain path for
+  `runtime reap`. It requires an auditable reason, a positive bounded limit and
+  a positive bounded maximum pass duration. It calls the state reaper path
+  instead of deleting Redis keys directly.
+- `RuntimeAggregateService.ReconcileRuntimeAggregates` is the public
+  runtime-domain path for `runtime reconcile aggregates`. It repairs
+  repairable aggregate marker and counter drift from authoritative runtime
+  reads. It does not use aggregate counters to decide routing or placement.
+- Dry-run requests return `status=preview` and must not mutate Redis. They are
+  for bounded operator preview only, not for proving that route lookup or
+  placement can self-heal state.
+
 Normal `ClearUserAffinity` is the migration-safe inactive-only path. It refuses
 active holders by default and is intended after operators have set any required
 hold, kicked or killed active sessions, waited for heartbeat or lease expiry,
-optionally run the reaper, and verified that runtime session reads no longer
-show active visible sessions and affinity diagnostics no longer show active
-holders.
+optionally run `runtime reap`, and verified that runtime session reads no
+longer show active visible sessions and affinity diagnostics no longer show
+active holders.
 
 ```mermaid
 flowchart TD
@@ -678,6 +694,43 @@ with the remaining limit for each shard.
 After session repair, `ReapSessions` also repairs indexed backend reservations
 with bounded backend reservation reaps.
 
+The control API exposes this same path as `POST /api/v1/runtime/reap`, and
+`nauthilus-directorctl` exposes it as `runtime reap --reason <text> --limit <n>
+--max-pass-duration <duration> [--dry-run]`. The command repairs expired
+session leases, stale due/session locators, backend reservation deltas returned
+by the reaper, aggregate markers returned by the reaper and idle-affinity
+aggregate additions. It does not clear retained inactive affinity; that remains
+the separate `users affinity clear` decision after holder verification.
+
+Aggregate-only summary drift is repaired separately by
+`POST /api/v1/runtime/reconcile/aggregates` and
+`nauthilus-directorctl runtime reconcile aggregates --reason <text> --limit <n>
+--max-pass-duration <duration> [--scope <scope>] [--dry-run]`. The current
+state-layer implementation reconciles active-session aggregate markers and
+their counters from authoritative session reads. It removes stale aggregate
+markers only after the authoritative session is absent, upserts or corrects
+markers for valid active holders, and reports malformed or contradictory
+authoritative records as conflicts instead of deleting them. A complete pass
+from the start of the marker set can reconcile active-session counter fields;
+bounded partial passes return only the work proven in that pass.
+
+Operators should distinguish runtime repair states:
+
+- `expired_session_lease`: use `runtime reap`; the due lease is expired and
+  the existing reaper removes it.
+- `stale_repairable_index`: use runtime reads, `sessions kill` or
+  `runtime reap`; stale locators are removed only after authoritative absence
+  is proven.
+- `retained_inactive_affinity`: use `users affinity clear` only after visible
+  sessions and affinity holder counts are inactive.
+- `backend_reservation_repair`: use `runtime reap`; backend reservation repair
+  remains behind the state-layer reservation path.
+- `aggregate_only_drift`: use `runtime reconcile aggregates`; aggregate summary
+  state is repairable operator evidence, not placement authority.
+- `authoritative_corrupt_state`: stop and investigate. The repair commands
+  report bounded conflicts or fail closed and must preserve the authoritative
+  evidence.
+
 ```mermaid
 flowchart LR
     D["sessions_due shard"] --> L["ZRANGEBYSCORE due LIMIT n"]
@@ -705,6 +758,14 @@ Runtime session and user lists are cursor-paginated:
   `holder_kind == delivery`.
 - User-stateful holders use `holder_kind == session`. IMAP, ManageSieve and
   POP3 proxy sessions are visible through runtime session reads while active.
+
+`RuntimeAggregateSummary` reads repairable aggregate hashes and counters for
+operator summaries. Its `routing_authority=false` value is deliberate: runtime
+summary output is useful for capacity and drift diagnosis, but placement and
+route lookup rely on authoritative affinity/session/backend state instead.
+When `runtime summary` shows obsolete aggregate values after authoritative
+session and user reads are clean, run `runtime reconcile aggregates` rather
+than editing Redis manually.
 
 `LookupAffinity` runs `lookup.lua`, which reads state without refreshing leases
 or key TTLs. It can return active, retained, expired or absent backend-binding
@@ -739,6 +800,9 @@ not create, close, reap, kick, kill, clear or refresh them.
 - Treat secondary indexes and aggregates as repairable, not authoritative.
 - Treat `stale_index_repaired` as successful cleanup of a repairable locator,
   not as proof that an active stream was closed by the command.
+- Treat `runtime reap` and `runtime reconcile aggregates` as explicit
+  operator-controlled repair paths, not as implicit side effects of route
+  lookup or placement.
 - Treat `ambiguous_state` as corrupt or contradictory authoritative runtime
   data that must be investigated fail-closed.
 - Do not add routing decisions to Nauthilus-facing auth or identity calls.

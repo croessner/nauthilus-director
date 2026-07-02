@@ -113,6 +113,72 @@ paths:
                 $ref: "#/components/schemas/RuntimeSummaryResponse"
         default:
           $ref: "#/components/responses/Error"
+  /api/v1/runtime/reap:
+    post:
+      operationId: reapRuntime
+      tags:
+        - runtime
+      summary: Run one bounded expired-session repair pass.
+      description: >
+        Runs the explicit runtime reaper path for expired leases and repairable
+        session indexes. This operation is auditable, bounded and separate from
+        route lookup, which remains read-only.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RuntimeReapRequest"
+      responses:
+        "200":
+          description: Runtime reap pass result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuntimeReapResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "503":
+          $ref: "#/components/responses/Error"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/v1/runtime/reconcile/aggregates:
+    post:
+      operationId: reconcileRuntimeAggregates
+      tags:
+        - runtime
+      summary: Reconcile repairable runtime aggregate state.
+      description: >
+        Reconciles repairable aggregate markers and counters from authoritative
+        runtime state. Authoritative corrupt state remains fail-closed and is
+        reported as a bounded conflict.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RuntimeAggregateReconcileRequest"
+      responses:
+        "200":
+          description: Runtime aggregate reconciliation result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuntimeAggregateReconcileResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "503":
+          $ref: "#/components/responses/Error"
+        default:
+          $ref: "#/components/responses/Error"
   /api/v1/config/effective:
     get:
       operationId: getEffectiveConfig
@@ -1436,6 +1502,147 @@ components:
             $ref: "#/components/schemas/RuntimeBackendCapacitySummary"
         repairs:
           $ref: "#/components/schemas/RuntimeRepairSummary"
+    RuntimeReapRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - reason
+        - limit
+        - max_pass_duration
+      properties:
+        reason:
+          type: string
+          minLength: 1
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 1000
+        max_pass_duration:
+          type: string
+          minLength: 1
+          description: Go-style duration such as 5s or 30s.
+        dry_run:
+          type: boolean
+    RuntimeReapResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - status
+        - scanned_sessions
+        - expired_sessions
+        - stale_index_entries
+        - repaired_backends
+        - aggregate_markers_removed
+        - idle_affinities_added
+        - server_time
+      properties:
+        status:
+          type: string
+          enum:
+            - preview
+            - reaped
+        scanned_sessions:
+          type: integer
+          minimum: 0
+        expired_sessions:
+          type: integer
+          minimum: 0
+        stale_index_entries:
+          type: integer
+          minimum: 0
+        repaired_backends:
+          type: integer
+          minimum: 0
+        aggregate_markers_removed:
+          type: integer
+          minimum: 0
+        idle_affinities_added:
+          type: integer
+          minimum: 0
+        server_time:
+          type: string
+          format: date-time
+        audit:
+          $ref: "#/components/schemas/AcceptedResponse"
+    RuntimeAggregateReconcileRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - reason
+        - limit
+        - max_pass_duration
+        - scope
+      properties:
+        reason:
+          type: string
+          minLength: 1
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 1000
+        max_pass_duration:
+          type: string
+          minLength: 1
+          description: Go-style duration such as 5s or 30s.
+        scope:
+          type: string
+          enum:
+            - all
+            - active_sessions
+            - backend_capacity
+            - idle_affinities
+            - repairs
+        dry_run:
+          type: boolean
+    RuntimeAggregateReconcileResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - status
+        - scanned_markers
+        - stale_markers_removed
+        - markers_upserted
+        - counter_fields_changed
+        - counter_fields_removed
+        - backend_capacity_fields_changed
+        - idle_affinities_removed
+        - authoritative_conflicts
+        - server_time
+      properties:
+        status:
+          type: string
+          enum:
+            - preview
+            - reconciled
+        scanned_markers:
+          type: integer
+          minimum: 0
+        stale_markers_removed:
+          type: integer
+          minimum: 0
+        markers_upserted:
+          type: integer
+          minimum: 0
+        counter_fields_changed:
+          type: integer
+          minimum: 0
+        counter_fields_removed:
+          type: integer
+          minimum: 0
+        backend_capacity_fields_changed:
+          type: integer
+          minimum: 0
+        idle_affinities_removed:
+          type: integer
+          minimum: 0
+        authoritative_conflicts:
+          type: integer
+          minimum: 0
+        server_time:
+          type: string
+          format: date-time
+        audit:
+          $ref: "#/components/schemas/AcceptedResponse"
     RouteLookupAffinity:
       type: object
       additionalProperties: false

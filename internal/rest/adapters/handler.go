@@ -77,6 +77,7 @@ type SessionReader interface {
 // SessionMutator exposes Redis-backed session control to REST adapters.
 type SessionMutator interface {
 	KillSession(ctx context.Context, request runtime.KillSessionRequest) (runtime.SessionMutationResult, error)
+	ReapSessions(ctx context.Context, request runtime.ReapSessionsRequest) (runtime.ReapSessionsResult, error)
 }
 
 // UserReader exposes user runtime state to REST adapters.
@@ -99,6 +100,11 @@ type UserHoldReader interface {
 // RuntimeSummaryReader exposes aggregate runtime summaries to REST adapters.
 type RuntimeSummaryReader interface {
 	RuntimeSummary(ctx context.Context) (runtime.Summary, error)
+}
+
+// RuntimeAggregateReconciler exposes aggregate repair operations to REST adapters.
+type RuntimeAggregateReconciler interface {
+	ReconcileRuntimeAggregates(ctx context.Context, request runtime.RuntimeAggregateReconcileRequest) (runtime.RuntimeAggregateReconcileResult, error)
 }
 
 // UserMutator exposes Redis-backed user runtime mutations to REST adapters.
@@ -171,54 +177,56 @@ type ProtectedConfigAuditSink interface {
 
 // HandlerOptions configures the generated REST adapter.
 type HandlerOptions struct {
-	Version                   string
-	ConfigPath                string
-	Loader                    *config.Loader
-	Snapshot                  *config.Snapshot
-	ConfigLoadError           error
-	BackendReader             BackendReader
-	BackendMutator            BackendMutator
-	SessionReader             SessionReader
-	SessionMutator            SessionMutator
-	UserReader                UserReader
-	UserBackendPinReader      UserBackendPinReader
-	UserHoldReader            UserHoldReader
-	RuntimeSummaryReader      RuntimeSummaryReader
-	UserMutator               UserMutator
-	UserBackendPinMutator     UserBackendPinMutator
-	UserHoldMutator           UserHoldMutator
-	RouteLookup               RouteLookupService
-	ListenerRuntime           ListenerRuntimeService
-	Reload                    ReloadService
-	Metrics                   MetricsProvider
-	Observability             observability.Recorder
-	ProtectedConfigAuthorizer ProtectedConfigAuthorizer
-	ProtectedConfigAudit      ProtectedConfigAuditSink
+	Version                    string
+	ConfigPath                 string
+	Loader                     *config.Loader
+	Snapshot                   *config.Snapshot
+	ConfigLoadError            error
+	BackendReader              BackendReader
+	BackendMutator             BackendMutator
+	SessionReader              SessionReader
+	SessionMutator             SessionMutator
+	UserReader                 UserReader
+	UserBackendPinReader       UserBackendPinReader
+	UserHoldReader             UserHoldReader
+	RuntimeSummaryReader       RuntimeSummaryReader
+	RuntimeAggregateReconciler RuntimeAggregateReconciler
+	UserMutator                UserMutator
+	UserBackendPinMutator      UserBackendPinMutator
+	UserHoldMutator            UserHoldMutator
+	RouteLookup                RouteLookupService
+	ListenerRuntime            ListenerRuntimeService
+	Reload                     ReloadService
+	Metrics                    MetricsProvider
+	Observability              observability.Recorder
+	ProtectedConfigAuthorizer  ProtectedConfigAuthorizer
+	ProtectedConfigAudit       ProtectedConfigAuditSink
 }
 
 // Handler implements the generated strict-server interface.
 type Handler struct {
-	version                   string
-	loader                    *config.Loader
-	snapshot                  *config.Snapshot
-	configLoadErr             error
-	backendReader             BackendReader
-	backendMutator            BackendMutator
-	sessionReader             SessionReader
-	sessionMutator            SessionMutator
-	userReader                UserReader
-	userBackendPinReader      UserBackendPinReader
-	userHoldReader            UserHoldReader
-	runtimeSummaryReader      RuntimeSummaryReader
-	userMutator               UserMutator
-	userBackendPinMutator     UserBackendPinMutator
-	userHoldMutator           UserHoldMutator
-	routeLookup               RouteLookupService
-	listenerRuntime           ListenerRuntimeService
-	reload                    ReloadService
-	metrics                   MetricsProvider
-	protectedConfigAuthorizer ProtectedConfigAuthorizer
-	protectedConfigAudit      ProtectedConfigAuditSink
+	version                    string
+	loader                     *config.Loader
+	snapshot                   *config.Snapshot
+	configLoadErr              error
+	backendReader              BackendReader
+	backendMutator             BackendMutator
+	sessionReader              SessionReader
+	sessionMutator             SessionMutator
+	userReader                 UserReader
+	userBackendPinReader       UserBackendPinReader
+	userHoldReader             UserHoldReader
+	runtimeSummaryReader       RuntimeSummaryReader
+	runtimeAggregateReconciler RuntimeAggregateReconciler
+	userMutator                UserMutator
+	userBackendPinMutator      UserBackendPinMutator
+	userHoldMutator            UserHoldMutator
+	routeLookup                RouteLookupService
+	listenerRuntime            ListenerRuntimeService
+	reload                     ReloadService
+	metrics                    MetricsProvider
+	protectedConfigAuthorizer  ProtectedConfigAuthorizer
+	protectedConfigAudit       ProtectedConfigAuditSink
 }
 
 // NewHandler creates a generated-boundary REST adapter.
@@ -226,27 +234,28 @@ func NewHandler(options HandlerOptions) *Handler {
 	options = withDefaultHandlerOptions(options)
 
 	return &Handler{
-		version:                   options.Version,
-		loader:                    options.Loader,
-		snapshot:                  options.Snapshot,
-		configLoadErr:             options.ConfigLoadError,
-		backendReader:             options.BackendReader,
-		backendMutator:            options.BackendMutator,
-		sessionReader:             options.SessionReader,
-		sessionMutator:            options.SessionMutator,
-		userReader:                options.UserReader,
-		userBackendPinReader:      options.UserBackendPinReader,
-		userHoldReader:            options.UserHoldReader,
-		runtimeSummaryReader:      options.RuntimeSummaryReader,
-		userMutator:               options.UserMutator,
-		userBackendPinMutator:     options.UserBackendPinMutator,
-		userHoldMutator:           options.UserHoldMutator,
-		routeLookup:               options.RouteLookup,
-		listenerRuntime:           options.ListenerRuntime,
-		reload:                    options.Reload,
-		metrics:                   options.Metrics,
-		protectedConfigAuthorizer: options.ProtectedConfigAuthorizer,
-		protectedConfigAudit:      options.ProtectedConfigAudit,
+		version:                    options.Version,
+		loader:                     options.Loader,
+		snapshot:                   options.Snapshot,
+		configLoadErr:              options.ConfigLoadError,
+		backendReader:              options.BackendReader,
+		backendMutator:             options.BackendMutator,
+		sessionReader:              options.SessionReader,
+		sessionMutator:             options.SessionMutator,
+		userReader:                 options.UserReader,
+		userBackendPinReader:       options.UserBackendPinReader,
+		userHoldReader:             options.UserHoldReader,
+		runtimeSummaryReader:       options.RuntimeSummaryReader,
+		runtimeAggregateReconciler: options.RuntimeAggregateReconciler,
+		userMutator:                options.UserMutator,
+		userBackendPinMutator:      options.UserBackendPinMutator,
+		userHoldMutator:            options.UserHoldMutator,
+		routeLookup:                options.RouteLookup,
+		listenerRuntime:            options.ListenerRuntime,
+		reload:                     options.Reload,
+		metrics:                    options.Metrics,
+		protectedConfigAuthorizer:  options.ProtectedConfigAuthorizer,
+		protectedConfigAudit:       options.ProtectedConfigAudit,
 	}
 }
 
@@ -581,6 +590,65 @@ func (h *Handler) LookupRoute(ctx context.Context, request generated.LookupRoute
 	}
 
 	return generated.LookupRoute200JSONResponse(routeLookupResponse(result)), nil
+}
+
+// ReapRuntime runs one bounded expired-session repair pass.
+func (h *Handler) ReapRuntime(ctx context.Context, request generated.ReapRuntimeRequestObject) (generated.ReapRuntimeResponseObject, error) {
+	if request.Body == nil {
+		return generated.ReapRuntimedefaultJSONResponse{StatusCode: http.StatusBadRequest, Body: h.problem(http.StatusBadRequest, "invalid_request", "request body is required", "ReapRuntime")}, nil
+	}
+
+	if h.sessionMutator == nil {
+		return generated.ReapRuntimedefaultJSONResponse{StatusCode: http.StatusServiceUnavailable, Body: h.runtimeUnavailable("ReapRuntime")}, nil
+	}
+
+	duration, ok := h.runtimeRepairDuration("ReapRuntime", request.Body.MaxPassDuration)
+	if !ok {
+		return generated.ReapRuntimedefaultJSONResponse{StatusCode: http.StatusBadRequest, Body: h.problem(http.StatusBadRequest, "invalid_request", "max_pass_duration must be a valid Go duration", "ReapRuntime")}, nil
+	}
+
+	result, err := h.sessionMutator.ReapSessions(ctx, runtime.ReapSessionsRequest{
+		Reason:          request.Body.Reason,
+		Actor:           actorFromContext(ctx),
+		Limit:           request.Body.Limit,
+		MaxPassDuration: duration,
+		DryRun:          pointerBool(request.Body.DryRun),
+	})
+	if err != nil {
+		return generated.ReapRuntimedefaultJSONResponse{StatusCode: statusForError(err), Body: h.problemFromError("ReapRuntime", err)}, nil
+	}
+
+	return generated.ReapRuntime200JSONResponse(runtimeReapResponse(result)), nil
+}
+
+// ReconcileRuntimeAggregates repairs repairable aggregate-only runtime drift.
+func (h *Handler) ReconcileRuntimeAggregates(ctx context.Context, request generated.ReconcileRuntimeAggregatesRequestObject) (generated.ReconcileRuntimeAggregatesResponseObject, error) {
+	if request.Body == nil {
+		return generated.ReconcileRuntimeAggregatesdefaultJSONResponse{StatusCode: http.StatusBadRequest, Body: h.problem(http.StatusBadRequest, "invalid_request", "request body is required", "ReconcileRuntimeAggregates")}, nil
+	}
+
+	if h.runtimeAggregateReconciler == nil {
+		return generated.ReconcileRuntimeAggregatesdefaultJSONResponse{StatusCode: http.StatusServiceUnavailable, Body: h.runtimeUnavailable("ReconcileRuntimeAggregates")}, nil
+	}
+
+	duration, ok := h.runtimeRepairDuration("ReconcileRuntimeAggregates", request.Body.MaxPassDuration)
+	if !ok {
+		return generated.ReconcileRuntimeAggregatesdefaultJSONResponse{StatusCode: http.StatusBadRequest, Body: h.problem(http.StatusBadRequest, "invalid_request", "max_pass_duration must be a valid Go duration", "ReconcileRuntimeAggregates")}, nil
+	}
+
+	result, err := h.runtimeAggregateReconciler.ReconcileRuntimeAggregates(ctx, runtime.RuntimeAggregateReconcileRequest{
+		Reason:          request.Body.Reason,
+		Actor:           actorFromContext(ctx),
+		Limit:           request.Body.Limit,
+		MaxPassDuration: duration,
+		DryRun:          pointerBool(request.Body.DryRun),
+		Scope:           runtime.RuntimeAggregateReconcileScope(request.Body.Scope),
+	})
+	if err != nil {
+		return generated.ReconcileRuntimeAggregatesdefaultJSONResponse{StatusCode: statusForError(err), Body: h.problemFromError("ReconcileRuntimeAggregates", err)}, nil
+	}
+
+	return generated.ReconcileRuntimeAggregates200JSONResponse(runtimeAggregateReconcileResponse(result)), nil
 }
 
 // ListSessions returns active frontend sessions.
@@ -1468,6 +1536,16 @@ func reasonBody(body *generated.RuntimeReasonRequest) (string, bool) {
 	return reason, reason != ""
 }
 
+// runtimeRepairDuration parses a positive whole-second repair duration from generated DTO text.
+func (h *Handler) runtimeRepairDuration(_ string, value string) (time.Duration, bool) {
+	duration, err := time.ParseDuration(strings.TrimSpace(value))
+	if err != nil || duration <= 0 || duration%time.Second != 0 {
+		return 0, false
+	}
+
+	return duration, true
+}
+
 // backendDetails adapts domain backend states into generated DTOs.
 func backendDetails(states []backend.EffectiveBackendState) []generated.BackendDetail {
 	details := make([]generated.BackendDetail, 0, len(states))
@@ -1777,6 +1855,69 @@ func sessionKillResponse(result runtime.SessionMutationResult) generated.Session
 	}
 
 	return response
+}
+
+// runtimeReapResponse adapts one runtime reap result into a generated DTO.
+func runtimeReapResponse(result runtime.ReapSessionsResult) generated.RuntimeReapResponse {
+	audit := accepted()
+
+	return generated.RuntimeReapResponse{
+		AggregateMarkersRemoved: result.AggregateMarkersRemoved,
+		Audit:                   &audit,
+		ExpiredSessions:         result.ExpiredSessions,
+		IdleAffinitiesAdded:     result.IdleAffinitiesAdded,
+		RepairedBackends:        result.RepairedBackends,
+		ScannedSessions:         result.ScannedSessions,
+		ServerTime:              repairServerTime(result.ServerTime),
+		StaleIndexEntries:       result.StaleIndexEntries,
+		Status:                  runtimeReapStatus(result.Status),
+	}
+}
+
+// runtimeReapStatus maps runtime status text to the generated enum.
+func runtimeReapStatus(status string) generated.RuntimeReapResponseStatus {
+	if strings.TrimSpace(status) == string(generated.RuntimeReapResponseStatusPreview) {
+		return generated.RuntimeReapResponseStatusPreview
+	}
+
+	return generated.RuntimeReapResponseStatusReaped
+}
+
+// runtimeAggregateReconcileResponse adapts one aggregate repair result into a generated DTO.
+func runtimeAggregateReconcileResponse(result runtime.RuntimeAggregateReconcileResult) generated.RuntimeAggregateReconcileResponse {
+	audit := accepted()
+
+	return generated.RuntimeAggregateReconcileResponse{
+		Audit:                        &audit,
+		AuthoritativeConflicts:       result.AuthoritativeConflicts,
+		BackendCapacityFieldsChanged: result.BackendCapacityFieldsChanged,
+		CounterFieldsChanged:         result.CounterFieldsChanged,
+		CounterFieldsRemoved:         result.CounterFieldsRemoved,
+		IdleAffinitiesRemoved:        result.IdleAffinitiesRemoved,
+		MarkersUpserted:              result.MarkersUpserted,
+		ScannedMarkers:               result.ScannedMarkers,
+		ServerTime:                   repairServerTime(result.ServerTime),
+		StaleMarkersRemoved:          result.StaleMarkersRemoved,
+		Status:                       runtimeAggregateReconcileStatus(result.Status),
+	}
+}
+
+// runtimeAggregateReconcileStatus maps runtime status text to the generated enum.
+func runtimeAggregateReconcileStatus(status string) generated.RuntimeAggregateReconcileResponseStatus {
+	if strings.TrimSpace(status) == string(generated.RuntimeAggregateReconcileResponseStatusPreview) {
+		return generated.RuntimeAggregateReconcileResponseStatusPreview
+	}
+
+	return generated.RuntimeAggregateReconcileResponseStatusReconciled
+}
+
+// repairServerTime returns a non-zero UTC timestamp for required response fields.
+func repairServerTime(serverTime time.Time) time.Time {
+	if serverTime.IsZero() {
+		return time.Now().UTC()
+	}
+
+	return serverTime.UTC()
 }
 
 // runtimeSummary adapts repairable runtime aggregates into generated DTOs.

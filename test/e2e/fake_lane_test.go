@@ -1944,6 +1944,7 @@ type processConfigOptions struct {
 	BackendAuth            backend.AuthConfig
 	IMAPAuthMechanisms     []string
 	IMAPCapabilities       []string
+	ReaperInterval         time.Duration
 	UserHoldMaxWait        time.Duration
 	UserHoldPollInterval   time.Duration
 }
@@ -2137,6 +2138,7 @@ runtime:
     nauthilus: 2s
     backend_connect: 2s
     proxy_idle: 2s
+%s
 storage:
   redis:
     protocol: 2
@@ -2212,6 +2214,7 @@ director:
 		controlAddress,
 		processControlAuthYAML(t),
 		processControlTLSYAML(options.ControlTLS),
+		processRuntimeStateYAML(options),
 		e2eProcessKeyPrefix,
 		options.RedisAddress,
 		processAuthorityYAML(t, options.AuthorityOIDC, options.AuthorityBearer),
@@ -2588,6 +2591,21 @@ func processBackendIdentifiers(backends []processBackendDefinition) []string {
 	}
 
 	return identifiers
+}
+
+// processRuntimeStateYAML renders optional runtime-state timing overrides for process E2E.
+func processRuntimeStateYAML(options processConfigOptions) string {
+	if options.ReaperInterval <= 0 {
+		return ""
+	}
+
+	return fmt.Sprintf(`  state:
+    reaper:
+      interval: %q
+      batch_size: 100
+      max_pass_duration: 2s
+      jitter: 0s
+`, options.ReaperInterval.String())
 }
 
 // processUserHoldConfigYAML renders optional hold timing overrides for process E2E.

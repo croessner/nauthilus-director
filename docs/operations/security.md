@@ -141,6 +141,42 @@ malformed control responses and structured runtime API problem responses.
 Diagnostics must not print bearer token values, private key contents,
 certificate bodies or raw large response bodies.
 
+## Runtime Repair Control
+
+Runtime repair commands use the same authenticated control API boundary as
+other `/api/v1/*` runtime mutations. Operators must provide an auditable
+`--reason`, a positive `--limit` and a positive `--max-pass-duration` for:
+
+```sh
+nauthilus-directorctl runtime reap \
+  --reason "<ticket/change>" \
+  --limit 1000 \
+  --max-pass-duration 5s
+
+nauthilus-directorctl runtime reconcile aggregates \
+  --reason "<ticket/change>" \
+  --limit 1000 \
+  --max-pass-duration 5s
+```
+
+`runtime reap` runs the existing bounded session reaper path for expired leases
+and repairable due/session locators. `runtime reconcile aggregates` repairs
+repairable runtime aggregate drift from authoritative runtime reads. Neither
+command rewrites YAML configuration, and neither command is a route lookup,
+authentication test or protocol login.
+
+Add `--dry-run` when the operator needs a non-mutating preview. Dry-run output
+uses `status=preview` and must not change Redis. Text and JSON output may show
+bounded counts such as scanned sessions, stale markers or authoritative
+conflicts. Logs, metrics labels and traces must not contain raw usernames,
+session IDs, trace IDs, request IDs, client IPs, backend identifiers, raw error
+text or operator reason text as labels.
+
+Manual Redis edits are not the normal production cleanup path. If
+`runtime reap`, `users affinity clear` and `runtime reconcile aggregates` do
+not converge the state, preserve evidence and investigate fail-closed
+authoritative corruption before any exceptional manual intervention.
+
 ## OIDC Control Authorization
 
 The default ordinary control scope is `nauthilus-director.admin`. The default

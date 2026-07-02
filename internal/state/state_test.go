@@ -1064,6 +1064,337 @@ func TestReaperUpdatesRuntimeAggregateRepairCounters(t *testing.T) {
 	}
 }
 
+// TestRedisRuntimeAggregateOnlyDrift reproduces summary drift after authoritative reads are clean.
+func TestRedisRuntimeAggregateOnlyDrift(t *testing.T) {
+	store, client, builder := redisIntegrationStore(t)
+	key := AffinityKey{Tenant: "blue", AccountKey: "aggregate-only-drift@example.test"}
+	obsoleteShard := "mailstack1"
+	sessionIDs := []string{"aggregate-drift-session-1", "aggregate-drift-session-2"}
+
+	cleanupAffinity(t, client, builder, key, sessionIDs...)
+	cleanupRuntimeAggregateState(t, client, builder)
+	seedRuntimeAggregateDrift(t, store, obsoleteShard, sessionIDs...)
+
+	assertRuntimeAuthoritativeReadsClean(t, store, sessionIDs...)
+
+	summary, err := store.RuntimeAggregateSummary(context.Background())
+	if err != nil {
+		t.Fatalf("RuntimeAggregateSummary returned error: %v", err)
+	}
+
+	if summary.RoutingAuthority {
+		t.Fatal("runtime aggregate summary must not be routing authority")
+	}
+	if summary.ActiveSessions.Total.Count != len(sessionIDs) {
+		t.Fatalf("aggregate active total = %d, want %d", summary.ActiveSessions.Total.Count, len(sessionIDs))
+	}
+	if got := runtimeDimensionCount(summary.ActiveSessions.ByShardTag, obsoleteShard); got != len(sessionIDs) {
+		t.Fatalf("obsolete shard aggregate count = %d, want %d", got, len(sessionIDs))
+	}
+}
+
+// TestRedisRuntimeAggregateReconcileDrift verifies aggregate-only drift is repaired.
+func TestRedisRuntimeAggregateReconcileDrift(t *testing.T) {
+	store, client, builder := redisIntegrationStore(t)
+	key := AffinityKey{Tenant: "blue", AccountKey: "aggregate-reconcile@example.test"}
+	obsoleteShard := "mailstack1"
+	sessionIDs := []string{"aggregate-reconcile-session-1", "aggregate-reconcile-session-2"}
+
+	cleanupAffinity(t, client, builder, key, sessionIDs...)
+	cleanupRuntimeAggregateState(t, client, builder)
+	seedRuntimeAggregateDrift(t, store, obsoleteShard, sessionIDs...)
+	assertRuntimeAuthoritativeReadsClean(t, store, sessionIDs...)
+
+	record, err := store.ReconcileRuntimeAggregates(context.Background(), RuntimeAggregateReconcileRequest{
+		Limit:           10,
+		MaxPassDuration: time.Second,
+		Scope:           RuntimeAggregateReconcileScopeActiveSessions,
+	})
+	if err != nil {
+		t.Fatalf("ReconcileRuntimeAggregates returned error: %v", err)
+	}
+
+	if record.Status != "reconciled" || record.ScannedMarkers != len(sessionIDs) || record.StaleMarkersRemoved != len(sessionIDs) ||
+		record.AuthoritativeConflicts != 0 || record.Partial {
+		t.Fatalf("reconcile record = %#v, want complete stale marker repair", record)
+	}
+
+	summary, err := store.RuntimeAggregateSummary(context.Background())
+	if err != nil {
+		t.Fatalf("RuntimeAggregateSummary returned error: %v", err)
+	}
+
+	if summary.ActiveSessions.Total.Count != 0 {
+		t.Fatalf("aggregate active total = %d, want 0", summary.ActiveSessions.Total.Count)
+	}
+	if got := runtimeDimensionCount(summary.ActiveSessions.ByShardTag, obsoleteShard); got != 0 {
+		t.Fatalf("obsolete shard aggregate count = %d, want 0", got)
+	}
+	if markerCount := client.HLen(context.Background(), builder.AggregateSessionMarkerKey()).Val(); markerCount != 0 {
+		t.Fatalf("aggregate markers = %d, want 0", markerCount)
+	}
+}
+
+// TestRedisRuntimeAggregateReconcileDryRun verifies preview reports candidates without mutation.
+func TestRedisRuntimeAggregateReconcileDryRun(t *testing.T) {
+	store, client, builder := redisIntegrationStore(t)
+	key := AffinityKey{Tenant: "blue", AccountKey: "aggregate-reconcile-dryrun@example.test"}
+	obsoleteShard := "mailstack1"
+	sessionIDs := []string{"aggregate-reconcile-dryrun-1", "aggregate-reconcile-dryrun-2"}
+
+	cleanupAffinity(t, client, builder, key, sessionIDs...)
+	cleanupRuntimeAggregateState(t, client, builder)
+	seedRuntimeAggregateDrift(t, store, obsoleteShard, sessionIDs...)
+	assertRuntimeAuthoritativeReadsClean(t, store, sessionIDs...)
+
+	record, err := store.ReconcileRuntimeAggregates(context.Background(), RuntimeAggregateReconcileRequest{
+		Limit:           10,
+		MaxPassDuration: time.Second,
+		DryRun:          true,
+		Scope:           RuntimeAggregateReconcileScopeActiveSessions,
+	})
+	if err != nil {
+		t.Fatalf("dry-run ReconcileRuntimeAggregates returned error: %v", err)
+	}
+
+	if record.Status != "preview" || record.StaleMarkersRemoved != len(sessionIDs) {
+		t.Fatalf("dry-run reconcile record = %#v, want preview stale candidates", record)
+	}
+
+	summary, err := store.RuntimeAggregateSummary(context.Background())
+	if err != nil {
+		t.Fatalf("RuntimeAggregateSummary returned error: %v", err)
+	}
+
+	if summary.ActiveSessions.Total.Count != len(sessionIDs) {
+		t.Fatalf("dry-run active total = %d, want unchanged %d", summary.ActiveSessions.Total.Count, len(sessionIDs))
+	}
+	if markerCount := client.HLen(context.Background(), builder.AggregateSessionMarkerKey()).Val(); markerCount != int64(len(sessionIDs)) {
+		t.Fatalf("dry-run aggregate markers = %d, want unchanged %d", markerCount, len(sessionIDs))
+	}
+}
+
+// TestRedisRuntimeAggregateReconcileCorruptAuthoritative preserves malformed authoritative session hashes.
+func TestRedisRuntimeAggregateReconcileCorruptAuthoritative(t *testing.T) {
+	store, client, builder := redisIntegrationStore(t)
+	key := AffinityKey{Tenant: "blue", AccountKey: "aggregate-reconcile-corrupt@example.test"}
+	sessionID := "aggregate-reconcile-corrupt"
+
+	cleanupAffinity(t, client, builder, key, sessionID)
+	cleanupRuntimeAggregateState(t, client, builder)
+
+	if _, err := store.OpenSession(context.Background(), testSessionRecord(key, sessionID)); err != nil {
+		t.Fatalf("OpenSession returned error: %v", err)
+	}
+
+	sessionKey, err := builder.SessionKey(key.Tenant, key.AccountKey, sessionID)
+	if err != nil {
+		t.Fatalf("SessionKey returned error: %v", err)
+	}
+	if err := client.HDel(context.Background(), sessionKey, scriptFieldProtocol).Err(); err != nil {
+		t.Fatalf("corrupt session hash: %v", err)
+	}
+
+	record, err := store.ReconcileRuntimeAggregates(context.Background(), RuntimeAggregateReconcileRequest{
+		Limit:           10,
+		MaxPassDuration: time.Second,
+		Scope:           RuntimeAggregateReconcileScopeActiveSessions,
+	})
+	if err != nil {
+		t.Fatalf("ReconcileRuntimeAggregates returned error: %v", err)
+	}
+
+	if record.AuthoritativeConflicts != 1 || record.StaleMarkersRemoved != 0 {
+		t.Fatalf("reconcile record = %#v, want one preserved authoritative conflict", record)
+	}
+	if exists := client.Exists(context.Background(), sessionKey).Val(); exists != 1 {
+		t.Fatalf("corrupt authoritative session exists = %d, want preserved", exists)
+	}
+	if markerCount := client.HLen(context.Background(), builder.AggregateSessionMarkerKey()).Val(); markerCount != 1 {
+		t.Fatalf("aggregate markers = %d, want conflict marker preserved", markerCount)
+	}
+}
+
+// TestRedisRuntimeAggregateReconcileMalformedMarkerWithoutAuthoritativeSession repairs marker-only corruption.
+func TestRedisRuntimeAggregateReconcileMalformedMarkerWithoutAuthoritativeSession(t *testing.T) {
+	store, client, builder := redisIntegrationStore(t)
+	sessionID := "aggregate-reconcile-malformed-marker"
+	obsoleteShard := "mailstack1"
+
+	cleanupRuntimeAggregateState(t, client, builder)
+
+	if err := client.HSet(context.Background(), builder.AggregateSessionMarkerKey(), sessionID, "{not-json").Err(); err != nil {
+		t.Fatalf("seed malformed aggregate marker: %v", err)
+	}
+	if err := client.HSet(context.Background(), builder.AggregateActiveDimensionKey(aggregateDimensionShardTag), obsoleteShard, 1).Err(); err != nil {
+		t.Fatalf("seed obsolete shard counter: %v", err)
+	}
+
+	record, err := store.ReconcileRuntimeAggregates(context.Background(), RuntimeAggregateReconcileRequest{
+		Limit:           10,
+		MaxPassDuration: time.Second,
+		Scope:           RuntimeAggregateReconcileScopeActiveSessions,
+	})
+	if err != nil {
+		t.Fatalf("ReconcileRuntimeAggregates returned error: %v", err)
+	}
+
+	if record.StaleMarkersRemoved != 1 || record.AuthoritativeConflicts != 0 {
+		t.Fatalf("reconcile record = %#v, want malformed marker repaired from authoritative absence", record)
+	}
+
+	summary, err := store.RuntimeAggregateSummary(context.Background())
+	if err != nil {
+		t.Fatalf("RuntimeAggregateSummary returned error: %v", err)
+	}
+	if summary.ActiveSessions.Total.Count != 0 {
+		t.Fatalf("active total = %d, want 0", summary.ActiveSessions.Total.Count)
+	}
+	if got := runtimeDimensionCount(summary.ActiveSessions.ByShardTag, obsoleteShard); got != 0 {
+		t.Fatalf("obsolete shard aggregate count = %d, want 0", got)
+	}
+}
+
+// TestRedisRuntimeAggregateReconcileShardTagRename repairs marker dimensions from authoritative sessions.
+func TestRedisRuntimeAggregateReconcileShardTagRename(t *testing.T) {
+	store, client, builder := redisIntegrationStore(t)
+	key := AffinityKey{Tenant: "blue", AccountKey: "aggregate-reconcile-shard@example.test"}
+	sessionID := "aggregate-reconcile-shard"
+	obsoleteShard := "mailstack1"
+
+	cleanupAffinity(t, client, builder, key, sessionID)
+	cleanupRuntimeAggregateState(t, client, builder)
+
+	if _, err := store.OpenSession(context.Background(), testSessionRecord(key, sessionID)); err != nil {
+		t.Fatalf("OpenSession returned error: %v", err)
+	}
+
+	runtimeRecord, ok, err := store.GetRuntimeSession(context.Background(), sessionID)
+	if err != nil || !ok {
+		t.Fatalf("GetRuntimeSession ok=%t err=%v, want active session", ok, err)
+	}
+
+	current := aggregateSessionDimensionsFromRecord(runtimeRecord)
+	obsolete := current
+	obsolete.ShardTag = obsoleteShard
+	encoded, err := obsolete.encode()
+	if err != nil {
+		t.Fatalf("encode obsolete aggregate marker: %v", err)
+	}
+
+	if err := client.HSet(context.Background(), builder.AggregateSessionMarkerKey(), sessionID, encoded).Err(); err != nil {
+		t.Fatalf("seed obsolete aggregate marker: %v", err)
+	}
+	store.decrementAggregateCounters(context.Background(), current)
+	store.incrementAggregateCounters(context.Background(), obsolete)
+
+	record, err := store.ReconcileRuntimeAggregates(context.Background(), RuntimeAggregateReconcileRequest{
+		Limit:           10,
+		MaxPassDuration: time.Second,
+		Scope:           RuntimeAggregateReconcileScopeActiveSessions,
+	})
+	if err != nil {
+		t.Fatalf("ReconcileRuntimeAggregates returned error: %v", err)
+	}
+
+	if record.MarkersUpserted != 1 || record.StaleMarkersRemoved != 0 || record.AuthoritativeConflicts != 0 {
+		t.Fatalf("reconcile record = %#v, want one marker upsert from authoritative session", record)
+	}
+
+	summary, err := store.RuntimeAggregateSummary(context.Background())
+	if err != nil {
+		t.Fatalf("RuntimeAggregateSummary returned error: %v", err)
+	}
+
+	if got := runtimeDimensionCount(summary.ActiveSessions.ByShardTag, obsoleteShard); got != 0 {
+		t.Fatalf("obsolete shard aggregate count = %d, want 0", got)
+	}
+	if got := runtimeDimensionCount(summary.ActiveSessions.ByShardTag, current.ShardTag); got != 1 {
+		t.Fatalf("current shard aggregate count = %d, want 1", got)
+	}
+}
+
+// TestRedisRuntimeAggregateReconcileIdempotent verifies repeated repair passes do not drift counters.
+func TestRedisRuntimeAggregateReconcileIdempotent(t *testing.T) {
+	store, client, builder := redisIntegrationStore(t)
+	key := AffinityKey{Tenant: "blue", AccountKey: "aggregate-reconcile-idempotent@example.test"}
+	obsoleteShard := "mailstack1"
+	sessionIDs := []string{"aggregate-reconcile-idempotent-1", "aggregate-reconcile-idempotent-2"}
+
+	cleanupAffinity(t, client, builder, key, sessionIDs...)
+	cleanupRuntimeAggregateState(t, client, builder)
+	seedRuntimeAggregateDrift(t, store, obsoleteShard, sessionIDs...)
+
+	first, err := store.ReconcileRuntimeAggregates(context.Background(), RuntimeAggregateReconcileRequest{
+		Limit:           10,
+		MaxPassDuration: time.Second,
+		Scope:           RuntimeAggregateReconcileScopeActiveSessions,
+	})
+	if err != nil {
+		t.Fatalf("first ReconcileRuntimeAggregates returned error: %v", err)
+	}
+
+	second, err := store.ReconcileRuntimeAggregates(context.Background(), RuntimeAggregateReconcileRequest{
+		Limit:           10,
+		MaxPassDuration: time.Second,
+		Scope:           RuntimeAggregateReconcileScopeActiveSessions,
+	})
+	if err != nil {
+		t.Fatalf("second ReconcileRuntimeAggregates returned error: %v", err)
+	}
+
+	if first.StaleMarkersRemoved != len(sessionIDs) || second.StaleMarkersRemoved != 0 || second.ScannedMarkers != 0 {
+		t.Fatalf("reconcile results first=%#v second=%#v, want idempotent repair", first, second)
+	}
+
+	summary, err := store.RuntimeAggregateSummary(context.Background())
+	if err != nil {
+		t.Fatalf("RuntimeAggregateSummary returned error: %v", err)
+	}
+	if summary.ActiveSessions.Total.Count != 0 {
+		t.Fatalf("active total after repeated repair = %d, want 0", summary.ActiveSessions.Total.Count)
+	}
+}
+
+// TestRedisRuntimeAggregateReconcilePreservesActive verifies valid active holders stay present.
+func TestRedisRuntimeAggregateReconcilePreservesActive(t *testing.T) {
+	store, client, builder := redisIntegrationStore(t)
+	key := AffinityKey{Tenant: "blue", AccountKey: "aggregate-reconcile-active@example.test"}
+	sessionID := "aggregate-reconcile-active"
+
+	cleanupAffinity(t, client, builder, key, sessionID)
+	cleanupRuntimeAggregateState(t, client, builder)
+
+	if _, err := store.OpenSession(context.Background(), testSessionRecord(key, sessionID)); err != nil {
+		t.Fatalf("OpenSession returned error: %v", err)
+	}
+
+	record, err := store.ReconcileRuntimeAggregates(context.Background(), RuntimeAggregateReconcileRequest{
+		Limit:           10,
+		MaxPassDuration: time.Second,
+		Scope:           RuntimeAggregateReconcileScopeActiveSessions,
+	})
+	if err != nil {
+		t.Fatalf("ReconcileRuntimeAggregates returned error: %v", err)
+	}
+
+	if record.StaleMarkersRemoved != 0 || record.MarkersUpserted != 0 || record.AuthoritativeConflicts != 0 {
+		t.Fatalf("reconcile record = %#v, want active holder preserved", record)
+	}
+
+	if _, ok, err := store.GetRuntimeSession(context.Background(), sessionID); err != nil || !ok {
+		t.Fatalf("GetRuntimeSession ok=%t err=%v, want active session preserved", ok, err)
+	}
+
+	summary, err := store.RuntimeAggregateSummary(context.Background())
+	if err != nil {
+		t.Fatalf("RuntimeAggregateSummary returned error: %v", err)
+	}
+	if summary.ActiveSessions.Total.Count != 1 {
+		t.Fatalf("active total = %d, want 1", summary.ActiveSessions.Total.Count)
+	}
+}
+
 // TestBackendReservationRepairUpdatesAggregateCounters verifies reservation repair totals converge.
 func TestBackendReservationRepairUpdatesAggregateCounters(t *testing.T) {
 	store, client, builder := redisIntegrationStore(t)
@@ -4585,6 +4916,79 @@ func runtimeBackendCapacity(summaries []RuntimeBackendCapacitySummary, backendID
 	}
 
 	return RuntimeBackendCapacitySummary{}
+}
+
+// assertRuntimeAuthoritativeReadsClean verifies aggregate drift is not backed by live holders.
+func assertRuntimeAuthoritativeReadsClean(t *testing.T, store *RedisSessionStore, sessionIDs ...string) {
+	t.Helper()
+
+	page, err := store.ListRuntimeSessionsPage(context.Background(), RuntimeSessionPageRequest{Limit: 10})
+	if err != nil {
+		t.Fatalf("ListRuntimeSessionsPage returned error: %v", err)
+	}
+	if len(page.Records) != 0 {
+		t.Fatalf("runtime sessions = %#v, want no authoritative session reads", page.Records)
+	}
+
+	users, err := store.ListRuntimeUsersPage(context.Background(), RuntimeUserPageRequest{Limit: 10})
+	if err != nil {
+		t.Fatalf("ListRuntimeUsersPage returned error: %v", err)
+	}
+	if len(users.Records) != 0 {
+		t.Fatalf("runtime users = %#v, want no authoritative user reads", users.Records)
+	}
+
+	for _, sessionID := range sessionIDs {
+		if _, ok, err := store.GetRuntimeSession(context.Background(), sessionID); err != nil || ok {
+			t.Fatalf("GetRuntimeSession(%s) ok=%t err=%v, want absent without error", sessionID, ok, err)
+		}
+	}
+}
+
+// cleanupRuntimeAggregateState deletes repairable aggregate keys in an isolated test namespace.
+func cleanupRuntimeAggregateState(t *testing.T, client *redis.Client, builder KeyBuilder) {
+	t.Helper()
+
+	keys := []string{
+		builder.AggregateSessionMarkerKey(),
+		builder.AggregateActiveDimensionKey(aggregateDimensionBackend),
+		builder.AggregateActiveDimensionKey(aggregateDimensionListener),
+		builder.AggregateActiveDimensionKey(aggregateDimensionProtocol),
+		builder.AggregateActiveDimensionKey(aggregateDimensionService),
+		builder.AggregateActiveDimensionKey(aggregateDimensionShardTag),
+		builder.AggregateActiveDimensionKey("reserved_backend"),
+		builder.AggregateIdleAffinityKey(),
+		builder.AggregateRepairKey(),
+	}
+	if err := client.Del(context.Background(), keys...).Err(); err != nil {
+		t.Fatalf("cleanup aggregate keys: %v", err)
+	}
+}
+
+// seedRuntimeAggregateDrift writes repairable summary markers without authoritative sessions.
+func seedRuntimeAggregateDrift(t *testing.T, store *RedisSessionStore, shard string, sessionIDs ...string) {
+	t.Helper()
+
+	for _, sessionID := range sessionIDs {
+		dimensions := aggregateSessionDimensions{
+			SessionID:    sessionID,
+			Protocol:     testProtocolIMAP,
+			ListenerName: testListenerIMAPS,
+			ServiceName:  testProtocolIMAP,
+			ShardTag:     shard,
+		}.normalize()
+
+		encoded, err := dimensions.encode()
+		if err != nil {
+			t.Fatalf("encode aggregate dimensions: %v", err)
+		}
+
+		if err := store.client.HSet(context.Background(), store.keys.AggregateSessionMarkerKey(), sessionID, encoded).Err(); err != nil {
+			t.Fatalf("seed aggregate marker: %v", err)
+		}
+
+		store.incrementAggregateCounters(context.Background(), dimensions)
+	}
 }
 
 // aggregateHashField reads one raw aggregate hash field for underflow assertions.

@@ -68,6 +68,14 @@ The default lane is fake-service based and deterministic:
   creation through public protocol login, active-clear refusal, `sessions kill`
   marked and bounded missing/stale outcomes, `users kick` cooperative closure,
   post-close empty reads and inactive affinity clear.
+- runtime repair proof through the production `nauthilus-director` binary,
+  Valkey, fake Nauthilus, a fake IMAP backend, generated REST, an
+  HTTPS/authenticated control listener and `nauthilus-directorctl`. The scenario
+  proves public protocol holder creation, deterministic expired-lease repair
+  through `runtime reap`, explicit inactive affinity clear after holder absence,
+  aggregate-only drift repair through `runtime reconcile aggregates`, active
+  holder preservation and route lookup remaining non-mutating before and after
+  repair.
 
 Fake services must expose counters or request observations that prove protocol
 mapping, routing, and backend behavior without logging credentials, SASL blobs,

@@ -41,6 +41,8 @@ const (
 	pathContractListener           = "/api/v1/listeners/{name}"
 	pathContractListenerDrain      = "/api/v1/listeners/{name}/runtime/drain"
 	pathContractListenerResume     = "/api/v1/listeners/{name}/runtime/resume"
+	pathContractRuntimeReap        = "/api/v1/runtime/reap"
+	pathContractRuntimeReconcile   = "/api/v1/runtime/reconcile/aggregates"
 	pathContractSession            = "/api/v1/sessions/{session_id}"
 	pathContractUserAffinity       = "/api/v1/users/{user_key}/affinity"
 	pathContractUserBackendPin     = "/api/v1/users/{user_key}/backend-pin"
@@ -64,6 +66,8 @@ func TestOpenAPIContractIncludesPlannedEndpointGroupSet(t *testing.T) {
 		{method: http.MethodGet, path: "/api/v1/config/non-default"},
 		{method: http.MethodPost, path: "/api/v1/reload"},
 		{method: http.MethodGet, path: "/api/v1/runtime/summary"},
+		{method: http.MethodPost, path: pathContractRuntimeReap},
+		{method: http.MethodPost, path: pathContractRuntimeReconcile},
 		{method: http.MethodGet, path: pathContractListeners},
 		{method: http.MethodGet, path: pathContractListener},
 		{method: http.MethodPost, path: pathContractListenerDrain},
@@ -98,7 +102,12 @@ func TestOpenAPIContractIncludesPlannedEndpointGroupSet(t *testing.T) {
 	}
 
 	for _, endpoint := range planned {
-		if operation := contract.Paths.Find(endpoint.path).GetOperation(endpoint.method); operation == nil {
+		path := contract.Paths.Find(endpoint.path)
+		if path == nil {
+			t.Fatalf("OpenAPI contract missing %s %s", endpoint.method, endpoint.path)
+		}
+
+		if operation := path.GetOperation(endpoint.method); operation == nil {
 			t.Fatalf("OpenAPI contract missing %s %s", endpoint.method, endpoint.path)
 		}
 	}
@@ -453,6 +462,138 @@ func TestOpenAPIContractIncludesRuntimeSummary(t *testing.T) {
 	}
 }
 
+// TestOpenAPIContractIncludesRuntimeReap captures the public bounded reap contract.
+func TestOpenAPIContractIncludesRuntimeReap(t *testing.T) {
+	contract := loadContract(t)
+
+	path := contract.Paths.Find(pathContractRuntimeReap)
+	if path == nil {
+		t.Fatalf("OpenAPI contract missing POST %s", pathContractRuntimeReap)
+	}
+
+	operation := path.GetOperation(http.MethodPost)
+	if operation == nil {
+		t.Fatalf("OpenAPI contract missing POST %s", pathContractRuntimeReap)
+	}
+
+	if operation.OperationID != "reapRuntime" {
+		t.Fatalf("POST %s operationId = %q, want reapRuntime", pathContractRuntimeReap, operation.OperationID)
+	}
+
+	if got := operationRequestSchemaRef(t, operation); got != "#/components/schemas/RuntimeReapRequest" {
+		t.Fatalf("runtime reap request schema = %q, want RuntimeReapRequest", got)
+	}
+	if got := operationResponseSchemaRef(t, operation, http.StatusOK); got != "#/components/schemas/RuntimeReapResponse" {
+		t.Fatalf("runtime reap response schema = %q, want RuntimeReapResponse", got)
+	}
+
+	for _, status := range []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusServiceUnavailable} {
+		if operation.Responses.Status(status) == nil {
+			t.Fatalf("POST %s missing %d response", pathContractRuntimeReap, status)
+		}
+	}
+
+	requestSchema := contract.Components.Schemas["RuntimeReapRequest"].Value
+	if !schemaRejectsAdditionalProperties(requestSchema) {
+		t.Fatal("RuntimeReapRequest must reject additional properties")
+	}
+	assertSchemaRequires(t, requestSchema, "reason", "limit", "max_pass_duration")
+	assertSchemaPropertiesExactly(t, requestSchema, "dry_run", "limit", "max_pass_duration", "reason")
+
+	responseSchema := contract.Components.Schemas["RuntimeReapResponse"].Value
+	if !schemaRejectsAdditionalProperties(responseSchema) {
+		t.Fatal("RuntimeReapResponse must reject additional properties")
+	}
+	assertSchemaRequires(t, responseSchema, "status", "scanned_sessions", "expired_sessions", "stale_index_entries", "repaired_backends", "server_time")
+	assertSchemaPropertiesExactly(
+		t,
+		responseSchema,
+		"aggregate_markers_removed",
+		"audit",
+		"expired_sessions",
+		"idle_affinities_added",
+		"repaired_backends",
+		"scanned_sessions",
+		"server_time",
+		"stale_index_entries",
+		"status",
+	)
+	assertSchemaExcludesForbiddenRuntimeRepairFields(t, "RuntimeReapResponse", responseSchema)
+}
+
+// TestOpenAPIContractIncludesRuntimeAggregateReconcile captures aggregate repair UX.
+//
+//nolint:funlen,gocyclo // The contract test keeps path, request, response and enum checks together.
+func TestOpenAPIContractIncludesRuntimeAggregateReconcile(t *testing.T) {
+	contract := loadContract(t)
+
+	path := contract.Paths.Find(pathContractRuntimeReconcile)
+	if path == nil {
+		t.Fatalf("OpenAPI contract missing POST %s", pathContractRuntimeReconcile)
+	}
+
+	operation := path.GetOperation(http.MethodPost)
+	if operation == nil {
+		t.Fatalf("OpenAPI contract missing POST %s", pathContractRuntimeReconcile)
+	}
+
+	if operation.OperationID != "reconcileRuntimeAggregates" {
+		t.Fatalf("POST %s operationId = %q, want reconcileRuntimeAggregates", pathContractRuntimeReconcile, operation.OperationID)
+	}
+
+	if got := operationRequestSchemaRef(t, operation); got != "#/components/schemas/RuntimeAggregateReconcileRequest" {
+		t.Fatalf("aggregate reconcile request schema = %q, want RuntimeAggregateReconcileRequest", got)
+	}
+	if got := operationResponseSchemaRef(t, operation, http.StatusOK); got != "#/components/schemas/RuntimeAggregateReconcileResponse" {
+		t.Fatalf("aggregate reconcile response schema = %q, want RuntimeAggregateReconcileResponse", got)
+	}
+
+	for _, status := range []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusServiceUnavailable} {
+		if operation.Responses.Status(status) == nil {
+			t.Fatalf("POST %s missing %d response", pathContractRuntimeReconcile, status)
+		}
+	}
+
+	requestSchema := contract.Components.Schemas["RuntimeAggregateReconcileRequest"].Value
+	if !schemaRejectsAdditionalProperties(requestSchema) {
+		t.Fatal("RuntimeAggregateReconcileRequest must reject additional properties")
+	}
+	assertSchemaRequires(t, requestSchema, "reason", "limit", "max_pass_duration", "scope")
+	assertSchemaPropertiesExactly(t, requestSchema, "dry_run", "limit", "max_pass_duration", "reason", "scope")
+
+	scopeSchema := requestSchema.Properties["scope"].Value
+	if scopeSchema == nil {
+		t.Fatal("RuntimeAggregateReconcileRequest scope schema missing")
+	}
+	for _, expected := range []string{"all", "active_sessions", "backend_capacity", "idle_affinities", "repairs"} {
+		if !schemaEnumContains(scopeSchema.Enum, expected) {
+			t.Fatalf("aggregate reconcile scope enum missing %q: %#v", expected, scopeSchema.Enum)
+		}
+	}
+
+	responseSchema := contract.Components.Schemas["RuntimeAggregateReconcileResponse"].Value
+	if !schemaRejectsAdditionalProperties(responseSchema) {
+		t.Fatal("RuntimeAggregateReconcileResponse must reject additional properties")
+	}
+	assertSchemaRequires(t, responseSchema, "status", "scanned_markers", "stale_markers_removed", "authoritative_conflicts", "server_time")
+	assertSchemaPropertiesExactly(
+		t,
+		responseSchema,
+		"audit",
+		"authoritative_conflicts",
+		"backend_capacity_fields_changed",
+		"counter_fields_changed",
+		"counter_fields_removed",
+		"idle_affinities_removed",
+		"markers_upserted",
+		"scanned_markers",
+		"server_time",
+		"stale_markers_removed",
+		"status",
+	)
+	assertSchemaExcludesForbiddenRuntimeRepairFields(t, "RuntimeAggregateReconcileResponse", responseSchema)
+}
+
 // TestOpenAPIContractIncludesListenerOperations checks the listener v1 REST contract.
 func TestOpenAPIContractIncludesListenerOperations(t *testing.T) {
 	contract := loadContract(t)
@@ -615,6 +756,30 @@ func assertSchemaArrayItemsRef(t *testing.T, schema *openapi3.Schema, property s
 	}
 }
 
+// assertSchemaExcludesForbiddenRuntimeRepairFields checks repair DTOs for unsafe detail leaks.
+func assertSchemaExcludesForbiddenRuntimeRepairFields(t *testing.T, schemaName string, schema *openapi3.Schema) {
+	t.Helper()
+
+	for _, forbidden := range []string{
+		"backend",
+		"backend_identifier",
+		"client_ip",
+		"raw_backend",
+		"raw_error",
+		"reason",
+		"request_id",
+		"session_id",
+		"trace_id",
+		"user",
+		"user_key",
+		"username",
+	} {
+		if _, ok := schema.Properties[forbidden]; ok {
+			t.Fatalf("%s exposes forbidden field %q", schemaName, forbidden)
+		}
+	}
+}
+
 // assertStringPropertyMinLength fails when a string property omits the expected minimum length.
 func assertStringPropertyMinLength(t *testing.T, schema *openapi3.Schema, property string, minimum uint64) {
 	t.Helper()
@@ -729,6 +894,27 @@ func operationHasParameter(operation *openapi3.Operation, name string) bool {
 	}
 
 	return false
+}
+
+// operationRequestSchemaRef returns the JSON request schema reference for one operation.
+func operationRequestSchemaRef(t *testing.T, operation *openapi3.Operation) string {
+	t.Helper()
+
+	if operation == nil || operation.RequestBody == nil || operation.RequestBody.Value == nil {
+		t.Fatal("operation has no request body")
+	}
+
+	required := operation.RequestBody.Value.Required
+	if !required {
+		t.Fatal("operation request body must be required")
+	}
+
+	media := operation.RequestBody.Value.Content.Get("application/json")
+	if media == nil || media.Schema == nil {
+		t.Fatal("request body missing application/json schema")
+	}
+
+	return media.Schema.Ref
 }
 
 // operationResponseSchemaRef returns the JSON response schema reference for one status.

@@ -20,6 +20,10 @@ package runtime
 import (
 	"context"
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"os"
 	"reflect"
 	"sort"
 	"strings"
@@ -587,7 +591,102 @@ func TestUserAndSessionRuntimeRequestsRejectEmptyReasons(t *testing.T) {
 				return KillSessionRequest{SessionID: runtimeTestSessionA}.Validate()
 			},
 		},
+		{
+			name: "session reap",
+			validate: func() error {
+				return ReapSessionsRequest{Limit: 1, MaxPassDuration: time.Second}.Validate()
+			},
+		},
 	})
+}
+
+// TestRuntimeReapRepairValidation captures the explicit public reap request contract.
+//
+//nolint:funlen // The validation table keeps all bounded reap constraints visible together.
+func TestRuntimeReapRepairValidation(t *testing.T) {
+	assertInvalidRuntimeRequests(t, []runtimeValidationCase{
+		{
+			name: "missing reason",
+			validate: func() error {
+				return ReapSessionsRequest{Limit: 1, MaxPassDuration: time.Second}.Validate()
+			},
+		},
+		{
+			name: "missing limit",
+			validate: func() error {
+				return ReapSessionsRequest{Reason: "operator runtime reap", MaxPassDuration: time.Second}.Validate()
+			},
+		},
+		{
+			name: "missing max pass duration",
+			validate: func() error {
+				return ReapSessionsRequest{Reason: "operator runtime reap", Limit: 1}.Validate()
+			},
+		},
+		{
+			name: "limit above bound",
+			validate: func() error {
+				return ReapSessionsRequest{Reason: "operator runtime reap", Limit: maxRuntimeReapLimit + 1, MaxPassDuration: time.Second}.Validate()
+			},
+		},
+		{
+			name: "max pass duration above bound",
+			validate: func() error {
+				return ReapSessionsRequest{Reason: "operator runtime reap", Limit: 1, MaxPassDuration: maxRuntimeReapPassDuration + time.Nanosecond}.Validate()
+			},
+		},
+	})
+
+	request := ReapSessionsRequest{
+		Reason:          "operator runtime reap preview",
+		Limit:           1,
+		MaxPassDuration: time.Second,
+	}
+	if err := request.Validate(); err != nil {
+		t.Fatalf("valid ReapSessionsRequest returned error: %v", err)
+	}
+
+	requestValue := reflect.ValueOf(&request).Elem()
+	dryRun := requestValue.FieldByName("DryRun")
+	if !dryRun.IsValid() {
+		t.Fatal("ReapSessionsRequest missing DryRun field for explicit public runtime reap preview")
+	}
+	if dryRun.Kind() != reflect.Bool || !dryRun.CanSet() {
+		t.Fatalf("ReapSessionsRequest DryRun field kind/settable = %s/%t, want bool/true", dryRun.Kind(), dryRun.CanSet())
+	}
+
+	dryRun.SetBool(true)
+
+	store := &recordingSessionStateStore{
+		reapRecord: state.ReapRecord{Status: "preview", ServerTime: time.Unix(100, 0)},
+	}
+	service := NewSessionService(store, nil)
+
+	if _, err := service.ReapSessions(context.Background(), request); err != nil {
+		t.Fatalf("dry-run ReapSessions returned error: %v", err)
+	}
+
+	if store.reapCalls != 0 {
+		t.Fatalf("dry-run ReapSessions called mutating store path %d times, want preview without mutation", store.reapCalls)
+	}
+
+	if got, want := store.reapRequest.Limit, 0; got != want {
+		t.Fatalf("dry-run reap request limit = %d, want untouched store request", got)
+	}
+}
+
+// TestRuntimeAggregateReconcileRepairValidation captures the missing aggregate reconcile domain contract.
+func TestRuntimeAggregateReconcileRepairValidation(t *testing.T) {
+	request, typeName, ok := runtimeStructTypeAny(t, "AggregateReconcileRequest", "RuntimeAggregateReconcileRequest")
+	if !ok {
+		t.Fatal("aggregate reconcile request missing; want reason, limit, max pass duration, dry-run and scope validation")
+	}
+
+	assertRuntimeStructFields(t, request, "Reason", "Limit", "MaxPassDuration", "DryRun", "Scope")
+
+	if !runtimeMethodDeclared(t, typeName, "Validate") {
+		t.Fatalf("%s.Validate missing; invalid reconcile scopes must be rejected before state repair", typeName)
+	}
 }
 
 // TestUserHoldSetRejectsEmptyUserKey verifies holds require a normalized affinity key.
@@ -1837,11 +1936,14 @@ func TestCloseListenerClosesOnlyListenerLocalSessions(t *testing.T) {
 func TestReaperRunOnceReportsRepairCounts(t *testing.T) {
 	store := &recordingSessionStateStore{
 		reapRecord: state.ReapRecord{
-			Status:           "reaped",
-			ScannedSessions:  4,
-			ExpiredSessions:  2,
-			RepairedBackends: 1,
-			ServerTime:       time.Unix(100, 0),
+			Status:                  "reaped",
+			ScannedSessions:         4,
+			ExpiredSessions:         2,
+			StaleIndexEntries:       3,
+			RepairedBackends:        1,
+			AggregateMarkersRemoved: 2,
+			IdleAffinitiesAdded:     1,
+			ServerTime:              time.Unix(100, 0),
 		},
 	}
 
@@ -1857,7 +1959,12 @@ func TestReaperRunOnceReportsRepairCounts(t *testing.T) {
 		t.Fatalf("RunOnce returned error: %v", err)
 	}
 
-	if result.ExpiredSessions != 2 || result.RepairedBackends != 1 {
+	if result.Status != "reaped" ||
+		result.ExpiredSessions != 2 ||
+		result.RepairedBackends != 1 ||
+		result.StaleIndexEntries != 3 ||
+		result.AggregateMarkersRemoved != 2 ||
+		result.IdleAffinitiesAdded != 1 {
 		t.Fatalf("reap result = %#v, want repair counts", result)
 	}
 
@@ -1906,6 +2013,132 @@ func assertInvalidRuntimeRequests(t *testing.T, testCases []runtimeValidationCas
 			}
 		})
 	}
+}
+
+// runtimeStructType returns one production struct declaration from this package.
+func runtimeStructType(t *testing.T, name string) (*ast.StructType, bool) {
+	t.Helper()
+
+	for _, file := range runtimeProductionAST(t) {
+		for _, declaration := range file.Decls {
+			general, ok := declaration.(*ast.GenDecl)
+			if !ok {
+				continue
+			}
+
+			for _, spec := range general.Specs {
+				typeSpec, ok := spec.(*ast.TypeSpec)
+				if !ok || typeSpec.Name.Name != name {
+					continue
+				}
+
+				structType, ok := typeSpec.Type.(*ast.StructType)
+
+				return structType, ok
+			}
+		}
+	}
+
+	return nil, false
+}
+
+// runtimeStructTypeAny returns the first matching production struct declaration.
+func runtimeStructTypeAny(t *testing.T, names ...string) (*ast.StructType, string, bool) {
+	t.Helper()
+
+	for _, name := range names {
+		structType, ok := runtimeStructType(t, name)
+		if ok {
+			return structType, name, true
+		}
+	}
+
+	return nil, "", false
+}
+
+// runtimeMethodDeclared reports whether a production receiver method exists.
+func runtimeMethodDeclared(t *testing.T, receiverType string, method string) bool {
+	t.Helper()
+
+	for _, file := range runtimeProductionAST(t) {
+		for _, declaration := range file.Decls {
+			function, ok := declaration.(*ast.FuncDecl)
+			if !ok || function.Recv == nil || function.Name.Name != method {
+				continue
+			}
+
+			if runtimeReceiverType(function.Recv) == receiverType {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+// assertRuntimeStructFields verifies the named struct exposes expected contract fields.
+func assertRuntimeStructFields(t *testing.T, structType *ast.StructType, fields ...string) {
+	t.Helper()
+
+	present := make(map[string]struct{}, len(structType.Fields.List))
+	for _, field := range structType.Fields.List {
+		for _, name := range field.Names {
+			present[name.Name] = struct{}{}
+		}
+	}
+
+	for _, field := range fields {
+		if _, ok := present[field]; !ok {
+			t.Fatalf("runtime struct missing field %q", field)
+		}
+	}
+}
+
+// runtimeProductionAST parses non-test Go files in the runtime package.
+func runtimeProductionAST(t *testing.T) []*ast.File {
+	t.Helper()
+
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatalf("read runtime package directory: %v", err)
+	}
+
+	files := make([]*ast.File, 0, len(entries))
+	fileSet := token.NewFileSet()
+
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+
+		file, err := parser.ParseFile(fileSet, name, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+
+		files = append(files, file)
+	}
+
+	return files
+}
+
+// runtimeReceiverType normalizes value and pointer method receiver names.
+func runtimeReceiverType(receivers *ast.FieldList) string {
+	if receivers == nil || len(receivers.List) == 0 {
+		return ""
+	}
+
+	switch expr := receivers.List[0].Type.(type) {
+	case *ast.Ident:
+		return expr.Name
+	case *ast.StarExpr:
+		if ident, ok := expr.X.(*ast.Ident); ok {
+			return ident.Name
+		}
+	}
+
+	return ""
 }
 
 // backendRuntimeRecord returns a valid backend runtime mutation result for tests.
@@ -2280,6 +2513,7 @@ type recordingSessionStateStore struct {
 	killRecord  state.SessionKillRecord
 	reapRecord  state.ReapRecord
 	reapRequest state.ReapRequest
+	reapCalls   int
 }
 
 type blockingSessionStateStore struct{}
@@ -2309,6 +2543,7 @@ func (s *recordingSessionStateStore) ReapSessions(
 	_ context.Context,
 	request state.ReapRequest,
 ) (state.ReapRecord, error) {
+	s.reapCalls++
 	s.reapRequest = request
 
 	return s.reapRecord, nil

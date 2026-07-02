@@ -118,6 +118,51 @@ func (e MaintenanceMode) Valid() bool {
 	}
 }
 
+// Defines values for RuntimeAggregateReconcileRequestScope.
+const (
+	ActiveSessions  RuntimeAggregateReconcileRequestScope = "active_sessions"
+	All             RuntimeAggregateReconcileRequestScope = "all"
+	BackendCapacity RuntimeAggregateReconcileRequestScope = "backend_capacity"
+	IdleAffinities  RuntimeAggregateReconcileRequestScope = "idle_affinities"
+	Repairs         RuntimeAggregateReconcileRequestScope = "repairs"
+)
+
+// Valid indicates whether the value is a known member of the RuntimeAggregateReconcileRequestScope enum.
+func (e RuntimeAggregateReconcileRequestScope) Valid() bool {
+	switch e {
+	case ActiveSessions:
+		return true
+	case All:
+		return true
+	case BackendCapacity:
+		return true
+	case IdleAffinities:
+		return true
+	case Repairs:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for RuntimeAggregateReconcileResponseStatus.
+const (
+	RuntimeAggregateReconcileResponseStatusPreview    RuntimeAggregateReconcileResponseStatus = "preview"
+	RuntimeAggregateReconcileResponseStatusReconciled RuntimeAggregateReconcileResponseStatus = "reconciled"
+)
+
+// Valid indicates whether the value is a known member of the RuntimeAggregateReconcileResponseStatus enum.
+func (e RuntimeAggregateReconcileResponseStatus) Valid() bool {
+	switch e {
+	case RuntimeAggregateReconcileResponseStatusPreview:
+		return true
+	case RuntimeAggregateReconcileResponseStatusReconciled:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for RuntimeCountSummaryAccuracy.
 const (
 	RuntimeCountSummaryAccuracyCumulative         RuntimeCountSummaryAccuracy = "cumulative"
@@ -148,6 +193,24 @@ func (e RuntimeDimensionCountAccuracy) Valid() bool {
 	case RuntimeDimensionCountAccuracyCumulative:
 		return true
 	case RuntimeDimensionCountAccuracyEventuallyRepaired:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for RuntimeReapResponseStatus.
+const (
+	RuntimeReapResponseStatusPreview RuntimeReapResponseStatus = "preview"
+	RuntimeReapResponseStatusReaped  RuntimeReapResponseStatus = "reaped"
+)
+
+// Valid indicates whether the value is a known member of the RuntimeReapResponseStatus enum.
+func (e RuntimeReapResponseStatus) Valid() bool {
+	switch e {
+	case RuntimeReapResponseStatusPreview:
+		return true
+	case RuntimeReapResponseStatusReaped:
 		return true
 	default:
 		return false
@@ -595,6 +658,38 @@ type RouteLookupUserHold struct {
 	RemainingSeconds *int   `json:"remaining_seconds,omitempty"`
 }
 
+// RuntimeAggregateReconcileRequest defines model for RuntimeAggregateReconcileRequest.
+type RuntimeAggregateReconcileRequest struct {
+	DryRun *bool `json:"dry_run,omitempty"`
+	Limit  int   `json:"limit"`
+
+	// MaxPassDuration Go-style duration such as 5s or 30s.
+	MaxPassDuration string                                `json:"max_pass_duration"`
+	Reason          string                                `json:"reason"`
+	Scope           RuntimeAggregateReconcileRequestScope `json:"scope"`
+}
+
+// RuntimeAggregateReconcileRequestScope defines model for RuntimeAggregateReconcileRequest.Scope.
+type RuntimeAggregateReconcileRequestScope string
+
+// RuntimeAggregateReconcileResponse defines model for RuntimeAggregateReconcileResponse.
+type RuntimeAggregateReconcileResponse struct {
+	Audit                        *AcceptedResponse                       `json:"audit,omitempty"`
+	AuthoritativeConflicts       int                                     `json:"authoritative_conflicts"`
+	BackendCapacityFieldsChanged int                                     `json:"backend_capacity_fields_changed"`
+	CounterFieldsChanged         int                                     `json:"counter_fields_changed"`
+	CounterFieldsRemoved         int                                     `json:"counter_fields_removed"`
+	IdleAffinitiesRemoved        int                                     `json:"idle_affinities_removed"`
+	MarkersUpserted              int                                     `json:"markers_upserted"`
+	ScannedMarkers               int                                     `json:"scanned_markers"`
+	ServerTime                   time.Time                               `json:"server_time"`
+	StaleMarkersRemoved          int                                     `json:"stale_markers_removed"`
+	Status                       RuntimeAggregateReconcileResponseStatus `json:"status"`
+}
+
+// RuntimeAggregateReconcileResponseStatus defines model for RuntimeAggregateReconcileResponse.Status.
+type RuntimeAggregateReconcileResponseStatus string
+
 // RuntimeBackendCapacitySummary defines model for RuntimeBackendCapacitySummary.
 type RuntimeBackendCapacitySummary struct {
 	ActiveSessions    RuntimeCountSummary `json:"active_sessions"`
@@ -622,6 +717,32 @@ type RuntimeDimensionCount struct {
 
 // RuntimeDimensionCountAccuracy defines model for RuntimeDimensionCount.Accuracy.
 type RuntimeDimensionCountAccuracy string
+
+// RuntimeReapRequest defines model for RuntimeReapRequest.
+type RuntimeReapRequest struct {
+	DryRun *bool `json:"dry_run,omitempty"`
+	Limit  int   `json:"limit"`
+
+	// MaxPassDuration Go-style duration such as 5s or 30s.
+	MaxPassDuration string `json:"max_pass_duration"`
+	Reason          string `json:"reason"`
+}
+
+// RuntimeReapResponse defines model for RuntimeReapResponse.
+type RuntimeReapResponse struct {
+	AggregateMarkersRemoved int                       `json:"aggregate_markers_removed"`
+	Audit                   *AcceptedResponse         `json:"audit,omitempty"`
+	ExpiredSessions         int                       `json:"expired_sessions"`
+	IdleAffinitiesAdded     int                       `json:"idle_affinities_added"`
+	RepairedBackends        int                       `json:"repaired_backends"`
+	ScannedSessions         int                       `json:"scanned_sessions"`
+	ServerTime              time.Time                 `json:"server_time"`
+	StaleIndexEntries       int                       `json:"stale_index_entries"`
+	Status                  RuntimeReapResponseStatus `json:"status"`
+}
+
+// RuntimeReapResponseStatus defines model for RuntimeReapResponse.Status.
+type RuntimeReapResponseStatus string
 
 // RuntimeReasonRequest defines model for RuntimeReasonRequest.
 type RuntimeReasonRequest struct {
@@ -994,6 +1115,12 @@ type ResumeListenerJSONRequestBody = ListenerResumeRequest
 // LookupRouteJSONRequestBody defines body for LookupRoute for application/json ContentType.
 type LookupRouteJSONRequestBody = RouteLookupRequest
 
+// ReapRuntimeJSONRequestBody defines body for ReapRuntime for application/json ContentType.
+type ReapRuntimeJSONRequestBody = RuntimeReapRequest
+
+// ReconcileRuntimeAggregatesJSONRequestBody defines body for ReconcileRuntimeAggregates for application/json ContentType.
+type ReconcileRuntimeAggregatesJSONRequestBody = RuntimeAggregateReconcileRequest
+
 // DeleteSessionJSONRequestBody defines body for DeleteSession for application/json ContentType.
 type DeleteSessionJSONRequestBody = RuntimeReasonRequest
 
@@ -1167,6 +1294,16 @@ type ClientInterface interface {
 	LookupRouteWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	LookupRoute(ctx context.Context, body LookupRouteJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ReapRuntimeWithBody request with any body
+	ReapRuntimeWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	ReapRuntime(ctx context.Context, body ReapRuntimeJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ReconcileRuntimeAggregatesWithBody request with any body
+	ReconcileRuntimeAggregatesWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	ReconcileRuntimeAggregates(ctx context.Context, body ReconcileRuntimeAggregatesJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetRuntimeSummary request
 	GetRuntimeSummary(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -1579,6 +1716,54 @@ func (c *Client) LookupRouteWithBody(ctx context.Context, contentType string, bo
 
 func (c *Client) LookupRoute(ctx context.Context, body LookupRouteJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewLookupRouteRequest(c.Server, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ReapRuntimeWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewReapRuntimeRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ReapRuntime(ctx context.Context, body ReapRuntimeJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewReapRuntimeRequest(c.Server, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ReconcileRuntimeAggregatesWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewReconcileRuntimeAggregatesRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ReconcileRuntimeAggregates(ctx context.Context, body ReconcileRuntimeAggregatesJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewReconcileRuntimeAggregatesRequest(c.Server, body)
 	if err != nil {
 		return nil, err
 	}
@@ -2771,6 +2956,86 @@ func NewLookupRouteRequestWithBody(server string, contentType string, body io.Re
 	return req, nil
 }
 
+// NewReapRuntimeRequest calls the generic ReapRuntime builder with application/json body
+func NewReapRuntimeRequest(server string, body ReapRuntimeJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewReapRuntimeRequestWithBody(server, "application/json", bodyReader)
+}
+
+// NewReapRuntimeRequestWithBody generates requests for ReapRuntime with any type of body
+func NewReapRuntimeRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/runtime/reap")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewReconcileRuntimeAggregatesRequest calls the generic ReconcileRuntimeAggregates builder with application/json body
+func NewReconcileRuntimeAggregatesRequest(server string, body ReconcileRuntimeAggregatesJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewReconcileRuntimeAggregatesRequestWithBody(server, "application/json", bodyReader)
+}
+
+// NewReconcileRuntimeAggregatesRequestWithBody generates requests for ReconcileRuntimeAggregates with any type of body
+func NewReconcileRuntimeAggregatesRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/runtime/reconcile/aggregates")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
 // NewGetRuntimeSummaryRequest generates requests for GetRuntimeSummary
 func NewGetRuntimeSummaryRequest(server string) (*http.Request, error) {
 	var err error
@@ -3806,6 +4071,16 @@ type ClientWithResponsesInterface interface {
 
 	LookupRouteWithResponse(ctx context.Context, body LookupRouteJSONRequestBody, reqEditors ...RequestEditorFn) (*LookupRouteResponse, error)
 
+	// ReapRuntimeWithBodyWithResponse request with any body
+	ReapRuntimeWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ReapRuntimeResponse, error)
+
+	ReapRuntimeWithResponse(ctx context.Context, body ReapRuntimeJSONRequestBody, reqEditors ...RequestEditorFn) (*ReapRuntimeResponse, error)
+
+	// ReconcileRuntimeAggregatesWithBodyWithResponse request with any body
+	ReconcileRuntimeAggregatesWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ReconcileRuntimeAggregatesResponse, error)
+
+	ReconcileRuntimeAggregatesWithResponse(ctx context.Context, body ReconcileRuntimeAggregatesJSONRequestBody, reqEditors ...RequestEditorFn) (*ReconcileRuntimeAggregatesResponse, error)
+
 	// GetRuntimeSummaryWithResponse request
 	GetRuntimeSummaryWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*GetRuntimeSummaryResponse, error)
 
@@ -4444,6 +4719,76 @@ func (r LookupRouteResponse) StatusCode() int {
 
 // ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
 func (r LookupRouteResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type ReapRuntimeResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *RuntimeReapResponse
+	JSON400      *BadRequest
+	JSON401      *Error
+	JSON403      *Error
+	JSON503      *Error
+	JSONDefault  *Error
+}
+
+// Status returns HTTPResponse.Status
+func (r ReapRuntimeResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ReapRuntimeResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r ReapRuntimeResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type ReconcileRuntimeAggregatesResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *RuntimeAggregateReconcileResponse
+	JSON400      *BadRequest
+	JSON401      *Error
+	JSON403      *Error
+	JSON503      *Error
+	JSONDefault  *Error
+}
+
+// Status returns HTTPResponse.Status
+func (r ReconcileRuntimeAggregatesResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ReconcileRuntimeAggregatesResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r ReconcileRuntimeAggregatesResponse) ContentType() string {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.Header.Get("Content-Type")
 	}
@@ -5379,6 +5724,40 @@ func (c *ClientWithResponses) LookupRouteWithResponse(ctx context.Context, body 
 	return ParseLookupRouteResponse(rsp)
 }
 
+// ReapRuntimeWithBodyWithResponse request with arbitrary body returning *ReapRuntimeResponse
+func (c *ClientWithResponses) ReapRuntimeWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ReapRuntimeResponse, error) {
+	rsp, err := c.ReapRuntimeWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseReapRuntimeResponse(rsp)
+}
+
+func (c *ClientWithResponses) ReapRuntimeWithResponse(ctx context.Context, body ReapRuntimeJSONRequestBody, reqEditors ...RequestEditorFn) (*ReapRuntimeResponse, error) {
+	rsp, err := c.ReapRuntime(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseReapRuntimeResponse(rsp)
+}
+
+// ReconcileRuntimeAggregatesWithBodyWithResponse request with arbitrary body returning *ReconcileRuntimeAggregatesResponse
+func (c *ClientWithResponses) ReconcileRuntimeAggregatesWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ReconcileRuntimeAggregatesResponse, error) {
+	rsp, err := c.ReconcileRuntimeAggregatesWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseReconcileRuntimeAggregatesResponse(rsp)
+}
+
+func (c *ClientWithResponses) ReconcileRuntimeAggregatesWithResponse(ctx context.Context, body ReconcileRuntimeAggregatesJSONRequestBody, reqEditors ...RequestEditorFn) (*ReconcileRuntimeAggregatesResponse, error) {
+	rsp, err := c.ReconcileRuntimeAggregates(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseReconcileRuntimeAggregatesResponse(rsp)
+}
+
 // GetRuntimeSummaryWithResponse request returning *GetRuntimeSummaryResponse
 func (c *ClientWithResponses) GetRuntimeSummaryWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*GetRuntimeSummaryResponse, error) {
 	rsp, err := c.GetRuntimeSummary(ctx, reqEditors...)
@@ -6237,6 +6616,128 @@ func ParseLookupRouteResponse(rsp *http.Response) (*LookupRouteResponse, error) 
 			return nil, err
 		}
 		response.JSON400 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseReapRuntimeResponse parses an HTTP response from a ReapRuntimeWithResponse call
+func ParseReapRuntimeResponse(rsp *http.Response) (*ReapRuntimeResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ReapRuntimeResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest RuntimeReapResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 400:
+		var dest BadRequest
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON400 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 401:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON401 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 403:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON403 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON503 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseReconcileRuntimeAggregatesResponse parses an HTTP response from a ReconcileRuntimeAggregatesWithResponse call
+func ParseReconcileRuntimeAggregatesResponse(rsp *http.Response) (*ReconcileRuntimeAggregatesResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ReconcileRuntimeAggregatesResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest RuntimeAggregateReconcileResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 400:
+		var dest BadRequest
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON400 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 401:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON401 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 403:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON403 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON503 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
 		var dest Error

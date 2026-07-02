@@ -1783,6 +1783,7 @@ func assertNoRouteLookupMutations(t *testing.T, store *countingRouteState) {
 		store.reserveBackendCalls != 0 ||
 		store.releaseBackendCalls != 0 ||
 		store.reapBackendCalls != 0 ||
+		store.reconcileAggregateCalls != 0 ||
 		store.setBackendCalls != 0 ||
 		store.clearBackendCalls != 0 ||
 		store.backendPinSetCalls != 0 ||
@@ -1806,31 +1807,32 @@ type countingRouteState struct {
 	userHold      state.UserHoldRecord
 	userHoldErr   error
 
-	backendSnapshotCalls  int
-	lookupAffinityCalls   int
-	backendPinGetCalls    int
-	backendPinSetCalls    int
-	backendPinsSetCalls   int
-	backendPinClearCalls  int
-	backendPinsClearCalls int
-	userHoldCheckCalls    int
-	userHoldSetCalls      int
-	userHoldClearCalls    int
-	waitForPlacementCalls int
-	openSessionCalls      int
-	attachBackendCalls    int
-	heartbeatCalls        int
-	closeSessionCalls     int
-	reapCalls             int
-	moveUserCalls         int
-	kickUserCalls         int
-	clearUserCalls        int
-	killSessionCalls      int
-	reserveBackendCalls   int
-	releaseBackendCalls   int
-	reapBackendCalls      int
-	setBackendCalls       int
-	clearBackendCalls     int
+	backendSnapshotCalls    int
+	lookupAffinityCalls     int
+	backendPinGetCalls      int
+	backendPinSetCalls      int
+	backendPinsSetCalls     int
+	backendPinClearCalls    int
+	backendPinsClearCalls   int
+	userHoldCheckCalls      int
+	userHoldSetCalls        int
+	userHoldClearCalls      int
+	waitForPlacementCalls   int
+	openSessionCalls        int
+	attachBackendCalls      int
+	heartbeatCalls          int
+	closeSessionCalls       int
+	reapCalls               int
+	moveUserCalls           int
+	kickUserCalls           int
+	clearUserCalls          int
+	killSessionCalls        int
+	reserveBackendCalls     int
+	releaseBackendCalls     int
+	reapBackendCalls        int
+	reconcileAggregateCalls int
+	setBackendCalls         int
+	clearBackendCalls       int
 }
 
 type recordingRuntimeObservation struct {

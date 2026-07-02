@@ -31,6 +31,11 @@ import (
 const (
 	operationSessionKill = "session_kill"
 	operationSessionReap = "session_reap"
+
+	maxRuntimeReapLimit        = 1000
+	maxRuntimeReapPassDuration = 30 * time.Second
+
+	runtimeRepairStatusPreview = "preview"
 )
 
 // SessionStatus describes the runtime control state of one frontend session.
@@ -129,6 +134,7 @@ type ReapSessionsRequest struct {
 	Actor           Actor
 	Limit           int
 	MaxPassDuration time.Duration
+	DryRun          bool
 }
 
 // SessionMutationResult describes a runtime session mutation outcome.
@@ -149,11 +155,15 @@ type SessionStateStore interface {
 
 // ReapSessionsResult describes a bounded expired-session repair pass.
 type ReapSessionsResult struct {
-	ScannedSessions  int
-	ExpiredSessions  int
-	RepairedBackends int
-	ServerTime       time.Time
-	Audit            AuditMetadata
+	Status                  string
+	ScannedSessions         int
+	ExpiredSessions         int
+	StaleIndexEntries       int
+	RepairedBackends        int
+	AggregateMarkersRemoved int
+	IdleAffinitiesAdded     int
+	ServerTime              time.Time
+	Audit                   AuditMetadata
 }
 
 // SessionService coordinates Redis-backed session operations and local acceleration.
@@ -436,6 +446,10 @@ func (s *SessionService) ReapSessions(ctx context.Context, request ReapSessionsR
 		return ReapSessionsResult{}, newRuntimeError(ErrorKindInvalidRequest, operationSessionReap, "session store required")
 	}
 
+	if request.DryRun {
+		return s.previewReapSessions(ctx, request)
+	}
+
 	reapCtx := ctx
 	cancel := func() {}
 
@@ -461,10 +475,14 @@ func (s *SessionService) ReapSessions(ctx context.Context, request ReapSessionsR
 		ServerTime: record.ServerTime,
 		Generation: record.Status,
 		Fields: map[string]string{
-			auditFieldExpiredSessions:  strconv.Itoa(record.ExpiredSessions),
-			auditFieldRepairedBackends: strconv.Itoa(record.RepairedBackends),
-			auditFieldScannedSessions:  strconv.Itoa(record.ScannedSessions),
-			auditFieldStatus:           record.Status,
+			auditFieldAggregateMarkers:  strconv.Itoa(record.AggregateMarkersRemoved),
+			auditFieldDryRun:            auditValueFalse,
+			auditFieldExpiredSessions:   strconv.Itoa(record.ExpiredSessions),
+			auditFieldIdleAffinities:    strconv.Itoa(record.IdleAffinitiesAdded),
+			auditFieldRepairedBackends:  strconv.Itoa(record.RepairedBackends),
+			auditFieldScannedSessions:   strconv.Itoa(record.ScannedSessions),
+			auditFieldStaleIndexEntries: strconv.Itoa(record.StaleIndexEntries),
+			auditFieldStatus:            record.Status,
 		},
 	})
 	if err != nil {
@@ -472,18 +490,69 @@ func (s *SessionService) ReapSessions(ctx context.Context, request ReapSessionsR
 	}
 
 	s.recordSessionOperation(ctx, observability.EventSessionReap, operationSessionReap, runtimeObservationResultOK, "reap", map[string]string{
+		auditFieldAggregateMarkers:           strconv.Itoa(record.AggregateMarkersRemoved),
+		auditFieldDryRun:                     auditValueFalse,
 		auditFieldExpiredSessions:            strconv.Itoa(record.ExpiredSessions),
+		auditFieldIdleAffinities:             strconv.Itoa(record.IdleAffinitiesAdded),
 		auditFieldRepairedBackends:           strconv.Itoa(record.RepairedBackends),
 		auditFieldScannedSessions:            strconv.Itoa(record.ScannedSessions),
+		auditFieldStaleIndexEntries:          strconv.Itoa(record.StaleIndexEntries),
 		runtimeObservationFieldRuntimeStatus: record.Status,
 	}, time.Since(started))
 
 	return ReapSessionsResult{
-		ScannedSessions:  record.ScannedSessions,
-		ExpiredSessions:  record.ExpiredSessions,
-		RepairedBackends: record.RepairedBackends,
-		ServerTime:       record.ServerTime,
-		Audit:            audit,
+		Status:                  record.Status,
+		ScannedSessions:         record.ScannedSessions,
+		ExpiredSessions:         record.ExpiredSessions,
+		StaleIndexEntries:       record.StaleIndexEntries,
+		RepairedBackends:        record.RepairedBackends,
+		AggregateMarkersRemoved: record.AggregateMarkersRemoved,
+		IdleAffinitiesAdded:     record.IdleAffinitiesAdded,
+		ServerTime:              record.ServerTime,
+		Audit:                   audit,
+	}, nil
+}
+
+// previewReapSessions records auditable no-op preview metadata without touching Redis.
+func (s *SessionService) previewReapSessions(ctx context.Context, request ReapSessionsRequest) (ReapSessionsResult, error) {
+	serverTime := time.Now().UTC()
+
+	audit, err := NewAuditMetadata(AuditInput{
+		Operation:  AuditOperationSessionReap,
+		Reason:     request.Reason,
+		Actor:      request.Actor,
+		ServerTime: serverTime,
+		Generation: runtimeRepairStatusPreview,
+		Fields: map[string]string{
+			auditFieldAggregateMarkers:  "0",
+			auditFieldDryRun:            auditValueTrue,
+			auditFieldExpiredSessions:   "0",
+			auditFieldIdleAffinities:    "0",
+			auditFieldRepairedBackends:  "0",
+			auditFieldScannedSessions:   "0",
+			auditFieldStaleIndexEntries: "0",
+			auditFieldStatus:            runtimeRepairStatusPreview,
+		},
+	})
+	if err != nil {
+		return ReapSessionsResult{}, err
+	}
+
+	s.recordSessionOperation(ctx, observability.EventSessionReap, operationSessionReap, runtimeObservationResultOK, runtimeRepairStatusPreview, map[string]string{
+		auditFieldAggregateMarkers:           "0",
+		auditFieldDryRun:                     auditValueTrue,
+		auditFieldExpiredSessions:            "0",
+		auditFieldIdleAffinities:             "0",
+		auditFieldRepairedBackends:           "0",
+		auditFieldScannedSessions:            "0",
+		auditFieldStaleIndexEntries:          "0",
+		runtimeObservationFieldRuntimeStatus: runtimeRepairStatusPreview,
+	})
+
+	return ReapSessionsResult{
+		Status:     runtimeRepairStatusPreview,
+		ServerTime: serverTime,
+		Audit:      audit,
 	}, nil
 }
 
@@ -857,8 +926,16 @@ func (r ReapSessionsRequest) Validate() error {
 		return newRuntimeError(ErrorKindInvalidRequest, operationSessionReap, "limit must be greater than zero")
 	}
 
+	if r.Limit > maxRuntimeReapLimit {
+		return newRuntimeError(ErrorKindInvalidRequest, operationSessionReap, "limit exceeds maximum")
+	}
+
 	if r.MaxPassDuration <= 0 {
 		return newRuntimeError(ErrorKindInvalidRequest, operationSessionReap, "max pass duration required")
+	}
+
+	if r.MaxPassDuration > maxRuntimeReapPassDuration {
+		return newRuntimeError(ErrorKindInvalidRequest, operationSessionReap, "max pass duration exceeds maximum")
 	}
 
 	return requireReason(operationSessionReap, r.Reason)
