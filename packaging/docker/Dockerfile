@@ -21,21 +21,19 @@ ENV CGO_ENABLED=0 \
 
 COPY go.mod go.sum ./
 COPY vendor/ ./vendor/
-COPY cmd/ ./cmd/
+COPY cmd/nauthilus-director/ ./cmd/nauthilus-director/
 COPY internal/ ./internal/
 
 RUN --mount=type=cache,target=/root/.cache/go-build \
     set -eux; \
     target_os="${TARGETOS:-linux}"; \
     target_arch="${TARGETARCH:-$(go env GOARCH)}"; \
-    for command in nauthilus-director nauthilus-directorctl; do \
-        GOOS="$target_os" GOARCH="$target_arch" go build \
-            -trimpath \
-            -buildvcs=false \
-            -ldflags="-s -w -buildid= -X main.version=${VERSION}" \
-            -o "/out/$command" \
-            "./cmd/$command"; \
-    done
+    GOOS="$target_os" GOARCH="$target_arch" go build \
+        -trimpath \
+        -buildvcs=false \
+        -ldflags="-s -w -buildid= -X main.version=${VERSION}" \
+        -o "/out/nauthilus-director" \
+        "./cmd/nauthilus-director"
 
 FROM --platform=$BUILDPLATFORM ${CERTS_IMAGE} AS runtime-files
 
@@ -56,7 +54,7 @@ ARG BUILD_DATE=unknown
 ARG SOURCE=https://github.com/croessner/nauthilus-director
 
 LABEL org.opencontainers.image.title="nauthilus-director" \
-      org.opencontainers.image.description="Production nauthilus-director server and operator CLI image" \
+      org.opencontainers.image.description="Production nauthilus-director server image" \
       org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.revision="${REVISION}" \
       org.opencontainers.image.created="${BUILD_DATE}" \
@@ -70,7 +68,6 @@ COPY --from=runtime-files --chown=10001:10001 /etc/nauthilus-director /etc/nauth
 COPY --from=runtime-files --chown=10001:10001 /run/nauthilus-director /run/nauthilus-director
 COPY --from=runtime-files /tmp /tmp
 COPY --from=builder --chmod=0555 /out/nauthilus-director /usr/local/bin/nauthilus-director
-COPY --from=builder --chmod=0555 /out/nauthilus-directorctl /usr/local/bin/nauthilus-directorctl
 
 ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
     TMPDIR=/tmp

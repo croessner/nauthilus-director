@@ -1,0 +1,87 @@
+# syntax=docker/dockerfile:1.7
+#
+# Copyright (C) 2026 Christian Rößner
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
+ARG GO_IMAGE=golang:1.26.4-alpine3.23
+ARG CLIENT_RUNTIME_IMAGE=alpine:3.23
+
+FROM --platform=$BUILDPLATFORM ${GO_IMAGE} AS builder
+
+ARG TARGETOS=linux
+ARG TARGETARCH
+ARG VERSION=dev
+
+WORKDIR /src
+
+ENV CGO_ENABLED=0 \
+    GOFLAGS=-mod=vendor
+
+COPY go.mod go.sum ./
+COPY vendor/ ./vendor/
+COPY cmd/nauthilus-directorctl/ ./cmd/nauthilus-directorctl/
+COPY internal/client/ ./internal/client/
+
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    set -eux; \
+    target_os="${TARGETOS:-linux}"; \
+    target_arch="${TARGETARCH:-$(go env GOARCH)}"; \
+    GOOS="$target_os" GOARCH="$target_arch" go build \
+        -trimpath \
+        -buildvcs=false \
+        -ldflags="-s -w -buildid= -X main.version=${VERSION}" \
+        -o "/out/nauthilus-directorctl" \
+        "./cmd/nauthilus-directorctl"
+
+FROM ${CLIENT_RUNTIME_IMAGE}
+
+ARG VERSION=dev
+ARG REVISION=unknown
+ARG BUILD_DATE=unknown
+ARG SOURCE=https://github.com/croessner/nauthilus-director
+
+LABEL org.opencontainers.image.title="nauthilus-directorctl" \
+      org.opencontainers.image.description="Nauthilus Director operator CLI, manpages and troubleshooting tools" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.revision="${REVISION}" \
+      org.opencontainers.image.created="${BUILD_DATE}" \
+      org.opencontainers.image.source="${SOURCE}" \
+      org.opencontainers.image.licenses="AGPL-3.0-only"
+
+RUN set -eux; \
+    apk add --no-cache \
+        busybox-extras \
+        ca-certificates \
+        curl \
+        jq \
+        less \
+        mandoc \
+        openssl; \
+    addgroup -S -g 10001 directorctl; \
+    adduser -S -D -H -u 10001 -G directorctl -s /sbin/nologin directorctl; \
+    mkdir -p /run/nauthilus-directorctl /tmp; \
+    chown 10001:10001 /run/nauthilus-directorctl; \
+    chmod 0755 /run/nauthilus-directorctl; \
+    chmod 1777 /tmp
+
+COPY --from=builder --chmod=0555 /out/nauthilus-directorctl /usr/local/bin/nauthilus-directorctl
+COPY --chmod=0444 docs/man/nauthilus-directorctl.1 /usr/share/man/man1/nauthilus-directorctl.1
+COPY --chmod=0444 docs/man/nauthilus-director.yaml.5 /usr/share/man/man5/nauthilus-director.yaml.5
+
+RUN set -eux; \
+    chmod 0755 /usr/share/man /usr/share/man/man1 /usr/share/man/man5; \
+    chmod 0444 /usr/share/man/man1/nauthilus-directorctl.1 /usr/share/man/man5/nauthilus-director.yaml.5
+
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
+    MANPAGER=cat \
+    PAGER=cat \
+    TMPDIR=/tmp
+
+WORKDIR /
+VOLUME ["/run/nauthilus-directorctl", "/tmp"]
+
+USER 10001:10001
+
+ENTRYPOINT ["/usr/local/bin/nauthilus-directorctl"]
+CMD ["--help"]

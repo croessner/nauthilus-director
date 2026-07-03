@@ -283,7 +283,9 @@ and systemd paths are intentionally separate from the demo stack:
 ```bash
 make check-packaging
 make docker-build
+make docker-client-build
 make docker-smoke
+make docker-client-smoke
 make systemd-verify
 ```
 

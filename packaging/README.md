@@ -15,7 +15,8 @@ the production image or host-install layout.
 
 - Build and packaging references use Go 1.26.4.
 - Production binaries are `cmd/nauthilus-director` and
-  `cmd/nauthilus-directorctl`.
+  `cmd/nauthilus-directorctl`; the server and client container images ship
+  those binaries separately.
 - `make build` and `make build-check` remain the binary build validation path.
 - `make install` remains the binary and manpage install path unless a later M8
   slice adds explicit systemd or package install targets.
@@ -31,7 +32,8 @@ the production image or host-install layout.
 | --- | --- | --- | --- | --- |
 | Production binaries | `cmd/nauthilus-director/`, `cmd/nauthilus-directorctl/`, `Makefile` | `make build-check`; `make build` for concrete binary output | In `make guardrails` through `build-check` | Binaries must build from the root production module with Go 1.26.4. |
 | Host binary and manpage install | `Makefile`, `docs/man/` | `make install DESTDIR=<staging-dir>` when install layout changes | Outside normal guardrails | Install validation writes to a chosen staging directory. |
-| Production Docker image | `packaging/docker/Dockerfile`, `packaging/docker/README.md`, `.dockerignore`, `Makefile` | `make check-packaging`; optional `make docker-build`; optional `make docker-smoke` | Static checks only in guardrails | Docker daemon proof stays optional and separate. |
+| Production server Docker image | `packaging/docker/Dockerfile`, `packaging/docker/README.md`, `.dockerignore`, `Makefile` | `make check-packaging`; optional `make docker-build`; optional `make docker-smoke` | Static checks only in guardrails | Server image contains only `nauthilus-director`; Docker daemon proof stays optional and separate. |
+| Operator client Docker image | `packaging/docker/Dockerfile.client`, `packaging/docker/README.md`, `.dockerignore`, `Makefile` | `make check-packaging`; optional `make docker-client-build`; optional `make docker-client-smoke` | Static checks only in guardrails | Client image contains `nauthilus-directorctl`, manpages and bounded operator tools. |
 | systemd service | `packaging/systemd/nauthilus-director.service`, `packaging/systemd/nauthilus-director.env.example`, `packaging/systemd/README.md` | `make check-packaging`; optional `make systemd-verify` | Static checks only in guardrails | Host systemd must not be required for normal guardrails. |
 | Production config examples | `docs/config/nauthilus-director.target.yml`, `docs/reference/config-defaults.yaml`, `docs/reference/config-paths.md` | `make docs-check` | In `make guardrails` | Examples use file paths and redacted placeholders, not secret values. |
 | REST contract and generated boundaries | `docs/specs/openapi/`, `internal/rest/generated/`, `internal/client/generated/` | `make check-openapi`; focused Go tests when handlers or clients change | In `make guardrails` | Generated DTOs remain at the REST and client boundary. |
@@ -65,6 +67,10 @@ host-independent.
 | `make check-packaging` | Verify the production packaging inventory and host-independent guardrail boundary | `packaging/`, `docs/operations/`, `scripts/check-packaging.sh` | In guardrails |
 | `make e2e` | Run deterministic public-boundary E2E proof | `test/e2e/` | In guardrails |
 | `make e2e-interop` | Run Docker-backed real interoperability proof when available | `test/e2e/interop/` | Outside guardrails |
-| `make docker-build` | Build the production image when Docker is available | `packaging/docker/Dockerfile`, `.dockerignore`, `Makefile` | Outside guardrails |
-| `make docker-smoke` | Build the production image, run both binaries with `--version` and assert default config redaction | `packaging/docker/Dockerfile`, `Makefile` | Outside guardrails |
+| `make docker-build` | Build the production server image when Docker is available | `packaging/docker/Dockerfile`, `.dockerignore`, `Makefile` | Outside guardrails |
+| `make docker-client-build` | Build the operator client image when Docker is available | `packaging/docker/Dockerfile.client`, `.dockerignore`, `Makefile` | Outside guardrails |
+| `make docker-build-all` | Build both production images when Docker is available | `packaging/docker/`, `.dockerignore`, `Makefile` | Outside guardrails |
+| `make docker-smoke` | Build the server image, verify server `--version` and prove `nauthilus-directorctl` is absent | `packaging/docker/Dockerfile`, `Makefile` | Outside guardrails |
+| `make docker-client-smoke` | Build the client image, verify client `--version` and manpage availability | `packaging/docker/Dockerfile.client`, `Makefile` | Outside guardrails |
+| `make docker-smoke-all` | Run both image smoke checks | `packaging/docker/`, `Makefile` | Outside guardrails |
 | `make systemd-verify` | Verify the service file offline when `systemd-analyze` exists | `packaging/systemd/nauthilus-director.service`, `Makefile` | Outside guardrails |

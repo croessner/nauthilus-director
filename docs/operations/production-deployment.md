@@ -91,26 +91,42 @@ listener. Use protected config output only through an explicit and authorized
 
 ## Container Deployment
 
-The production image is built from `packaging/docker/Dockerfile` with Go 1.26.4,
-vendored dependencies and a `scratch` runtime image. It includes only
-`nauthilus-director`, `nauthilus-directorctl`, CA trust roots, passwd/group
-metadata and empty runtime directories. It runs as UID/GID `10001:10001`.
+The production server image is built from `packaging/docker/Dockerfile` with
+Go 1.26.4, vendored dependencies and a `scratch` runtime image. It includes only
+`nauthilus-director`, CA trust roots, passwd/group metadata and empty runtime
+directories. It runs as UID/GID `10001:10001`.
+
+The operator client image is built from `packaging/docker/Dockerfile.client`.
+It includes `nauthilus-directorctl`, CA trust roots, command manpages and a
+small troubleshooting toolset. It is intended for operator jobs, Kubernetes
+debug pods, CI checks and adjacent stacks that need Director control access.
 
 Build and smoke-test locally:
 
 ```sh
 make docker-build
+make docker-client-build
 make docker-smoke
+make docker-client-smoke
 ```
 
 Both targets skip with a stable message when the Docker CLI or daemon is not
-available. The smoke target verifies both `--version` commands and default
-config redaction. They are not part of `make guardrails`.
+available. The server smoke target verifies server `--version` output and that
+`nauthilus-directorctl` is absent from the server image. The client smoke target
+verifies client `--version` output and manpage availability. They are not part
+of `make guardrails`.
 
 The default container command is:
 
 ```text
 nauthilus-director --config /etc/nauthilus-director/nauthilus-director.yml serve
+```
+
+Use the client image for control-plane operations instead of expecting the
+server container to contain operator tooling:
+
+```text
+nauthilus-directorctl --address https://nauthilus-director:9090 status
 ```
 
 Mount the production YAML configuration under `/etc/nauthilus-director/`.

@@ -26,8 +26,10 @@ permissions:
 env:
   CERTS_IMAGE: alpine:3.23
   GO_IMAGE: golang:1.26.4-alpine3.23
-  OCI_IMAGE_DESCRIPTION: >-
-    Production Nauthilus Director mail protocol proxy and operator CLI
+  OCI_CLIENT_IMAGE_DESCRIPTION: >-
+    Nauthilus Director operator CLI, manpages and troubleshooting tools
+  OCI_SERVER_IMAGE_DESCRIPTION: >-
+    Production Nauthilus Director mail protocol proxy
 
 concurrency:
   group: stable-docker-${{ inputs.release_tag }}
@@ -37,10 +39,13 @@ jobs:
   prepare:
     runs-on: ubuntu-latest
     outputs:
-      annotations: ${{ steps.release_metadata.outputs.annotations }}
+      client_annotations: ${{ steps.release_metadata.outputs.client_annotations }}
+      client_labels: ${{ steps.release_metadata.outputs.client_labels }}
+      client_tags: ${{ steps.release_metadata.outputs.client_tags }}
       build_args: ${{ steps.release_metadata.outputs.build_args }}
-      labels: ${{ steps.release_metadata.outputs.labels }}
-      tags: ${{ steps.release_metadata.outputs.tags }}
+      server_annotations: ${{ steps.release_metadata.outputs.server_annotations }}
+      server_labels: ${{ steps.release_metadata.outputs.server_labels }}
+      server_tags: ${{ steps.release_metadata.outputs.server_tags }}
 
     steps:
       - name: Check out workflow tooling
@@ -62,12 +67,14 @@ jobs:
       - name: Extract release metadata
         id: release_metadata
         env:
-          OCI_IMAGE_DESCRIPTION: ${{ env.OCI_IMAGE_DESCRIPTION }}
+          OCI_CLIENT_IMAGE_DESCRIPTION: ${{ env.OCI_CLIENT_IMAGE_DESCRIPTION }}
+          OCI_SERVER_IMAGE_DESCRIPTION: ${{ env.OCI_SERVER_IMAGE_DESCRIPTION }}
           RELEASE_TAG: ${{ inputs.release_tag }}
           REBUILD_SUFFIX: ${{ inputs.rebuild_suffix }}
         run: |
           release_commit="$(git -C workflow-src rev-list -n 1 "${RELEASE_TAG}")"
-          registry_image="ghcr.io/${{ github.repository_owner }}/nauthilus-director"
+          client_registry_image="ghcr.io/${{ github.repository_owner }}/nauthilus-directorctl"
+          server_registry_image="ghcr.io/${{ github.repository_owner }}/nauthilus-director"
           prerelease=""
           tag_major=""
           tag_minor=""
@@ -103,22 +110,39 @@ jobs:
           } >> "${GITHUB_OUTPUT}"
 
           {
-            echo 'tags<<EOF'
-            echo "${registry_image}:${RELEASE_TAG}"
+            echo 'server_tags<<EOF'
+            echo "${server_registry_image}:${RELEASE_TAG}"
 
             if [[ "${prerelease}" != "true" ]]; then
-              echo "${registry_image}:latest"
-              echo "${registry_image}:${tag_major}"
-              echo "${registry_image}:${tag_minor}"
+              echo "${server_registry_image}:latest"
+              echo "${server_registry_image}:${tag_major}"
+              echo "${server_registry_image}:${tag_minor}"
             fi
 
             if [[ -n "${rebuild_tag}" ]]; then
-              echo "${registry_image}:${rebuild_tag}"
+              echo "${server_registry_image}:${rebuild_tag}"
             fi
 
             echo 'EOF'
-            echo 'annotations<<EOF'
-            echo "${annotation_prefix}${OCI_IMAGE_DESCRIPTION}"
+            echo 'client_tags<<EOF'
+            echo "${client_registry_image}:${RELEASE_TAG}"
+
+            if [[ "${prerelease}" != "true" ]]; then
+              echo "${client_registry_image}:latest"
+              echo "${client_registry_image}:${tag_major}"
+              echo "${client_registry_image}:${tag_minor}"
+            fi
+
+            if [[ -n "${rebuild_tag}" ]]; then
+              echo "${client_registry_image}:${rebuild_tag}"
+            fi
+
+            echo 'EOF'
+            echo 'server_annotations<<EOF'
+            echo "${annotation_prefix}${OCI_SERVER_IMAGE_DESCRIPTION}"
+            echo 'EOF'
+            echo 'client_annotations<<EOF'
+            echo "${annotation_prefix}${OCI_CLIENT_IMAGE_DESCRIPTION}"
             echo 'EOF'
             echo 'build_args<<EOF'
             echo "VERSION=${RELEASE_TAG}"
@@ -126,9 +150,10 @@ jobs:
             echo "SOURCE=https://github.com/${{ github.repository }}"
             echo "GO_IMAGE=${golang_image}@${golang_digest}"
             echo "CERTS_IMAGE=${certs_image}@${certs_digest}"
+            echo "CLIENT_RUNTIME_IMAGE=${certs_image}@${certs_digest}"
             echo 'EOF'
-            echo 'labels<<EOF'
-            echo "org.opencontainers.image.description=${OCI_IMAGE_DESCRIPTION}"
+            echo 'server_labels<<EOF'
+            echo "org.opencontainers.image.description=${OCI_SERVER_IMAGE_DESCRIPTION}"
             echo "org.opencontainers.image.revision=${release_commit}"
             echo "org.opencontainers.image.source=https://github.com/${{ github.repository }}"
             echo "org.opencontainers.image.version=${RELEASE_TAG}"
@@ -144,9 +169,26 @@ jobs:
             fi
 
             echo 'EOF'
+            echo 'client_labels<<EOF'
+            echo "org.opencontainers.image.description=${OCI_CLIENT_IMAGE_DESCRIPTION}"
+            echo "org.opencontainers.image.revision=${release_commit}"
+            echo "org.opencontainers.image.source=https://github.com/${{ github.repository }}"
+            echo "org.opencontainers.image.version=${RELEASE_TAG}"
+            echo "io.nauthilus.director.base.golang.digest=${golang_digest}"
+            echo "io.nauthilus.director.base.golang.image=${golang_image}"
+            echo "io.nauthilus.director.base.client.digest=${certs_digest}"
+            echo "io.nauthilus.director.base.client.image=${certs_image}"
+            echo "io.nauthilus.director.build.reason=${{ inputs.build_reason }}"
+            echo "io.nauthilus.director.release.tag=${RELEASE_TAG}"
+
+            if [[ -n "${rebuild_tag}" ]]; then
+              echo "io.nauthilus.director.rebuild.tag=${rebuild_tag}"
+            fi
+
+            echo 'EOF'
           } >> "${GITHUB_OUTPUT}"
 
-  build:
+  build-server:
     needs: prepare
     uses: ./.github/workflows/docker-build-push.yaml
     with:
@@ -155,7 +197,21 @@ jobs:
       checkout_path: release-src
       dockerfile_path: packaging/docker/Dockerfile
       sbom: true
-      tags: ${{ needs.prepare.outputs.tags }}
-      annotations: ${{ needs.prepare.outputs.annotations }}
+      tags: ${{ needs.prepare.outputs.server_tags }}
+      annotations: ${{ needs.prepare.outputs.server_annotations }}
       build_args: ${{ needs.prepare.outputs.build_args }}
-      labels: ${{ needs.prepare.outputs.labels }}
+      labels: ${{ needs.prepare.outputs.server_labels }}
+
+  build-client:
+    needs: prepare
+    uses: ./.github/workflows/docker-build-push.yaml
+    with:
+      source_ref: ${{ inputs.release_tag }}
+      fetch_depth: 0
+      checkout_path: release-client-src
+      dockerfile_path: packaging/docker/Dockerfile.client
+      sbom: true
+      tags: ${{ needs.prepare.outputs.client_tags }}
+      annotations: ${{ needs.prepare.outputs.client_annotations }}
+      build_args: ${{ needs.prepare.outputs.build_args }}
+      labels: ${{ needs.prepare.outputs.client_labels }}

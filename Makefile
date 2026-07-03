@@ -7,9 +7,11 @@ COMMANDS := $(APP_NAME) $(APP_NAME)ctl
 DOCKER ?= docker
 SYSTEMD_ANALYZE ?= systemd-analyze
 IMAGE_TAG ?= $(APP_NAME):$(VERSION)
+CLIENT_IMAGE_TAG ?= $(APP_NAME)ctl:$(VERSION)
 GO_IMAGE ?= golang:1.26.4-alpine3.23
 CERTS_IMAGE ?= alpine:3.23
 RUNTIME_IMAGE ?= scratch
+CLIENT_RUNTIME_IMAGE ?= alpine:3.23
 REVISION ?= $(shell git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)
 BUILD_DATE ?= unknown
 IMAGE_SOURCE ?= https://github.com/croessner/nauthilus-director
@@ -229,6 +231,30 @@ docker-build:
 		$(DOCKER_BUILD_FLAGS) \
 		.
 
+docker-client-build:
+	@set -e; \
+	if ! command -v $(DOCKER) >/dev/null 2>&1; then \
+		echo "docker-client-build: Docker is unavailable; skipping $(DOCKER) build"; \
+		exit 0; \
+	fi; \
+	if ! $(DOCKER) info >/dev/null 2>&1; then \
+		echo "docker-client-build: Docker daemon is unavailable; skipping $(DOCKER) build"; \
+		exit 0; \
+	fi; \
+	$(DOCKER) build \
+		--file packaging/docker/Dockerfile.client \
+		--build-arg VERSION="$(VERSION)" \
+		--build-arg REVISION="$(REVISION)" \
+		--build-arg BUILD_DATE="$(BUILD_DATE)" \
+		--build-arg SOURCE="$(IMAGE_SOURCE)" \
+		--build-arg GO_IMAGE="$(GO_IMAGE)" \
+		--build-arg CLIENT_RUNTIME_IMAGE="$(CLIENT_RUNTIME_IMAGE)" \
+		--tag "$(CLIENT_IMAGE_TAG)" \
+		$(DOCKER_BUILD_FLAGS) \
+		.
+
+docker-build-all: docker-build docker-client-build
+
 docker-smoke: docker-build
 	@set -e; \
 	if ! command -v $(DOCKER) >/dev/null 2>&1; then \
@@ -253,27 +279,52 @@ docker-smoke: docker-build
 		"nauthilus-director "*) printf '%s\n' "$$director_output" ;; \
 		*) printf 'docker-smoke: unexpected server version output: %s\n' "$$director_output" >&2; exit 1 ;; \
 	esac; \
+	if $(DOCKER) run --rm --network=none --read-only \
+		--tmpfs /tmp:rw,noexec,nosuid,size=16m \
+		--tmpfs /run/nauthilus-director:rw,noexec,nosuid,size=16m \
+		--entrypoint /usr/local/bin/nauthilus-directorctl \
+		"$(IMAGE_TAG)" --version >/dev/null 2>&1; then \
+		printf '%s\n' "docker-smoke: server image unexpectedly contains nauthilus-directorctl" >&2; \
+		exit 1; \
+	fi
+
+docker-client-smoke: docker-client-build
+	@set -e; \
+	if ! command -v $(DOCKER) >/dev/null 2>&1; then \
+		echo "docker-client-smoke: Docker is unavailable; skipping $(DOCKER) run"; \
+		exit 0; \
+	fi; \
+	if ! $(DOCKER) info >/dev/null 2>&1; then \
+		echo "docker-client-smoke: Docker daemon is unavailable; skipping $(DOCKER) run"; \
+		exit 0; \
+	fi; \
+	if ! $(DOCKER) image inspect "$(CLIENT_IMAGE_TAG)" >/dev/null 2>&1; then \
+		echo "docker-client-smoke: image $(CLIENT_IMAGE_TAG) is unavailable after docker-client-build"; \
+		exit 1; \
+	fi; \
 	ctl_output="$$( \
 		$(DOCKER) run --rm --network=none --read-only \
 			--tmpfs /tmp:rw,noexec,nosuid,size=16m \
-			--tmpfs /run/nauthilus-director:rw,noexec,nosuid,size=16m \
-			--entrypoint /usr/local/bin/nauthilus-directorctl \
-			"$(IMAGE_TAG)" --version \
+			--tmpfs /run/nauthilus-directorctl:rw,noexec,nosuid,size=16m \
+			"$(CLIENT_IMAGE_TAG)" --version \
 	)"; \
 	case "$$ctl_output" in \
 		"nauthilus-directorctl "*) printf '%s\n' "$$ctl_output" ;; \
-		*) printf 'docker-smoke: unexpected client version output: %s\n' "$$ctl_output" >&2; exit 1 ;; \
+		*) printf 'docker-client-smoke: unexpected client version output: %s\n' "$$ctl_output" >&2; exit 1 ;; \
 	esac; \
-	config_output="$$( \
+	man_output="$$( \
 		$(DOCKER) run --rm --network=none --read-only \
 			--tmpfs /tmp:rw,noexec,nosuid,size=16m \
-			--tmpfs /run/nauthilus-director:rw,noexec,nosuid,size=16m \
-			"$(IMAGE_TAG)" config dump -d --format yaml \
+			--tmpfs /run/nauthilus-directorctl:rw,noexec,nosuid,size=16m \
+			--entrypoint man \
+			"$(CLIENT_IMAGE_TAG)" nauthilus-directorctl \
 	)"; \
-	case "$$config_output" in \
-		*"<redacted>"*) printf '%s\n' "docker-smoke: default config redaction present" ;; \
-		*) printf '%s\n' "docker-smoke: default config dump did not show redacted protected values" >&2; exit 1 ;; \
+	case "$$man_output" in \
+		*"NAUTHILUS-DIRECTORCTL"*) printf '%s\n' "docker-client-smoke: client manpage present" ;; \
+		*) printf '%s\n' "docker-client-smoke: nauthilus-directorctl manpage missing" >&2; exit 1 ;; \
 	esac
+
+docker-smoke-all: docker-smoke docker-client-smoke
 
 generate-openapi:
 	bash ./scripts/generate-openapi.sh
@@ -361,4 +412,4 @@ poc-race:
 version:
 	@echo $(VERSION)
 
-.PHONY: all build install install-bin install-man uninstall uninstall-bin uninstall-man build-check clean fix vet lint-config lint test race e2e e2e-interop docs-check check-packaging check-release-hardening systemd-verify docker-build docker-smoke generate-openapi check-openapi generate-docs check-docs copyright-check guardrails govulncheck release-guardrails install-hooks scale-smoke scale-stress poc-test poc-race version
+.PHONY: all build install install-bin install-man uninstall uninstall-bin uninstall-man build-check clean fix vet lint-config lint test race e2e e2e-interop docs-check check-packaging check-release-hardening systemd-verify docker-build docker-client-build docker-build-all docker-smoke docker-client-smoke docker-smoke-all generate-openapi check-openapi generate-docs check-docs copyright-check guardrails govulncheck release-guardrails install-hooks scale-smoke scale-stress poc-test poc-race version

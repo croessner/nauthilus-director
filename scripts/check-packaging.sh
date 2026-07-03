@@ -34,6 +34,7 @@ require_file "README.md"
 require_file ".dockerignore"
 require_file "packaging/README.md"
 require_file "packaging/docker/Dockerfile"
+require_file "packaging/docker/Dockerfile.client"
 require_file "packaging/docker/README.md"
 require_file "packaging/systemd/nauthilus-director.service"
 require_file "packaging/systemd/nauthilus-director.env.example"
@@ -49,6 +50,7 @@ require_dir "packaging/systemd"
 require_dir "docs/operations"
 
 dockerfile="packaging/docker/Dockerfile"
+client_dockerfile="packaging/docker/Dockerfile.client"
 
 grep -R "Go 1.26" packaging docs/operations >/dev/null || \
 	fail "production packaging docs must reference Go 1.26"
@@ -66,8 +68,14 @@ grep -Eq '^check-packaging:' Makefile || \
 grep -Eq '^docker-build:' Makefile || \
 	fail "Makefile is missing docker-build target"
 
+grep -Eq '^docker-client-build:' Makefile || \
+	fail "Makefile is missing docker-client-build target"
+
 grep -Eq '^docker-smoke:' Makefile || \
 	fail "Makefile is missing docker-smoke target"
+
+grep -Eq '^docker-client-smoke:' Makefile || \
+	fail "Makefile is missing docker-client-smoke target"
 
 grep -Eq '^systemd-verify:' Makefile || \
 	fail "Makefile is missing systemd-verify target"
@@ -78,8 +86,14 @@ grep -Eq '^\.PHONY:.*\bcheck-packaging\b' Makefile || \
 grep -Eq '^\.PHONY:.*\bdocker-build\b' Makefile || \
 	fail "docker-build must be listed in .PHONY"
 
+grep -Eq '^\.PHONY:.*\bdocker-client-build\b' Makefile || \
+	fail "docker-client-build must be listed in .PHONY"
+
 grep -Eq '^\.PHONY:.*\bdocker-smoke\b' Makefile || \
 	fail "docker-smoke must be listed in .PHONY"
+
+grep -Eq '^\.PHONY:.*\bdocker-client-smoke\b' Makefile || \
+	fail "docker-client-smoke must be listed in .PHONY"
 
 grep -Eq '^\.PHONY:.*\bsystemd-verify\b' Makefile || \
 	fail "systemd-verify must be listed in .PHONY"
@@ -89,7 +103,7 @@ guardrails_line="$(awk '/^guardrails:/{print; exit}' Makefile)"
 [[ "$guardrails_line" == *"check-packaging"* ]] || \
 	fail "guardrails must include static packaging checks"
 
-for forbidden_target in docker-build docker-check docker-smoke systemd-verify systemd-install; do
+for forbidden_target in docker-build docker-client-build docker-check docker-smoke docker-client-smoke systemd-verify systemd-install; do
 	if [[ "$guardrails_line" == *"$forbidden_target"* ]]; then
 		fail "guardrails must not depend on host-specific target: $forbidden_target"
 	fi
@@ -128,6 +142,10 @@ grep -Eq '^USER[[:space:]]+[1-9][0-9]*(:[1-9][0-9]*)?[[:space:]]*$' "$dockerfile
 grep -Eq '^ARG RUNTIME_IMAGE=scratch[[:space:]]*$' "$dockerfile" || \
 	fail "production Dockerfile must default to a scratch runtime image"
 
+if grep -F "nauthilus-directorctl" "$dockerfile" >/dev/null; then
+	fail "server Dockerfile must not build or copy nauthilus-directorctl"
+fi
+
 for label in version revision created source licenses; do
 	grep -F "org.opencontainers.image.$label" "$dockerfile" >/dev/null || \
 		fail "production Dockerfile is missing OCI label: $label"
@@ -145,6 +163,57 @@ while IFS= read -r line; do
 			;;
 	esac
 done < "$dockerfile"
+
+grep -Eq '^ARG GO_IMAGE=.*1\.26' "$client_dockerfile" || \
+	fail "client Dockerfile must use a Go 1.26 build stage"
+
+grep -Eq '^FROM[[:space:]]+--platform=\$BUILDPLATFORM[[:space:]]+\$\{GO_IMAGE\}[[:space:]]+AS[[:space:]]+builder[[:space:]]*$' "$client_dockerfile" || \
+	fail "client Dockerfile builder stage must run on BUILDPLATFORM for cross-compiled multi-arch builds"
+
+grep -F -- "-mod=vendor" "$client_dockerfile" >/dev/null || \
+	fail "client Dockerfile must build with vendored dependencies"
+
+grep -F "nauthilus-directorctl" "$client_dockerfile" >/dev/null || \
+	fail "client Dockerfile must build nauthilus-directorctl"
+
+grep -F "docs/man/nauthilus-directorctl.1" "$client_dockerfile" >/dev/null || \
+	fail "client Dockerfile must install the nauthilus-directorctl manpage"
+
+grep -F "docs/man/nauthilus-director.yaml.5" "$client_dockerfile" >/dev/null || \
+	fail "client Dockerfile must install the config manpage"
+
+grep -F "mandoc" "$client_dockerfile" >/dev/null || \
+	fail "client Dockerfile must include a manpage reader"
+
+grep -F "jq" "$client_dockerfile" >/dev/null || \
+	fail "client Dockerfile must include jq for operator JSON output"
+
+grep -F "curl" "$client_dockerfile" >/dev/null || \
+	fail "client Dockerfile must include curl for control-plane diagnostics"
+
+grep -F "openssl" "$client_dockerfile" >/dev/null || \
+	fail "client Dockerfile must include openssl for TLS diagnostics"
+
+grep -Eq '^USER[[:space:]]+[1-9][0-9]*(:[1-9][0-9]*)?[[:space:]]*$' "$client_dockerfile" || \
+	fail "client Dockerfile must run as a non-root user"
+
+for label in version revision created source licenses; do
+	grep -F "org.opencontainers.image.$label" "$client_dockerfile" >/dev/null || \
+		fail "client Dockerfile is missing OCI label: $label"
+done
+
+while IFS= read -r line; do
+	case "$line" in
+		ARG\ *IMAGE=*)
+			value="${line#*=}"
+			value="${value%% *}"
+			value="${value%%	*}"
+			[[ "$value" != *:latest ]] || fail "client Dockerfile must not use mutable latest base tags: $line"
+			[[ "$value" == *:* ]] || \
+				fail "client Dockerfile base image must be explicit: $line"
+			;;
+	esac
+done < "$client_dockerfile"
 
 if grep -nE '^[[:space:]]*FROM[[:space:]].*:latest([[:space:]]|$)' "$dockerfile"; then
 	fail "production Dockerfile must not use mutable latest FROM tags"

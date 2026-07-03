@@ -62,6 +62,8 @@ require_contains ".github/workflows/docker-stable-build.yaml" 'GO_IMAGE=\$\{gola
 	"stable Docker build must pass a digest-pinned Go builder image"
 require_contains ".github/workflows/docker-stable-build.yaml" 'CERTS_IMAGE=\$\{certs_image\}@\$\{certs_digest\}' \
 	"stable Docker build must pass a digest-pinned certificate-stage image"
+require_contains ".github/workflows/docker-stable-build.yaml" 'CLIENT_RUNTIME_IMAGE=\$\{certs_image\}@\$\{certs_digest\}' \
+	"stable Docker build must pass a digest-pinned client runtime image"
 
 require_contains "Makefile" '^GOVULNCHECK_GOFLAGS \?= -mod=vendor$' \
 	"make govulncheck must default to vendored dependency analysis"
