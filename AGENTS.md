@@ -86,6 +86,10 @@ POC package structure as a compatibility constraint.
   rollout labels or similar transient implementation references.
 - Maintain project documentation under `docs/`. Formal specs belong under
   `docs/specs/`; manpages belong under `docs/man/`.
+- Write operator-facing manpages as practical command manuals, not API contract
+  summaries. Prefer operator intent, safety effects, state changes, output
+  meaning and realistic examples over OpenAPI, generated-client, DTO, schema or
+  REST-path wording unless the endpoint itself is the topic.
 - Keep local planning, prompt, scratch, and handoff artifacts under `temp/`.
   The root `temp/` directory is ignored and must never be staged, committed, or
   re-included through ignore exceptions. If a temporary artifact becomes

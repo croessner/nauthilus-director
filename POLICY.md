@@ -164,6 +164,11 @@ These rules are mandatory for coding changes in this repository.
   IDs, task IDs, rollout labels or similar transient implementation references.
 - MUST: Maintain project documentation under `docs/`. Formal specs must live
   under `docs/specs/`; manpages must live under `docs/man/`.
+- MUST: Write operator-facing manpages as practical command manuals rather than
+  API contract summaries. They must prioritize operator intent, safety effects,
+  state changes, output meaning and realistic examples over OpenAPI,
+  generated-client, DTO, schema or REST-path wording unless the endpoint itself
+  is the subject.
 - MUST: Keep product and architecture documentation vendor-neutral. Do not
   frame target behavior by naming other mail-server or director projects unless
   the named project is an actual dependency, protocol peer, or configured
@@ -214,6 +219,9 @@ These rules are mandatory for coding changes in this repository.
       phases, specs, milestones, prompt IDs, task IDs or rollout labels.
 - [ ] Project docs live under `docs/`, specs under `docs/specs/`, and manpages
       under `docs/man/`.
+- [ ] Operator-facing manpages explain commands in operator terms, include
+      realistic examples for common workflows, and avoid OpenAPI/generated-code
+      vocabulary unless it is essential to the topic.
 - [ ] Product and architecture docs stay vendor-neutral unless naming an actual
       dependency, protocol peer, or configured service.
 - [ ] Production code does not depend on `poc/`.
