@@ -55,6 +55,11 @@ POC package structure as a compatibility constraint.
   parallel hand-written client model.
 - Run Go tests through the Makefile targets so `make test`, `make race`, and
   `make guardrails` stay aligned.
+- For Kubernetes release rollouts, use the image produced by the GitHub Actions
+  release workflow under `ghcr.io/croessner/nauthilus-director` and pin the
+  deployment to that GHCR digest. Do not implicitly retag, mirror, or push the
+  release image into another registry as part of rollout preparation unless the
+  user explicitly asks for that registry path.
 - Add and run E2E tests for externally visible behavior. E2E tests must start
   real binaries or test processes, talk to public sockets, REST endpoints and
   CLI commands, and avoid internal package shortcuts as proof of behavior.

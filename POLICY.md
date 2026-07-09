@@ -127,6 +127,11 @@ These rules are mandatory for coding changes in this repository.
 - MUST: Publish release-sensitive refs from a clean checkout whose `HEAD`
   matches the pushed `main` or version-tag commit, so vulnerability analysis
   covers the exact content being published.
+- MUST: For Kubernetes release rollouts, deploy the release image produced by
+  GitHub Actions from `ghcr.io/croessner/nauthilus-director` and pin the
+  manifest to the GHCR digest. Do not implicitly retag, mirror, or push release
+  images into another registry during rollout preparation unless that registry
+  path is explicitly requested.
 - MUST: Keep `.golangci.yml` aligned with the repository guardrail policy and
   run `golangci-lint` through `make lint` or `make guardrails`.
 - MUST: Keep lint checks strict enough to report unused variables, constants,
