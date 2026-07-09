@@ -756,12 +756,13 @@ func TestBufferedPostAuthBytesReachBackendExactlyOnce(t *testing.T) {
 	harness.expectDone(t)
 }
 
-// TestBackendBufferedBytesReachProxyHandoff verifies backend read-ahead is relayed by policy.
-func TestBackendBufferedBytesReachProxyHandoff(t *testing.T) {
+// TestBackendPostAuthCapabilitiesAreSuppressedBeforeProxyHandoff verifies
+// unattended backend capabilities cannot be misread as client command output.
+func TestBackendPostAuthCapabilitiesAreSuppressedBeforeProxyHandoff(t *testing.T) {
 	authenticator := &recordingAuthenticator{
 		result: nauthilus.AuthResult{Decision: nauthilus.DecisionAuthenticated, Account: "alice@example.test"},
 	}
-	backendBuffered := "\"SASL\" \"PLAIN\"\r\nOK \"post-auth capability\"\r\n"
+	backendBuffered := "\"IMPLEMENTATION\" \"Dovecot Pigeonhole\"\r\n\"SASL\" \"PLAIN XOAUTH2\"\r\nOK \"post-auth capability\"\r\n"
 	connector := &recordingSieveBackendConnector{backendBuffered: backendBuffered}
 	runner := &recordingSieveProxyRunner{}
 	config := testPlacementSessionConfig(TLSModeImplicit, authenticator, nil, nil)
@@ -783,8 +784,8 @@ func TestBackendBufferedBytesReachProxyHandoff(t *testing.T) {
 	harness.expectDone(t)
 
 	configured := runner.singleConfig(t)
-	if got := string(configured.BufferedToClient); got != backendBuffered {
-		t.Fatalf("backend buffered bytes = %q, want %q", got, backendBuffered)
+	if got := string(configured.BufferedToClient); got != "" {
+		t.Fatalf("backend buffered bytes = %q, want none", got)
 	}
 }
 

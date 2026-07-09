@@ -103,6 +103,7 @@ func (s *Session) transitionAuthenticatedSession(
 	connectSpan.End(sieveObservationResultOK, sieveReasonOK)
 
 	credentials.Clear()
+	connection.DiscardBufferedCapabilityResponse()
 
 	if err := s.writeOK("Authentication successful"); err != nil {
 		_ = connection.Conn().Close()

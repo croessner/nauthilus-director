@@ -19,6 +19,7 @@ package sieve
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -156,6 +157,28 @@ func (c *BackendConnection) Buffered() []byte {
 	}
 
 	return buffered
+}
+
+// DiscardBufferedCapabilityResponse removes an unsolicited backend capability
+// response that arrived after backend authentication but before proxy handoff.
+func (c *BackendConnection) DiscardBufferedCapabilityResponse() bool {
+	if c == nil || c.reader == nil || c.reader.Buffered() == 0 {
+		return false
+	}
+
+	buffered, err := c.reader.Peek(c.reader.Buffered())
+	if err != nil {
+		return false
+	}
+
+	length, ok := bufferedCapabilityResponseLength(buffered)
+	if !ok || length <= 0 {
+		return false
+	}
+
+	_, _ = c.reader.Discard(length)
+
+	return true
 }
 
 // Connect dials, negotiates configured TLS, and collects backend capabilities.
@@ -440,6 +463,38 @@ func backendResponseCode(rest string) string {
 // referral reports whether a backend response tried to redirect the client.
 func (r backendResponse) referral() bool {
 	return strings.EqualFold(r.code, "REFERRAL")
+}
+
+// bufferedCapabilityResponseLength returns the complete response length when
+// the buffered bytes begin with ManageSieve capability lines followed by OK.
+func bufferedCapabilityResponseLength(buffered []byte) (int, bool) {
+	remaining := buffered
+	total := 0
+	sawCapability := false
+
+	for len(remaining) > 0 {
+		index := bytes.IndexByte(remaining, '\n')
+		if index < 0 {
+			return 0, false
+		}
+
+		lineBytes := remaining[:index+1]
+		total += len(lineBytes)
+		line := strings.TrimRight(string(lineBytes), "\r\n")
+
+		if response, ok := parseBackendResponseLine(line); ok {
+			return total, sawCapability && response.condition == backendResponseOK
+		}
+
+		check := &BackendConnection{}
+		if err := check.addCapabilityLine(line); err != nil {
+			return 0, false
+		}
+		sawCapability = true
+		remaining = remaining[index+1:]
+	}
+
+	return 0, false
 }
 
 // backendConnectContext derives the configured backend connect deadline.

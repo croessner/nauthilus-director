@@ -87,6 +87,15 @@ post-auth ManageSieve traffic as opaque bytes. Script names, script contents,
 post-auth command bodies and backend script diagnostics belong to the backend
 ManageSieve service, not to director routing, metrics or logs.
 
+The proxy handoff boundary must also keep backend post-auth protocol chatter
+out of the frontend command stream. Some ManageSieve backends can emit a fresh
+capability response immediately after successful backend authentication. The
+director consumes a complete buffered capability response before it sends
+frontend authentication success and before transparent proxy mode starts, so a
+client's first post-auth command cannot misread backend capability lines as its
+own command response. Other backend read-ahead bytes remain backend-owned
+opaque traffic and are forwarded through the proxy handoff unchanged.
+
 The hard invariant is same-backend-node user-stateful routing. ManageSieve uses
 the same authoritative tenant and normalized account key as IMAP active affinity,
 retained backend binding, user movement, user placement holds, user backend pins
