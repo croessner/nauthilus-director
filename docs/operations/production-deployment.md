@@ -9,7 +9,7 @@ focused operations runbooks linked below.
 
 | Artifact | Path | Validation | Notes |
 | --- | --- | --- | --- |
-| Server binary | `cmd/nauthilus-director/` | `make build-check`; `make build` | Built from the root production module with Go 1.26.4. |
+| Server binary | `cmd/nauthilus-director/` | `make build-check`; `make build` | Built from the root production module with Go 1.26.5. |
 | Operator CLI | `cmd/nauthilus-directorctl/` | `make build-check`; `make build` | Uses the generated OpenAPI client boundary for REST transport. |
 | Manpages | `docs/man/` | `make docs-check`; install staging with `make install DESTDIR=<staging-dir>` | Operator command and config references. |
 | Target configuration | `docs/config/nauthilus-director.target.yml` | `make docs-check` | Target YAML shape with secret paths and redacted references only. |
@@ -61,7 +61,7 @@ Environment-specific checks belong to separate targets:
 
 ## Binary Deployment And Preflight
 
-Build production binaries from the root module with Go 1.26.4:
+Build production binaries from the root module with Go 1.26.5:
 
 ```sh
 make build
@@ -92,7 +92,7 @@ listener. Use protected config output only through an explicit and authorized
 ## Container Deployment
 
 The production server image is built from `packaging/docker/Dockerfile` with
-Go 1.26.4, vendored dependencies and a `scratch` runtime image. It includes only
+Go 1.26.5, vendored dependencies and a `scratch` runtime image. It includes only
 `nauthilus-director`, CA trust roots, passwd/group metadata and empty runtime
 directories. It runs as UID/GID `10001:10001`.
 

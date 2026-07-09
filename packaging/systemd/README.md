@@ -13,7 +13,7 @@ not depend on demo Compose services, demo TLS generators or demo entrypoints.
 
 ## Service Contract
 
-- Run `/usr/local/bin/nauthilus-director` built with Go 1.26.4.
+- Run `/usr/local/bin/nauthilus-director` built with Go 1.26.5.
 - Start with `/etc/nauthilus-director/nauthilus-director.yml`.
 - Reload through `/usr/local/bin/nauthilus-directorctl --address http://127.0.0.1:9090 --timeout 10s reload`.
 - Stop gracefully with `SIGTERM`; the unit timeout is aligned with the default

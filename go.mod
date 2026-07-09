@@ -2,7 +2,7 @@ module github.com/croessner/nauthilus-director
 
 go 1.26
 
-toolchain go1.26.4
+toolchain go1.26.5
 
 require (
 	github.com/getkin/kin-openapi v0.135.0

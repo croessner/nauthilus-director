@@ -13,7 +13,7 @@ the production image or host-install layout.
 
 ## Release Target Conventions
 
-- Build and packaging references use Go 1.26.4.
+- Build and packaging references use Go 1.26.5.
 - Production binaries are `cmd/nauthilus-director` and
   `cmd/nauthilus-directorctl`; the server and client container images ship
   those binaries separately.
@@ -30,7 +30,7 @@ the production image or host-install layout.
 
 | Artifact class | Owner path | Validation path | Guardrail status | Notes |
 | --- | --- | --- | --- | --- |
-| Production binaries | `cmd/nauthilus-director/`, `cmd/nauthilus-directorctl/`, `Makefile` | `make build-check`; `make build` for concrete binary output | In `make guardrails` through `build-check` | Binaries must build from the root production module with Go 1.26.4. |
+| Production binaries | `cmd/nauthilus-director/`, `cmd/nauthilus-directorctl/`, `Makefile` | `make build-check`; `make build` for concrete binary output | In `make guardrails` through `build-check` | Binaries must build from the root production module with Go 1.26.5. |
 | Host binary and manpage install | `Makefile`, `docs/man/` | `make install DESTDIR=<staging-dir>` when install layout changes | Outside normal guardrails | Install validation writes to a chosen staging directory. |
 | Production server Docker image | `packaging/docker/Dockerfile`, `packaging/docker/README.md`, `.dockerignore`, `Makefile` | `make check-packaging`; optional `make docker-build`; optional `make docker-smoke` | Static checks only in guardrails | Server image contains only `nauthilus-director`; Docker daemon proof stays optional and separate. |
 | Operator client Docker image | `packaging/docker/Dockerfile.client`, `packaging/docker/README.md`, `.dockerignore`, `Makefile` | `make check-packaging`; optional `make docker-client-build`; optional `make docker-client-smoke` | Static checks only in guardrails | Client image contains `nauthilus-directorctl`, manpages and bounded operator tools. |

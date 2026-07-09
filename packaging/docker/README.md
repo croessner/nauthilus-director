@@ -8,7 +8,7 @@ built to run without that topology.
 
 ## Image Contract
 
-- Build with Go 1.26.4 and `-mod=vendor`.
+- Build with Go 1.26.5 and `-mod=vendor`.
 - Build `nauthilus-director` and `nauthilus-directorctl` from the root
   production module, but ship them in separate runtime images.
 - Use reproducible build inputs: `-trimpath`, `-buildvcs=false` and an empty Go
@@ -59,7 +59,7 @@ The target uses the following overridable variables:
 | `REVISION` | Short Git revision or `unknown` | OCI revision label. |
 | `BUILD_DATE` | `unknown` | OCI created label; set an RFC 3339 timestamp when desired. |
 | `IMAGE_SOURCE` | Repository URL | OCI source label. |
-| `GO_IMAGE` | `golang:1.26.4-alpine3.23` | Go build-stage image. |
+| `GO_IMAGE` | `golang:1.26.5-alpine3.23` | Go build-stage image. |
 | `CERTS_IMAGE` | `alpine:3.23` | CA-certificate and passwd/group preparation image. |
 | `RUNTIME_IMAGE` | `scratch` | Final runtime image. |
 | `CLIENT_RUNTIME_IMAGE` | `alpine:3.23` | Final operator client runtime image. |
@@ -160,7 +160,7 @@ docker run --rm --network host --read-only \
 ## Static Validation
 
 `make check-packaging` validates both Dockerfiles without starting Docker. It
-checks for Go 1.26.4, vendored builds, non-root runtime, server-only `scratch`
+checks for Go 1.26.5, vendored builds, non-root runtime, server-only `scratch`
 runtime defaults, client manpages and tools, OCI labels, `.dockerignore`
 exclusions, stable optional targets and the absence of demo-stack entrypoints
 or source-only copy paths.
