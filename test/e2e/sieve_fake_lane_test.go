@@ -26,6 +26,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -128,6 +129,113 @@ func TestServerBinaryPublicSieveProductionFlow(t *testing.T) {
 	exerciseSieveRuntimeControls(t, sieveAddress, controlURL, ctl, fakeSieveA, fakeSieveB, process)
 
 	assertSieveProcessOutputSafe(t, process.output.String())
+}
+
+// TestServerBinaryPublicSieveGreetingDisclosurePolicy proves ManageSieve greeting policy through a public socket.
+func TestServerBinaryPublicSieveGreetingDisclosurePolicy(t *testing.T) {
+	binary := e2eServerBinaryWithVersion(t, e2eGreetingProcessVersion)
+	testCases := []struct {
+		name           string
+		policy         greetingPolicyFixture
+		implementation string
+		checkVersion   bool
+	}{
+		{
+			name:           "default",
+			implementation: "\"IMPLEMENTATION\" \"nauthilus-director " + e2eGreetingProcessVersion + "\"",
+			checkVersion:   true,
+		},
+		{
+			name: "include",
+			policy: greetingPolicyFixture{
+				DisplayName:     "nauthilus-director",
+				SoftwareVersion: "include",
+			},
+			implementation: "\"IMPLEMENTATION\" \"nauthilus-director " + e2eGreetingProcessVersion + "\"",
+			checkVersion:   true,
+		},
+		{
+			name: "suppress",
+			policy: greetingPolicyFixture{
+				DisplayName:     "nauthilus-director",
+				SoftwareVersion: "suppress",
+			},
+			implementation: "\"IMPLEMENTATION\" \"nauthilus-director\"",
+			checkVersion:   true,
+		},
+		{
+			name: "display name",
+			policy: greetingPolicyFixture{
+				DisplayName:     "Norbert",
+				SoftwareVersion: "default",
+			},
+			implementation: "\"IMPLEMENTATION\" \"Norbert " + e2eGreetingProcessVersion + "\"",
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			redisFixture := startValkeySessionStore(t)
+			authority := startMappedFakeOIDCHTTPAuthority(t, sieveAuthorityIdentities(), nil, fakeOIDCAuthorityOptions{
+				SkipBackchannelAuth: true,
+			})
+			backendCertPath, _, backendCertificate := writeTestCertificate(t)
+			sieveBackendTLS := &tls.Config{Certificates: []tls.Certificate{backendCertificate}, MinVersion: tls.VersionTLS12}
+			fakeSieveA := managesievebackend.Start(t, managesievebackend.Options{
+				TLSConfig: sieveBackendTLS,
+				TLSMode:   "starttls",
+			})
+			fakeSieveB := managesievebackend.Start(t, managesievebackend.Options{
+				TLSConfig: sieveBackendTLS,
+				TLSMode:   "starttls",
+			})
+			fakeIMAPA := startFakeIMAPBackend(t, fakeBackendOptions{})
+			fakeIMAPB := startFakeIMAPBackend(t, fakeBackendOptions{})
+			fakeLMTPA := lmtpbackend.Start(t, lmtpbackend.Options{})
+			fakeLMTPB := lmtpbackend.Start(t, lmtpbackend.Options{})
+			sieveAddress := loopbackAddress(t)
+			configPath := writeSieveProductionProcessConfig(t, sieveProductionProcessConfigOptions{
+				RedisAddress:    redisFixture.addr,
+				AuthorityURL:    authority.URL(),
+				AuthorityBearer: processAuthorityBearerForFake(authority),
+				SieveAddress:    sieveAddress,
+				SievesAddress:   loopbackAddress(t),
+				IMAPAddress:     loopbackAddress(t),
+				LMTPAddress:     loopbackAddress(t),
+				ControlAddress:  loopbackAddress(t),
+				SieveBackends: map[string]string{
+					e2eSieveBackendAID: fakeSieveA.Address(),
+					e2eSieveBackendBID: fakeSieveB.Address(),
+				},
+				IMAPBackends: map[string]string{
+					e2eBackendAID: fakeIMAPA.Address(),
+					e2eBackendBID: fakeIMAPB.Address(),
+				},
+				LMTPBackends: map[string]string{
+					e2eLMTPBackendAID: fakeLMTPA.Address(),
+					e2eLMTPBackendBID: fakeLMTPB.Address(),
+				},
+				SieveBackendTLSMode:   "starttls",
+				SieveBackendTLSCAFile: backendCertPath,
+				SieveGreeting:         testCase.policy,
+			})
+			process := startDirectorProcess(t, binary, configPath)
+
+			waitForSieveGreeting(t, sieveAddress, process)
+			client := dialSieve(t, sieveAddress)
+			defer client.Close()
+			greeting := client.ReadResponse()
+			assertSieveResponseLine(t, greeting, testCase.implementation)
+			if testCase.checkVersion {
+				assertSieveResponseLine(t, greeting, "\"VERSION\" \"1.0\"")
+			}
+			assertSieveResponseLine(t, greeting, "OK")
+			client.Close()
+			stopDirectorProcess(t, process)
+			assertSieveProcessOutputSafe(t, process.output.String())
+			assertOutputOmits(t, process.output.String(), e2eGreetingUnsafeSentinel)
+		})
+	}
 }
 
 // exerciseSieveStartTLSAuthProxyAndRouteLookup proves frontend TLS, auth, proxying and diagnostics.
@@ -428,6 +536,10 @@ type sieveProductionProcessConfigOptions struct {
 	IMAPAddress           string
 	LMTPAddress           string
 	ControlAddress        string
+	IMAPGreeting          greetingPolicyFixture
+	LMTPGreeting          greetingPolicyFixture
+	SieveGreeting         greetingPolicyFixture
+	SievesGreeting        greetingPolicyFixture
 	SieveBackends         map[string]string
 	SieveBackendTLSMode   string
 	SieveBackendTLSCAFile string
@@ -542,6 +654,7 @@ director:
       imap:
         capabilities: [IMAP4rev1, ID, SASL-IR, STARTTLS, AUTH=PLAIN]
         auth_mechanisms: [plain]
+%s
     lmtp:
       protocol: lmtp
       service_name: lmtp
@@ -565,6 +678,7 @@ director:
             satisfies_required: false
             identity_source: subject_common_name
         capabilities: [SMTPUTF8, STARTTLS]
+%s
     sieve:
       protocol: sieve
       service_name: sieve
@@ -584,6 +698,7 @@ director:
         capabilities:
           script_extensions: [fileinto, reject]
           language: en
+%s
     sieves:
       protocol: sieve
       service_name: sieves
@@ -603,6 +718,7 @@ director:
         capabilities:
           script_extensions: [fileinto, reject]
           language: en
+%s
   backend_pools:
     imap-default:
       protocol: imap
@@ -629,15 +745,19 @@ director:
 		options.IMAPAddress,
 		certPath,
 		keyPath,
+		greetingPolicyYAML("        ", options.IMAPGreeting),
 		options.LMTPAddress,
 		certPath,
 		keyPath,
+		greetingPolicyYAML("        ", options.LMTPGreeting),
 		options.SieveAddress,
 		certPath,
 		keyPath,
+		greetingPolicyYAML("        ", options.SieveGreeting),
 		options.SievesAddress,
 		certPath,
 		keyPath,
+		greetingPolicyYAML("        ", options.SievesGreeting),
 		sieveProductionBackendsYAML(options, backendPasswordPath),
 	)
 	content = strings.ReplaceAll(content, "\t", "")
@@ -952,6 +1072,17 @@ func sieveStatusLine(line string) bool {
 	line = strings.TrimSpace(line)
 
 	return strings.HasPrefix(line, "OK") || strings.HasPrefix(line, "NO") || strings.HasPrefix(line, "BYE")
+}
+
+// assertSieveResponseLine verifies one exact ManageSieve response line is present.
+func assertSieveResponseLine(t *testing.T, lines []string, want string) {
+	t.Helper()
+
+	if slices.Contains(lines, want) {
+		return
+	}
+
+	t.Fatalf("Sieve response = %v, want line %q", lines, want)
 }
 
 // assertSieveHasCapability verifies one capability token is present.

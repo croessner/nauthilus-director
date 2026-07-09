@@ -530,6 +530,9 @@ director:
                     - AUTH=PLAIN
                     - AUTH=XOAUTH2
                     - AUTH=OAUTHBEARER
+                greeting:
+                    display_name: nauthilus-director
+                    software_version: default
                 require_id_before_auth: false
             network: tcp
             protocol: imap
@@ -563,6 +566,9 @@ director:
                     - AUTH=PLAIN
                     - AUTH=XOAUTH2
                     - AUTH=OAUTHBEARER
+                greeting:
+                    display_name: nauthilus-director
+                    software_version: default
                 require_id_before_auth: false
             network: tcp
             protocol: imap
@@ -607,6 +613,9 @@ director:
                         identity_source: subject_common_name
                         satisfies_required: false
                     required: true
+                greeting:
+                    display_name: nauthilus-director
+                    software_version: default
                 size:
                     max_message_bytes: 104857600
             network: tcp
@@ -651,6 +660,9 @@ director:
                         identity_source: subject_common_name
                         satisfies_required: false
                     required: true
+                greeting:
+                    display_name: nauthilus-director
+                    software_version: default
                 size:
                     max_message_bytes: 104857600
             network: tcp
@@ -683,6 +695,9 @@ director:
                     - STLS
                     - USER
                     - SASL
+                greeting:
+                    display_name: nauthilus-director
+                    software_version: default
             protocol: pop3
             proxy_protocol:
                 enabled: false
@@ -711,6 +726,9 @@ director:
                 capabilities:
                     - USER
                     - SASL
+                greeting:
+                    display_name: nauthilus-director
+                    software_version: default
             protocol: pop3
             proxy_protocol:
                 enabled: false
@@ -744,6 +762,9 @@ director:
                 capabilities:
                     language: en
                     script_extensions: []
+                greeting:
+                    display_name: nauthilus-director
+                    software_version: default
             tls:
                 cert: /etc/nauthilus-director/sieve.crt
                 client_ca: ""
@@ -772,6 +793,9 @@ director:
                 capabilities:
                     language: en
                     script_extensions: []
+                greeting:
+                    display_name: nauthilus-director
+                    software_version: default
             tls:
                 cert: /etc/nauthilus-director/sieves.crt
                 client_ca: ""

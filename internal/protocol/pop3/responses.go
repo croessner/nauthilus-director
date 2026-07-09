@@ -20,6 +20,8 @@ import (
 	"fmt"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/croessner/nauthilus-director/internal/protocol/greeting"
 )
 
 const (
@@ -32,7 +34,12 @@ const (
 
 // writeGreeting sends the safe POP3 greeting for a ready frontend session.
 func (s *Session) writeGreeting() error {
-	return s.writeOK("nauthilus-director POP3 ready")
+	return s.writeOK(pop3GreetingText(s.greetingPolicy))
+}
+
+// pop3GreetingText renders the POP3 greeting text around the shared display identity.
+func pop3GreetingText(policy greeting.Policy) string {
+	return sanitizeResponseText(policy.DisplayIdentity(greeting.ProtocolPOP3) + " POP3 ready")
 }
 
 // writeOK writes one successful POP3 response line.

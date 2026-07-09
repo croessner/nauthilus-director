@@ -36,6 +36,7 @@ import (
 	"github.com/croessner/nauthilus-director/internal/nauthilus"
 	"github.com/croessner/nauthilus-director/internal/observability"
 	"github.com/croessner/nauthilus-director/internal/placement"
+	"github.com/croessner/nauthilus-director/internal/protocol/greeting"
 	"github.com/croessner/nauthilus-director/internal/proxy"
 	"github.com/croessner/nauthilus-director/internal/routing"
 	runtimectl "github.com/croessner/nauthilus-director/internal/runtime"
@@ -62,6 +63,84 @@ func TestImplementationCapabilityUsesProcessVersion(t *testing.T) {
 	if got := ImplementationCapability(" "); got != ImplementationName {
 		t.Fatalf("implementation fallback = %q, want product name", got)
 	}
+}
+
+// TestGreetingPolicyControlsImplementationDisclosure verifies Sieve identity policy rendering.
+func TestGreetingPolicyControlsImplementationDisclosure(t *testing.T) {
+	tests := []struct {
+		name           string
+		displayName    string
+		disclosure     greeting.SoftwareVersionDisclosure
+		implementation string
+	}{
+		{
+			name:           "default",
+			displayName:    ImplementationName,
+			disclosure:     greeting.DisclosureDefault,
+			implementation: "\"IMPLEMENTATION\" \"nauthilus-director test\"\r\n",
+		},
+		{
+			name:           "suppress",
+			displayName:    ImplementationName,
+			disclosure:     greeting.DisclosureSuppress,
+			implementation: "\"IMPLEMENTATION\" \"nauthilus-director\"\r\n",
+		},
+		{
+			name:           "include",
+			displayName:    ImplementationName,
+			disclosure:     greeting.DisclosureInclude,
+			implementation: "\"IMPLEMENTATION\" \"nauthilus-director test\"\r\n",
+		},
+		{
+			name:           "custom default",
+			displayName:    "Norbert",
+			disclosure:     greeting.DisclosureDefault,
+			implementation: "\"IMPLEMENTATION\" \"Norbert test\"\r\n",
+		},
+		{
+			name:           "custom suppress",
+			displayName:    "Norbert",
+			disclosure:     greeting.DisclosureSuppress,
+			implementation: "\"IMPLEMENTATION\" \"Norbert\"\r\n",
+		},
+		{
+			name:           "custom include",
+			displayName:    "Norbert",
+			disclosure:     greeting.DisclosureInclude,
+			implementation: "\"IMPLEMENTATION\" \"Norbert test\"\r\n",
+		},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			config := testSessionConfig(TLSModeImplicit, nil)
+			config.GreetingPolicy = testGreetingPolicy(t, testCase.displayName, "test", testCase.disclosure)
+			harness := startSieveHarness(t, config)
+			harness.expectGreeting(t,
+				testCase.implementation,
+				testGreetingVersion,
+				testGreetingSieve,
+				testGreetingLanguage,
+				testGreetingSASLTLS,
+				testGreetingOK,
+			)
+		})
+	}
+}
+
+// TestGreetingPolicyWithoutVersionKeepsProtocolVersion verifies include cannot publish an empty process version.
+func TestGreetingPolicyWithoutVersionKeepsProtocolVersion(t *testing.T) {
+	config := testSessionConfig(TLSModeImplicit, nil)
+	config.GreetingPolicy = testGreetingPolicy(t, "Norbert", " \n\t ", greeting.DisclosureInclude)
+	harness := startSieveHarness(t, config)
+	harness.expectGreeting(t,
+		"\"IMPLEMENTATION\" \"Norbert\"\r\n",
+		testGreetingVersion,
+		testGreetingSieve,
+		testGreetingLanguage,
+		testGreetingSASLTLS,
+		testGreetingOK,
+	)
 }
 
 // TestCapabilitiesReturnsDetachedFacts verifies callers cannot mutate handler capability state.
@@ -142,6 +221,44 @@ func TestCapabilityChangesAfterStartTLS(t *testing.T) {
 	harness.write(t, "CAPABILITY\r\n")
 	harness.expectLines(t,
 		testGreetingImplementation,
+		testGreetingVersion,
+		testGreetingSieve,
+		testGreetingLanguage,
+		testGreetingSASLTLS,
+		"OK \"Capability completed\"\r\n",
+	)
+}
+
+// TestCapabilityRefreshAfterStartTLSKeepsGreetingPolicy verifies STARTTLS does not reset identity policy.
+func TestCapabilityRefreshAfterStartTLSKeepsGreetingPolicy(t *testing.T) {
+	implementation := "\"IMPLEMENTATION\" \"Norbert\"\r\n"
+	config := testSessionConfig(TLSModeStartTLS, nil)
+	config.GreetingPolicy = testGreetingPolicy(t, "Norbert", "test", greeting.DisclosureSuppress)
+	harness := startSieveHarness(t, config)
+	harness.expectGreeting(t,
+		implementation,
+		testGreetingVersion,
+		testGreetingSieve,
+		testGreetingLanguage,
+		testGreetingStartTLS,
+		testGreetingSASLClear,
+		testGreetingOK,
+	)
+
+	harness.write(t, "STARTTLS\r\n")
+	harness.expectLine(t, "OK \"Begin TLS negotiation now\"\r\n")
+	harness.expectLines(t,
+		implementation,
+		testGreetingVersion,
+		testGreetingSieve,
+		testGreetingLanguage,
+		testGreetingSASLTLS,
+		testGreetingOK,
+	)
+
+	harness.write(t, "CAPABILITY\r\n")
+	harness.expectLines(t,
+		implementation,
 		testGreetingVersion,
 		testGreetingSieve,
 		testGreetingLanguage,
@@ -1063,8 +1180,8 @@ func testSessionConfig(tlsMode string, authenticator nauthilus.Authenticator) Se
 		TLSMode:             tlsMode,
 		AuthMechanisms:      []string{"plain", "xoauth2", "oauthbearer"},
 		MaxBearerTokenBytes: defaultMaxBearerBytes,
+		GreetingPolicy:      testGreetingPolicyForHelper(ImplementationName, "test", greeting.DisclosureDefault),
 		Capabilities: CapabilitiesConfig{
-			Implementation:   ImplementationCapability("test"),
 			ProtocolVersion:  ProtocolVersionRFC5804,
 			ScriptExtensions: []string{"fileinto", "reject"},
 			Language:         "en",
@@ -1105,6 +1222,48 @@ func testPlacementSessionConfig(
 	config.ProxyRunner = &recordingSieveProxyRunner{}
 
 	return config
+}
+
+// testGreetingPolicy builds a public identity policy and fails the test on invalid fixtures.
+func testGreetingPolicy(
+	t *testing.T,
+	displayNameValue string,
+	processVersion string,
+	disclosure greeting.SoftwareVersionDisclosure,
+) greeting.Policy {
+	t.Helper()
+
+	policy, err := newTestGreetingPolicy(displayNameValue, processVersion, disclosure)
+	if err != nil {
+		t.Fatalf("newTestGreetingPolicy rejected fixture: %v", err)
+	}
+
+	return policy
+}
+
+// testGreetingPolicyForHelper builds a public identity policy where no testing handle is available.
+func testGreetingPolicyForHelper(
+	displayNameValue string,
+	processVersion string,
+	disclosure greeting.SoftwareVersionDisclosure,
+) greeting.Policy {
+	policy, _ := newTestGreetingPolicy(displayNameValue, processVersion, disclosure)
+
+	return policy
+}
+
+// newTestGreetingPolicy constructs a shared policy for ManageSieve wire tests.
+func newTestGreetingPolicy(
+	displayNameValue string,
+	processVersion string,
+	disclosure greeting.SoftwareVersionDisclosure,
+) (greeting.Policy, error) {
+	displayName, err := greeting.NewDisplayName(displayNameValue)
+	if err != nil {
+		return greeting.Policy{}, err
+	}
+
+	return greeting.NewPolicy(displayName, processVersion, disclosure)
 }
 
 type sieveHarness struct {

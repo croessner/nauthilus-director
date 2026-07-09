@@ -29,6 +29,7 @@ import (
 	"github.com/croessner/nauthilus-director/internal/listener"
 	"github.com/croessner/nauthilus-director/internal/observability"
 	"github.com/croessner/nauthilus-director/internal/placement"
+	"github.com/croessner/nauthilus-director/internal/protocol/greeting"
 	"github.com/croessner/nauthilus-director/internal/protocol/imap"
 	"github.com/croessner/nauthilus-director/internal/protocol/lmtp"
 	"github.com/croessner/nauthilus-director/internal/protocol/pop3"
@@ -599,13 +600,13 @@ func sessionHandlerFactory(
 	return func(options listener.SessionOptions) listener.SessionHandler {
 		switch strings.ToLower(strings.TrimSpace(options.Config.Protocol)) {
 		case protocolIMAP:
-			return imapSessionHandler(options, resolver, store, placementService, retentionTTL, placementGate, recorder)
+			return imapSessionHandler(options, resolver, store, placementService, retentionTTL, placementGate, recorder, processVersion)
 		case protocolLMTP:
-			return lmtpSessionHandler(options, resolver, store, selector, capabilities, placementService, retentionTTL, placementGate)
+			return lmtpSessionHandler(options, resolver, store, selector, capabilities, placementService, retentionTTL, placementGate, processVersion)
 		case protocolSIEVE:
 			return sieveSessionHandler(options, resolver, placementService, retentionTTL, placementGate, processVersion)
 		case protocolPOP3:
-			return pop3SessionHandler(options, resolver, placementService, retentionTTL, placementGate)
+			return pop3SessionHandler(options, resolver, placementService, retentionTTL, placementGate, processVersion)
 		default:
 			return unsupportedProtocolHandler{protocol: options.Config.Protocol}
 		}
@@ -640,8 +641,14 @@ func imapSessionHandler(
 	retentionTTL time.Duration,
 	placementGate runtimectl.PlacementGate,
 	recorder observability.Recorder,
+	processVersion string,
 ) listener.SessionHandler {
 	capabilities, mechanisms, requireID := imapListenerOptions(options.Config)
+
+	greetingPolicy := greetingPolicyFromConfig(config.ListenerGreetingConfig{}, processVersion)
+	if options.Config.IMAP != nil {
+		greetingPolicy = greetingPolicyFromConfig(options.Config.IMAP.Greeting, processVersion)
+	}
 
 	return imap.NewHandler(imap.SessionConfig{
 		ListenerName:           options.ListenerName,
@@ -653,6 +660,7 @@ func imapSessionHandler(
 		DirectorInstanceID:     options.DirectorInstanceID,
 		DefaultTenant:          options.DefaultTenant,
 		DefaultShard:           options.DefaultShard,
+		GreetingPolicy:         greetingPolicy,
 		TLSMode:                options.Config.TLS.Mode,
 		Capabilities:           capabilities,
 		AuthMechanisms:         mechanisms,
@@ -691,12 +699,14 @@ func lmtpSessionHandler(
 	placementService placement.DeliveryPlacer,
 	retentionTTL time.Duration,
 	placementGate runtimectl.PlacementGate,
+	processVersion string,
 ) listener.SessionHandler {
 	var (
 		listenerCapabilities []string
 		capabilityFilterDeny []string
 		maxMessageBytes      int64
 		peerAuth             config.LMTPClientAuthConfig
+		greetingPolicy       = greetingPolicyFromConfig(config.ListenerGreetingConfig{}, processVersion)
 	)
 
 	if options.Config.LMTP != nil {
@@ -704,6 +714,7 @@ func lmtpSessionHandler(
 		capabilityFilterDeny = options.Config.LMTP.CapabilityFilter.Deny
 		maxMessageBytes = options.Config.LMTP.Size.MaxMessageBytes
 		peerAuth = options.Config.LMTP.ClientAuth
+		greetingPolicy = greetingPolicyFromConfig(options.Config.LMTP.Greeting, processVersion)
 	}
 
 	return lmtp.NewHandler(lmtp.SessionConfig{
@@ -716,6 +727,7 @@ func lmtpSessionHandler(
 		DirectorInstanceID:      options.DirectorInstanceID,
 		DefaultTenant:           options.DefaultTenant,
 		DefaultShard:            options.DefaultShard,
+		GreetingPolicy:          greetingPolicy,
 		TLSMode:                 options.Config.TLS.Mode,
 		Capabilities:            listenerCapabilities,
 		CapabilityFilterDeny:    capabilityFilterDeny,
@@ -764,15 +776,16 @@ func sieveSessionHandler(
 	var (
 		authMechanisms []string
 		capabilities   = sieve.CapabilitiesConfig{
-			Implementation:  sieve.ImplementationCapability(processVersion),
 			ProtocolVersion: sieve.ProtocolVersionRFC5804,
 		}
+		greetingPolicy = greetingPolicyFromConfig(config.ListenerGreetingConfig{}, processVersion)
 	)
 
 	if options.Config.Sieve != nil {
 		authMechanisms = options.Config.Sieve.AuthMechanisms
 		capabilities.ScriptExtensions = options.Config.Sieve.Capabilities.ScriptExtensions
 		capabilities.Language = options.Config.Sieve.Capabilities.Language
+		greetingPolicy = greetingPolicyFromConfig(options.Config.Sieve.Greeting, processVersion)
 	}
 
 	return sieve.NewHandler(sieve.SessionConfig{
@@ -785,6 +798,7 @@ func sieveSessionHandler(
 		DirectorInstanceID:     options.DirectorInstanceID,
 		DefaultTenant:          options.DefaultTenant,
 		DefaultShard:           options.DefaultShard,
+		GreetingPolicy:         greetingPolicy,
 		TLSMode:                options.Config.TLS.Mode,
 		AuthMechanisms:         authMechanisms,
 		Capabilities:           capabilities,
@@ -811,6 +825,37 @@ func sieveSessionHandler(
 	})
 }
 
+// greetingPolicyFromConfig converts validated listener greeting config into immutable protocol policy.
+func greetingPolicyFromConfig(configured config.ListenerGreetingConfig, processVersion string) greeting.Policy {
+	displayNameValue := ""
+	if configured.DisplayName != nil {
+		displayNameValue = *configured.DisplayName
+	}
+
+	displayName, err := greeting.NewDisplayNameOrDefault(displayNameValue)
+	if err != nil {
+		displayName, _ = greeting.NewDisplayNameOrDefault("")
+	}
+
+	disclosureValue := ""
+	if configured.SoftwareVersion != nil {
+		disclosureValue = *configured.SoftwareVersion
+	}
+
+	disclosure, err := greeting.NewSoftwareVersionDisclosure(disclosureValue)
+	if err != nil {
+		disclosure = greeting.DisclosureSuppress
+	}
+
+	policy, err := greeting.NewPolicy(displayName, processVersion, disclosure)
+	if err != nil {
+		fallback, _ := greeting.NewDisplayNameOrDefault("")
+		policy, _ = greeting.NewPolicy(fallback, "", greeting.DisclosureSuppress)
+	}
+
+	return policy
+}
+
 // pop3SessionHandler builds the POP3 dispatch shell and shared placement boundary.
 func pop3SessionHandler(
 	options listener.SessionOptions,
@@ -818,15 +863,18 @@ func pop3SessionHandler(
 	placementService placement.SessionPlacer,
 	retentionTTL time.Duration,
 	placementGate runtimectl.PlacementGate,
+	processVersion string,
 ) listener.SessionHandler {
 	var (
 		authMechanisms []string
 		capabilities   []string
+		greetingPolicy = greetingPolicyFromConfig(config.ListenerGreetingConfig{}, processVersion)
 	)
 
 	if options.Config.POP3 != nil {
 		authMechanisms = options.Config.POP3.AuthMechanisms
 		capabilities = options.Config.POP3.Capabilities
+		greetingPolicy = greetingPolicyFromConfig(options.Config.POP3.Greeting, processVersion)
 	}
 
 	return pop3.NewHandler(pop3.SessionConfig{
@@ -839,6 +887,7 @@ func pop3SessionHandler(
 		DirectorInstanceID:     options.DirectorInstanceID,
 		DefaultTenant:          options.DefaultTenant,
 		DefaultShard:           options.DefaultShard,
+		GreetingPolicy:         greetingPolicy,
 		TLSMode:                options.Config.TLS.Mode,
 		AuthMechanisms:         authMechanisms,
 		Capabilities:           capabilities,

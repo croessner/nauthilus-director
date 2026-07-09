@@ -124,6 +124,8 @@ const (
 	fakeProxyReadLimit         = 256
 	fakeProxyTimeout           = 500 * time.Millisecond
 	serverBinaryEnv            = "NAUTHILUS_DIRECTOR_E2E_SERVER_BINARY"
+	e2eGreetingProcessVersion  = "e2e-greeting-proof-version"
+	e2eGreetingUnsafeSentinel  = "E2EGreetingUnsafeSentinel"
 )
 
 // TestFakeHTTPAuthorityPublicIMAPFlow proves the guardrail lane uses public sockets.
@@ -220,6 +222,50 @@ func TestServerBinaryPublicIMAPFlow(t *testing.T) {
 
 	fakeBackend.ExpectProxyLine(t, "A002 NOOP")
 	authority.ExpectRequest(t, e2eProtocol, "login", "")
+}
+
+// TestServerBinaryPublicIMAPGreetingDisclosurePolicy proves IMAP greeting policy through a public process socket.
+func TestServerBinaryPublicIMAPGreetingDisclosurePolicy(t *testing.T) {
+	binary := e2eServerBinaryWithVersion(t, e2eGreetingProcessVersion)
+	testCases := protocolGreetingLineFixtures(
+		"* OK nauthilus-director IMAP session ready\r\n",
+		"* OK nauthilus-director "+e2eGreetingProcessVersion+" IMAP session ready\r\n",
+		"* OK nauthilus-director IMAP session ready\r\n",
+		"* OK Norbert IMAP session ready\r\n",
+	)
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			redisFixture := startValkeySessionStore(t)
+			authority := startFakeHTTPAuthority(t, map[string][]string{
+				"account":   {e2eAccount},
+				"tenant":    {e2eTenant},
+				"mailShard": {e2eShardTag},
+			})
+			fakeBackend := startFakeIMAPBackend(t, fakeBackendOptions{})
+			directorAddress := loopbackAddress(t)
+			configPath := writeProcessConfig(t, processConfigOptions{
+				RedisAddress:    redisFixture.addr,
+				AuthorityURL:    authority.URL(),
+				DirectorAddress: directorAddress,
+				BackendAddress:  fakeBackend.Address(),
+				BackendTLS: config.BackendTLSConfig{
+					Mode:          "plaintext",
+					MinTLSVersion: "TLS1.2",
+				},
+				BackendAuth:  masterUserBackendAuth(),
+				IMAPGreeting: testCase.policy,
+			})
+			process := startDirectorProcess(t, binary, configPath)
+
+			got := readProcessGreetingLine(t, directorAddress, process, "* OK ")
+			if got != testCase.want {
+				t.Fatalf("IMAP greeting = %q, want %q", got, testCase.want)
+			}
+			stopDirectorProcess(t, process)
+			assertOutputOmits(t, process.output.String(), e2ePassword, e2eToken, e2eGreetingUnsafeSentinel)
+		})
+	}
 }
 
 // TestServerBinaryOIDCAuthorityCallerAuthPublicIMAPFlow proves public auth uses OIDC caller tokens.
@@ -1925,6 +1971,7 @@ type directorProcess struct {
 	command *exec.Cmd
 	output  *bytes.Buffer
 	done    chan error
+	stop    sync.Once
 }
 
 type processConfigOptions struct {
@@ -1944,9 +1991,55 @@ type processConfigOptions struct {
 	BackendAuth            backend.AuthConfig
 	IMAPAuthMechanisms     []string
 	IMAPCapabilities       []string
+	IMAPGreeting           greetingPolicyFixture
 	ReaperInterval         time.Duration
 	UserHoldMaxWait        time.Duration
 	UserHoldPollInterval   time.Duration
+}
+
+type greetingPolicyFixture struct {
+	DisplayName     string
+	SoftwareVersion string
+}
+
+type greetingLineFixture struct {
+	name   string
+	policy greetingPolicyFixture
+	want   string
+}
+
+// protocolGreetingLineFixtures renders shared disclosure cases for line-oriented greeting tests.
+func protocolGreetingLineFixtures(defaultLine string, includeLine string, suppressLine string, displayNameLine string) []greetingLineFixture {
+	return []greetingLineFixture{
+		{
+			name: "default",
+			want: defaultLine,
+		},
+		{
+			name: "include",
+			policy: greetingPolicyFixture{
+				DisplayName:     "nauthilus-director",
+				SoftwareVersion: "include",
+			},
+			want: includeLine,
+		},
+		{
+			name: "suppress",
+			policy: greetingPolicyFixture{
+				DisplayName:     "nauthilus-director",
+				SoftwareVersion: "suppress",
+			},
+			want: suppressLine,
+		},
+		{
+			name: "display name",
+			policy: greetingPolicyFixture{
+				DisplayName:     "Norbert",
+				SoftwareVersion: "default",
+			},
+			want: displayNameLine,
+		},
+	}
 }
 
 type processAuthorityOIDCOptions struct {
@@ -1993,6 +2086,32 @@ func e2eServerBinary(t *testing.T) string {
 	return binary
 }
 
+// e2eServerBinaryWithVersion builds a real server binary with a stable process version for disclosure tests.
+func e2eServerBinaryWithVersion(t *testing.T, processVersion string) string {
+	t.Helper()
+
+	root := repoRoot(t)
+	binary := filepath.Join(t.TempDir(), "nauthilus-director")
+	cmd := exec.Command(
+		"go",
+		"build",
+		"-mod=vendor",
+		"-trimpath",
+		"-ldflags",
+		"-X main.version="+processVersion,
+		"-o",
+		binary,
+		"./cmd/nauthilus-director",
+	)
+	cmd.Dir = root
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("build versioned nauthilus-director: %v\n%s", err, output)
+	}
+
+	return binary
+}
+
 // startDirectorProcess starts the server binary as an external process.
 func startDirectorProcess(t *testing.T, binary string, configPath string) *directorProcess {
 	t.Helper()
@@ -2017,28 +2136,127 @@ func startDirectorProcess(t *testing.T, binary string, configPath string) *direc
 	return process
 }
 
+// runDirectorProcessExpectFailure runs the server binary and requires an early non-zero exit.
+func runDirectorProcessExpectFailure(t *testing.T, binary string, configPath string) string {
+	t.Helper()
+
+	output := &bytes.Buffer{}
+	cmd := exec.Command(binary, "--config", configPath)
+	cmd.Stdout = output
+	cmd.Stderr = output
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start director process for failure proof: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- cmd.Wait()
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatalf("director process exited successfully, want validation failure:\n%s", output.String())
+		}
+	case <-time.After(5 * time.Second):
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		<-done
+		t.Fatalf("director process did not fail before startup:\n%s", output.String())
+	}
+
+	return output.String()
+}
+
+// readProcessGreetingLine reads one externally visible greeting line from a public socket.
+func readProcessGreetingLine(t *testing.T, address string, process *directorProcess, prefix string) string {
+	t.Helper()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		conn, err := net.DialTimeout("tcp", address, 100*time.Millisecond)
+		if err == nil {
+			_ = conn.SetDeadline(time.Now().Add(time.Second))
+			line, readErr := bufio.NewReader(conn).ReadString('\n')
+			_ = conn.Close()
+			if readErr == nil && strings.HasPrefix(line, prefix) {
+				return line
+			}
+		}
+
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	t.Fatalf("director process did not expose greeting at %s:\n%s", address, process.output.String())
+
+	return ""
+}
+
+// assertTCPAddressClosed verifies validation stopped the process before it bound a public listener.
+func assertTCPAddressClosed(t *testing.T, address string) {
+	t.Helper()
+
+	conn, err := net.DialTimeout("tcp", address, 100*time.Millisecond)
+	if err == nil {
+		_ = conn.Close()
+		t.Fatalf("listener %s accepted connections after validation failure", address)
+	}
+}
+
+// greetingPolicyYAML renders an optional safe fixture subtree under one protocol config.
+func greetingPolicyYAML(indent string, policy greetingPolicyFixture) string {
+	if strings.TrimSpace(policy.DisplayName) == "" && strings.TrimSpace(policy.SoftwareVersion) == "" {
+		return ""
+	}
+
+	displayName := policy.DisplayName
+	if strings.TrimSpace(displayName) == "" {
+		displayName = "nauthilus-director"
+	}
+	softwareVersion := policy.SoftwareVersion
+	if strings.TrimSpace(softwareVersion) == "" {
+		softwareVersion = "default"
+	}
+
+	return fmt.Sprintf(
+		"%sgreeting:\n%s  display_name: %q\n%s  software_version: %q\n",
+		indent,
+		indent,
+		displayName,
+		indent,
+		softwareVersion,
+	)
+}
+
 // stopDirectorProcess terminates the external server process.
 func stopDirectorProcess(t *testing.T, process *directorProcess) {
 	t.Helper()
 
-	select {
-	case <-process.done:
-		return
-	default:
-	}
-
-	if process.command.Process != nil {
-		_ = process.command.Process.Signal(os.Interrupt)
-	}
-
-	select {
-	case <-process.done:
-	case <-time.After(time.Second):
-		if process.command.Process != nil {
-			_ = process.command.Process.Kill()
+	process.stop.Do(func() {
+		select {
+		case <-process.done:
+			return
+		default:
 		}
-		<-process.done
-	}
+
+		if process.command.Process != nil {
+			_ = process.command.Process.Signal(os.Interrupt)
+		}
+
+		select {
+		case <-process.done:
+		case <-time.After(time.Second):
+			if process.command.Process != nil {
+				_ = process.command.Process.Kill()
+			}
+			select {
+			case <-process.done:
+			case <-time.After(2 * time.Second):
+				t.Fatal("director process did not stop after interrupt and kill")
+			}
+		}
+	})
 }
 
 // waitForDirectorGreeting waits until the process exposes its public IMAP socket.
@@ -2177,6 +2395,7 @@ director:
       imap:
         capabilities: [%s]
         auth_mechanisms: [%s]
+%s
   backend_pools:
     imap-default:
       backends: [mailstore-a-imap]
@@ -2226,6 +2445,7 @@ director:
 		listenerKeyPath,
 		quotedYAMLStrings(imapCapabilities),
 		quotedYAMLStrings(imapAuthMechanisms),
+		greetingPolicyYAML("        ", options.IMAPGreeting),
 		options.BackendAddress,
 		e2eShardTag,
 		options.BackendHAProxy,

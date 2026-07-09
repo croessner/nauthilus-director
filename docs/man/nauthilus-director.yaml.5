@@ -306,6 +306,48 @@ and gRPC-reserved
 .B grpc-*
 metadata names fail closed. HTTP header names are canonicalized; gRPC metadata
 keys must already be lowercase ASCII metadata keys.
+.SH PROTOCOL GREETING DISCLOSURE
+IMAP, LMTP, ManageSieve and POP3 listener subtrees expose a bounded
+.B greeting
+policy under the protocol-specific listener block, such as
+.BR director.listeners.<name>.imap.greeting ,
+.BR director.listeners.<name>.lmtp.greeting ,
+.BR director.listeners.<name>.sieve.greeting
+or
+.BR director.listeners.<name>.pop3.greeting .
+.PP
+.B display_name
+sets the public product identity inserted by the protocol renderer. For
+example,
+.B display_name: Norbert
+changes the public identity token to
+.B Norbert
+while the Director still owns the IMAP greeting, LMTP status line and
+.BR LHLO
+identity, ManageSieve quoted capability value and POP3 status line syntax.
+It is not a raw greeting line and cannot be used to publish arbitrary protocol
+text, status codes, multiline replies or capability transcripts.
+.PP
+.B software_version
+accepts
+.BR default ,
+.BR include
+or
+.BR suppress .
+.B default
+preserves the protocol's current public behavior.
+.B include
+is an explicit operator disclosure choice that publishes the normalized process
+version for that listener through the protocol renderer.
+.B suppress
+hides the process version where a protocol would otherwise expose it.
+.PP
+ManageSieve
+.B VERSION
+remains the RFC 5804 protocol version and is still advertised as protocol
+capability information. It is not the Director software version and is not
+controlled by
+.BR software_version .
 .SH BACKEND OUTBOUND PROXY PROTOCOL
 Backend entries may enable backend-side HAProxy PROXY protocol with
 .B director.backends.<name>.haproxy.enabled: true.
@@ -564,9 +606,10 @@ RFC 5804
 .B IMPLEMENTATION
 and
 .B VERSION
-facts are not operator-configurable; the protocol handler derives
+wire fields are not direct raw config fields; the protocol handler derives
 .B IMPLEMENTATION
-from the binary version and uses the RFC 5804 protocol version
+from the listener greeting policy and process-version disclosure mode, and uses
+the RFC 5804 protocol version
 .BR 1.0 .
 RFC 5804 wire rendering belongs to the protocol handler and must also account
 for listener TLS state, configured mechanisms and backend transport safety.

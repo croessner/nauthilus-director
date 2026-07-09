@@ -30,6 +30,7 @@ import (
 	"github.com/croessner/nauthilus-director/internal/nauthilus"
 	"github.com/croessner/nauthilus-director/internal/observability"
 	"github.com/croessner/nauthilus-director/internal/placement"
+	"github.com/croessner/nauthilus-director/internal/protocol/greeting"
 	"github.com/croessner/nauthilus-director/internal/proxy"
 	"github.com/croessner/nauthilus-director/internal/routing"
 	runtimectl "github.com/croessner/nauthilus-director/internal/runtime"
@@ -103,6 +104,7 @@ type SessionConfig struct {
 	DirectorInstanceID     string
 	DefaultTenant          string
 	DefaultShard           string
+	GreetingPolicy         greeting.Policy
 	SessionLeaseTTL        time.Duration
 	SessionIdleGrace       time.Duration
 	BackendRetentionTTL    time.Duration
@@ -143,6 +145,7 @@ type Session struct {
 	directorInstanceID    string
 	defaultTenant         string
 	defaultShard          string
+	greetingPolicy        greeting.Policy
 	sessionLeaseTTL       time.Duration
 	sessionIdleGrace      time.Duration
 	backendRetentionTTL   time.Duration
@@ -184,14 +187,19 @@ func NewHandler(config SessionConfig) *Handler {
 	return &Handler{config: config}
 }
 
-// ImplementationCapability builds the internal RFC 5804 IMPLEMENTATION value.
+// ImplementationCapability builds the compatible default IMPLEMENTATION value.
 func ImplementationCapability(processVersion string) string {
-	version := strings.Join(strings.Fields(processVersion), " ")
-	if version == "" {
+	displayName, err := greeting.NewDisplayNameOrDefault(ImplementationName)
+	if err != nil {
 		return ImplementationName
 	}
 
-	return ImplementationName + " " + version
+	policy, err := greeting.NewPolicy(displayName, processVersion, greeting.DisclosureDefault)
+	if err != nil {
+		return ImplementationName
+	}
+
+	return policy.DisplayIdentity(greeting.ProtocolSieve)
 }
 
 // Capabilities returns a detached copy of the handler's internal capability facts.
@@ -201,6 +209,13 @@ func (h *Handler) Capabilities() CapabilitiesConfig {
 	}
 
 	capabilities := h.config.Capabilities
+
+	capabilities.Implementation = h.config.GreetingPolicy.DisplayIdentity(greeting.ProtocolSieve)
+	if strings.TrimSpace(capabilities.Implementation) == "" {
+		capabilities.Implementation = ImplementationName
+	}
+
+	capabilities.ProtocolVersion = ProtocolVersionRFC5804
 	capabilities.ScriptExtensions = append([]string(nil), capabilities.ScriptExtensions...)
 
 	return capabilities
@@ -270,6 +285,7 @@ func NewSession(config SessionConfig, conn net.Conn) (*Session, error) {
 		directorInstanceID:     config.DirectorInstanceID,
 		defaultTenant:          defaultTenant(config.DefaultTenant),
 		defaultShard:           defaultShard(config.DefaultShard),
+		greetingPolicy:         config.GreetingPolicy,
 		sessionLeaseTTL:        leaseTTL,
 		sessionIdleGrace:       defaultSessionGrace(config.SessionIdleGrace, config.SessionLeaseTTL),
 		backendRetentionTTL:    config.BackendRetentionTTL,

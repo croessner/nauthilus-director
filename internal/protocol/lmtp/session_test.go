@@ -38,6 +38,7 @@ import (
 	"github.com/croessner/nauthilus-director/internal/backend"
 	"github.com/croessner/nauthilus-director/internal/nauthilus"
 	"github.com/croessner/nauthilus-director/internal/placement"
+	"github.com/croessner/nauthilus-director/internal/protocol/greeting"
 	"github.com/croessner/nauthilus-director/internal/routing"
 	runtimectl "github.com/croessner/nauthilus-director/internal/runtime"
 	"github.com/croessner/nauthilus-director/internal/state"
@@ -93,6 +94,77 @@ func TestGreetingAndLHLOCapabilitiesAreDeterministic(t *testing.T) {
 	harness.expectLine(t, "250-nauthilus-director\r\n")
 	harness.expectLine(t, "250-SMTPUTF8\r\n")
 	harness.expectLine(t, "250 AUTH PLAIN LOGIN XOAUTH2 OAUTHBEARER\r\n")
+}
+
+type lmtpGreetingPolicyTestCase struct {
+	name           string
+	displayName    string
+	processVersion string
+	disclosure     greeting.SoftwareVersionDisclosure
+	wantGreeting   string
+	wantLHLO       string
+}
+
+// lmtpGreetingPolicyCases returns protocol identity fixtures for the LMTP greeting and LHLO surfaces.
+func lmtpGreetingPolicyCases() []lmtpGreetingPolicyTestCase {
+	return []lmtpGreetingPolicyTestCase{
+		{
+			name:           "default compatible",
+			displayName:    "nauthilus-director",
+			processVersion: "v1.2.3",
+			disclosure:     greeting.DisclosureDefault,
+			wantGreeting:   "220 2.0.0 nauthilus-director LMTP ready\r\n",
+			wantLHLO:       "250 nauthilus-director\r\n",
+		},
+		{
+			name:           "custom display name",
+			displayName:    "Norbert",
+			processVersion: "v1.2.3",
+			disclosure:     greeting.DisclosureDefault,
+			wantGreeting:   "220 2.0.0 Norbert LMTP ready\r\n",
+			wantLHLO:       "250 Norbert\r\n",
+		},
+		{
+			name:           "include version",
+			displayName:    "Norbert",
+			processVersion: " v1.2.3\nbuild\t7 ",
+			disclosure:     greeting.DisclosureInclude,
+			wantGreeting:   "220 2.0.0 Norbert v1.2.3 build 7 LMTP ready\r\n",
+			wantLHLO:       "250 Norbert v1.2.3 build 7\r\n",
+		},
+		{
+			name:           "suppress default version",
+			displayName:    "nauthilus-director",
+			processVersion: "v1.2.3",
+			disclosure:     greeting.DisclosureSuppress,
+			wantGreeting:   "220 2.0.0 nauthilus-director LMTP ready\r\n",
+			wantLHLO:       "250 nauthilus-director\r\n",
+		},
+		{
+			name:           "suppress custom version",
+			displayName:    "Norbert",
+			processVersion: "v1.2.3",
+			disclosure:     greeting.DisclosureSuppress,
+			wantGreeting:   "220 2.0.0 Norbert LMTP ready\r\n",
+			wantLHLO:       "250 Norbert\r\n",
+		},
+	}
+}
+
+// TestGreetingPolicyControlsLMTPGreetingAndLHLO verifies the shared identity drives both LMTP surfaces.
+func TestGreetingPolicyControlsLMTPGreetingAndLHLO(t *testing.T) {
+	for _, testCase := range lmtpGreetingPolicyCases() {
+		t.Run(testCase.name, func(t *testing.T) {
+			config := testSessionConfig()
+			config.Capabilities = nil
+			config.GreetingPolicy = testGreetingPolicy(t, testCase.displayName, testCase.processVersion, testCase.disclosure)
+
+			harness := startLMTPHarness(t, config)
+			harness.expectLine(t, testCase.wantGreeting)
+			harness.write(t, "LHLO submitter.example\r\n")
+			harness.expectLine(t, testCase.wantLHLO)
+		})
+	}
 }
 
 // TestLHLOAdvertisesEnhancedStatusCodesOnlyWhenConfigured verifies frontend-owned capability filtering.
@@ -3648,6 +3720,28 @@ func testSessionConfig() SessionConfig {
 		MaxBearerTokenBytes: 64,
 		PeerAuthMechanisms:  []string{mechanismPlain, mechanismLogin, mechanismXOAUTH2, mechanismOAuthBearer},
 	}
+}
+
+// testGreetingPolicy builds a shared greeting policy for LMTP wire tests.
+func testGreetingPolicy(
+	t *testing.T,
+	displayNameValue string,
+	processVersion string,
+	disclosure greeting.SoftwareVersionDisclosure,
+) greeting.Policy {
+	t.Helper()
+
+	displayName, err := greeting.NewDisplayName(displayNameValue)
+	if err != nil {
+		t.Fatalf("NewDisplayName(%q): %v", displayNameValue, err)
+	}
+
+	policy, err := greeting.NewPolicy(displayName, processVersion, disclosure)
+	if err != nil {
+		t.Fatalf("NewPolicy: %v", err)
+	}
+
+	return policy
 }
 
 // testChunkingConfig returns a session config where CHUNKING is safe to advertise for tests.

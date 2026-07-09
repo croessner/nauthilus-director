@@ -26,6 +26,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/croessner/nauthilus-director/internal/protocol/greeting"
 )
 
 const (
@@ -40,6 +42,56 @@ func TestGreetingAndTaggedResponseFormatting(t *testing.T) {
 	harness.expectLine(t, greetingLine)
 	harness.write(t, "A001 NOOP\r\n")
 	harness.expectLine(t, "A001 OK NOOP completed\r\n")
+}
+
+// TestGreetingPolicyControlsIMAPGreeting verifies policy rendering without changing the response condition.
+func TestGreetingPolicyControlsIMAPGreeting(t *testing.T) {
+	tests := []struct {
+		name           string
+		displayName    string
+		processVersion string
+		disclosure     greeting.SoftwareVersionDisclosure
+		want           string
+	}{
+		{
+			name:           "default compatible",
+			displayName:    "nauthilus-director",
+			processVersion: "v1.2.3",
+			disclosure:     greeting.DisclosureDefault,
+			want:           greetingLine,
+		},
+		{
+			name:           "custom display name",
+			displayName:    "Norbert",
+			processVersion: "v1.2.3",
+			disclosure:     greeting.DisclosureDefault,
+			want:           "* OK Norbert IMAP session ready\r\n",
+		},
+		{
+			name:           "include version",
+			displayName:    "Norbert",
+			processVersion: " v1.2.3\nbuild\t7 ",
+			disclosure:     greeting.DisclosureInclude,
+			want:           "* OK Norbert v1.2.3 build 7 IMAP session ready\r\n",
+		},
+		{
+			name:           "suppress version",
+			displayName:    "nauthilus-director",
+			processVersion: "v1.2.3",
+			disclosure:     greeting.DisclosureSuppress,
+			want:           greetingLine,
+		},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			config := testPreauthConfig(TLSModeStartTLS, false)
+			config.GreetingPolicy = testGreetingPolicy(t, testCase.displayName, testCase.processVersion, testCase.disclosure)
+
+			harness := startTestSession(t, config)
+			harness.expectLine(t, testCase.want)
+		})
+	}
 }
 
 // TestCommandDispatchIsCaseInsensitive verifies command names are normalized.
@@ -468,6 +520,28 @@ func testPreauthConfig(tlsMode string, requireID bool) SessionConfig {
 		MaxPreauthLineBytes:    8192,
 		MaxPreauthLiteralBytes: 16,
 	}
+}
+
+// testGreetingPolicy builds a shared greeting policy for IMAP wire tests.
+func testGreetingPolicy(
+	t *testing.T,
+	displayNameValue string,
+	processVersion string,
+	disclosure greeting.SoftwareVersionDisclosure,
+) greeting.Policy {
+	t.Helper()
+
+	displayName, err := greeting.NewDisplayName(displayNameValue)
+	if err != nil {
+		t.Fatalf("NewDisplayName(%q): %v", displayNameValue, err)
+	}
+
+	policy, err := greeting.NewPolicy(displayName, processVersion, disclosure)
+	if err != nil {
+		t.Fatalf("NewPolicy: %v", err)
+	}
+
+	return policy
 }
 
 type scriptedConn struct {

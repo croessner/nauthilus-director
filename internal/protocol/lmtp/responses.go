@@ -20,6 +20,8 @@ import (
 	"fmt"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/croessner/nauthilus-director/internal/protocol/greeting"
 )
 
 const (
@@ -59,7 +61,6 @@ const (
 )
 
 const (
-	greetingText             = "nauthilus-director LMTP ready"
 	authContinueText         = ""
 	authRejectedText         = "Authentication credentials invalid"
 	authRequiredText         = "Authentication required"
@@ -73,7 +74,6 @@ const (
 	dataContinueText         = "End data with <CR><LF>.<CR><LF>"
 	dataQueuedText           = "Message accepted"
 	differentBackendText     = "Recipient must be retried separately"
-	lhloDomainText           = "nauthilus-director"
 	malformedAuthText        = "Invalid AUTH command"
 	malformedBDATText        = "Invalid BDAT command"
 	malformedMailText        = "Invalid MAIL command"
@@ -125,16 +125,17 @@ func (s *Session) writePlain(status string, text string) error {
 
 // writeGreeting sends the initial protocol greeting.
 func (s *Session) writeGreeting() error {
-	return s.writeEnhanced(responseStatusReady, enhancedOK, greetingText)
+	return s.writeEnhanced(responseStatusReady, enhancedOK, lmtpGreetingText(s.greetingPolicy))
 }
 
 // writeLHLO writes a deterministic multiline capability response.
 func (s *Session) writeLHLO(capabilities []string) error {
+	identity := lmtpLHLOIdentity(s.greetingPolicy)
 	if len(capabilities) == 0 {
-		return s.writePlain(responseStatusOK, lhloDomainText)
+		return s.writePlain(responseStatusOK, identity)
 	}
 
-	if _, err := fmt.Fprintf(s.writer, "%s-%s\r\n", responseStatusOK, lhloDomainText); err != nil {
+	if _, err := fmt.Fprintf(s.writer, "%s-%s\r\n", responseStatusOK, identity); err != nil {
 		return err
 	}
 
@@ -150,6 +151,16 @@ func (s *Session) writeLHLO(capabilities []string) error {
 	}
 
 	return nil
+}
+
+// lmtpGreetingText renders the compatible LMTP greeting text around the shared identity.
+func lmtpGreetingText(policy greeting.Policy) string {
+	return sanitizeResponseText(policy.DisplayIdentity(greeting.ProtocolLMTP) + " LMTP ready")
+}
+
+// lmtpLHLOIdentity renders the frontend-owned LHLO identity from the same disclosure policy.
+func lmtpLHLOIdentity(policy greeting.Policy) string {
+	return sanitizeResponseText(policy.DisplayIdentity(greeting.ProtocolLMTP))
 }
 
 // sanitizeResponseText prevents response injection and bounds locally generated status text.

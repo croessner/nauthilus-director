@@ -119,6 +119,99 @@ func TestServerBinaryPublicLMTPProductionFlow(t *testing.T) {
 	assertLMTPProcessOutputSafe(t, process.output.String())
 }
 
+// TestServerBinaryPublicLMTPGreetingDisclosurePolicy proves LMTP greeting identity through public sockets.
+func TestServerBinaryPublicLMTPGreetingDisclosurePolicy(t *testing.T) {
+	binary := e2eServerBinaryWithVersion(t, e2eGreetingProcessVersion)
+	testCases := []struct {
+		name     string
+		policy   greetingPolicyFixture
+		greeting string
+		lhlo     string
+	}{
+		{
+			name:     "default",
+			greeting: "220 2.0.0 nauthilus-director LMTP ready\r\n",
+			lhlo:     "250-nauthilus-director",
+		},
+		{
+			name: "include",
+			policy: greetingPolicyFixture{
+				DisplayName:     "nauthilus-director",
+				SoftwareVersion: "include",
+			},
+			greeting: "220 2.0.0 nauthilus-director " + e2eGreetingProcessVersion + " LMTP ready\r\n",
+			lhlo:     "250-nauthilus-director " + e2eGreetingProcessVersion,
+		},
+		{
+			name: "suppress",
+			policy: greetingPolicyFixture{
+				DisplayName:     "nauthilus-director",
+				SoftwareVersion: "suppress",
+			},
+			greeting: "220 2.0.0 nauthilus-director LMTP ready\r\n",
+			lhlo:     "250-nauthilus-director",
+		},
+		{
+			name: "display name",
+			policy: greetingPolicyFixture{
+				DisplayName:     "Norbert",
+				SoftwareVersion: "default",
+			},
+			greeting: "220 2.0.0 Norbert LMTP ready\r\n",
+			lhlo:     "250-Norbert",
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			redisFixture := startValkeySessionStore(t)
+			authority := startLMTPAuthority(t, lmtpAuthorityIdentities())
+			tlsBundle := writeLMTPPeerTLSBundle(t)
+			fakeLMTPA := lmtpbackend.Start(t, lmtpbackend.Options{})
+			fakeLMTPB := lmtpbackend.Start(t, lmtpbackend.Options{})
+			fakeIMAPA := startFakeIMAPBackend(t, fakeBackendOptions{})
+			fakeIMAPB := startFakeIMAPBackend(t, fakeBackendOptions{})
+			lmtpAddress := loopbackAddress(t)
+			configPath := writeLMTPProcessConfig(t, lmtpProcessConfigOptions{
+				RedisAddress:   redisFixture.addr,
+				AuthorityURL:   authority.URL(),
+				LMTPAddress:    lmtpAddress,
+				LMTPSAddress:   loopbackAddress(t),
+				IMAPAddress:    loopbackAddress(t),
+				ControlAddress: loopbackAddress(t),
+				LMTPBackends: map[string]string{
+					e2eLMTPBackendAID: fakeLMTPA.Address(),
+					e2eLMTPBackendBID: fakeLMTPB.Address(),
+				},
+				IMAPBackends: map[string]string{
+					e2eBackendAID: fakeIMAPA.Address(),
+					e2eBackendBID: fakeIMAPB.Address(),
+				},
+				TLS:          tlsBundle,
+				LMTPGreeting: testCase.policy,
+			})
+			process := startDirectorProcess(t, binary, configPath)
+
+			got := readProcessGreetingLine(t, lmtpAddress, process, "220 ")
+			if got != testCase.greeting {
+				t.Fatalf("LMTP greeting = %q, want %q", got, testCase.greeting)
+			}
+			client := dialLMTP(t, lmtpAddress)
+			defer client.Close()
+			client.ExpectLine(testCase.greeting)
+			client.WriteLine("LHLO greeting-policy.example")
+			lhlo := client.ReadResponse()
+			if len(lhlo) == 0 || lhlo[0] != testCase.lhlo {
+				t.Fatalf("LMTP LHLO = %v, want first line %q", lhlo, testCase.lhlo)
+			}
+			client.Close()
+			stopDirectorProcess(t, process)
+			assertLMTPProcessOutputSafe(t, process.output.String())
+			assertOutputOmits(t, process.output.String(), e2eGreetingUnsafeSentinel)
+		})
+	}
+}
+
 // TestServerBinaryPublicLMTPBearerPeerIntrospectionFlow proves LMTP peer bearer auth uses OIDC introspection.
 func TestServerBinaryPublicLMTPBearerPeerIntrospectionFlow(t *testing.T) {
 	binary := e2eServerBinary(t)
@@ -1054,6 +1147,9 @@ type lmtpProcessConfigOptions struct {
 	LMTPSAddress                string
 	IMAPAddress                 string
 	ControlAddress              string
+	IMAPGreeting                greetingPolicyFixture
+	LMTPGreeting                greetingPolicyFixture
+	LMTPSGreeting               greetingPolicyFixture
 	BackendRetentionTTL         string
 	LMTPBackends                map[string]string
 	IMAPBackends                map[string]string
@@ -1190,6 +1286,7 @@ director:
         capabilities: [IMAP4rev1, ID, SASL-IR, STARTTLS, AUTH=PLAIN]
         auth_mechanisms: [plain]
         require_id_before_auth: false
+%s
     lmtp:
       protocol: lmtp
       service_name: lmtp
@@ -1220,6 +1317,7 @@ director:
           deny: [%s]
         size:
           max_message_bytes: %d
+%s
     lmtps:
       protocol: lmtp
       service_name: lmtps
@@ -1250,6 +1348,7 @@ director:
           deny: [%s]
         size:
           max_message_bytes: %d
+%s
   backend_pools:
     imap-default:
       protocol: imap
@@ -1379,6 +1478,7 @@ director:
 		options.IMAPAddress,
 		options.TLS.ServerCertPath,
 		options.TLS.ServerKeyPath,
+		greetingPolicyYAML("        ", options.IMAPGreeting),
 		options.LMTPAddress,
 		lmtpListenerTLSMode,
 		options.TLS.ServerCertPath,
@@ -1388,6 +1488,7 @@ director:
 		quotedYAMLStrings(lmtpCapabilities),
 		lmtpCapabilityDeny,
 		options.LMTPMaxMessageBytes,
+		greetingPolicyYAML("        ", options.LMTPGreeting),
 		options.LMTPSAddress,
 		options.TLS.ServerCertPath,
 		options.TLS.ServerKeyPath,
@@ -1396,6 +1497,7 @@ director:
 		quotedYAMLStrings(lmtpsCapabilities),
 		lmtpCapabilityDeny,
 		options.LMTPMaxMessageBytes,
+		greetingPolicyYAML("        ", options.LMTPSGreeting),
 		e2eShardTag,
 		options.IMAPBackends[e2eBackendAID],
 		imapBackendTLSMode,

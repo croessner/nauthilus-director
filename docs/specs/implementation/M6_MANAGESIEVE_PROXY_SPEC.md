@@ -246,8 +246,8 @@ tests:
 - common listener fields under those listeners: `protocol`, `service_name`,
   `network`, `address`, `authority`, `backend_pool`, `proxy_protocol` and `tls`
 - `director.listeners.sieve.sieve.auth_mechanisms`
-- `director.listeners.sieve.sieve.capabilities.implementation`
-- `director.listeners.sieve.sieve.capabilities.version`
+- `director.listeners.sieve.sieve.greeting.display_name`
+- `director.listeners.sieve.sieve.greeting.software_version`
 - `director.listeners.sieve.sieve.capabilities.script_extensions`
 - `director.listeners.sieve.sieve.capabilities.language`
 - matching `director.listeners.sieves.sieve.*` paths
@@ -295,7 +295,9 @@ Because the director cannot select a user backend before authentication, the
 pre-auth `SIEVE` extension list must come from typed config as the operator's
 declared common backend-pool capability set. If no common set is declared, M6
 must advertise an empty `SIEVE` value rather than guessing or connecting to a
-backend before authentication.
+backend before authentication. `IMPLEMENTATION` is rendered from the listener
+greeting policy, while `VERSION` remains the ManageSieve protocol version and
+is not an operator software-version field.
 
 M6 must keep redaction metadata intact for listener TLS keys, backend TLS keys,
 backend master-user password files and any credential-replay or bearer-token

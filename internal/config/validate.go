@@ -28,7 +28,8 @@ import (
 )
 
 const (
-	lmtpBDATImplemented = true
+	lmtpBDATImplemented                 = true
+	listenerGreetingDisplayNameMaxBytes = 64
 
 	bearerMechanismOAuthBearer             = "oauthbearer"
 	bearerMechanismXOAUTH2                 = "xoauth2"
@@ -796,46 +797,30 @@ func validateDirector(director DirectorConfig, authorities map[string]AuthorityC
 			addProblem(problems, path+".tls.mode plaintext is supported only for lmtp listeners")
 		}
 
-		if listener.Protocol == protocolIMAP && listener.IMAP == nil {
-			addProblem(problems, path+".imap is required for imap listeners")
-		}
-		if listener.Protocol == protocolIMAP && listener.IMAP != nil {
-			validateIMAPListener(path+".imap", listener, *listener.IMAP, problems)
-		}
-		if listener.Protocol == protocolLMTP && listener.LMTP == nil {
-			addProblem(problems, path+".lmtp is required for lmtp listeners")
-		}
-		if listener.Protocol == protocolLMTP && listener.LMTP != nil {
-			validateLMTPListener(path+".lmtp", listener, authorities, problems)
-		}
-		if listener.Protocol == protocolSIEVE && listener.Sieve == nil {
-			addProblem(problems, path+".sieve is required for sieve listeners")
-		}
-		if listener.Protocol == protocolSIEVE {
-			if listener.IMAP != nil {
-				addProblem(problems, path+".imap must not be set for sieve listeners")
+		validateListenerProtocolSubconfigs(path, listener, problems)
+		switch listener.Protocol {
+		case protocolIMAP:
+			if listener.IMAP == nil {
+				addProblem(problems, path+".imap is required for imap listeners")
+			} else {
+				validateIMAPListener(path+".imap", listener, *listener.IMAP, problems)
 			}
-			if listener.LMTP != nil {
-				addProblem(problems, path+".lmtp must not be set for sieve listeners")
+		case protocolLMTP:
+			if listener.LMTP == nil {
+				addProblem(problems, path+".lmtp is required for lmtp listeners")
+			} else {
+				validateLMTPListener(path+".lmtp", listener, authorities, problems)
 			}
-			if listener.Sieve != nil {
+		case protocolSIEVE:
+			if listener.Sieve == nil {
+				addProblem(problems, path+".sieve is required for sieve listeners")
+			} else {
 				validateSieveListener(path+".sieve", listener, authority, authorityOK, problems)
 			}
-		}
-		if listener.Protocol == protocolPOP3 && listener.POP3 == nil {
-			addProblem(problems, path+".pop3 is required for pop3 listeners")
-		}
-		if listener.Protocol == protocolPOP3 {
-			if listener.IMAP != nil {
-				addProblem(problems, path+".imap must not be set for pop3 listeners")
-			}
-			if listener.LMTP != nil {
-				addProblem(problems, path+".lmtp must not be set for pop3 listeners")
-			}
-			if listener.Sieve != nil {
-				addProblem(problems, path+".sieve must not be set for pop3 listeners")
-			}
-			if listener.POP3 != nil {
+		case protocolPOP3:
+			if listener.POP3 == nil {
+				addProblem(problems, path+".pop3 is required for pop3 listeners")
+			} else {
 				validatePOP3Listener(path+".pop3", listener, authority, authorityOK, problems)
 			}
 		}
@@ -1223,8 +1208,134 @@ func validateBackendProtocol(path string, protocol string, problems *[]string) {
 	}
 }
 
+// validateListenerProtocolSubconfigs rejects protocol-specific policy under the wrong listener type.
+func validateListenerProtocolSubconfigs(path string, listener ListenerConfig, problems *[]string) {
+	switch listener.Protocol {
+	case protocolIMAP:
+		if listener.LMTP != nil {
+			addProblem(problems, path+".lmtp must not be set for imap listeners")
+		}
+		if listener.Sieve != nil {
+			addProblem(problems, path+".sieve must not be set for imap listeners")
+		}
+		if listener.POP3 != nil {
+			addProblem(problems, path+".pop3 must not be set for imap listeners")
+		}
+	case protocolLMTP:
+		if listener.IMAP != nil {
+			addProblem(problems, path+".imap must not be set for lmtp listeners")
+		}
+		if listener.Sieve != nil {
+			addProblem(problems, path+".sieve must not be set for lmtp listeners")
+		}
+		if listener.POP3 != nil {
+			addProblem(problems, path+".pop3 must not be set for lmtp listeners")
+		}
+	case protocolSIEVE:
+		if listener.IMAP != nil {
+			addProblem(problems, path+".imap must not be set for sieve listeners")
+		}
+		if listener.LMTP != nil {
+			addProblem(problems, path+".lmtp must not be set for sieve listeners")
+		}
+		if listener.POP3 != nil {
+			addProblem(problems, path+".pop3 must not be set for sieve listeners")
+		}
+	case protocolPOP3:
+		if listener.IMAP != nil {
+			addProblem(problems, path+".imap must not be set for pop3 listeners")
+		}
+		if listener.LMTP != nil {
+			addProblem(problems, path+".lmtp must not be set for pop3 listeners")
+		}
+		if listener.Sieve != nil {
+			addProblem(problems, path+".sieve must not be set for pop3 listeners")
+		}
+	}
+}
+
+// validateListenerGreeting rejects public identity values that can become transcript text.
+func validateListenerGreeting(path string, greeting ListenerGreetingConfig, problems *[]string) {
+	if greeting.DisplayName == nil {
+		addProblem(problems, path+".display_name is required")
+	} else {
+		displayName := normalizeListenerGreetingDisplayName(*greeting.DisplayName)
+		switch {
+		case displayName == "":
+			addProblem(problems, path+".display_name is required")
+		case len(displayName) > listenerGreetingDisplayNameMaxBytes:
+			addProblem(problems, path+".display_name must be at most 64 bytes")
+		case !validListenerGreetingDisplayName(displayName):
+			addProblem(problems, path+".display_name contains unsupported characters or response-shaped text")
+		}
+	}
+
+	if greeting.SoftwareVersion == nil {
+		addProblem(problems, path+".software_version is required")
+
+		return
+	}
+
+	switch strings.ToLower(strings.TrimSpace(*greeting.SoftwareVersion)) {
+	case listenerGreetingSoftwareVersionDefault, listenerGreetingSoftwareVersionInclude, listenerGreetingSoftwareVersionSuppress:
+	default:
+		addProblem(problems, path+".software_version must be default, include, or suppress")
+	}
+}
+
+// validListenerGreetingDisplayName applies the shared conservative display-name grammar.
+func validListenerGreetingDisplayName(value string) bool {
+	if listenerGreetingLooksLikeResponse(value) {
+		return false
+	}
+
+	previousSpace := false
+	for index := 0; index < len(value); index++ {
+		char := value[index]
+		switch {
+		case char >= 'a' && char <= 'z':
+			previousSpace = false
+		case char >= 'A' && char <= 'Z':
+			previousSpace = false
+		case char >= '0' && char <= '9':
+			previousSpace = false
+		case char == '.' || char == '_' || char == '-':
+			previousSpace = false
+		case char == ' ':
+			if previousSpace {
+				return false
+			}
+			previousSpace = true
+		default:
+			return false
+		}
+	}
+
+	return true
+}
+
+// listenerGreetingLooksLikeResponse catches status-code fragments before protocol rendering.
+func listenerGreetingLooksLikeResponse(value string) bool {
+	if len(value) < 3 {
+		return false
+	}
+
+	if value[0] < '0' ||
+		value[0] > '9' ||
+		value[1] < '0' ||
+		value[1] > '9' ||
+		value[2] < '0' ||
+		value[2] > '9' {
+		return false
+	}
+
+	return len(value) == 3 || value[3] == ' ' || value[3] == '-'
+}
+
 // validateIMAPListener rejects unsupported pre-auth advertisements and mechanisms.
 func validateIMAPListener(path string, listener ListenerConfig, imap IMAPListenerConfig, problems *[]string) {
+	validateListenerGreeting(path+".greeting", imap.Greeting, problems)
+
 	if len(imap.AuthMechanisms) > 0 && !listenerTLSProtectsCredentialAuth(listener.TLS.Mode) {
 		addProblem(problems, path+".auth_mechanisms requires frontend TLS mode starttls or implicit")
 	}
@@ -1271,6 +1382,8 @@ func validateLMTPListener(path string, listener ListenerConfig, authorities map[
 
 		return
 	}
+
+	validateListenerGreeting(path+".greeting", lmtp.Greeting, problems)
 
 	if lmtp.ClientAuth.Required {
 		if _, ok := authorities[lmtp.ClientAuth.Authority]; !ok {
@@ -1566,6 +1679,8 @@ func validateSieveListener(path string, listener ListenerConfig, authority Autho
 		return
 	}
 
+	validateListenerGreeting(path+".greeting", sieve.Greeting, problems)
+
 	if len(sieve.AuthMechanisms) == 0 {
 		addProblem(problems, path+".auth_mechanisms is required")
 	}
@@ -1679,6 +1794,8 @@ func validatePOP3Listener(path string, listener ListenerConfig, authority Author
 
 		return
 	}
+
+	validateListenerGreeting(path+".greeting", pop3.Greeting, problems)
 
 	if len(pop3.AuthMechanisms) == 0 {
 		addProblem(problems, path+".auth_mechanisms is required")

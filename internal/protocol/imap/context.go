@@ -25,6 +25,7 @@ import (
 	"github.com/croessner/nauthilus-director/internal/nauthilus"
 	"github.com/croessner/nauthilus-director/internal/observability"
 	"github.com/croessner/nauthilus-director/internal/placement"
+	"github.com/croessner/nauthilus-director/internal/protocol/greeting"
 	"github.com/croessner/nauthilus-director/internal/proxy"
 	"github.com/croessner/nauthilus-director/internal/routing"
 	runtimectl "github.com/croessner/nauthilus-director/internal/runtime"
@@ -70,6 +71,7 @@ type SessionConfig struct {
 	DirectorInstanceID     string
 	DefaultTenant          string
 	DefaultShard           string
+	GreetingPolicy         greeting.Policy
 	TLSMode                string
 	Capabilities           []string
 	AuthMechanisms         []string

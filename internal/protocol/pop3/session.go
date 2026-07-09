@@ -30,6 +30,7 @@ import (
 	"github.com/croessner/nauthilus-director/internal/nauthilus"
 	"github.com/croessner/nauthilus-director/internal/observability"
 	"github.com/croessner/nauthilus-director/internal/placement"
+	"github.com/croessner/nauthilus-director/internal/protocol/greeting"
 	"github.com/croessner/nauthilus-director/internal/proxy"
 	"github.com/croessner/nauthilus-director/internal/routing"
 	runtimectl "github.com/croessner/nauthilus-director/internal/runtime"
@@ -99,6 +100,7 @@ type Session struct {
 	proxyRunner            proxy.Runner
 	localSessions          *runtimectl.LocalSessionRegistry
 	observability          observability.Recorder
+	greetingPolicy         greeting.Policy
 
 	tlsActive       bool
 	provisionalUser string
@@ -169,6 +171,7 @@ func NewSession(config SessionConfig, conn net.Conn) (*Session, error) {
 		proxyRunner:            proxyRunner,
 		localSessions:          config.LocalSessions,
 		observability:          observability.NormalizeRecorder(config.Observability),
+		greetingPolicy:         config.GreetingPolicy,
 		tlsActive:              strings.EqualFold(strings.TrimSpace(config.TLSMode), TLSModeImplicit),
 		sessionID:              sessionID,
 	}, nil

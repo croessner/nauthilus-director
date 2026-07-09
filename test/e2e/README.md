@@ -25,6 +25,11 @@ The default lane is fake-service based and deterministic:
 - deterministic fake LMTP backend under `test/e2e/fakes/lmtp_backend/`
 - public loopback sockets for frontend IMAP, LMTP, LMTPS, STARTTLS, implicit
   TLS and fake backend handoff
+- public greeting disclosure proof through real `nauthilus-director` binaries
+  for IMAP, LMTP, ManageSieve and POP3, covering compatible defaults,
+  explicit process-version inclusion, suppression, `display_name: Norbert`,
+  ManageSieve `VERSION` stability and invalid display-name validation before
+  listener sockets bind
 - fake LMTP backend wire transcripts for DATA-to-DATA fallback,
   DATA-to-BDAT delivery, frontend/backend CHUNKING independence, BDAT gating,
   dot-unstuffing, CRLF preservation, empty and multi-chunk bodies, rejected

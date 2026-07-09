@@ -32,6 +32,7 @@ import (
 	"github.com/croessner/nauthilus-director/internal/nauthilus"
 	"github.com/croessner/nauthilus-director/internal/observability"
 	"github.com/croessner/nauthilus-director/internal/placement"
+	"github.com/croessner/nauthilus-director/internal/protocol/greeting"
 	"github.com/croessner/nauthilus-director/internal/routing"
 	runtimectl "github.com/croessner/nauthilus-director/internal/runtime"
 	"github.com/croessner/nauthilus-director/internal/state"
@@ -102,6 +103,7 @@ type Session struct {
 	placementService           placement.DeliveryPlacer
 	placementGate              runtimectl.PlacementGate
 	observability              observability.Recorder
+	greetingPolicy             greeting.Policy
 
 	tlsActive             bool
 	tlsClientVerified     bool
@@ -201,6 +203,7 @@ func NewSession(config SessionConfig, conn net.Conn) (*Session, error) {
 		placementService:           config.PlacementService,
 		placementGate:              config.PlacementGate,
 		observability:              observability.NormalizeRecorder(config.Observability),
+		greetingPolicy:             config.GreetingPolicy,
 		tlsActive:                  config.TLSMode == TLSModeImplicit,
 	}, nil
 }

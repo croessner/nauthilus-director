@@ -353,6 +353,13 @@ director:
         min_tls_version: TLS1.2
 
       imap:
+        greeting:
+          # The display name is inserted by protocol renderers, not used as a
+          # raw greeting line. software_version=default preserves current wire
+          # behavior; include is an explicit disclosure choice, suppress hides
+          # the process version where a protocol would otherwise expose it.
+          display_name: nauthilus-director
+          software_version: default
         capabilities:
           - IMAP4rev1
           - ID
@@ -388,6 +395,9 @@ director:
         min_tls_version: TLS1.2
 
       imap:
+        greeting:
+          display_name: nauthilus-director
+          software_version: default
         capabilities:
           - IMAP4rev1
           - ID
@@ -422,6 +432,9 @@ director:
         min_tls_version: TLS1.2
 
       lmtp:
+        greeting:
+          display_name: nauthilus-director
+          software_version: default
         client_auth:
           # Client auth verifies the submitting LMTP peer. This block controls
           # SASL peer auth with technical submitter credentials checked by
@@ -494,6 +507,9 @@ director:
         min_tls_version: TLS1.2
 
       lmtp:
+        greeting:
+          display_name: nauthilus-director
+          software_version: default
         client_auth:
           # Client auth verifies the submitting LMTP peer. This block controls
           # SASL peer auth with technical submitter credentials checked by
@@ -565,14 +581,17 @@ director:
         min_tls_version: TLS1.2
 
       sieve:
+        greeting:
+          display_name: nauthilus-director
+          software_version: default
         auth_mechanisms:
           - plain
           - xoauth2
           - oauthbearer
         capabilities:
           # Operator-controlled capability facts are typed policy inputs. RFC
-          # 5804 IMPLEMENTATION and VERSION are internal protocol facts derived
-          # from the binary version and RFC compliance level.
+          # 5804 IMPLEMENTATION is rendered from greeting policy; VERSION
+          # remains the ManageSieve protocol version, not the software version.
           script_extensions: []
           language: en
 
@@ -597,6 +616,9 @@ director:
         min_tls_version: TLS1.2
 
       sieve:
+        greeting:
+          display_name: nauthilus-director
+          software_version: default
         auth_mechanisms:
           - plain
           - xoauth2
@@ -629,6 +651,9 @@ director:
         min_tls_version: TLS1.2
 
       pop3:
+        greeting:
+          display_name: nauthilus-director
+          software_version: default
         auth_mechanisms:
           - userpass
           - xoauth2
@@ -661,6 +686,9 @@ director:
         min_tls_version: TLS1.2
 
       pop3:
+        greeting:
+          display_name: nauthilus-director
+          software_version: default
         auth_mechanisms:
           - userpass
           - xoauth2

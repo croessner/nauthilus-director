@@ -151,6 +151,127 @@ func TestSessionHandlerFactoryDispatchesSieve(t *testing.T) {
 	}
 }
 
+// TestSessionHandlerFactoryPassesSieveGreetingPolicy verifies listener greeting config reaches Sieve handlers.
+func TestSessionHandlerFactoryPassesSieveGreetingPolicy(t *testing.T) {
+	cfg := config.DefaultConfig().Normalize()
+	listenerConfig := cfg.Director.Listeners["sieve"]
+	displayName := "Norbert"
+	softwareVersion := "suppress"
+	listenerConfig.Sieve.Greeting = config.ListenerGreetingConfig{
+		DisplayName:     &displayName,
+		SoftwareVersion: &softwareVersion,
+	}
+
+	factory := sessionHandlerFactory(nil, nil, nil, nil, nil, 0, nil, nil, "test-version")
+	handler := factory(listener.SessionOptions{
+		ListenerName: "sieve",
+		Config:       listenerConfig,
+	})
+
+	sieveHandler, ok := handler.(*sieve.Handler)
+	if !ok {
+		t.Fatalf("handler type = %T, want Sieve handler", handler)
+	}
+
+	capabilities := sieveHandler.Capabilities()
+	if capabilities.Implementation != "Norbert" {
+		t.Fatalf("Sieve implementation = %q, want custom display identity without version", capabilities.Implementation)
+	}
+
+	if capabilities.ProtocolVersion != sieve.ProtocolVersionRFC5804 {
+		t.Fatalf("Sieve protocol version = %q, want %q", capabilities.ProtocolVersion, sieve.ProtocolVersionRFC5804)
+	}
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- handler.Serve(context.Background(), server)
+	}()
+
+	reader := bufio.NewReader(client)
+
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		t.Fatalf("read Sieve greeting: %v", err)
+	}
+
+	if line != "\"IMPLEMENTATION\" \"Norbert\"\r\n" {
+		t.Fatalf("Sieve greeting line = %q, want configured display identity", line)
+	}
+
+	_ = client.Close()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Sieve handler error = %v, want clean close", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Sieve handler did not stop after client close")
+	}
+}
+
+// TestSessionHandlerFactoryPassesGreetingPolicyToFrontendHandlers verifies app wiring for greeting policies.
+func TestSessionHandlerFactoryPassesGreetingPolicyToFrontendHandlers(t *testing.T) {
+	tests := []struct {
+		name         string
+		listenerName string
+		wantGreeting string
+		update       func(*config.ListenerConfig, config.ListenerGreetingConfig)
+	}{
+		{
+			name:         "imap",
+			listenerName: "imap",
+			wantGreeting: "* OK Norbert test-version IMAP session ready\r\n",
+			update: func(listenerConfig *config.ListenerConfig, greetingConfig config.ListenerGreetingConfig) {
+				listenerConfig.IMAP.Greeting = greetingConfig
+			},
+		},
+		{
+			name:         "lmtp",
+			listenerName: "lmtp",
+			wantGreeting: "220 2.0.0 Norbert test-version LMTP ready\r\n",
+			update: func(listenerConfig *config.ListenerConfig, greetingConfig config.ListenerGreetingConfig) {
+				listenerConfig.LMTP.Greeting = greetingConfig
+			},
+		},
+		{
+			name:         "pop3",
+			listenerName: "pop3",
+			wantGreeting: "+OK Norbert test-version POP3 ready\r\n",
+			update: func(listenerConfig *config.ListenerConfig, greetingConfig config.ListenerGreetingConfig) {
+				listenerConfig.POP3.Greeting = greetingConfig
+			},
+		},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			cfg := config.DefaultConfig().Normalize()
+			listenerConfig := cfg.Director.Listeners[testCase.listenerName]
+			displayName := "Norbert"
+			softwareVersion := "include"
+			testCase.update(&listenerConfig, config.ListenerGreetingConfig{
+				DisplayName:     &displayName,
+				SoftwareVersion: &softwareVersion,
+			})
+
+			factory := sessionHandlerFactory(nil, nil, nil, nil, nil, 0, nil, nil, "test-version")
+			handler := factory(listener.SessionOptions{
+				ListenerName: testCase.listenerName,
+				Config:       listenerConfig,
+			})
+
+			if line := readHandlerGreeting(t, handler); line != testCase.wantGreeting {
+				t.Fatalf("greeting = %q, want %q", line, testCase.wantGreeting)
+			}
+		})
+	}
+}
+
 // TestControlTLSConfigRejectsRequiredClientCertWithoutCA keeps control mTLS gates fail-closed.
 func TestControlTLSConfigRejectsRequiredClientCertWithoutCA(t *testing.T) {
 	certPath, keyPath := writeAppTestCertificate(t)
@@ -192,6 +313,40 @@ func TestSessionHandlerFactoryDispatchesPOP3(t *testing.T) {
 	if len(handlerConfig.AuthMechanisms) != 3 {
 		t.Fatalf("POP3 auth methods = %v, want default userpass and bearer methods", handlerConfig.AuthMechanisms)
 	}
+}
+
+// readHandlerGreeting starts one handler over net.Pipe and returns its first wire line.
+func readHandlerGreeting(t *testing.T, handler listener.SessionHandler) string {
+	t.Helper()
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- handler.Serve(context.Background(), server)
+	}()
+
+	reader := bufio.NewReader(client)
+
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		t.Fatalf("read greeting: %v", err)
+	}
+
+	_ = client.Close()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("handler error = %v, want clean close", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("handler did not stop after client close")
+	}
+
+	return line
 }
 
 // writeAppTestCertificate writes a temporary self-signed TLS certificate pair.

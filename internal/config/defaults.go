@@ -446,10 +446,24 @@ func defaultIMAPListener(serviceName string, address string, tlsMode string, cer
 			MinTLSVersion: "TLS1.2",
 		},
 		IMAP: &IMAPListenerConfig{
+			Greeting:            defaultListenerGreeting(),
 			Capabilities:        defaultIMAPCapabilities(tlsMode),
 			AuthMechanisms:      []string{"plain", "xoauth2", "oauthbearer"},
 			RequireIDBeforeAuth: false,
 		},
+	}
+}
+
+// defaultListenerGreeting returns the compatible public greeting disclosure policy.
+func defaultListenerGreeting() ListenerGreetingConfig {
+	displayName := new(string)
+	*displayName = listenerGreetingDisplayNameDefault
+	softwareVersion := new(string)
+	*softwareVersion = listenerGreetingSoftwareVersionDefault
+
+	return ListenerGreetingConfig{
+		DisplayName:     displayName,
+		SoftwareVersion: softwareVersion,
 	}
 }
 
@@ -513,6 +527,7 @@ func defaultLMTPListener(serviceName string, address string, tlsMode string, cer
 			MinTLSVersion: "TLS1.2",
 		},
 		LMTP: &LMTPListenerConfig{
+			Greeting: defaultListenerGreeting(),
 			ClientAuth: LMTPClientAuthConfig{
 				Required:   true,
 				Authority:  "default",
@@ -548,6 +563,7 @@ func defaultSieveListener(serviceName string, address string, tlsMode string, ce
 			MinTLSVersion: "TLS1.2",
 		},
 		Sieve: &SieveListenerConfig{
+			Greeting:       defaultListenerGreeting(),
 			AuthMechanisms: []string{"plain", "xoauth2", "oauthbearer"},
 			Capabilities: SieveCapabilitiesConfig{
 				ScriptExtensions: []string{},
@@ -577,6 +593,7 @@ func defaultPOP3Listener(serviceName string, address string, tlsMode string, cer
 			MinTLSVersion: "TLS1.2",
 		},
 		POP3: &POP3ListenerConfig{
+			Greeting:       defaultListenerGreeting(),
 			AuthMechanisms: []string{"userpass", "xoauth2", "oauthbearer"},
 			Capabilities:   defaultPOP3Capabilities(tlsMode),
 		},

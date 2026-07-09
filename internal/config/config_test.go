@@ -118,6 +118,166 @@ func TestTargetConfigDecodesAndValidates(t *testing.T) {
 	}
 }
 
+// TestDefaultListenerGreetingPolicy verifies every generated frontend listener has safe defaults.
+func TestDefaultListenerGreetingPolicy(t *testing.T) {
+	cfg := DefaultConfig().Normalize()
+
+	for _, listenerName := range []string{"imap", "imaps", "lmtp", "lmtps", "sieve", "sieves", "pop3", "pop3s"} {
+		greeting := greetingForListener(t, cfg.Director.Listeners[listenerName])
+		displayName, softwareVersion := greetingValues(t, greeting)
+		if displayName != listenerGreetingDisplayNameDefault {
+			t.Fatalf("%s display_name = %q, want %q", listenerName, displayName, listenerGreetingDisplayNameDefault)
+		}
+		if softwareVersion != listenerGreetingSoftwareVersionDefault {
+			t.Fatalf("%s software_version = %q, want %q", listenerName, softwareVersion, listenerGreetingSoftwareVersionDefault)
+		}
+	}
+}
+
+// TestListenerGreetingDisplayNameNorbertValidates proves the shared policy accepts a safe identity.
+func TestListenerGreetingDisplayNameNorbertValidates(t *testing.T) {
+	for _, listenerName := range []string{"imap", "lmtp", "sieve", "pop3"} {
+		t.Run(listenerName, func(t *testing.T) {
+			cfg := configWithListenerGreeting(t, listenerName, "Norbert", listenerGreetingSoftwareVersionDefault)
+			if err := NewLoader().Validate(cfg); err != nil {
+				t.Fatalf("Validate rejected safe greeting display name for %s: %v", listenerName, err)
+			}
+		})
+	}
+}
+
+// TestListenerGreetingDisplayNameValidation rejects transcript-shaped public identities.
+func TestListenerGreetingDisplayNameValidation(t *testing.T) {
+	tests := map[string]struct {
+		displayName string
+		want        string
+	}{
+		"empty": {
+			displayName: "   ",
+			want:        "display_name is required",
+		},
+		"overlong": {
+			displayName: strings.Repeat("a", 65),
+			want:        "display_name must be at most 64 bytes",
+		},
+		"carriage return": {
+			displayName: "Norbert\rInjected",
+			want:        "display_name contains unsupported characters or response-shaped text",
+		},
+		"line feed": {
+			displayName: "Norbert\nInjected",
+			want:        "display_name contains unsupported characters or response-shaped text",
+		},
+		"control": {
+			displayName: "Norbert\tInjected",
+			want:        "display_name contains unsupported characters or response-shaped text",
+		},
+		"del": {
+			displayName: "Norbert\x7f",
+			want:        "display_name contains unsupported characters or response-shaped text",
+		},
+		"double quote": {
+			displayName: `Norbert"Mail`,
+			want:        "display_name contains unsupported characters or response-shaped text",
+		},
+		"single quote": {
+			displayName: "Norbert'Mail",
+			want:        "display_name contains unsupported characters or response-shaped text",
+		},
+		"backslash": {
+			displayName: `Norbert\Mail`,
+			want:        "display_name contains unsupported characters or response-shaped text",
+		},
+		"non printable byte": {
+			displayName: "Norbert\xff",
+			want:        "display_name contains unsupported characters or response-shaped text",
+		},
+		"raw status": {
+			displayName: "250 OK",
+			want:        "display_name contains unsupported characters or response-shaped text",
+		},
+		"raw continuation": {
+			displayName: "250-PIPELINING",
+			want:        "display_name contains unsupported characters or response-shaped text",
+		},
+	}
+
+	for _, listenerName := range []string{"imap", "lmtp", "sieve", "pop3"} {
+		for name, testCase := range tests {
+			t.Run(listenerName+"_"+name, func(t *testing.T) {
+				cfg := configWithListenerGreeting(t, listenerName, testCase.displayName, listenerGreetingSoftwareVersionDefault)
+				err := NewLoader().Validate(cfg)
+				if err == nil {
+					t.Fatalf("Validate accepted display_name %q for %s", testCase.displayName, listenerName)
+				}
+				if !strings.Contains(err.Error(), testCase.want) {
+					t.Fatalf("error = %q, want %q", err.Error(), testCase.want)
+				}
+				if testCase.displayName != "" && strings.Contains(err.Error(), testCase.displayName) {
+					t.Fatalf("validation error leaked unsafe display_name %q: %v", testCase.displayName, err)
+				}
+			})
+		}
+	}
+}
+
+// TestListenerGreetingSoftwareVersionValidation verifies disclosure modes for every protocol.
+func TestListenerGreetingSoftwareVersionValidation(t *testing.T) {
+	for _, softwareVersion := range []string{
+		listenerGreetingSoftwareVersionDefault,
+		listenerGreetingSoftwareVersionInclude,
+		listenerGreetingSoftwareVersionSuppress,
+	} {
+		for _, listenerName := range []string{"imap", "lmtp", "sieve", "pop3"} {
+			t.Run(listenerName+"_"+softwareVersion, func(t *testing.T) {
+				cfg := configWithListenerGreeting(t, listenerName, listenerGreetingDisplayNameDefault, softwareVersion)
+				if err := NewLoader().Validate(cfg); err != nil {
+					t.Fatalf("Validate rejected software_version %q for %s: %v", softwareVersion, listenerName, err)
+				}
+			})
+		}
+	}
+
+	for _, listenerName := range []string{"imap", "lmtp", "sieve", "pop3"} {
+		t.Run(listenerName+"_unknown", func(t *testing.T) {
+			cfg := configWithListenerGreeting(t, listenerName, listenerGreetingDisplayNameDefault, "publish")
+			expectValidationError(t, cfg, "software_version must be default, include, or suppress")
+		})
+	}
+}
+
+// TestListenerGreetingDefaultsApplyToConfigsWithoutExplicitPolicy preserves compatibility.
+func TestListenerGreetingDefaultsApplyToConfigsWithoutExplicitPolicy(t *testing.T) {
+	path := writeConfigFile(t, t.TempDir(), "without-greeting.yaml", `runtime:
+  instance_name: no-greeting-policy-test
+`)
+
+	snapshot, err := NewLoader().LoadFile(path)
+	if err != nil {
+		t.Fatalf("LoadFile rejected config without greeting policy: %v", err)
+	}
+
+	for _, listenerName := range []string{"imap", "lmtp", "sieve", "pop3"} {
+		greeting := greetingForListener(t, snapshot.Config.Director.Listeners[listenerName])
+		displayName, softwareVersion := greetingValues(t, greeting)
+		if displayName != listenerGreetingDisplayNameDefault || softwareVersion != listenerGreetingSoftwareVersionDefault {
+			t.Fatalf("%s greeting = %q/%q, want default policy", listenerName, displayName, softwareVersion)
+		}
+	}
+}
+
+// TestListenerGreetingRejectsWrongProtocolSubtree keeps per-protocol policy unambiguous.
+func TestListenerGreetingRejectsWrongProtocolSubtree(t *testing.T) {
+	cfg := DefaultConfig()
+	listener := cfg.Director.Listeners["lmtp"]
+	listener.IMAP = &IMAPListenerConfig{
+		Greeting: defaultListenerGreeting(),
+	}
+	cfg.Director.Listeners["lmtp"] = listener
+
+	expectValidationError(t, cfg, "director.listeners.lmtp.imap must not be set for lmtp listeners")
+}
+
 // TestListenerAuthorityContextDefaultsEmpty verifies listener context is opt-in only.
 func TestListenerAuthorityContextDefaultsEmpty(t *testing.T) {
 	cfg := DefaultConfig().Normalize()
@@ -3053,6 +3213,89 @@ func expectValidationError(t *testing.T, cfg Config, want string) {
 // containsString keeps slice assertions compact without pulling in another dependency.
 func containsString(values []string, needle string) bool {
 	return slices.Contains(values, needle)
+}
+
+// configWithListenerGreeting returns defaults with one listener greeting overridden.
+func configWithListenerGreeting(t *testing.T, listenerName string, displayName string, softwareVersion string) Config {
+	t.Helper()
+
+	cfg := DefaultConfig()
+	listener := cfg.Director.Listeners[listenerName]
+	displayNameValue := new(string)
+	*displayNameValue = displayName
+	softwareVersionValue := new(string)
+	*softwareVersionValue = softwareVersion
+	greeting := ListenerGreetingConfig{
+		DisplayName:     displayNameValue,
+		SoftwareVersion: softwareVersionValue,
+	}
+
+	switch listener.Protocol {
+	case protocolIMAP:
+		listener.IMAP.Greeting = greeting
+	case protocolLMTP:
+		listener.LMTP.Greeting = greeting
+	case protocolSIEVE:
+		listener.Sieve.Greeting = greeting
+	case protocolPOP3:
+		listener.POP3.Greeting = greeting
+	default:
+		t.Fatalf("listener %s has unsupported protocol %q", listenerName, listener.Protocol)
+	}
+
+	cfg.Director.Listeners[listenerName] = listener
+
+	return cfg
+}
+
+// greetingForListener selects the protocol-local greeting config for assertions.
+func greetingForListener(t *testing.T, listener ListenerConfig) ListenerGreetingConfig {
+	t.Helper()
+
+	switch listener.Protocol {
+	case protocolIMAP:
+		if listener.IMAP == nil {
+			t.Fatal("IMAP listener missing protocol config")
+		}
+
+		return listener.IMAP.Greeting
+	case protocolLMTP:
+		if listener.LMTP == nil {
+			t.Fatal("LMTP listener missing protocol config")
+		}
+
+		return listener.LMTP.Greeting
+	case protocolSIEVE:
+		if listener.Sieve == nil {
+			t.Fatal("Sieve listener missing protocol config")
+		}
+
+		return listener.Sieve.Greeting
+	case protocolPOP3:
+		if listener.POP3 == nil {
+			t.Fatal("POP3 listener missing protocol config")
+		}
+
+		return listener.POP3.Greeting
+	default:
+		t.Fatalf("unsupported listener protocol %q", listener.Protocol)
+	}
+
+	return ListenerGreetingConfig{}
+}
+
+// greetingValues dereferences greeting scalars for compact test assertions.
+func greetingValues(t *testing.T, greeting ListenerGreetingConfig) (string, string) {
+	t.Helper()
+
+	if greeting.DisplayName == nil {
+		t.Fatal("display_name is nil")
+	}
+	if greeting.SoftwareVersion == nil {
+		t.Fatal("software_version is nil")
+	}
+
+	return *greeting.DisplayName, *greeting.SoftwareVersion
 }
 
 // plaintextLMTPListenerConfig returns a safe auth-free plaintext LMTP listener profile.

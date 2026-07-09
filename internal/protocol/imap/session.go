@@ -32,6 +32,7 @@ import (
 	"github.com/croessner/nauthilus-director/internal/nauthilus"
 	"github.com/croessner/nauthilus-director/internal/observability"
 	"github.com/croessner/nauthilus-director/internal/placement"
+	"github.com/croessner/nauthilus-director/internal/protocol/greeting"
 	"github.com/croessner/nauthilus-director/internal/proxy"
 	"github.com/croessner/nauthilus-director/internal/routing"
 	runtimectl "github.com/croessner/nauthilus-director/internal/runtime"
@@ -90,6 +91,7 @@ type Session struct {
 	localSessions      *runtimectl.LocalSessionRegistry
 	placementGate      runtimectl.PlacementGate
 	observability      observability.Recorder
+	greetingPolicy     greeting.Policy
 
 	tlsActive      bool
 	clientID       string
@@ -166,6 +168,7 @@ func NewSession(config SessionConfig, conn net.Conn) (*Session, error) {
 		localSessions:      config.LocalSessions,
 		placementGate:      config.PlacementGate,
 		observability:      observability.NormalizeRecorder(config.Observability),
+		greetingPolicy:     config.GreetingPolicy,
 		tlsActive:          config.TLSMode == TLSModeImplicit,
 	}, nil
 }
@@ -197,7 +200,7 @@ func (s *Session) Serve(ctx context.Context) (err error) {
 		return err
 	}
 
-	if _, err := s.writer.WriteString(greetingLine); err != nil {
+	if err := s.writeGreeting(); err != nil {
 		return err
 	}
 
@@ -237,6 +240,48 @@ func (s *Session) Serve(ctx context.Context) (err error) {
 			return nil
 		}
 	}
+}
+
+// writeGreeting renders the initial untagged OK greeting from the listener policy.
+func (s *Session) writeGreeting() error {
+	_, err := s.writer.WriteString(renderGreetingLine(s.greetingPolicy))
+
+	return err
+}
+
+// renderGreetingLine formats the IMAP greeting while preserving the fixed status and suffix.
+func renderGreetingLine(policy greeting.Policy) string {
+	return "* OK " + sanitizeGreetingIdentity(policy.DisplayIdentity(greeting.ProtocolIMAP)) + " IMAP session ready\r\n"
+}
+
+// sanitizeGreetingIdentity keeps the IMAP greeting identity single-line and non-empty.
+func sanitizeGreetingIdentity(value string) string {
+	cleaned := strings.TrimSpace(replaceGreetingControls(value))
+
+	cleaned = strings.Join(strings.Fields(cleaned), " ")
+	if cleaned == "" {
+		return greeting.DefaultDisplayName
+	}
+
+	return cleaned
+}
+
+// replaceGreetingControls removes multiline and response-injection controls before wire output.
+func replaceGreetingControls(value string) string {
+	var builder strings.Builder
+	builder.Grow(len(value))
+
+	for _, current := range value {
+		if current < 0x20 || current == 0x7f {
+			builder.WriteByte(' ')
+
+			continue
+		}
+
+		builder.WriteRune(current)
+	}
+
+	return builder.String()
 }
 
 // TLSActive reports whether the session has crossed an implicit or STARTTLS boundary.

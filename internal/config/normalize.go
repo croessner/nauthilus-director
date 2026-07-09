@@ -120,8 +120,15 @@ func (d DirectorConfig) Normalize() DirectorConfig {
 			listener.TLS.Mode = normalizeListenerTLSMode(listener.TLS.Mode)
 			listener.AuthorityContext = listener.AuthorityContext.Normalize()
 
+			if listener.IMAP != nil {
+				imap := *listener.IMAP
+				imap.Greeting = imap.Greeting.Normalize()
+				listener.IMAP = &imap
+			}
+
 			if listener.LMTP != nil {
 				lmtp := *listener.LMTP
+				lmtp.Greeting = lmtp.Greeting.Normalize()
 				lmtp.Capabilities = normalizeLMTPCapabilities(lmtp.Capabilities)
 				lmtp.CapabilityFilter = lmtp.CapabilityFilter.Normalize()
 				lmtp.ClientAuth.Authority = strings.TrimSpace(lmtp.ClientAuth.Authority)
@@ -132,6 +139,7 @@ func (d DirectorConfig) Normalize() DirectorConfig {
 
 			if listener.Sieve != nil {
 				sieve := *listener.Sieve
+				sieve.Greeting = sieve.Greeting.Normalize()
 				sieve.AuthMechanisms = normalizeLowerList(sieve.AuthMechanisms)
 				sieve.Capabilities.ScriptExtensions = normalizeLowerList(sieve.Capabilities.ScriptExtensions)
 				sieve.Capabilities.Language = strings.ToLower(strings.TrimSpace(sieve.Capabilities.Language))
@@ -140,6 +148,7 @@ func (d DirectorConfig) Normalize() DirectorConfig {
 
 			if listener.POP3 != nil {
 				pop3 := *listener.POP3
+				pop3.Greeting = pop3.Greeting.Normalize()
 				pop3.AuthMechanisms = normalizeLowerList(pop3.AuthMechanisms)
 				pop3.Capabilities = normalizeUpperList(pop3.Capabilities)
 				listener.POP3 = &pop3
@@ -178,6 +187,57 @@ func (a AuthorityContextConfig) Normalize() AuthorityContextConfig {
 		HTTPHeaders:  normalizeHTTPAuthorityContext(a.HTTPHeaders),
 		GRPCMetadata: normalizeGRPCAuthorityContext(a.GRPCMetadata),
 	}
+}
+
+// Normalize applies safe defaults and canonical scalar forms for greeting policy.
+func (g ListenerGreetingConfig) Normalize() ListenerGreetingConfig {
+	if g.DisplayName == nil {
+		displayName := new(string)
+		*displayName = listenerGreetingDisplayNameDefault
+		g.DisplayName = displayName
+	} else {
+		displayName := normalizeListenerGreetingDisplayName(*g.DisplayName)
+		g.DisplayName = &displayName
+	}
+
+	if g.SoftwareVersion == nil {
+		softwareVersion := new(string)
+		*softwareVersion = listenerGreetingSoftwareVersionDefault
+		g.SoftwareVersion = softwareVersion
+	} else {
+		softwareVersion := strings.ToLower(strings.TrimSpace(*g.SoftwareVersion))
+		g.SoftwareVersion = &softwareVersion
+	}
+
+	return g
+}
+
+// normalizeListenerGreetingDisplayName trims edges and collapses repeated ASCII spaces.
+func normalizeListenerGreetingDisplayName(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return ""
+	}
+
+	var builder strings.Builder
+
+	lastWasSpace := false
+
+	for _, char := range trimmed {
+		if char == ' ' {
+			if lastWasSpace {
+				continue
+			}
+
+			lastWasSpace = true
+		} else {
+			lastWasSpace = false
+		}
+
+		builder.WriteRune(char)
+	}
+
+	return builder.String()
 }
 
 // normalizeHTTPAuthorityContext trims values and canonicalizes HTTP header names.

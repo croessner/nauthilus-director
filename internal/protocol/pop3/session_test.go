@@ -33,6 +33,7 @@ import (
 	"time"
 
 	"github.com/croessner/nauthilus-director/internal/nauthilus"
+	"github.com/croessner/nauthilus-director/internal/protocol/greeting"
 )
 
 // TestGreetingRendersSafeOK verifies the POP3 greeting has no deployment-specific secret material.
@@ -41,12 +42,62 @@ func TestGreetingRendersSafeOK(t *testing.T) {
 	harness := startPOP3Harness(t, testPOP3Config(TLSModeImplicit, authenticator))
 
 	line := harness.readLine(t)
-	if !strings.HasPrefix(line, "+OK ") {
-		t.Fatalf("greeting class = %q, want +OK", line)
+	if line != "+OK nauthilus-director POP3 ready\r\n" {
+		t.Fatalf("greeting = %q, want compatible default", line)
 	}
 
 	if strings.Contains(line, "director-instance-secret") {
 		t.Fatal("greeting leaked director instance identity")
+	}
+}
+
+// TestGreetingPolicyControlsPOP3Greeting verifies policy rendering without changing the response class.
+func TestGreetingPolicyControlsPOP3Greeting(t *testing.T) {
+	tests := []struct {
+		name           string
+		displayName    string
+		processVersion string
+		disclosure     greeting.SoftwareVersionDisclosure
+		want           string
+	}{
+		{
+			name:           "custom display name",
+			displayName:    "Norbert",
+			processVersion: "v1.2.3",
+			disclosure:     greeting.DisclosureDefault,
+			want:           "+OK Norbert POP3 ready\r\n",
+		},
+		{
+			name:           "include version",
+			displayName:    "Norbert",
+			processVersion: " v1.2.3\nbuild\t7 ",
+			disclosure:     greeting.DisclosureInclude,
+			want:           "+OK Norbert v1.2.3 build 7 POP3 ready\r\n",
+		},
+		{
+			name:           "suppress default version",
+			displayName:    "nauthilus-director",
+			processVersion: "v1.2.3",
+			disclosure:     greeting.DisclosureSuppress,
+			want:           "+OK nauthilus-director POP3 ready\r\n",
+		},
+		{
+			name:           "suppress custom version",
+			displayName:    "Norbert",
+			processVersion: "v1.2.3",
+			disclosure:     greeting.DisclosureSuppress,
+			want:           "+OK Norbert POP3 ready\r\n",
+		},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			config := testPOP3Config(TLSModeImplicit, &recordingAuthenticator{})
+			config.GreetingPolicy = testGreetingPolicy(t, testCase.displayName, testCase.processVersion, testCase.disclosure)
+
+			harness := startPOP3Harness(t, config)
+			harness.expectLine(t, testCase.want)
+		})
 	}
 }
 
@@ -451,6 +502,28 @@ func testPOP3Config(tlsMode string, authenticator nauthilus.Authenticator) Sessi
 		MaxBearerTokenBytes:    8192,
 		Authenticator:          authenticator,
 	}
+}
+
+// testGreetingPolicy builds a shared greeting policy for POP3 wire tests.
+func testGreetingPolicy(
+	t *testing.T,
+	displayNameValue string,
+	processVersion string,
+	disclosure greeting.SoftwareVersionDisclosure,
+) greeting.Policy {
+	t.Helper()
+
+	displayName, err := greeting.NewDisplayName(displayNameValue)
+	if err != nil {
+		t.Fatalf("NewDisplayName(%q): %v", displayNameValue, err)
+	}
+
+	policy, err := greeting.NewPolicy(displayName, processVersion, disclosure)
+	if err != nil {
+		t.Fatalf("NewPolicy: %v", err)
+	}
+
+	return policy
 }
 
 type pop3Harness struct {

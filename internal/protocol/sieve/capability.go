@@ -20,6 +20,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/croessner/nauthilus-director/internal/protocol/greeting"
 	"github.com/croessner/nauthilus-director/internal/protocol/saslcred"
 )
 
@@ -138,19 +139,15 @@ func capabilityLinePresent(lines []capabilityLine, name string) bool {
 
 // implementationCapability returns the internal IMPLEMENTATION value with a safe fallback.
 func (s *Session) implementationCapability() string {
-	if value := strings.TrimSpace(s.capabilities.Implementation); value != "" {
+	if value := strings.TrimSpace(s.greetingPolicy.DisplayIdentity(greeting.ProtocolSieve)); value != "" {
 		return value
 	}
 
 	return ImplementationName
 }
 
-// protocolVersionCapability returns the RFC 5804 VERSION value with a safe fallback.
+// protocolVersionCapability returns the immutable RFC 5804 VERSION value.
 func (s *Session) protocolVersionCapability() string {
-	if value := strings.TrimSpace(s.capabilities.ProtocolVersion); value != "" {
-		return value
-	}
-
 	return ProtocolVersionRFC5804
 }
 

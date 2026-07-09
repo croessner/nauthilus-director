@@ -35,6 +35,9 @@ paths:
   director.listeners.**:
     stability: stable
     description: Public protocol listener, TLS, proxy protocol, authority, and backend-pool binding.
+  director.listeners.*.*.greeting.**:
+    stability: stable
+    description: Per-listener protocol greeting policy. display_name is a bounded public identity; software_version accepts default, include, or suppress and never permits raw transcript lines.
   director.listeners.*.lmtp.capabilities:
     stability: stable
     description: Positive LMTP frontend capability allowlist. STARTTLS and AUTH are mediated by listener TLS and auth policy; CHUNKING, 8BITMIME and SIZE are advertised only when configured, implemented, allowed by capability_filter.deny, and backed by fresh backend-pool capability proof. PIPELINING is frontend-only and never enables backend command batching.

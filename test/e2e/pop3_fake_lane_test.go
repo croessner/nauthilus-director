@@ -160,6 +160,134 @@ func TestServerBinaryPublicPOP3ProductionFlow(t *testing.T) {
 	assertPOP3ProcessOutputSafe(t, process.output.String())
 }
 
+// TestServerBinaryPublicPOP3GreetingDisclosurePolicy proves POP3 greeting policy through a public socket.
+func TestServerBinaryPublicPOP3GreetingDisclosurePolicy(t *testing.T) {
+	binary := e2eServerBinaryWithVersion(t, e2eGreetingProcessVersion)
+	testCases := protocolGreetingLineFixtures(
+		"+OK nauthilus-director POP3 ready\r\n",
+		"+OK nauthilus-director "+e2eGreetingProcessVersion+" POP3 ready\r\n",
+		"+OK nauthilus-director POP3 ready\r\n",
+		"+OK Norbert POP3 ready\r\n",
+	)
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			redisFixture := startValkeySessionStore(t)
+			authority := startMappedFakeOIDCHTTPAuthority(t, pop3AuthorityIdentities(), nil, fakeOIDCAuthorityOptions{
+				SkipBackchannelAuth: true,
+			})
+			backendCertPath, _, backendCertificate := writeTestCertificate(t)
+			pop3BackendTLS := &tls.Config{Certificates: []tls.Certificate{backendCertificate}, MinVersion: tls.VersionTLS12}
+			fakePOP3A := pop3backend.Start(t, pop3backend.Options{
+				TLSConfig: pop3BackendTLS,
+				TLSMode:   "starttls",
+			})
+			fakePOP3B := pop3backend.Start(t, pop3backend.Options{
+				TLSConfig: pop3BackendTLS,
+				TLSMode:   "starttls",
+			})
+			fakeIMAPA := startFakeIMAPBackend(t, fakeBackendOptions{})
+			fakeIMAPB := startFakeIMAPBackend(t, fakeBackendOptions{})
+			fakeLMTPA := lmtpbackend.Start(t, lmtpbackend.Options{})
+			fakeLMTPB := lmtpbackend.Start(t, lmtpbackend.Options{})
+			fakeSieveA := managesievebackend.Start(t, managesievebackend.Options{})
+			fakeSieveB := managesievebackend.Start(t, managesievebackend.Options{})
+			pop3Address := loopbackAddress(t)
+			configPath := writePOP3ProductionProcessConfig(t, pop3ProductionProcessConfigOptions{
+				RedisAddress:    redisFixture.addr,
+				AuthorityURL:    authority.URL(),
+				AuthorityBearer: processAuthorityBearerForFake(authority),
+				POP3Address:     pop3Address,
+				POP3SAddress:    loopbackAddress(t),
+				IMAPAddress:     loopbackAddress(t),
+				LMTPAddress:     loopbackAddress(t),
+				SieveAddress:    loopbackAddress(t),
+				ControlAddress:  loopbackAddress(t),
+				POP3Backends: map[string]string{
+					e2ePOP3BackendAID: fakePOP3A.Address(),
+					e2ePOP3BackendBID: fakePOP3B.Address(),
+				},
+				IMAPBackends: map[string]string{
+					e2eBackendAID: fakeIMAPA.Address(),
+					e2eBackendBID: fakeIMAPB.Address(),
+				},
+				LMTPBackends: map[string]string{
+					e2eLMTPBackendAID: fakeLMTPA.Address(),
+					e2eLMTPBackendBID: fakeLMTPB.Address(),
+				},
+				SieveBackends: map[string]string{
+					e2eSieveBackendAID: fakeSieveA.Address(),
+					e2eSieveBackendBID: fakeSieveB.Address(),
+				},
+				POP3BackendTLSMode:   "starttls",
+				POP3BackendTLSCAFile: backendCertPath,
+				UserHoldMaxWait:      175 * time.Millisecond,
+				UserHoldPollInterval: 25 * time.Millisecond,
+				POP3Greeting:         testCase.policy,
+			})
+			process := startDirectorProcess(t, binary, configPath)
+
+			got := readProcessGreetingLine(t, pop3Address, process, "+OK ")
+			if got != testCase.want {
+				t.Fatalf("POP3 greeting = %q, want %q", got, testCase.want)
+			}
+			stopDirectorProcess(t, process)
+			assertPOP3ProcessOutputSafe(t, process.output.String())
+			assertOutputOmits(t, process.output.String(), e2eGreetingUnsafeSentinel)
+		})
+	}
+}
+
+// TestServerBinaryRejectsInvalidGreetingDisplayNameBeforeListenersBind proves process-level fail-closed validation.
+func TestServerBinaryRejectsInvalidGreetingDisplayNameBeforeListenersBind(t *testing.T) {
+	binary := e2eServerBinaryWithVersion(t, e2eGreetingProcessVersion)
+	imapAddress := loopbackAddress(t)
+	lmtpAddress := loopbackAddress(t)
+	sieveAddress := loopbackAddress(t)
+	pop3Address := loopbackAddress(t)
+	configPath := writePOP3ProductionProcessConfig(t, pop3ProductionProcessConfigOptions{
+		RedisAddress:   "127.0.0.1:1",
+		AuthorityURL:   "http://127.0.0.1:1/api/v1/auth/json",
+		POP3Address:    pop3Address,
+		POP3SAddress:   loopbackAddress(t),
+		IMAPAddress:    imapAddress,
+		LMTPAddress:    lmtpAddress,
+		SieveAddress:   sieveAddress,
+		ControlAddress: loopbackAddress(t),
+		POP3Backends: map[string]string{
+			e2ePOP3BackendAID: "127.0.0.1:1",
+			e2ePOP3BackendBID: "127.0.0.1:1",
+		},
+		IMAPBackends: map[string]string{
+			e2eBackendAID: "127.0.0.1:1",
+			e2eBackendBID: "127.0.0.1:1",
+		},
+		LMTPBackends: map[string]string{
+			e2eLMTPBackendAID: "127.0.0.1:1",
+			e2eLMTPBackendBID: "127.0.0.1:1",
+		},
+		SieveBackends: map[string]string{
+			e2eSieveBackendAID: "127.0.0.1:1",
+			e2eSieveBackendBID: "127.0.0.1:1",
+		},
+		UserHoldMaxWait:      175 * time.Millisecond,
+		UserHoldPollInterval: 25 * time.Millisecond,
+		POP3Greeting: greetingPolicyFixture{
+			DisplayName:     e2eGreetingUnsafeSentinel + "\nInjected",
+			SoftwareVersion: "default",
+		},
+	})
+
+	output := runDirectorProcessExpectFailure(t, binary, configPath)
+	if !strings.Contains(output, "display_name contains unsupported characters or response-shaped text") {
+		t.Fatalf("director output = %q, want display_name validation failure", output)
+	}
+	assertOutputOmits(t, output, e2eGreetingUnsafeSentinel)
+	for _, address := range []string{imapAddress, lmtpAddress, sieveAddress, pop3Address} {
+		assertTCPAddressClosed(t, address)
+	}
+}
+
 // exercisePOP3StartTLSAuthProxyAndRouteLookup proves frontend TLS, auth, proxying and diagnostics.
 func exercisePOP3StartTLSAuthProxyAndRouteLookup(
 	t *testing.T,
@@ -467,6 +595,11 @@ type pop3ProductionProcessConfigOptions struct {
 	LMTPAddress          string
 	SieveAddress         string
 	ControlAddress       string
+	IMAPGreeting         greetingPolicyFixture
+	LMTPGreeting         greetingPolicyFixture
+	SieveGreeting        greetingPolicyFixture
+	POP3Greeting         greetingPolicyFixture
+	POP3SGreeting        greetingPolicyFixture
 	POP3Backends         map[string]string
 	POP3BackendTLSMode   string
 	POP3BackendTLSCAFile string
@@ -563,6 +696,7 @@ director:
       imap:
         capabilities: [IMAP4rev1, ID, SASL-IR, STARTTLS, AUTH=PLAIN]
         auth_mechanisms: [plain]
+%s
     lmtp:
       protocol: lmtp
       service_name: lmtp
@@ -586,6 +720,7 @@ director:
             satisfies_required: false
             identity_source: subject_common_name
         capabilities: [SMTPUTF8, STARTTLS]
+%s
     sieve:
       protocol: sieve
       service_name: sieve
@@ -603,6 +738,7 @@ director:
         capabilities:
           script_extensions: [fileinto, reject]
           language: en
+%s
     pop3:
       protocol: pop3
       service_name: pop3
@@ -618,6 +754,7 @@ director:
       pop3:
         auth_mechanisms: [userpass, xoauth2, oauthbearer]
         capabilities: [STLS, USER, SASL, UIDL, TOP, RESP-CODES]
+%s
     pop3s:
       protocol: pop3
       service_name: pop3s
@@ -633,6 +770,7 @@ director:
       pop3:
         auth_mechanisms: [userpass, xoauth2, oauthbearer]
         capabilities: [USER, SASL, UIDL, TOP, RESP-CODES]
+%s
   backend_pools:
     imap-default:
       protocol: imap
@@ -664,18 +802,23 @@ director:
 		options.IMAPAddress,
 		certPath,
 		keyPath,
+		greetingPolicyYAML("        ", options.IMAPGreeting),
 		options.LMTPAddress,
 		certPath,
 		keyPath,
+		greetingPolicyYAML("        ", options.LMTPGreeting),
 		options.SieveAddress,
 		certPath,
 		keyPath,
+		greetingPolicyYAML("        ", options.SieveGreeting),
 		options.POP3Address,
 		certPath,
 		keyPath,
+		greetingPolicyYAML("        ", options.POP3Greeting),
 		options.POP3SAddress,
 		certPath,
 		keyPath,
+		greetingPolicyYAML("        ", options.POP3SGreeting),
 		pop3ProductionBackendsYAML(options, backendPasswordPath),
 	)
 	content = strings.ReplaceAll(content, "\t", "")

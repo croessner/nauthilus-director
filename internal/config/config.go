@@ -48,6 +48,11 @@ const (
 	protocolSIEVE = "sieve"
 	protocolPOP3  = "pop3"
 
+	listenerGreetingDisplayNameDefault      = "nauthilus-director"
+	listenerGreetingSoftwareVersionDefault  = "default"
+	listenerGreetingSoftwareVersionInclude  = "include"
+	listenerGreetingSoftwareVersionSuppress = "suppress"
+
 	backendAuthModeMasterUser       = "master_user"
 	backendAuthModeCredentialReplay = "credential_replay"
 	backendAuthModeSASL             = "sasl"
@@ -454,13 +459,21 @@ type ListenerTLSConfig struct {
 	MinTLSVersion     string       `mapstructure:"min_tls_version" yaml:"min_tls_version"`
 }
 
+// ListenerGreetingConfig describes bounded public identity and version disclosure policy.
+type ListenerGreetingConfig struct {
+	DisplayName     *string `mapstructure:"display_name" yaml:"display_name"`
+	SoftwareVersion *string `mapstructure:"software_version" yaml:"software_version"`
+}
+
 type IMAPListenerConfig struct {
-	Capabilities        []string `mapstructure:"capabilities" yaml:"capabilities"`
-	AuthMechanisms      []string `mapstructure:"auth_mechanisms" yaml:"auth_mechanisms"`
-	RequireIDBeforeAuth bool     `mapstructure:"require_id_before_auth" yaml:"require_id_before_auth"`
+	Greeting            ListenerGreetingConfig `mapstructure:"greeting" yaml:"greeting" validate:"required"`
+	Capabilities        []string               `mapstructure:"capabilities" yaml:"capabilities"`
+	AuthMechanisms      []string               `mapstructure:"auth_mechanisms" yaml:"auth_mechanisms"`
+	RequireIDBeforeAuth bool                   `mapstructure:"require_id_before_auth" yaml:"require_id_before_auth"`
 }
 
 type LMTPListenerConfig struct {
+	Greeting         ListenerGreetingConfig     `mapstructure:"greeting" yaml:"greeting" validate:"required"`
 	ClientAuth       LMTPClientAuthConfig       `mapstructure:"client_auth" yaml:"client_auth" validate:"required"`
 	Capabilities     []string                   `mapstructure:"capabilities" yaml:"capabilities"`
 	CapabilityFilter LMTPCapabilityFilterConfig `mapstructure:"capability_filter" yaml:"capability_filter" validate:"required"`
@@ -488,6 +501,7 @@ type LMTPClientMTLSAuthConfig struct {
 }
 
 type SieveListenerConfig struct {
+	Greeting       ListenerGreetingConfig  `mapstructure:"greeting" yaml:"greeting" validate:"required"`
 	AuthMechanisms []string                `mapstructure:"auth_mechanisms" yaml:"auth_mechanisms"`
 	Capabilities   SieveCapabilitiesConfig `mapstructure:"capabilities" yaml:"capabilities" validate:"required"`
 }
@@ -498,8 +512,9 @@ type SieveCapabilitiesConfig struct {
 }
 
 type POP3ListenerConfig struct {
-	AuthMechanisms []string `mapstructure:"auth_mechanisms" yaml:"auth_mechanisms"`
-	Capabilities   []string `mapstructure:"capabilities" yaml:"capabilities"`
+	Greeting       ListenerGreetingConfig `mapstructure:"greeting" yaml:"greeting" validate:"required"`
+	AuthMechanisms []string               `mapstructure:"auth_mechanisms" yaml:"auth_mechanisms"`
+	Capabilities   []string               `mapstructure:"capabilities" yaml:"capabilities"`
 }
 
 type RoutingConfig struct {
