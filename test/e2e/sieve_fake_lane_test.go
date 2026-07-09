@@ -157,10 +157,13 @@ func exerciseSieveStartTLSAuthProxyAndRouteLookup(
 	client.WriteLine(sieveCommandStartTLS)
 	client.ExpectStatusPrefix("OK")
 	client.UpgradeTLS(&tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12})
+	postTLSCapability := client.ReadResponse()
+	assertSieveNoCapability(t, postTLSCapability, "STARTTLS")
+	assertSieveSASLValue(t, postTLSCapability, "PLAIN XOAUTH2 OAUTHBEARER")
 	client.WriteLine(sieveCommandCapability)
-	capability := client.ReadResponse()
-	assertSieveNoCapability(t, capability, "STARTTLS")
-	assertSieveSASLValue(t, capability, "PLAIN XOAUTH2 OAUTHBEARER")
+	requestedCapability := client.ReadResponse()
+	assertSieveNoCapability(t, requestedCapability, "STARTTLS")
+	assertSieveSASLValue(t, requestedCapability, "PLAIN XOAUTH2 OAUTHBEARER")
 
 	routeOutput := runDirectorctl(t, ctl, controlURL,
 		"route", "lookup",
@@ -848,6 +851,8 @@ func dialSieveStartedTLS(t *testing.T, address string) *sieveClient {
 	client.WriteLine(sieveCommandStartTLS)
 	client.ExpectStatusPrefix("OK")
 	client.UpgradeTLS(&tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12})
+	postTLSCapability := client.ReadResponse()
+	assertSieveNoCapability(t, postTLSCapability, "STARTTLS")
 
 	return client
 }

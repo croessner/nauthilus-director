@@ -59,7 +59,7 @@ func (s *Session) handleStartTLS(ctx context.Context, command preauthCommand) (c
 	if s.frontendTLSConfig == nil {
 		s.recordStartTLS(ctx, sieveObservationResultOK, sieveReasonOK)
 
-		return commandOutcome{flushed: true}, nil
+		return s.finishStartTLS(ctx)
 	}
 
 	tlsConn := tls.Server(s.conn, s.frontendTLSConfig.Clone())
@@ -75,7 +75,7 @@ func (s *Session) handleStartTLS(ctx context.Context, command preauthCommand) (c
 	s.resetAfterStartTLS()
 	s.recordStartTLS(ctx, sieveObservationResultOK, sieveReasonOK)
 
-	return commandOutcome{flushed: true}, nil
+	return s.finishStartTLS(ctx)
 }
 
 // startTLSAdvertised reports whether STARTTLS is configured and currently usable.
@@ -91,4 +91,23 @@ func (s *Session) startTLSPermitted() bool {
 // resetAfterStartTLS clears pre-TLS state that must not survive the transport upgrade.
 func (s *Session) resetAfterStartTLS() {
 	s.tlsActive = true
+}
+
+// finishStartTLS re-issues capabilities required by RFC 5804 after STARTTLS.
+func (s *Session) finishStartTLS(ctx context.Context) (commandOutcome, error) {
+	if err := s.writeCapabilityGreeting(); err != nil {
+		s.recordCapability(ctx, sieveObservationResultFailure, sieveReasonClass(err))
+
+		return commandOutcome{flushed: true}, err
+	}
+
+	if err := s.writer.Flush(); err != nil {
+		s.recordCapability(ctx, sieveObservationResultFailure, sieveReasonClass(err))
+
+		return commandOutcome{flushed: true}, err
+	}
+
+	s.recordCapability(ctx, sieveObservationResultOK, sieveReasonOK)
+
+	return commandOutcome{flushed: true}, nil
 }

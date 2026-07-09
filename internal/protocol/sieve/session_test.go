@@ -126,20 +126,18 @@ func TestCapabilityChangesAfterStartTLS(t *testing.T) {
 
 	harness.write(t, "STARTTLS\r\n")
 	harness.expectLine(t, "OK \"Begin TLS negotiation now\"\r\n")
-
-	if !harness.session.TLSActive() {
-		t.Fatal("STARTTLS did not mark the session TLS-active")
-	}
-
-	harness.write(t, "CAPABILITY\r\n")
 	harness.expectLines(t,
 		testGreetingImplementation,
 		testGreetingVersion,
 		testGreetingSieve,
 		testGreetingLanguage,
 		testGreetingSASLTLS,
-		"OK \"Capability completed\"\r\n",
+		testGreetingOK,
 	)
+
+	if !harness.session.TLSActive() {
+		t.Fatal("STARTTLS did not mark the session TLS-active")
+	}
 
 	harness.write(t, "CAPABILITY\r\n")
 	harness.expectLines(t,
