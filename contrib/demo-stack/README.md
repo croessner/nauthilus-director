@@ -193,6 +193,7 @@ The demo also includes public-boundary affinity proofs:
 ./scripts/prove-affinity.sh
 ./scripts/prove-backend-proxy.sh
 ./scripts/prove-managesieve.sh
+./scripts/prove-managesieve-client.sh
 ./scripts/prove-pop3.sh
 ./scripts/prove-user-backend-pin.sh
 ./scripts/prove-user-hold.sh
@@ -209,8 +210,18 @@ IMAP and LMTP backend connections cannot complete.
 `prove-managesieve.sh` authenticates `alice@example.test` through the public
 Sieve STARTTLS and Sieve-over-TLS ports, then proves `LISTSCRIPTS`,
 `PUTSCRIPT`, `SETACTIVE` and `GETSCRIPT` through the real Dovecot
-ManageSieve backend while checking that route lookup does not expose script
-material.
+ManageSieve backend. It also sends the Roundcube/Net_Sieve-style post-auth
+`CAPABILITY`, verifies the Director-advertised vacation extensions before
+proxy handoff, verifies backend `date` and `vacation` support before script
+operations, and checks that route lookup does not expose script material.
+`prove-managesieve-client.sh` runs an independent Perl `Net::ManageSieve`
+client over the public STARTTLS port, so the same Roundcube-visible
+post-auth `CAPABILITY`, backend `date` and `vacation` extensions, and
+temporary `PUTSCRIPT`/`GETSCRIPT`/`DELETESCRIPT` path are also proven through
+an external ManageSieve client. It requires the local Perl modules
+`Net::ManageSieve` and `IO::Socket::SSL`; install them with
+`cpan -T Net::ManageSieve IO::Socket::SSL` when the proof host does not
+already provide them.
 `prove-pop3.sh` injects a message through the public SMTP-to-LMTPS path,
 authenticates `alice@example.test` through public POP3 STLS and POP3S, proves
 `STAT`, `LIST`, `UIDL`, `RETR` and `QUIT` through the real Dovecot POP3

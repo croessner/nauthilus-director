@@ -26,6 +26,7 @@ import (
 const (
 	capabilityImplementation = "IMPLEMENTATION"
 	capabilityLanguage       = "LANGUAGE"
+	capabilityOwner          = "OWNER"
 	capabilitySASL           = "SASL"
 	capabilitySieve          = "SIEVE"
 	capabilityStartTLS       = "STARTTLS"
@@ -60,6 +61,17 @@ func (s *Session) handleCapability(command preauthCommand) error {
 	return s.writeOK("Capability completed")
 }
 
+// writeAuthenticatedCapabilityResponse sends the RFC 5804 capability update after AUTHENTICATE.
+func (s *Session) writeAuthenticatedCapabilityResponse(owner string) error {
+	for _, capability := range s.authenticatedCapabilityLines(owner) {
+		if _, err := s.writer.WriteString(renderCapabilityLine(capability)); err != nil {
+			return err
+		}
+	}
+
+	return s.writeOK("Authentication successful")
+}
+
 // writeCapabilityLines writes every effective capability line in stable order.
 func (s *Session) writeCapabilityLines() error {
 	for _, capability := range s.capabilityLines() {
@@ -92,6 +104,36 @@ func (s *Session) capabilityLines() []capabilityLine {
 	}
 
 	return lines
+}
+
+// authenticatedCapabilityLines returns capabilities that are safe after successful authentication.
+func (s *Session) authenticatedCapabilityLines(owner string) []capabilityLine {
+	lines := make([]capabilityLine, 0, len(s.capabilityLines())+1)
+	for _, capability := range s.capabilityLines() {
+		if capability.name == capabilityStartTLS {
+			continue
+		}
+
+		lines = append(lines, capability)
+		if capability.name == capabilityLanguage {
+			if owner = strings.TrimSpace(owner); owner != "" {
+				lines = append(lines, capabilityLine{name: capabilityOwner, value: owner, hasValue: true})
+			}
+		}
+	}
+
+	if owner = strings.TrimSpace(owner); owner != "" && !capabilityLinePresent(lines, capabilityOwner) {
+		lines = append(lines, capabilityLine{name: capabilityOwner, value: owner, hasValue: true})
+	}
+
+	return lines
+}
+
+// capabilityLinePresent reports whether a capability line is already rendered.
+func capabilityLinePresent(lines []capabilityLine, name string) bool {
+	return slices.ContainsFunc(lines, func(line capabilityLine) bool {
+		return line.name == name
+	})
 }
 
 // implementationCapability returns the internal IMPLEMENTATION value with a safe fallback.

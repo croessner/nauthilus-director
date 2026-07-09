@@ -322,6 +322,9 @@ func (s *Server) handleStartTLS(conn net.Conn, state *connectionState) (net.Conn
 	}
 
 	state.tlsActive = true
+	if err := s.writeCapabilities(tlsConn, state, "tls capability"); err != nil {
+		return tlsConn, bufio.NewReader(tlsConn), true
+	}
 
 	return tlsConn, bufio.NewReader(tlsConn), false
 }

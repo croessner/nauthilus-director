@@ -13,7 +13,6 @@ from dataclasses import dataclass
 import base64
 import json
 import os
-import select
 import socket
 import ssl
 import sys
@@ -105,18 +104,8 @@ class SieveClient:
             raise ProofError(f"unexpected ManageSieve response status: {response!r}")
         return response
 
-    def drain_optional_status(self, label: str) -> None:
-        """Drain an immediate backend status emitted after proxy handoff."""
-
-        ready, _, _ = select.select([self.sock], [], [], min(1.0, self.wait_seconds))
-        if not ready:
-            return
-        response = self.read_response()
-        if not response[-1].startswith("OK"):
-            raise ProofError(f"unexpected {label} status: {response!r}")
-
-    def starttls(self) -> None:
-        """Upgrade the cleartext connection with STARTTLS."""
+    def starttls(self) -> list[str]:
+        """Upgrade the cleartext connection with STARTTLS and read capabilities."""
 
         self.send_line("STARTTLS")
         self.expect_status("OK")
@@ -127,6 +116,7 @@ class SieveClient:
         tls_sock.settimeout(self.wait_seconds)
         self.sock = tls_sock
         self.file = tls_sock.makefile("rb")
+        return self.expect_status("OK")
 
     def authenticate_plain(self, user: str, password: str, expected_prefix: str = "OK") -> list[str]:
         """Authenticate with SASL PLAIN."""
@@ -211,6 +201,44 @@ def require_capability(response: list[str], capability: str) -> None:
         raise ProofError(f"ManageSieve capability {capability} missing: {response!r}")
 
 
+def sieve_capability_value(response: list[str], capability: str) -> str | None:
+    """Return one simple quoted ManageSieve capability value."""
+
+    wanted = f'"{capability.upper()}" '
+    for line in response:
+        if not line.upper().startswith(wanted):
+            continue
+
+        value = line[len(wanted) :].strip()
+        if len(value) >= 2 and value[0] == '"' and value[-1] == '"':
+            return value[1:-1]
+
+    return None
+
+
+def require_sieve_extensions(response: list[str], *extensions: str) -> None:
+    """Verify the SIEVE capability contains expected extension tokens."""
+
+    value = sieve_capability_value(response, "SIEVE")
+    if value is None:
+        raise ProofError(f"ManageSieve SIEVE capability missing: {response!r}")
+
+    advertised = {extension.lower() for extension in value.split()}
+    missing = [extension for extension in extensions if extension.lower() not in advertised]
+    if missing:
+        raise ProofError(f"ManageSieve SIEVE extensions missing {missing!r}: {value!r}")
+
+
+def reject_capability_desync(response: list[str], label: str) -> None:
+    """Fail when an ordinary script response starts with capability lines."""
+
+    capability_names = {"IMPLEMENTATION", "LANGUAGE", "SASL", "SIEVE", "STARTTLS", "VERSION"}
+    for line in response[:-1]:
+        name = line.split(" ", 1)[0].strip('"').upper()
+        if name in capability_names:
+            raise ProofError(f"{label} received stale capability line {name!r}: {response!r}")
+
+
 def request_json(config: DemoConfig, path: str, payload: dict[str, object]) -> dict[str, object]:
     """Perform one JSON POST request against the public control API."""
 
@@ -249,24 +277,35 @@ def assert_safe_route(route: dict[str, object], script_name: str, script_body: s
 def prove_starttls_flow(config: DemoConfig, script_name: str, script_body: str) -> None:
     """Prove public STARTTLS auth and script-management proxying."""
 
+    frontend_extensions = ("date", "vacation", "vacation-seconds")
+    backend_extensions = ("date", "vacation")
     client = SieveClient.connect_plain(config.sieve_host, config.sieve_port, config.wait_seconds)
     try:
         greeting = client.read_response()
         require_capability(greeting, "STARTTLS")
+        require_sieve_extensions(greeting, *frontend_extensions)
         client.authenticate_plain(config.user, config.password, "NO")
-        client.starttls()
+        starttls_capability = client.starttls()
+        require_capability(starttls_capability, "SASL")
+        require_sieve_extensions(starttls_capability, *frontend_extensions)
         client.send_line("CAPABILITY")
-        require_capability(client.expect_status("OK"), "SASL")
-        client.authenticate_plain(config.user, config.password)
-        client.drain_optional_status("backend login")
+        explicit_starttls_capability = client.expect_status("OK")
+        require_capability(explicit_starttls_capability, "SASL")
+        require_sieve_extensions(explicit_starttls_capability, *frontend_extensions)
+        auth_capability = client.authenticate_plain(config.user, config.password)
+        require_sieve_extensions(auth_capability, *frontend_extensions)
+        client.send_line("CAPABILITY")
+        backend_capability = client.expect_status("OK")
+        require_sieve_extensions(backend_capability, *backend_extensions)
         client.send_line("LISTSCRIPTS")
-        client.expect_status("OK")
+        reject_capability_desync(client.expect_status("OK"), "LISTSCRIPTS")
         client.send_line(f'PUTSCRIPT "{script_name}" "{script_body}"')
         client.expect_status("OK")
         client.send_line(f'SETACTIVE "{script_name}"')
         client.expect_status("OK")
         client.send_line("LISTSCRIPTS")
         listed = client.expect_status("OK")
+        reject_capability_desync(listed, "LISTSCRIPTS")
         if script_name not in "\n".join(listed):
             raise ProofError("new Sieve script was not listed by the backend")
         client.send_line(f'GETSCRIPT "{script_name}"')
@@ -296,14 +335,20 @@ def prove_starttls_flow(config: DemoConfig, script_name: str, script_body: str) 
 def prove_implicit_tls_flow(config: DemoConfig) -> None:
     """Prove public implicit-TLS ManageSieve auth."""
 
+    frontend_extensions = ("date", "vacation", "vacation-seconds")
+    backend_extensions = ("date", "vacation")
     client = SieveClient.connect_tls(config.sieve_host, config.sieves_port, config.wait_seconds)
     try:
         greeting = client.read_response()
         require_capability(greeting, "SASL")
-        client.authenticate_plain(config.user, config.password)
-        client.drain_optional_status("backend login")
+        require_sieve_extensions(greeting, *frontend_extensions)
+        auth_capability = client.authenticate_plain(config.user, config.password)
+        require_sieve_extensions(auth_capability, *frontend_extensions)
+        client.send_line("CAPABILITY")
+        backend_capability = client.expect_status("OK")
+        require_sieve_extensions(backend_capability, *backend_extensions)
         client.send_line("LISTSCRIPTS")
-        client.expect_status("OK")
+        reject_capability_desync(client.expect_status("OK"), "LISTSCRIPTS")
         print(f"implicit-TLS ManageSieve proof ok: user={config.user}")
     finally:
         client.close()

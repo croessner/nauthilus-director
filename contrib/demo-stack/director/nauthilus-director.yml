@@ -489,6 +489,11 @@ director:
           script_extensions:
             - fileinto
             - reject
+            - vacation
+            - relational
+            - regex
+            - date
+            - vacation-seconds
           language: en
 
     sieves:
@@ -520,6 +525,11 @@ director:
           script_extensions:
             - fileinto
             - reject
+            - vacation
+            - relational
+            - regex
+            - date
+            - vacation-seconds
           language: en
 
 

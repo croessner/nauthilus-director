@@ -120,8 +120,8 @@ func TestBackendConnectorHandlesStartTLS(t *testing.T) {
 		}
 
 		tlsReader := bufio.NewReader(tlsConn)
-		expectSieveBackendLine(t, tlsReader, commandCapability)
 		writeSieveBackendCapabilities(t, tlsConn)
+		rejectUnexpectedSieveBackendLine(t, tlsConn, tlsReader, commandCapability)
 	})
 
 	connection, err := NewTCPBackendConnector(dialer).Connect(
@@ -740,6 +740,31 @@ func readSieveBackendLine(t *testing.T, reader *bufio.Reader) string {
 	}
 
 	return strings.TrimRight(line, "\r\n")
+}
+
+// rejectUnexpectedSieveBackendLine verifies no redundant backend command was sent.
+func rejectUnexpectedSieveBackendLine(t *testing.T, conn net.Conn, reader *bufio.Reader, forbidden string) {
+	t.Helper()
+
+	_ = conn.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
+	line, err := reader.ReadString('\n')
+	_ = conn.SetReadDeadline(time.Time{})
+	if err != nil {
+		var netErr net.Error
+		if errors.As(err, &netErr) && netErr.Timeout() {
+			return
+		}
+		if errors.Is(err, io.EOF) {
+			return
+		}
+		t.Fatalf("read optional backend line: %v", err)
+	}
+
+	got := strings.TrimRight(line, "\r\n")
+	if got == forbidden {
+		t.Fatalf("backend command = %q, want no redundant command", got)
+	}
+	t.Fatalf("unexpected backend command = %q", got)
 }
 
 // expectedSieveHealthAuthCommand returns the deep-health AUTHENTICATE command.

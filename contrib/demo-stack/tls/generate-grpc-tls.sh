@@ -24,11 +24,18 @@ fix_permissions() {
   chown "${nauthilus_uid}:${nauthilus_gid}" "${server_key}" "${server_cert}" "${oidc_key}"
 }
 
+cert_valid() {
+  cert_file="$1"
+  test -s "${cert_file}" && openssl x509 -checkend 86400 -noout -in "${cert_file}" >/dev/null 2>&1
+}
+
 mkdir -p "${tls_dir}"
 
 if [ -s "${ca_key}" ] && [ -s "${ca_cert}" ] && [ -s "${server_key}" ] && [ -s "${server_cert}" ] && [ -s "${server_pem}" ] && [ -s "${oidc_key}" ]; then
-  fix_permissions
-  exit 0
+  if cert_valid "${ca_cert}" && cert_valid "${server_cert}"; then
+    fix_permissions
+    exit 0
+  fi
 fi
 
 work_dir="$(mktemp -d)"

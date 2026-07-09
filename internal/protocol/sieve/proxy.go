@@ -22,6 +22,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -102,10 +103,14 @@ func (s *Session) transitionAuthenticatedSession(
 	s.recordBackendAuth(connectCtx, sieveObservationResultOK, sieveReasonOK, credentials.Mechanism().Normalized())
 	connectSpan.End(sieveObservationResultOK, sieveReasonOK)
 
+	owner := strings.TrimSpace(s.placement.AuthResult.Account)
+	if owner == "" {
+		owner = credentials.Username()
+	}
 	credentials.Clear()
-	connection.DiscardBufferedCapabilityResponse()
+	connection.DiscardBufferedAuthenticationResponses()
 
-	if err := s.writeOK("Authentication successful"); err != nil {
+	if err := s.writeAuthenticatedCapabilityResponse(owner); err != nil {
 		_ = connection.Conn().Close()
 		_ = s.closePlacedSession(context.Background())
 

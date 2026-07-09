@@ -266,7 +266,7 @@ func TestAuthenticateMechanismShapes(t *testing.T) {
 			)
 
 			harness.write(t, testCase.command)
-			harness.expectLine(t, "OK \"Authentication successful\"\r\n")
+			harness.expectAuthenticatedCapability(t, "alice@example.test")
 			harness.expectDone(t)
 
 			if testCase.bearer {
@@ -345,7 +345,7 @@ func TestAuthenticateContinuationCancellationAndLiteral(t *testing.T) {
 		)
 
 		harness.write(t, "AUTHENTICATE \"PLAIN\" {"+strconvItoa(len(payload))+"}\r\n"+payload+"\r\n")
-		harness.expectLine(t, "OK \"Authentication successful\"\r\n")
+		harness.expectAuthenticatedCapability(t, "literal@example.test")
 		harness.expectDone(t)
 
 		request := authenticator.singleRequest(t)
@@ -472,7 +472,7 @@ func TestAuthenticatePipelinedPostAuthBytesReachProxyHandoff(t *testing.T) {
 	scriptPayload := "require [\"fileinto\"];\n# sentinel-script-content"
 	postAuth := "PUTSCRIPT \"sentinel-script-name\" {" + strconvItoa(len(scriptPayload)) + "}\r\n" + scriptPayload + "\r\n"
 	harness.write(t, "AUTHENTICATE \"PLAIN\" \""+plainPayload("alice@example.test", "plain-secret")+"\"\r\n"+postAuth)
-	harness.expectLine(t, "OK \"Authentication successful\"\r\n")
+	harness.expectAuthenticatedCapability(t, "alice@example.test")
 	harness.expectDone(t)
 
 	if got := authenticator.callCount(); got != 1 {
@@ -564,7 +564,7 @@ func TestNauthilusContextReportsFrontendTLS(t *testing.T) {
 		testGreetingOK,
 	)
 	implicit.write(t, "AUTHENTICATE \"PLAIN\" \""+plainPayload("tls@example.test", "tls-secret")+"\"\r\n")
-	implicit.expectLine(t, "OK \"Authentication successful\"\r\n")
+	implicit.expectAuthenticatedCapability(t, "tls@example.test")
 	implicit.expectDone(t)
 
 	request := authenticator.singleRequest(t)
@@ -605,7 +605,7 @@ func TestAuthenticatedSieveFeedsSharedRoutingAndPlacement(t *testing.T) {
 	)
 
 	harness.write(t, "AUTHENTICATE \"PLAIN\" \""+plainPayload("RawUser@Example.Test", "routing-secret")+"\"\r\n")
-	harness.expectLine(t, "OK \"Authentication successful\"\r\n")
+	harness.expectAuthenticatedCapability(t, "Canonical@Example.Test")
 	harness.expectDone(t)
 
 	routingRequest := resolver.singleRequest(t)
@@ -667,7 +667,7 @@ func TestAuthenticatedSieveBackendAuthBindsToAuthenticatedAccount(t *testing.T) 
 
 	frontendPayload := base64.StdEncoding.EncodeToString([]byte("delegate@example.test\x00frontend@example.test\x00routing-secret"))
 	harness.write(t, "AUTHENTICATE \"PLAIN\" \""+frontendPayload+"\"\r\n")
-	harness.expectLine(t, "OK \"Authentication successful\"\r\n")
+	harness.expectAuthenticatedCapability(t, "canonical@example.test")
 	harness.expectDone(t)
 
 	payload := decodeSieveInitialResponse(t, receiveSieveBackendAuthCommand(t, authCommands), mechanismPlain)
@@ -701,7 +701,7 @@ func TestAuthenticatedSieveConnectsSelectedBackendBeforeSuccess(t *testing.T) {
 	)
 
 	harness.write(t, "AUTHENTICATE \"PLAIN\" \""+plainPayload("alice@example.test", "backend-secret")+"\"\r\n")
-	harness.expectLine(t, "OK \"Authentication successful\"\r\n")
+	harness.expectAuthenticatedCapability(t, "alice@example.test")
 	harness.expectDone(t)
 
 	request := connector.singleRequest(t)
@@ -742,7 +742,7 @@ func TestBufferedPostAuthBytesReachBackendExactlyOnce(t *testing.T) {
 
 	postAuth := "LISTSCRIPTS\r\n"
 	harness.write(t, "AUTHENTICATE \"PLAIN\" \""+plainPayload("alice@example.test", "backend-secret")+"\"\r\n"+postAuth)
-	harness.expectLine(t, "OK \"Authentication successful\"\r\n")
+	harness.expectAuthenticatedCapability(t, "alice@example.test")
 
 	observed := connector.singleObservation(t)
 	if observed.first != postAuth {
@@ -756,9 +756,9 @@ func TestBufferedPostAuthBytesReachBackendExactlyOnce(t *testing.T) {
 	harness.expectDone(t)
 }
 
-// TestBackendPostAuthCapabilitiesAreSuppressedBeforeProxyHandoff verifies
-// unattended backend capabilities cannot be misread as client command output.
-func TestBackendPostAuthCapabilitiesAreSuppressedBeforeProxyHandoff(t *testing.T) {
+// TestBackendPostAuthCapabilitiesAreDiscardedBeforeProxyHandoff verifies
+// backend capability updates cannot be misread as client command output.
+func TestBackendPostAuthCapabilitiesAreDiscardedBeforeProxyHandoff(t *testing.T) {
 	authenticator := &recordingAuthenticator{
 		result: nauthilus.AuthResult{Decision: nauthilus.DecisionAuthenticated, Account: "alice@example.test"},
 	}
@@ -780,12 +780,91 @@ func TestBackendPostAuthCapabilitiesAreSuppressedBeforeProxyHandoff(t *testing.T
 	)
 
 	harness.write(t, "AUTHENTICATE \"PLAIN\" \""+plainPayload("alice@example.test", "backend-secret")+"\"\r\n")
-	harness.expectLine(t, "OK \"Authentication successful\"\r\n")
+	harness.expectAuthenticatedCapability(t, "alice@example.test")
 	harness.expectDone(t)
 
 	configured := runner.singleConfig(t)
 	if got := string(configured.BufferedToClient); got != "" {
 		t.Fatalf("backend buffered bytes = %q, want none", got)
+	}
+}
+
+// TestBackendPostAuthOKIsDiscardedBeforeProxyHandoff verifies a standalone
+// backend login success cannot be misread as the post-auth CAPABILITY result.
+func TestBackendPostAuthOKIsDiscardedBeforeProxyHandoff(t *testing.T) {
+	authenticator := &recordingAuthenticator{
+		result: nauthilus.AuthResult{Decision: nauthilus.DecisionAuthenticated, Account: "alice@example.test"},
+	}
+	connector := &recordingSieveBackendConnector{backendBuffered: "OK \"Logged in.\"\r\n"}
+	runner := &recordingSieveProxyRunner{}
+	config := testPlacementSessionConfig(TLSModeImplicit, authenticator, nil, nil)
+	config.BackendConnector = connector
+	config.ProxyRunner = runner
+
+	harness := startSieveHarness(t, config)
+	harness.expectGreeting(t,
+		testGreetingImplementation,
+		testGreetingVersion,
+		testGreetingSieve,
+		testGreetingLanguage,
+		testGreetingSASLTLS,
+		testGreetingOK,
+	)
+
+	postAuth := "CAPABILITY\r\nLISTSCRIPTS\r\n"
+	harness.write(t, "AUTHENTICATE \"PLAIN\" \""+plainPayload("alice@example.test", "backend-secret")+"\"\r\n"+postAuth)
+	harness.expectAuthenticatedCapability(t, "alice@example.test")
+	harness.expectDone(t)
+
+	configured := runner.singleConfig(t)
+	if got := string(configured.BufferedToClient); got != "" {
+		t.Fatalf("backend buffered bytes = %q, want none", got)
+	}
+
+	if got := string(configured.BufferedToBackend); got != postAuth {
+		t.Fatalf("proxied post-auth bytes = %q, want %q", got, postAuth)
+	}
+}
+
+// TestBackendPostAuthCapabilityDiscardPreservesRoundcubeCommands verifies
+// Roundcube-style post-auth CAPABILITY and LISTSCRIPTS commands still reach the
+// backend after a backend capability block is discarded.
+func TestBackendPostAuthCapabilityDiscardPreservesRoundcubeCommands(t *testing.T) {
+	authenticator := &recordingAuthenticator{
+		result: nauthilus.AuthResult{Decision: nauthilus.DecisionAuthenticated, Account: "alice@example.test"},
+	}
+	backendBuffered := "\"IMPLEMENTATION\" \"Dovecot Pigeonhole\"\r\n" +
+		"\"SIEVE\" \"fileinto reject vacation relational date vacation-seconds\"\r\n" +
+		"\"SASL\" \"PLAIN XOAUTH2\"\r\n" +
+		"OK \"post-auth capability\"\r\n"
+	connector := &recordingSieveBackendConnector{backendBuffered: backendBuffered}
+	runner := &recordingSieveProxyRunner{}
+	config := testPlacementSessionConfig(TLSModeImplicit, authenticator, nil, nil)
+	config.BackendConnector = connector
+	config.ProxyRunner = runner
+
+	harness := startSieveHarness(t, config)
+	harness.expectGreeting(t,
+		testGreetingImplementation,
+		testGreetingVersion,
+		testGreetingSieve,
+		testGreetingLanguage,
+		testGreetingSASLTLS,
+		testGreetingOK,
+	)
+
+	postAuth := "CAPABILITY\r\nLISTSCRIPTS\r\n"
+	harness.write(t, "AUTHENTICATE \"PLAIN\" \""+plainPayload("alice@example.test", "backend-secret")+"\"\r\n"+postAuth)
+	harness.expectAuthenticatedCapability(t, "alice@example.test")
+	harness.expectDone(t)
+
+	configured := runner.singleConfig(t)
+	if got := string(configured.BufferedToClient); got != "" {
+		t.Fatalf("backend buffered bytes = %q, want none", got)
+	}
+
+	if got := string(configured.BufferedToBackend); got != postAuth {
+		t.Fatalf("proxied post-auth bytes = %q, want %q", got, postAuth)
 	}
 }
 
@@ -931,7 +1010,7 @@ func TestAuthenticatedSievePlacementGateRunsBeforePlacement(t *testing.T) {
 	)
 
 	harness.write(t, "AUTHENTICATE \"PLAIN\" \""+plainPayload("alice@example.test", "hold-secret")+"\"\r\n")
-	harness.expectLine(t, "OK \"Authentication successful\"\r\n")
+	harness.expectAuthenticatedCapability(t, "alice@example.test")
 	harness.expectDone(t)
 
 	if gate.callCount() != 1 || placer.callCount() != 1 {
@@ -1099,6 +1178,20 @@ func startSieveHarnessOnConn(t *testing.T, config SessionConfig, client net.Conn
 func (h *sieveHarness) expectGreeting(t *testing.T, lines ...string) {
 	t.Helper()
 	h.expectLines(t, lines...)
+}
+
+// expectAuthenticatedCapability consumes the RFC 5804 capability update after AUTHENTICATE.
+func (h *sieveHarness) expectAuthenticatedCapability(t *testing.T, owner string) {
+	t.Helper()
+	h.expectLines(t,
+		testGreetingImplementation,
+		testGreetingVersion,
+		testGreetingSieve,
+		testGreetingLanguage,
+		"\"OWNER\" \""+owner+"\"\r\n",
+		testGreetingSASLTLS,
+		"OK \"Authentication successful\"\r\n",
+	)
 }
 
 // expectLines consumes the expected response lines.

@@ -159,26 +159,30 @@ func (c *BackendConnection) Buffered() []byte {
 	return buffered
 }
 
-// DiscardBufferedCapabilityResponse removes an unsolicited backend capability
-// response that arrived after backend authentication but before proxy handoff.
-func (c *BackendConnection) DiscardBufferedCapabilityResponse() bool {
+// DiscardBufferedAuthenticationResponses removes successful backend login
+// responses that arrived after backend authentication but before proxy handoff.
+func (c *BackendConnection) DiscardBufferedAuthenticationResponses() bool {
 	if c == nil || c.reader == nil || c.reader.Buffered() == 0 {
 		return false
 	}
 
-	buffered, err := c.reader.Peek(c.reader.Buffered())
-	if err != nil {
-		return false
+	discarded := false
+	for c.reader.Buffered() > 0 {
+		buffered, err := c.reader.Peek(c.reader.Buffered())
+		if err != nil {
+			return discarded
+		}
+
+		length, response, ok := bufferedResponseLength(buffered)
+		if !ok || length <= 0 || response.condition != backendResponseOK {
+			return discarded
+		}
+
+		_, _ = c.reader.Discard(length)
+		discarded = true
 	}
 
-	length, ok := bufferedCapabilityResponseLength(buffered)
-	if !ok || length <= 0 {
-		return false
-	}
-
-	_, _ = c.reader.Discard(length)
-
-	return true
+	return discarded
 }
 
 // Connect dials, negotiates configured TLS, and collects backend capabilities.
@@ -224,6 +228,9 @@ func newBackendConnection(conn net.Conn) *BackendConnection {
 
 // prepare performs greeting, configured TLS, and post-TLS capability discovery.
 func (c *BackendConnection) prepare(ctx context.Context, target backend.Backend) error {
+	clearDeadline := c.applyContextDeadline(ctx)
+	defer clearDeadline()
+
 	switch strings.ToLower(strings.TrimSpace(target.TLS.Mode)) {
 	case backendTLSDisabled, backendTLSNone, backendTLSPlaintext:
 		if err := c.readGreeting(); err != nil {
@@ -240,7 +247,7 @@ func (c *BackendConnection) prepare(ctx context.Context, target backend.Backend)
 			return err
 		}
 
-		return c.queryCapabilities()
+		return c.readAutomaticCapabilities()
 	case backendTLSImplicit:
 		if err := c.wrapTLS(ctx, target); err != nil {
 			return err
@@ -253,6 +260,26 @@ func (c *BackendConnection) prepare(ctx context.Context, target backend.Backend)
 		return c.queryCapabilities()
 	default:
 		return fmt.Errorf("%w: unsupported backend tls mode", ErrBackendTLS)
+	}
+}
+
+// applyContextDeadline bounds backend setup I/O with the caller's deadline.
+func (c *BackendConnection) applyContextDeadline(ctx context.Context) func() {
+	if c == nil || c.conn == nil || ctx == nil {
+		return func() {}
+	}
+
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return func() {}
+	}
+
+	_ = c.conn.SetDeadline(deadline)
+
+	return func() {
+		if c.conn != nil {
+			_ = c.conn.SetDeadline(time.Time{})
+		}
 	}
 }
 
@@ -269,6 +296,26 @@ func (c *BackendConnection) readGreeting() error {
 
 	if response.condition != backendResponseOK {
 		return fmt.Errorf("%w: backend greeting was not ready", ErrBackendProtocol)
+	}
+
+	return nil
+}
+
+// readAutomaticCapabilities consumes the RFC 5804 capability update after STARTTLS.
+func (c *BackendConnection) readAutomaticCapabilities() error {
+	c.capabilities = backend.CapabilitySet{}
+
+	response, err := c.readResponse()
+	if err != nil {
+		return err
+	}
+
+	if response.referral() {
+		return fmt.Errorf("%w: backend referral is not supported", ErrBackendProtocol)
+	}
+
+	if response.condition != backendResponseOK {
+		return fmt.Errorf("%w: backend rejected automatic capability", ErrBackendProtocol)
 	}
 
 	return nil
@@ -465,17 +512,15 @@ func (r backendResponse) referral() bool {
 	return strings.EqualFold(r.code, "REFERRAL")
 }
 
-// bufferedCapabilityResponseLength returns the complete response length when
-// the buffered bytes begin with ManageSieve capability lines followed by OK.
-func bufferedCapabilityResponseLength(buffered []byte) (int, bool) {
+// bufferedResponseLength returns one complete buffered ManageSieve response.
+func bufferedResponseLength(buffered []byte) (int, backendResponse, bool) {
 	remaining := buffered
 	total := 0
-	sawCapability := false
 
 	for len(remaining) > 0 {
 		index := bytes.IndexByte(remaining, '\n')
 		if index < 0 {
-			return 0, false
+			return 0, backendResponse{}, false
 		}
 
 		lineBytes := remaining[:index+1]
@@ -483,18 +528,17 @@ func bufferedCapabilityResponseLength(buffered []byte) (int, bool) {
 		line := strings.TrimRight(string(lineBytes), "\r\n")
 
 		if response, ok := parseBackendResponseLine(line); ok {
-			return total, sawCapability && response.condition == backendResponseOK
+			return total, response, true
 		}
 
 		check := &BackendConnection{}
 		if err := check.addCapabilityLine(line); err != nil {
-			return 0, false
+			return 0, backendResponse{}, false
 		}
-		sawCapability = true
 		remaining = remaining[index+1:]
 	}
 
-	return 0, false
+	return 0, backendResponse{}, false
 }
 
 // backendConnectContext derives the configured backend connect deadline.
