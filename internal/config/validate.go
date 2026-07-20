@@ -33,6 +33,8 @@ const (
 
 	bearerMechanismOAuthBearer             = "oauthbearer"
 	bearerMechanismXOAUTH2                 = "xoauth2"
+	externalMechanism                      = "external"
+	externalIdentitySourceSANEmail         = "san_email"
 	bearerValidationNauthilusIntrospection = "nauthilus_introspection"
 	defaultBearerRequiredScope             = "email"
 	oidcClientSecretBasic                  = "client_secret_basic"
@@ -379,6 +381,18 @@ func validateAuthorities(authorities map[string]AuthorityConfig, problems *[]str
 			addProblem(problems, path+".mechanisms.password.names is required when password mechanisms are enabled")
 		}
 		validateBearerMechanism(path+".mechanisms.bearer", authority.Mechanisms.Bearer, problems)
+		validateExternalMechanism(path+".mechanisms.external", authority.Mechanisms.External, problems)
+	}
+}
+
+// validateExternalMechanism checks the certificate identity policy owned by one authority.
+func validateExternalMechanism(path string, external ExternalMechanismConfig, problems *[]string) {
+	if !external.Enabled {
+		return
+	}
+
+	if external.IdentitySource != externalIdentitySourceSANEmail {
+		addProblem(problems, path+".identity_source must be san_email when external authentication is enabled")
 	}
 }
 
@@ -783,6 +797,7 @@ func validateDirector(director DirectorConfig, authorities map[string]AuthorityC
 		} else if !strings.EqualFold(strings.TrimSpace(listener.Protocol), strings.TrimSpace(pool.Protocol)) {
 			addProblem(problems, path+".backend_pool references pool with different protocol "+listener.BackendPool)
 		}
+		validateExternalListener(path, listener, authority, authorityOK, director, problems)
 
 		switch listener.Protocol {
 		case protocolIMAP:
@@ -884,6 +899,70 @@ func validateDirector(director DirectorConfig, authorities map[string]AuthorityC
 	requirePositiveDuration("director.health.timeout", director.Health.Timeout, problems)
 	requirePositiveDuration("director.maintenance.drain_timeout", director.Maintenance.DrainTimeout, problems)
 	requirePositiveDuration("director.maintenance.hard_kill_grace", director.Maintenance.HardKillGrace, problems)
+}
+
+// validateExternalListener binds external authentication to verified TLS and master-user backends.
+func validateExternalListener(
+	path string,
+	listener ListenerConfig,
+	authority AuthorityConfig,
+	authorityKnown bool,
+	director DirectorConfig,
+	problems *[]string,
+) {
+	if !listenerUsesExternal(listener) {
+		return
+	}
+
+	if !authorityKnown || !authority.Mechanisms.External.Enabled {
+		addProblem(problems, path+" external mechanism not supported by authority")
+	}
+
+	if !listenerTLSProtectsCredentialAuth(listener.TLS.Mode) {
+		addProblem(problems, path+".tls.mode must be starttls or implicit for external authentication")
+	}
+
+	if strings.TrimSpace(listener.TLS.ClientCA) == "" {
+		addProblem(problems, path+".tls.client_ca is required for external authentication")
+	}
+
+	pool, ok := director.BackendPools[listener.BackendPool]
+	if !ok {
+		return
+	}
+
+	for _, backendName := range pool.Backends {
+		backend, exists := director.Backends[backendName]
+		if !exists {
+			continue
+		}
+
+		if !strings.EqualFold(strings.TrimSpace(backend.Auth.Mode), backendAuthModeMasterUser) {
+			addProblem(problems, "director.backends."+backendName+".auth.mode must be master_user for external authentication")
+		}
+	}
+}
+
+// listenerUsesExternal reports whether a user-stateful protocol enables SASL EXTERNAL.
+func listenerUsesExternal(listener ListenerConfig) bool {
+	var mechanisms []string
+
+	switch strings.ToLower(strings.TrimSpace(listener.Protocol)) {
+	case protocolIMAP:
+		if listener.IMAP != nil {
+			mechanisms = listener.IMAP.AuthMechanisms
+		}
+	case protocolSIEVE:
+		if listener.Sieve != nil {
+			mechanisms = listener.Sieve.AuthMechanisms
+		}
+	case protocolPOP3:
+		if listener.POP3 != nil {
+			mechanisms = listener.POP3.AuthMechanisms
+		}
+	}
+
+	return containsFold(mechanisms, externalMechanism)
 }
 
 // bearerReplayMechanismsByBackend maps bearer-capable login pools to concrete backend entries.
@@ -1643,7 +1722,7 @@ func validateLMTPAuthCapability(path string, capability string, configuredMechan
 // validIMAPAuthMechanism reports whether pre-auth command handling accepts this mechanism shape.
 func validIMAPAuthMechanism(mechanism string) bool {
 	switch strings.ToUpper(strings.TrimSpace(mechanism)) {
-	case "PLAIN", "XOAUTH2", "OAUTHBEARER":
+	case "PLAIN", "XOAUTH2", "OAUTHBEARER", "EXTERNAL":
 		return true
 	default:
 		return false
@@ -1745,7 +1824,7 @@ func listenerTLSModeIsPlaintext(mode string) bool {
 // validSieveAuthMechanism reports whether ManageSieve frontend auth can accept this mechanism shape.
 func validSieveAuthMechanism(mechanism string) bool {
 	switch strings.ToUpper(strings.TrimSpace(mechanism)) {
-	case "PLAIN", "XOAUTH2", "OAUTHBEARER":
+	case "PLAIN", "XOAUTH2", "OAUTHBEARER", "EXTERNAL":
 		return true
 	default:
 		return false
@@ -1760,6 +1839,8 @@ func sieveMechanismSupportedByAuthority(mechanism string, authority AuthorityCon
 		return authority.Mechanisms.Password.Enabled && containsFold(authority.Mechanisms.Password.Names, mechanism)
 	case "xoauth2", "oauthbearer":
 		return authority.Mechanisms.Bearer.Enabled && containsFold(authority.Mechanisms.Bearer.Names, mechanism)
+	case externalMechanism:
+		return authority.Mechanisms.External.Enabled
 	default:
 		return false
 	}
@@ -1839,7 +1920,7 @@ func validatePOP3Capabilities(path string, listener ListenerConfig, capabilities
 // validPOP3AuthMethod reports whether POP3 frontend auth can accept this method.
 func validPOP3AuthMethod(mechanism string) bool {
 	switch strings.ToLower(strings.TrimSpace(mechanism)) {
-	case "userpass", "xoauth2", "oauthbearer":
+	case "userpass", "xoauth2", "oauthbearer", externalMechanism:
 		return true
 	default:
 		return false
@@ -1854,6 +1935,8 @@ func pop3MethodSupportedByAuthority(mechanism string, authority AuthorityConfig)
 		return authority.Mechanisms.Password.Enabled
 	case "xoauth2", "oauthbearer":
 		return authority.Mechanisms.Bearer.Enabled && containsFold(authority.Mechanisms.Bearer.Names, mechanism)
+	case externalMechanism:
+		return authority.Mechanisms.External.Enabled
 	default:
 		return false
 	}

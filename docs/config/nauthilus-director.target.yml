@@ -240,6 +240,14 @@ auth:
             # Leave empty to use the conservative default account-claim chain,
             # or set one non-secret claim name expected from Nauthilus.
             account_claim: ""
+        external:
+          # EXTERNAL is advertised only on a TLS connection carrying a client
+          # certificate verified against the listener's tls.client_ca.
+          enabled: false
+          identity_source: san_email
+          # Distinct SASL authorization identities require a second Nauthilus
+          # lookup that resolves to the same canonical account.
+          allow_authorization_id: false
 
       oidc:
         # This subtree is Director-to-Nauthilus caller auth. It obtains the

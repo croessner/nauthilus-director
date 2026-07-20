@@ -19,6 +19,9 @@ package imap
 import (
 	"slices"
 	"strings"
+
+	"github.com/croessner/nauthilus-director/internal/protocol/certauth"
+	"github.com/croessner/nauthilus-director/internal/protocol/tlscontext"
 )
 
 const (
@@ -92,6 +95,9 @@ func (s *Session) effectiveCapability(configured string) string {
 		}
 
 		mechanism := strings.TrimPrefix(normalized, "AUTH=")
+		if strings.EqualFold(mechanism, mechanismExternal) && !s.externalAuthAvailable() {
+			return ""
+		}
 		if supportedPreauthAuthMechanism(mechanism) && s.supportsAuthMechanism(mechanism) {
 			return "AUTH=" + strings.ToUpper(mechanism)
 		}
@@ -122,12 +128,19 @@ func passwordAuthMechanism(mechanism string) bool {
 
 // supportedPreauthAuthMechanism reports whether command handling accepts the mechanism shape.
 func supportedPreauthAuthMechanism(mechanism string) bool {
-	switch strings.ToUpper(strings.TrimSpace(mechanism)) {
-	case "PLAIN", "XOAUTH2", "OAUTHBEARER":
+	switch strings.ToLower(strings.TrimSpace(mechanism)) {
+	case mechanismPlain, mechanismXOAUTH2, mechanismOAuthBearer, mechanismExternal:
 		return true
 	default:
 		return false
 	}
+}
+
+// externalAuthAvailable reports whether SASL EXTERNAL can use this connection now.
+func (s *Session) externalAuthAvailable() bool {
+	state, ok := tlscontext.ConnectionState(s.conn)
+
+	return certauth.Available(s.tlsActive, state, ok)
 }
 
 // configuredCapability reports whether the listener configured a capability token.

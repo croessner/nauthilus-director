@@ -21,7 +21,9 @@ import (
 	"context"
 	"strings"
 
+	"github.com/croessner/nauthilus-director/internal/protocol/certauth"
 	"github.com/croessner/nauthilus-director/internal/protocol/saslcred"
+	"github.com/croessner/nauthilus-director/internal/protocol/tlscontext"
 )
 
 const (
@@ -90,7 +92,7 @@ func (s *Session) effectiveCapabilityLine(capability string) (string, bool) {
 	case capabilityUser:
 		return capabilityUser, s.userPassAdvertised()
 	case capabilitySASL:
-		mechanisms := s.effectiveBearerMechanisms()
+		mechanisms := s.effectiveSASLMechanisms()
 		if len(mechanisms) == 0 {
 			return "", false
 		}
@@ -130,8 +132,8 @@ func (s *Session) userPassAdvertised() bool {
 	return s.configuredCapability(capabilityUser) && s.userPassConfigured() && s.tlsActive
 }
 
-// effectiveBearerMechanisms returns configured bearer SASL mechanisms usable in the current TLS state.
-func (s *Session) effectiveBearerMechanisms() []string {
+// effectiveSASLMechanisms returns configured SASL mechanisms usable in the current TLS state.
+func (s *Session) effectiveSASLMechanisms() []string {
 	if !s.tlsActive {
 		return nil
 	}
@@ -147,6 +149,10 @@ func (s *Session) effectiveBearerMechanisms() []string {
 
 		switch mechanism.Normalized() {
 		case saslcred.MechanismXOAUTH2, saslcred.MechanismOAuthBearer:
+		case saslcred.MechanismExternal:
+			if !s.externalAuthAvailable() {
+				continue
+			}
 		default:
 			continue
 		}
@@ -163,8 +169,8 @@ func (s *Session) effectiveBearerMechanisms() []string {
 	return mechanisms
 }
 
-// bearerMechanismConfigured reports whether a normalized bearer mechanism is configured.
-func (s *Session) bearerMechanismConfigured(mechanism string) bool {
+// saslMechanismConfigured reports whether a normalized SASL mechanism is configured.
+func (s *Session) saslMechanismConfigured(mechanism string) bool {
 	for _, configured := range s.authMechanisms {
 		accepted, err := saslcred.NewMechanism(configured)
 		if err != nil {
@@ -179,13 +185,20 @@ func (s *Session) bearerMechanismConfigured(mechanism string) bool {
 	return false
 }
 
-// bearerMechanismAdvertised reports whether AUTH may use a mechanism now.
-func (s *Session) bearerMechanismAdvertised(mechanism string) bool {
-	for _, advertised := range s.effectiveBearerMechanisms() {
+// saslMechanismAdvertised reports whether AUTH may use a mechanism now.
+func (s *Session) saslMechanismAdvertised(mechanism string) bool {
+	for _, advertised := range s.effectiveSASLMechanisms() {
 		if strings.EqualFold(advertised, mechanism) {
 			return true
 		}
 	}
 
 	return false
+}
+
+// externalAuthAvailable reports whether SASL EXTERNAL can use this connection now.
+func (s *Session) externalAuthAvailable() bool {
+	state, ok := tlscontext.ConnectionState(s.conn)
+
+	return certauth.Available(s.tlsActive, state, ok)
 }

@@ -27,9 +27,11 @@ import (
 
 const (
 	credentialKindBearer   = "bearer"
+	credentialKindExternal = "external"
 	credentialKindPassword = "password"
 
 	mechanismLogin       = "login"
+	mechanismExternal    = "external"
 	mechanismOAuthBearer = "oauthbearer"
 	mechanismPlain       = "plain"
 	mechanismXOAUTH2     = "xoauth2"
@@ -66,7 +68,7 @@ func newMechanismIdentity(value string) (mechanismIdentity, error) {
 
 	normalized := strings.ToLower(original)
 	switch normalized {
-	case mechanismLogin, mechanismPlain, mechanismXOAUTH2, mechanismOAuthBearer:
+	case mechanismLogin, mechanismPlain, mechanismXOAUTH2, mechanismOAuthBearer, mechanismExternal:
 		return mechanismIdentity{original: original, normalized: normalized}, nil
 	default:
 		return mechanismIdentity{}, fmt.Errorf("%w: unsupported mechanism", ErrUnsupportedAuthMechanism)

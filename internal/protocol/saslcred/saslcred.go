@@ -23,6 +23,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 const (
@@ -30,11 +32,15 @@ const (
 	KindBearer = "bearer"
 	// KindPassword identifies reusable password credential material.
 	KindPassword = "password"
+	// KindExternal identifies a credential-free externally established identity.
+	KindExternal = "external"
 
 	// MechanismOAuthBearer is the normalized OAuthBearer mechanism name.
 	MechanismOAuthBearer = "oauthbearer"
 	// MechanismPlain is the normalized PLAIN mechanism name.
 	MechanismPlain = "plain"
+	// MechanismExternal is the normalized EXTERNAL mechanism name.
+	MechanismExternal = "external"
 	// MechanismXOAUTH2 is the normalized XOAUTH2 mechanism name.
 	MechanismXOAUTH2 = "xoauth2"
 
@@ -80,7 +86,7 @@ func NewMechanism(value string) (Mechanism, error) {
 
 	normalized := strings.ToLower(original)
 	switch normalized {
-	case MechanismPlain, MechanismXOAUTH2, MechanismOAuthBearer:
+	case MechanismPlain, MechanismXOAUTH2, MechanismOAuthBearer, MechanismExternal:
 		return Mechanism{original: original, normalized: normalized}, nil
 	default:
 		return Mechanism{}, fmt.Errorf("%w: %s", ErrUnsupportedMechanism, normalized)
@@ -181,6 +187,10 @@ func Parse(
 	maxPayloadBytes int,
 	maxBearerTokenBytes int,
 ) (*Credentials, error) {
+	if mechanism.Normalized() == MechanismExternal {
+		return parseExternalPayload(mechanism, encoded, maxPayloadBytes)
+	}
+
 	payload, err := decodePayload(encoded, maxPayloadBytes)
 	if err != nil {
 		return nil, err
@@ -196,6 +206,54 @@ func Parse(
 	default:
 		return nil, fmt.Errorf("%w: %s", ErrUnsupportedMechanism, mechanism.Normalized())
 	}
+}
+
+// parseExternalPayload decodes an optional bounded SASL authorization identity without a secret.
+func parseExternalPayload(mechanism Mechanism, encoded string, maxPayloadBytes int) (*Credentials, error) {
+	var payload []byte
+
+	if encoded != "=" {
+		decoded, err := base64.StdEncoding.DecodeString(encoded)
+		if err != nil {
+			return nil, fmt.Errorf("%w: malformed external response", ErrRejected)
+		}
+
+		payload = decoded
+	}
+
+	if maxPayloadBytes > 0 && len(payload) > maxPayloadBytes {
+		return nil, fmt.Errorf("%w: external authorization identity", ErrTooLarge)
+	}
+
+	authorizationID := string(payload)
+	if !validExternalAuthorizationID(authorizationID) {
+		return nil, fmt.Errorf("%w: invalid external authorization identity", ErrRejected)
+	}
+
+	return &Credentials{
+		Mechanism:       mechanism,
+		Kind:            KindExternal,
+		AuthorizationID: authorizationID,
+	}, nil
+}
+
+// validExternalAuthorizationID rejects malformed or whitespace-shaped authorization identities.
+func validExternalAuthorizationID(value string) bool {
+	if value == "" {
+		return true
+	}
+
+	if !utf8.ValidString(value) || strings.TrimSpace(value) != value {
+		return false
+	}
+
+	for _, current := range value {
+		if unicode.IsControl(current) || unicode.IsSpace(current) {
+			return false
+		}
+	}
+
+	return true
 }
 
 // decodePayload converts base64 input into bounded raw SASL bytes.

@@ -30,6 +30,7 @@ import (
 	"github.com/croessner/nauthilus-director/internal/nauthilus"
 	"github.com/croessner/nauthilus-director/internal/observability"
 	"github.com/croessner/nauthilus-director/internal/placement"
+	"github.com/croessner/nauthilus-director/internal/protocol/certauth"
 	"github.com/croessner/nauthilus-director/internal/protocol/greeting"
 	"github.com/croessner/nauthilus-director/internal/proxy"
 	"github.com/croessner/nauthilus-director/internal/routing"
@@ -41,39 +42,41 @@ var ErrBackendReadinessUnavailable = errors.New("pop3: backend readiness continu
 
 // SessionConfig contains immutable listener settings for one POP3 handler.
 type SessionConfig struct {
-	ListenerName           string
-	AuthorityName          string
-	AuthorityTransport     string
-	ServiceName            string
-	Network                string
-	BackendPool            string
-	DirectorInstanceID     string
-	DefaultTenant          string
-	DefaultShard           string
-	GreetingPolicy         greeting.Policy
-	TLSMode                string
-	AuthMechanisms         []string
-	Capabilities           []string
-	PreauthTimeout         time.Duration
-	AuthTimeout            time.Duration
-	BackendConnectTimeout  time.Duration
-	ProxyIdleTimeout       time.Duration
-	SessionLeaseTTL        time.Duration
-	SessionIdleGrace       time.Duration
-	BackendRetentionTTL    time.Duration
-	MaxPreauthLineBytes    int
-	MaxPreauthLiteralBytes int
-	MaxBearerTokenBytes    int
-	FrontendTLSConfig      *tls.Config
-	Authenticator          nauthilus.Authenticator
-	BearerIntrospector     nauthilus.BearerIntrospector
-	RoutingResolver        routing.RoutingResolver
-	PlacementService       placement.SessionPlacer
-	PlacementGate          runtimectl.PlacementGate
-	BackendConnector       BackendConnector
-	ProxyRunner            proxy.Runner
-	LocalSessions          *runtimectl.LocalSessionRegistry
-	Observability          observability.Recorder
+	ListenerName                 string
+	AuthorityName                string
+	AuthorityTransport           string
+	ServiceName                  string
+	Network                      string
+	BackendPool                  string
+	DirectorInstanceID           string
+	DefaultTenant                string
+	DefaultShard                 string
+	GreetingPolicy               greeting.Policy
+	TLSMode                      string
+	AuthMechanisms               []string
+	Capabilities                 []string
+	PreauthTimeout               time.Duration
+	AuthTimeout                  time.Duration
+	BackendConnectTimeout        time.Duration
+	ProxyIdleTimeout             time.Duration
+	SessionLeaseTTL              time.Duration
+	SessionIdleGrace             time.Duration
+	BackendRetentionTTL          time.Duration
+	MaxPreauthLineBytes          int
+	MaxPreauthLiteralBytes       int
+	MaxBearerTokenBytes          int
+	FrontendTLSConfig            *tls.Config
+	Authenticator                nauthilus.Authenticator
+	BearerIntrospector           nauthilus.BearerIntrospector
+	CertificateAuthenticator     *certauth.Service
+	AllowExternalAuthorizationID bool
+	RoutingResolver              routing.RoutingResolver
+	PlacementService             placement.SessionPlacer
+	PlacementGate                runtimectl.PlacementGate
+	BackendConnector             BackendConnector
+	ProxyRunner                  proxy.Runner
+	LocalSessions                *runtimectl.LocalSessionRegistry
+	Observability                observability.Recorder
 }
 
 // Handler owns one configured POP3 listener's session construction policy.

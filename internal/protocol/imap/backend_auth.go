@@ -114,6 +114,10 @@ func backendAuthCommand(target backend.Backend, connection *BackendConnection, c
 
 		return masterUserAuthCommand(target.Auth.MasterUser, connection.capabilities, credentials)
 	case backendAuthModeCredentialReplay:
+		if credentials.Kind() == credentialKindExternal {
+			return "", fmt.Errorf("%w: external authentication requires master_user mode", ErrBackendAuthPolicy)
+		}
+
 		return credentialReplayCommand(target.Auth.CredentialReplay, connection, credentials)
 	default:
 		return "", fmt.Errorf("%w: unsupported backend auth mode", ErrBackendAuthPolicy)

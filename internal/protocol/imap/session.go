@@ -32,6 +32,7 @@ import (
 	"github.com/croessner/nauthilus-director/internal/nauthilus"
 	"github.com/croessner/nauthilus-director/internal/observability"
 	"github.com/croessner/nauthilus-director/internal/placement"
+	"github.com/croessner/nauthilus-director/internal/protocol/certauth"
 	"github.com/croessner/nauthilus-director/internal/protocol/greeting"
 	"github.com/croessner/nauthilus-director/internal/proxy"
 	"github.com/croessner/nauthilus-director/internal/routing"
@@ -77,21 +78,23 @@ func (h *Handler) Serve(ctx context.Context, conn net.Conn) error {
 
 // Session owns one accepted IMAP frontend stream until auth and proxy handling take over.
 type Session struct {
-	context            Context
-	conn               net.Conn
-	reader             *bufio.Reader
-	writer             *bufio.Writer
-	authenticator      nauthilus.Authenticator
-	bearerIntrospector nauthilus.BearerIntrospector
-	routingResolver    routing.RoutingResolver
-	sessionStore       state.SessionStore
-	placementService   placement.SessionPlacer
-	backendConnector   BackendConnector
-	proxyRunner        proxy.Runner
-	localSessions      *runtimectl.LocalSessionRegistry
-	placementGate      runtimectl.PlacementGate
-	observability      observability.Recorder
-	greetingPolicy     greeting.Policy
+	context                      Context
+	conn                         net.Conn
+	reader                       *bufio.Reader
+	writer                       *bufio.Writer
+	authenticator                nauthilus.Authenticator
+	bearerIntrospector           nauthilus.BearerIntrospector
+	certificateAuthenticator     *certauth.Service
+	allowExternalAuthorizationID bool
+	routingResolver              routing.RoutingResolver
+	sessionStore                 state.SessionStore
+	placementService             placement.SessionPlacer
+	backendConnector             BackendConnector
+	proxyRunner                  proxy.Runner
+	localSessions                *runtimectl.LocalSessionRegistry
+	placementGate                runtimectl.PlacementGate
+	observability                observability.Recorder
+	greetingPolicy               greeting.Policy
 
 	tlsActive      bool
 	clientID       string
@@ -155,21 +158,23 @@ func NewSession(config SessionConfig, conn net.Conn) (*Session, error) {
 			SessionIdleGrace:       defaultSessionIdleGrace(config.SessionIdleGrace, leaseTTL),
 			BackendRetentionTTL:    config.BackendRetentionTTL,
 		},
-		conn:               conn,
-		reader:             bufio.NewReaderSize(conn, config.MaxPreauthLineBytes+1),
-		writer:             bufio.NewWriter(conn),
-		authenticator:      config.Authenticator,
-		bearerIntrospector: config.BearerIntrospector,
-		routingResolver:    config.RoutingResolver,
-		sessionStore:       config.SessionStore,
-		placementService:   config.PlacementService,
-		backendConnector:   backendConnector,
-		proxyRunner:        proxyRunner,
-		localSessions:      config.LocalSessions,
-		placementGate:      config.PlacementGate,
-		observability:      observability.NormalizeRecorder(config.Observability),
-		greetingPolicy:     config.GreetingPolicy,
-		tlsActive:          config.TLSMode == TLSModeImplicit,
+		conn:                         conn,
+		reader:                       bufio.NewReaderSize(conn, config.MaxPreauthLineBytes+1),
+		writer:                       bufio.NewWriter(conn),
+		authenticator:                config.Authenticator,
+		bearerIntrospector:           config.BearerIntrospector,
+		certificateAuthenticator:     config.CertificateAuthenticator,
+		allowExternalAuthorizationID: config.AllowExternalAuthorizationID,
+		routingResolver:              config.RoutingResolver,
+		sessionStore:                 config.SessionStore,
+		placementService:             config.PlacementService,
+		backendConnector:             backendConnector,
+		proxyRunner:                  proxyRunner,
+		localSessions:                config.LocalSessions,
+		placementGate:                config.PlacementGate,
+		observability:                observability.NormalizeRecorder(config.Observability),
+		greetingPolicy:               config.GreetingPolicy,
+		tlsActive:                    config.TLSMode == TLSModeImplicit,
 	}, nil
 }
 

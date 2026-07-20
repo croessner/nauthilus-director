@@ -33,6 +33,7 @@ import (
 	"github.com/croessner/nauthilus-director/internal/config"
 	"github.com/croessner/nauthilus-director/internal/nauthilus"
 	"github.com/croessner/nauthilus-director/internal/observability"
+	"github.com/croessner/nauthilus-director/internal/protocol/certauth"
 	runtimectl "github.com/croessner/nauthilus-director/internal/runtime"
 	"go.uber.org/fx"
 )
@@ -106,23 +107,25 @@ type BearerIntrospectorFactory func(
 
 // SessionOptions contains the typed listener values passed into a protocol handler.
 type SessionOptions struct {
-	ListenerName        string
-	Config              config.ListenerConfig
-	AuthorityTransport  string
-	Timeouts            config.RuntimeTimeouts
-	Security            config.DirectorSecurityConfig
-	Authenticator       nauthilus.Authenticator
-	IdentityLookuper    nauthilus.IdentityLookuper
-	BearerIntrospector  nauthilus.BearerIntrospector
-	BearerTokenMaxBytes int
-	DirectorInstanceID  string
-	DefaultTenant       string
-	DefaultShard        string
-	SessionLeaseTTL     time.Duration
-	SessionIdleGrace    time.Duration
-	FrontendTLSConfig   *tls.Config
-	LocalSessions       *runtimectl.LocalSessionRegistry
-	Observability       observability.Recorder
+	ListenerName             string
+	Config                   config.ListenerConfig
+	AuthorityTransport       string
+	Timeouts                 config.RuntimeTimeouts
+	Security                 config.DirectorSecurityConfig
+	Authenticator            nauthilus.Authenticator
+	IdentityLookuper         nauthilus.IdentityLookuper
+	BearerIntrospector       nauthilus.BearerIntrospector
+	CertificateAuthenticator *certauth.Service
+	ExternalAuthPolicy       config.ExternalMechanismConfig
+	BearerTokenMaxBytes      int
+	DirectorInstanceID       string
+	DefaultTenant            string
+	DefaultShard             string
+	SessionLeaseTTL          time.Duration
+	SessionIdleGrace         time.Duration
+	FrontendTLSConfig        *tls.Config
+	LocalSessions            *runtimectl.LocalSessionRegistry
+	Observability            observability.Recorder
 }
 
 type unavailableSessionHandler struct {
@@ -653,6 +656,31 @@ func mechanismsIncludeBearer(mechanisms []string) bool {
 	for _, mechanism := range mechanisms {
 		switch strings.ToLower(strings.TrimSpace(mechanism)) {
 		case "xoauth2", "oauthbearer":
+			return true
+		}
+	}
+
+	return false
+}
+
+// listenerNeedsExternalIdentity reports whether a user-stateful listener enables SASL EXTERNAL.
+func listenerNeedsExternalIdentity(entry config.ListenerConfig) bool {
+	switch strings.ToLower(strings.TrimSpace(entry.Protocol)) {
+	case protocolIMAP:
+		return entry.IMAP != nil && mechanismsIncludeExternal(entry.IMAP.AuthMechanisms)
+	case protocolSIEVE:
+		return entry.Sieve != nil && mechanismsIncludeExternal(entry.Sieve.AuthMechanisms)
+	case protocolPOP3:
+		return entry.POP3 != nil && mechanismsIncludeExternal(entry.POP3.AuthMechanisms)
+	default:
+		return false
+	}
+}
+
+// mechanismsIncludeExternal reports whether one mechanism list enables certificate identity.
+func mechanismsIncludeExternal(mechanisms []string) bool {
+	for _, mechanism := range mechanisms {
+		if strings.EqualFold(strings.TrimSpace(mechanism), "external") {
 			return true
 		}
 	}

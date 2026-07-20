@@ -29,6 +29,7 @@ import (
 	"github.com/croessner/nauthilus-director/internal/config"
 	"github.com/croessner/nauthilus-director/internal/nauthilus"
 	"github.com/croessner/nauthilus-director/internal/observability"
+	"github.com/croessner/nauthilus-director/internal/protocol/certauth"
 	runtimectl "github.com/croessner/nauthilus-director/internal/runtime"
 )
 
@@ -105,6 +106,11 @@ func newManagedListener(
 	}
 
 	identityLookuper, _ := authenticator.(nauthilus.IdentityLookuper)
+	if listenerNeedsExternalIdentity(entry) && identityLookuper == nil {
+		return nil, fmt.Errorf("listener %s: sasl external identity lookup unavailable", name)
+	}
+
+	certificateAuthenticator := certauth.NewService(identityLookuper)
 
 	authenticator = nauthilus.ObserveAuthenticator(authenticator, nauthilus.ObservationConfig{
 		AuthorityName: entry.Authority,
@@ -132,23 +138,25 @@ func newManagedListener(
 		name:   name,
 		config: configured,
 		handler: options.handlerFactory(SessionOptions{
-			ListenerName:        name,
-			Config:              entry,
-			AuthorityTransport:  authority.Transport,
-			Timeouts:            runtime.Timeouts,
-			Security:            security,
-			Authenticator:       authenticator,
-			IdentityLookuper:    identityLookuper,
-			BearerIntrospector:  bearerIntrospector,
-			BearerTokenMaxBytes: authority.Mechanisms.Bearer.TokenMaxBytes,
-			DirectorInstanceID:  runtime.InstanceName,
-			DefaultTenant:       defaultTenant,
-			DefaultShard:        defaultShard,
-			SessionLeaseTTL:     runtime.Timeouts.ProxyIdle.Std(),
-			SessionIdleGrace:    sessionIdleGrace,
-			FrontendTLSConfig:   tlsConfig,
-			LocalSessions:       options.localSessions,
-			Observability:       options.observability,
+			ListenerName:             name,
+			Config:                   entry,
+			AuthorityTransport:       authority.Transport,
+			Timeouts:                 runtime.Timeouts,
+			Security:                 security,
+			Authenticator:            authenticator,
+			IdentityLookuper:         identityLookuper,
+			BearerIntrospector:       bearerIntrospector,
+			CertificateAuthenticator: certificateAuthenticator,
+			ExternalAuthPolicy:       authority.Mechanisms.External,
+			BearerTokenMaxBytes:      authority.Mechanisms.Bearer.TokenMaxBytes,
+			DirectorInstanceID:       runtime.InstanceName,
+			DefaultTenant:            defaultTenant,
+			DefaultShard:             defaultShard,
+			SessionLeaseTTL:          runtime.Timeouts.ProxyIdle.Std(),
+			SessionIdleGrace:         sessionIdleGrace,
+			FrontendTLSConfig:        tlsConfig,
+			LocalSessions:            options.localSessions,
+			Observability:            options.observability,
 		}),
 		tlsConfig:     tlsConfig,
 		proxyProtocol: proxyPolicy,

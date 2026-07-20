@@ -30,6 +30,7 @@ import (
 	"github.com/croessner/nauthilus-director/internal/nauthilus"
 	"github.com/croessner/nauthilus-director/internal/observability"
 	"github.com/croessner/nauthilus-director/internal/placement"
+	"github.com/croessner/nauthilus-director/internal/protocol/certauth"
 	"github.com/croessner/nauthilus-director/internal/protocol/greeting"
 	"github.com/croessner/nauthilus-director/internal/proxy"
 	"github.com/croessner/nauthilus-director/internal/routing"
@@ -68,39 +69,41 @@ type Session struct {
 	reader *bufio.Reader
 	writer *bufio.Writer
 
-	listenerName           string
-	authorityName          string
-	authorityTransport     string
-	serviceName            string
-	network                string
-	backendPool            string
-	directorInstanceID     string
-	defaultTenant          string
-	defaultShard           string
-	tlsMode                string
-	authMechanisms         []string
-	capabilities           []string
-	preauthTimeout         time.Duration
-	authTimeout            time.Duration
-	maxPreauthLineBytes    int
-	maxPreauthLiteralBytes int
-	maxBearerTokenBytes    int
-	frontendTLSConfig      *tls.Config
-	authenticator          nauthilus.Authenticator
-	bearerIntrospector     nauthilus.BearerIntrospector
-	routingResolver        routing.RoutingResolver
-	placementService       placement.SessionPlacer
-	placementGate          runtimectl.PlacementGate
-	sessionLeaseTTL        time.Duration
-	sessionIdleGrace       time.Duration
-	backendRetentionTTL    time.Duration
-	backendConnectTimeout  time.Duration
-	proxyIdleTimeout       time.Duration
-	backendConnector       BackendConnector
-	proxyRunner            proxy.Runner
-	localSessions          *runtimectl.LocalSessionRegistry
-	observability          observability.Recorder
-	greetingPolicy         greeting.Policy
+	listenerName                 string
+	authorityName                string
+	authorityTransport           string
+	serviceName                  string
+	network                      string
+	backendPool                  string
+	directorInstanceID           string
+	defaultTenant                string
+	defaultShard                 string
+	tlsMode                      string
+	authMechanisms               []string
+	capabilities                 []string
+	preauthTimeout               time.Duration
+	authTimeout                  time.Duration
+	maxPreauthLineBytes          int
+	maxPreauthLiteralBytes       int
+	maxBearerTokenBytes          int
+	frontendTLSConfig            *tls.Config
+	authenticator                nauthilus.Authenticator
+	bearerIntrospector           nauthilus.BearerIntrospector
+	certificateAuthenticator     *certauth.Service
+	allowExternalAuthorizationID bool
+	routingResolver              routing.RoutingResolver
+	placementService             placement.SessionPlacer
+	placementGate                runtimectl.PlacementGate
+	sessionLeaseTTL              time.Duration
+	sessionIdleGrace             time.Duration
+	backendRetentionTTL          time.Duration
+	backendConnectTimeout        time.Duration
+	proxyIdleTimeout             time.Duration
+	backendConnector             BackendConnector
+	proxyRunner                  proxy.Runner
+	localSessions                *runtimectl.LocalSessionRegistry
+	observability                observability.Recorder
+	greetingPolicy               greeting.Policy
 
 	tlsActive       bool
 	provisionalUser string
@@ -136,44 +139,46 @@ func NewSession(config SessionConfig, conn net.Conn) (*Session, error) {
 	}
 
 	return &Session{
-		conn:                   conn,
-		reader:                 bufio.NewReaderSize(conn, maxLineBytes+1),
-		writer:                 bufio.NewWriter(conn),
-		listenerName:           strings.TrimSpace(config.ListenerName),
-		authorityName:          strings.TrimSpace(config.AuthorityName),
-		authorityTransport:     strings.TrimSpace(config.AuthorityTransport),
-		serviceName:            strings.TrimSpace(config.ServiceName),
-		network:                strings.TrimSpace(config.Network),
-		backendPool:            strings.TrimSpace(config.BackendPool),
-		directorInstanceID:     strings.TrimSpace(config.DirectorInstanceID),
-		defaultTenant:          defaultTenant(config.DefaultTenant),
-		defaultShard:           defaultShard(config.DefaultShard),
-		tlsMode:                strings.TrimSpace(config.TLSMode),
-		authMechanisms:         cloneStrings(config.AuthMechanisms),
-		capabilities:           cloneStrings(config.Capabilities),
-		preauthTimeout:         config.PreauthTimeout,
-		authTimeout:            effectiveDuration(config.AuthTimeout, defaultAuthCallTimeout),
-		maxPreauthLineBytes:    maxLineBytes,
-		maxPreauthLiteralBytes: maxLiteralBytes,
-		maxBearerTokenBytes:    maxBearerBytes,
-		frontendTLSConfig:      cloneTLSConfig(config.FrontendTLSConfig),
-		authenticator:          config.Authenticator,
-		bearerIntrospector:     config.BearerIntrospector,
-		routingResolver:        config.RoutingResolver,
-		placementService:       config.PlacementService,
-		placementGate:          config.PlacementGate,
-		sessionLeaseTTL:        leaseTTL,
-		sessionIdleGrace:       defaultSessionGrace(config.SessionIdleGrace, config.SessionLeaseTTL),
-		backendRetentionTTL:    config.BackendRetentionTTL,
-		backendConnectTimeout:  config.BackendConnectTimeout,
-		proxyIdleTimeout:       defaultProxyIdleTimeout(config.ProxyIdleTimeout, leaseTTL),
-		backendConnector:       backendConnector,
-		proxyRunner:            proxyRunner,
-		localSessions:          config.LocalSessions,
-		observability:          observability.NormalizeRecorder(config.Observability),
-		greetingPolicy:         config.GreetingPolicy,
-		tlsActive:              strings.EqualFold(strings.TrimSpace(config.TLSMode), TLSModeImplicit),
-		sessionID:              sessionID,
+		conn:                         conn,
+		reader:                       bufio.NewReaderSize(conn, maxLineBytes+1),
+		writer:                       bufio.NewWriter(conn),
+		listenerName:                 strings.TrimSpace(config.ListenerName),
+		authorityName:                strings.TrimSpace(config.AuthorityName),
+		authorityTransport:           strings.TrimSpace(config.AuthorityTransport),
+		serviceName:                  strings.TrimSpace(config.ServiceName),
+		network:                      strings.TrimSpace(config.Network),
+		backendPool:                  strings.TrimSpace(config.BackendPool),
+		directorInstanceID:           strings.TrimSpace(config.DirectorInstanceID),
+		defaultTenant:                defaultTenant(config.DefaultTenant),
+		defaultShard:                 defaultShard(config.DefaultShard),
+		tlsMode:                      strings.TrimSpace(config.TLSMode),
+		authMechanisms:               cloneStrings(config.AuthMechanisms),
+		capabilities:                 cloneStrings(config.Capabilities),
+		preauthTimeout:               config.PreauthTimeout,
+		authTimeout:                  effectiveDuration(config.AuthTimeout, defaultAuthCallTimeout),
+		maxPreauthLineBytes:          maxLineBytes,
+		maxPreauthLiteralBytes:       maxLiteralBytes,
+		maxBearerTokenBytes:          maxBearerBytes,
+		frontendTLSConfig:            cloneTLSConfig(config.FrontendTLSConfig),
+		authenticator:                config.Authenticator,
+		bearerIntrospector:           config.BearerIntrospector,
+		certificateAuthenticator:     config.CertificateAuthenticator,
+		allowExternalAuthorizationID: config.AllowExternalAuthorizationID,
+		routingResolver:              config.RoutingResolver,
+		placementService:             config.PlacementService,
+		placementGate:                config.PlacementGate,
+		sessionLeaseTTL:              leaseTTL,
+		sessionIdleGrace:             defaultSessionGrace(config.SessionIdleGrace, config.SessionLeaseTTL),
+		backendRetentionTTL:          config.BackendRetentionTTL,
+		backendConnectTimeout:        config.BackendConnectTimeout,
+		proxyIdleTimeout:             defaultProxyIdleTimeout(config.ProxyIdleTimeout, leaseTTL),
+		backendConnector:             backendConnector,
+		proxyRunner:                  proxyRunner,
+		localSessions:                config.LocalSessions,
+		observability:                observability.NormalizeRecorder(config.Observability),
+		greetingPolicy:               config.GreetingPolicy,
+		tlsActive:                    strings.EqualFold(strings.TrimSpace(config.TLSMode), TLSModeImplicit),
+		sessionID:                    sessionID,
 	}, nil
 }
 

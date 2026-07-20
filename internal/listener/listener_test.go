@@ -173,6 +173,37 @@ func TestManagerRejectsBearerCapableListenerWithoutUsableIntrospector(t *testing
 	}
 }
 
+// TestManagerRejectsExternalListenerWithoutIdentityLookup proves startup fails before bind.
+func TestManagerRejectsExternalListenerWithoutIdentityLookup(t *testing.T) {
+	cfg := singleListenerConfig(t, testIMAPSListener, tlsModeImplicit)
+	entry := cfg.Director.Listeners[testIMAPSListener]
+	entry.TLS.ClientCA = entry.TLS.Cert
+	entry.IMAP.AuthMechanisms = append(entry.IMAP.AuthMechanisms, "external")
+	entry.IMAP.Capabilities = append(entry.IMAP.Capabilities, "AUTH=EXTERNAL")
+	cfg.Director.Listeners[testIMAPSListener] = entry
+
+	authority := cfg.Auth.Authorities[entry.Authority]
+	authority.Mechanisms.External.Enabled = true
+	cfg.Auth.Authorities[entry.Authority] = authority
+
+	_, err := newTestManagerWithConfig(
+		cfg,
+		WithNauthilusClientFactory(func(
+			config.AuthorityConfig,
+			nauthilus.ClientOptions,
+		) (nauthilus.Authenticator, error) {
+			return noopAuthenticator{}, nil
+		}),
+	)
+	if err == nil {
+		t.Fatal("NewManagerWithConfig accepted EXTERNAL without identity lookup")
+	}
+
+	if !strings.Contains(err.Error(), "sasl external identity lookup unavailable") {
+		t.Fatalf("error = %q, want identity lookup failure", err.Error())
+	}
+}
+
 // TestManagerSelectsConfiguredListenerAuthorityTransport verifies listener authority selection.
 func TestManagerSelectsConfiguredListenerAuthorityTransport(t *testing.T) {
 	cfg := singleListenerConfig(t, testIMAPListener, tlsModeStartTLS)

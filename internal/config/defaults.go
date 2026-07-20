@@ -234,6 +234,11 @@ func defaultAuthority() AuthorityConfig {
 					RequiredScope:    defaultBearerRequiredScope,
 				},
 			},
+			External: ExternalMechanismConfig{
+				Enabled:              false,
+				IdentitySource:       "san_email",
+				AllowAuthorizationID: false,
+			},
 		},
 		OIDC: AuthorityOIDCConfig{
 			Enabled:       true,

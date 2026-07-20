@@ -28,6 +28,7 @@ import (
 	"github.com/croessner/nauthilus-director/internal/backend"
 	"github.com/croessner/nauthilus-director/internal/nauthilus"
 	"github.com/croessner/nauthilus-director/internal/observability"
+	"github.com/croessner/nauthilus-director/internal/protocol/certauth"
 	"github.com/croessner/nauthilus-director/internal/protocol/saslcred"
 	"github.com/croessner/nauthilus-director/internal/protocol/tlscontext"
 )
@@ -102,7 +103,7 @@ func (s *Session) handleAuth(ctx context.Context, command preauthCommand) (comma
 	if len(command.arguments) == 0 {
 		s.recordAuthenticate(ctx, pop3ObservationResultOK, pop3ReasonOK, "")
 
-		return commandOutcome{}, s.writeMultilineOK("Supported authentication mechanisms", s.effectiveBearerMechanisms())
+		return commandOutcome{}, s.writeMultilineOK("Supported authentication mechanisms", s.effectiveSASLMechanisms())
 	}
 
 	if len(command.arguments) > 2 {
@@ -119,14 +120,14 @@ func (s *Session) handleAuth(ctx context.Context, command preauthCommand) (comma
 	}
 
 	switch mechanism.Normalized() {
-	case saslcred.MechanismXOAUTH2, saslcred.MechanismOAuthBearer:
+	case saslcred.MechanismXOAUTH2, saslcred.MechanismOAuthBearer, saslcred.MechanismExternal:
 	default:
 		s.recordAuthenticate(ctx, pop3ObservationResultUnsupported, pop3ReasonUnsupported, mechanism.Normalized())
 
 		return commandOutcome{}, s.writeERR("Unsupported authentication mechanism")
 	}
 
-	if !s.bearerMechanismConfigured(mechanism.Normalized()) || !s.configuredCapability(capabilitySASL) {
+	if !s.saslMechanismConfigured(mechanism.Normalized()) || !s.configuredCapability(capabilitySASL) {
 		s.recordAuthenticate(ctx, pop3ObservationResultUnsupported, pop3ReasonUnsupported, mechanism.Normalized())
 
 		return commandOutcome{}, s.writeERR("Unsupported authentication mechanism")
@@ -138,7 +139,7 @@ func (s *Session) handleAuth(ctx context.Context, command preauthCommand) (comma
 		return commandOutcome{}, s.writeERR("TLS is required before authentication")
 	}
 
-	if !s.bearerMechanismAdvertised(mechanism.WireName()) {
+	if !s.saslMechanismAdvertised(mechanism.WireName()) {
 		s.recordAuthenticate(ctx, pop3ObservationResultUnsupported, pop3ReasonUnsupported, mechanism.Normalized())
 
 		return commandOutcome{}, s.writeERR("Unsupported authentication mechanism")
@@ -178,6 +179,9 @@ func (s *Session) handleAuth(ctx context.Context, command preauthCommand) (comma
 func (s *Session) authenticateThroughNauthilus(ctx context.Context, credentials *frontendCredentials) (commandOutcome, error) {
 	if credentials.Kind() == saslcred.KindBearer {
 		return s.authenticateThroughBearerIntrospection(ctx, credentials)
+	}
+	if credentials.Kind() == saslcred.KindExternal {
+		return s.authenticateThroughExternal(ctx, credentials)
 	}
 
 	if s.authenticator == nil {
@@ -236,6 +240,50 @@ func (s *Session) authenticateThroughNauthilus(ctx context.Context, credentials 
 
 		return commandOutcome{}, s.writeBackendReadinessERR()
 	}
+
+	return s.transitionAuthenticatedSession(ctx, credentials, result)
+}
+
+// authenticateThroughExternal binds a verified client certificate to the canonical account.
+func (s *Session) authenticateThroughExternal(ctx context.Context, credentials *frontendCredentials) (commandOutcome, error) {
+	if s.certificateAuthenticator == nil {
+		s.recordAuthenticate(ctx, pop3ObservationResultFailure, pop3ReasonTemporaryFailure, credentials.Method())
+
+		return commandOutcome{}, s.writeERR("Authentication service temporarily unavailable")
+	}
+
+	authCtx, cancel := context.WithTimeout(ctx, s.authTimeout)
+	defer cancel()
+
+	state, stateAvailable := tlscontext.ConnectionState(s.conn)
+	result, err := s.certificateAuthenticator.Authenticate(authCtx, certauth.Request{
+		Context:              s.NauthilusRequestContext(credentials.Method()),
+		State:                state,
+		AuthorizationID:      credentials.AuthorizationID(),
+		TLSActive:            s.tlsActive,
+		StateAvailable:       stateAvailable,
+		AllowAuthorizationID: s.allowExternalAuthorizationID,
+	})
+	if err != nil {
+		if certauth.Rejected(err) {
+			s.recordAuthenticate(ctx, pop3ObservationResultRejected, pop3ReasonAuth, credentials.Method())
+
+			return commandOutcome{}, s.writeERR(genericAuthFailedText)
+		}
+
+		s.recordAuthenticate(ctx, pop3ObservationResultFailure, pop3ReasonTemporaryFailure, credentials.Method())
+
+		return commandOutcome{}, s.writeERR("Authentication service temporarily unavailable")
+	}
+
+	if err := s.placeAuthenticatedSession(ctx, credentials, result); err != nil {
+		s.recordAuthenticate(ctx, pop3ObservationResultFailure, pop3ReasonClass(err), credentials.Method())
+		_ = s.closePlacedSession(context.Background())
+
+		return commandOutcome{}, s.writeBackendReadinessERR()
+	}
+
+	s.recordAuthenticate(ctx, pop3ObservationResultOK, pop3ReasonOK, credentials.Method())
 
 	return s.transitionAuthenticatedSession(ctx, credentials, result)
 }

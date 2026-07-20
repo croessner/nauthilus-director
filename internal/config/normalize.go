@@ -74,6 +74,7 @@ func (a AuthorityMechanismsConfig) Normalize() AuthorityMechanismsConfig {
 	a.Bearer.Names = normalizeLowerList(a.Bearer.Names)
 	a.Bearer.Validation = strings.ToLower(strings.TrimSpace(a.Bearer.Validation))
 	a.Bearer.Introspection = a.Bearer.Introspection.Normalize()
+	a.External.IdentitySource = strings.ToLower(strings.TrimSpace(a.External.IdentitySource))
 
 	return a
 }
@@ -123,6 +124,7 @@ func (d DirectorConfig) Normalize() DirectorConfig {
 			if listener.IMAP != nil {
 				imap := *listener.IMAP
 				imap.Greeting = imap.Greeting.Normalize()
+				imap.AuthMechanisms = normalizeLowerList(imap.AuthMechanisms)
 				listener.IMAP = &imap
 			}
 

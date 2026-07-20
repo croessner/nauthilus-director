@@ -18,12 +18,47 @@ package imap
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"io"
 	"net"
 	"testing"
 	"time"
 )
+
+// TestExternalCapabilityRequiresVerifiedClientCertificate proves state-dependent advertisement.
+func TestExternalCapabilityRequiresVerifiedClientCertificate(t *testing.T) {
+	config := testSessionConfig()
+	config.AuthMechanisms = []string{mechanismExternal}
+	config.Capabilities = []string{capabilityIMAP4Rev1, capabilitySASLIR, "AUTH=EXTERNAL"}
+
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	leaf := &x509.Certificate{EmailAddresses: []string{"cert@example.test"}}
+
+	session, err := NewSession(config, imapStateConn{
+		Conn: server,
+		state: tls.ConnectionState{
+			PeerCertificates: []*x509.Certificate{leaf},
+			VerifiedChains:   [][]*x509.Certificate{{leaf}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewSession returned error: %v", err)
+	}
+
+	if !session.authMechanismAdvertised(mechanismExternal) {
+		t.Fatal("AUTH=EXTERNAL was not advertised for a verified client certificate")
+	}
+
+	session.conn = imapStateConn{Conn: server, state: tls.ConnectionState{PeerCertificates: []*x509.Certificate{leaf}}}
+	if session.authMechanismAdvertised(mechanismExternal) {
+		t.Fatal("AUTH=EXTERNAL was advertised for an unverified client certificate")
+	}
+}
 
 const (
 	testIMAPService  = "imap"
@@ -136,4 +171,14 @@ func runSessionInput(t *testing.T, cfg SessionConfig, input string) error {
 	}
 
 	return nil
+}
+
+type imapStateConn struct {
+	net.Conn
+	state tls.ConnectionState
+}
+
+// ConnectionState returns fixed TLS metadata for capability tests.
+func (c imapStateConn) ConnectionState() tls.ConnectionState {
+	return c.state
 }

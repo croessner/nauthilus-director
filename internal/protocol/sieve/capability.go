@@ -20,8 +20,10 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/croessner/nauthilus-director/internal/protocol/certauth"
 	"github.com/croessner/nauthilus-director/internal/protocol/greeting"
 	"github.com/croessner/nauthilus-director/internal/protocol/saslcred"
+	"github.com/croessner/nauthilus-director/internal/protocol/tlscontext"
 )
 
 const (
@@ -198,6 +200,9 @@ func (s *Session) effectiveSASLMechanisms() []string {
 		}
 
 		key := mechanism.Normalized()
+		if key == saslcred.MechanismExternal && !s.externalAuthAvailable() {
+			continue
+		}
 		if _, exists := seen[key]; exists {
 			continue
 		}
@@ -208,6 +213,13 @@ func (s *Session) effectiveSASLMechanisms() []string {
 	}
 
 	return mechanisms
+}
+
+// externalAuthAvailable reports whether SASL EXTERNAL can use this connection now.
+func (s *Session) externalAuthAvailable() bool {
+	state, ok := tlscontext.ConnectionState(s.conn)
+
+	return certauth.Available(s.tlsActive, state, ok)
 }
 
 // authMechanismConfigured reports whether listener config accepts the normalized mechanism.

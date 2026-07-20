@@ -33,6 +33,14 @@ type AuthorityConfig struct {
 type AuthorityMechanismsConfig struct {
 	Password PasswordMechanismConfig `mapstructure:"password" yaml:"password" validate:"required"`
 	Bearer   BearerMechanismConfig   `mapstructure:"bearer" yaml:"bearer" validate:"required"`
+	External ExternalMechanismConfig `mapstructure:"external" yaml:"external" validate:"required"`
+}
+
+// ExternalMechanismConfig controls certificate-backed SASL EXTERNAL identity binding.
+type ExternalMechanismConfig struct {
+	Enabled              bool   `mapstructure:"enabled" yaml:"enabled"`
+	IdentitySource       string `mapstructure:"identity_source" yaml:"identity_source"`
+	AllowAuthorizationID bool   `mapstructure:"allow_authorization_id" yaml:"allow_authorization_id"`
 }
 
 type PasswordMechanismConfig struct {

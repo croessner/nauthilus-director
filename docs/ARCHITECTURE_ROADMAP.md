@@ -350,11 +350,16 @@ Required frontend mechanisms for user-stateful protocols:
 - `LOGIN`, where the frontend protocol commonly exposes it
 - `XOAUTH2`
 - `OAUTHBEARER`
+- `EXTERNAL`, when a listener is explicitly configured for verified client certificates
 
 Mechanism handling rules:
 
 - `PLAIN` and `LOGIN` provide username/password credentials.
 - `XOAUTH2` and `OAUTHBEARER` provide bearer-token credentials.
+- `EXTERNAL` provides no reusable credential. It binds exactly one verified
+  client-certificate `rfc822Name` email SAN to the canonical account returned
+  by Nauthilus identity lookup. Common-name fallback and ambiguous email SANs
+  are rejected.
 - Tokens, passwords and SASL blobs must never be logged, traced or exposed in metrics.
 - The director may parse the SASL envelope enough to extract the authorization identity, authentication identity, bearer token and optional client metadata.
 - The original mechanism name must stay in director request context and
@@ -364,6 +369,10 @@ Mechanism handling rules:
 - The director owns the transport privacy gate. Credential-bearing frontend mechanisms, including password and bearer mechanisms, must be rejected before Nauthilus is called unless the client has already crossed an implicit TLS or STARTTLS boundary with the director.
 - When frontend TLS is active, every protocol handler must populate the flat Nauthilus SSL DTO fields it can derive from the connection state, including `ssl`, TLS protocol, cipher, client-certificate verification status and bounded peer-certificate metadata. Missing TLS metadata must not be invented, but `ssl` must still truthfully report whether the frontend connection was encrypted.
 - SASL-IR is allowed where the frontend protocol supports it, but size limits and pre-auth timeouts still apply.
+- `EXTERNAL` is advertised only for the live TLS session when a client
+  certificate chain is verified. A distinct authorization identity is denied
+  by default and, when enabled, must resolve through Nauthilus to the same
+  canonical account as the certificate identity.
 
 ### 7.2 SASL bearer introspection
 
@@ -709,6 +718,10 @@ successful OIDC introspection, because the original end-user bearer token is the
 backend credential. The director must not discard that token immediately after
 introspection and must not transform it into a master-user password login.
 
+`EXTERNAL` has no frontend credential to replay. User-stateful listeners that
+enable it therefore require `master_user` backend authentication and bind the
+backend login to the canonical Nauthilus account.
+
 `credential_replay` must be opt-in because it extends the lifetime and blast
 radius of user passwords or bearer tokens inside the director. Bearer replay is
 allowed only when backend policy explicitly permits the original mechanism,
@@ -729,6 +742,7 @@ Required commands before proxy mode:
 - PASS
 - AUTH XOAUTH2
 - AUTH OAUTHBEARER
+- AUTH EXTERNAL
 - QUIT
 - NOOP
 
