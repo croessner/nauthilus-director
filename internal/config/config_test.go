@@ -1848,6 +1848,84 @@ func TestIMAPValidationRejectsUnsafeFrontendAuthTLS(t *testing.T) {
 	expectValidationError(t, cfg, "auth_mechanisms requires frontend TLS mode starttls or implicit")
 }
 
+// TestExternalAuthValidationRequiresTheCompleteCertificateBoundary keeps SASL EXTERNAL fail-closed at startup.
+func TestExternalAuthValidationRequiresTheCompleteCertificateBoundary(t *testing.T) {
+	t.Run("complete policy", func(t *testing.T) {
+		for _, listenerName := range []string{"imaps", "pop3s", "sieves"} {
+			t.Run(listenerName, func(t *testing.T) {
+				cfg := externalAuthConfig(listenerName)
+
+				if err := NewLoader().Validate(cfg); err != nil {
+					t.Fatalf("Validate returned error: %v", err)
+				}
+			})
+		}
+	})
+
+	t.Run("authority disabled", func(t *testing.T) {
+		cfg := externalAuthConfig("imaps")
+		authority := cfg.Auth.Authorities["default"]
+		authority.Mechanisms.External.Enabled = false
+		cfg.Auth.Authorities["default"] = authority
+
+		expectValidationError(t, cfg, "external mechanism not supported by authority")
+	})
+
+	t.Run("client ca missing", func(t *testing.T) {
+		cfg := externalAuthConfig("imaps")
+		entry := cfg.Director.Listeners["imaps"]
+		entry.TLS.ClientCA = ""
+		cfg.Director.Listeners["imaps"] = entry
+
+		expectValidationError(t, cfg, "tls.client_ca is required for external authentication")
+	})
+
+	t.Run("unsupported identity source", func(t *testing.T) {
+		cfg := externalAuthConfig("imaps")
+		authority := cfg.Auth.Authorities["default"]
+		authority.Mechanisms.External.IdentitySource = "subject_common_name"
+		cfg.Auth.Authorities["default"] = authority
+
+		expectValidationError(t, cfg, "identity_source must be san_email")
+	})
+
+	t.Run("credential replay backend", func(t *testing.T) {
+		cfg := externalAuthConfig("imaps")
+		backend := cfg.Director.Backends["mailstore-a-imap"]
+		backend.Auth.Mode = "credential_replay"
+		cfg.Director.Backends["mailstore-a-imap"] = backend
+
+		expectValidationError(t, cfg, "auth.mode must be master_user for external authentication")
+	})
+}
+
+// externalAuthConfig enables one complete IMAPS certificate-auth fixture.
+func externalAuthConfig(listenerName string) Config {
+	cfg := DefaultConfig()
+	authority := cfg.Auth.Authorities["default"]
+	authority.Mechanisms.External = ExternalMechanismConfig{
+		Enabled:              true,
+		IdentitySource:       "san_email",
+		AllowAuthorizationID: false,
+	}
+	cfg.Auth.Authorities["default"] = authority
+
+	entry := cfg.Director.Listeners[listenerName]
+	entry.TLS.ClientCA = "/etc/nauthilus-director/mail-client-ca.pem"
+	switch entry.Protocol {
+	case protocolIMAP:
+		entry.IMAP.AuthMechanisms = append(entry.IMAP.AuthMechanisms, "external")
+		entry.IMAP.Capabilities = append(entry.IMAP.Capabilities, "AUTH=EXTERNAL")
+	case protocolPOP3:
+		entry.POP3.AuthMechanisms = append(entry.POP3.AuthMechanisms, "external")
+	case protocolSIEVE:
+		entry.Sieve.AuthMechanisms = append(entry.Sieve.AuthMechanisms, "external")
+	}
+	cfg.Director.Listeners[listenerName] = entry
+
+	return cfg
+}
+
 // TestNonLMTPPlaintextListenersRemainRejected keeps this follow-up scoped to LMTP.
 func TestNonLMTPPlaintextListenersRemainRejected(t *testing.T) {
 	for _, name := range []string{"imap", "sieve", "pop3"} {

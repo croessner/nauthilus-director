@@ -21,10 +21,12 @@ import (
 	"bufio"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"errors"
 	"io"
 	"net"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -36,12 +38,41 @@ import (
 	"github.com/croessner/nauthilus-director/internal/nauthilus"
 	"github.com/croessner/nauthilus-director/internal/observability"
 	"github.com/croessner/nauthilus-director/internal/placement"
+	"github.com/croessner/nauthilus-director/internal/protocol/certauth"
 	"github.com/croessner/nauthilus-director/internal/protocol/greeting"
+	"github.com/croessner/nauthilus-director/internal/protocol/saslcred"
 	"github.com/croessner/nauthilus-director/internal/proxy"
 	"github.com/croessner/nauthilus-director/internal/routing"
 	runtimectl "github.com/croessner/nauthilus-director/internal/runtime"
 	"github.com/croessner/nauthilus-director/internal/state"
 )
+
+// TestExternalCapabilityRequiresVerifiedClientCertificate proves ManageSieve advertises EXTERNAL truthfully.
+func TestExternalCapabilityRequiresVerifiedClientCertificate(t *testing.T) {
+	config := testSessionConfig(TLSModeImplicit, nil)
+	config.AuthMechanisms = append(config.AuthMechanisms, saslcred.MechanismExternal)
+	leaf := &x509.Certificate{EmailAddresses: []string{"cert@example.test"}}
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	session, err := NewSession(config, stateConn{Conn: server, state: tls.ConnectionState{
+		PeerCertificates: []*x509.Certificate{leaf},
+		VerifiedChains:   [][]*x509.Certificate{{leaf}},
+	}})
+	if err != nil {
+		t.Fatalf("NewSession returned error: %v", err)
+	}
+
+	if !slices.Contains(session.effectiveSASLMechanisms(), "EXTERNAL") {
+		t.Fatalf("SASL mechanisms = %v, want EXTERNAL", session.effectiveSASLMechanisms())
+	}
+
+	session.conn = stateConn{Conn: server, state: tls.ConnectionState{PeerCertificates: []*x509.Certificate{leaf}}}
+	if slices.Contains(session.effectiveSASLMechanisms(), "EXTERNAL") {
+		t.Fatalf("SASL mechanisms = %v, EXTERNAL must require verification", session.effectiveSASLMechanisms())
+	}
+}
 
 const (
 	testGreetingImplementation = "\"IMPLEMENTATION\" \"nauthilus-director test\"\r\n"
@@ -796,6 +827,63 @@ func TestAuthenticatedSieveBackendAuthBindsToAuthenticatedAccount(t *testing.T) 
 			t.Fatalf("backend auth replayed frontend identity %q instead of canonical account", forbidden)
 		}
 	}
+}
+
+// TestExternalSieveUsesCanonicalMasterUserBackend proves certificate auth reaches backend without replay.
+func TestExternalSieveUsesCanonicalMasterUserBackend(t *testing.T) {
+	resolver := &recordingRoutingResolver{
+		result: routing.RoutingResult{
+			AccountKey: "canonical@example.test",
+			Tenant:     "default",
+			ShardTag:   "mailstore-a",
+		},
+	}
+	authCommands := make(chan string, 1)
+	config := testPlacementSessionConfig(TLSModeImplicit, nil, resolver, nil)
+	config.AuthMechanisms = append(config.AuthMechanisms, saslcred.MechanismExternal)
+	config.CertificateAuthenticator = certauth.NewService(staticSieveIdentityLookuper{})
+	config.BackendConnector = &recordingSieveBackendConnector{authCommands: authCommands}
+	leaf := &x509.Certificate{EmailAddresses: []string{"external@example.test"}}
+	harness := startSieveHarnessWithState(t, config, tls.ConnectionState{
+		PeerCertificates: []*x509.Certificate{leaf},
+		VerifiedChains:   [][]*x509.Certificate{{leaf}},
+	})
+	harness.expectGreeting(t,
+		testGreetingImplementation,
+		testGreetingVersion,
+		testGreetingSieve,
+		testGreetingLanguage,
+		"\"SASL\" \"PLAIN XOAUTH2 OAUTHBEARER EXTERNAL\"\r\n",
+		testGreetingOK,
+	)
+
+	harness.write(t, "AUTHENTICATE \"EXTERNAL\" \"=\"\r\n")
+	harness.expectLines(t,
+		testGreetingImplementation,
+		testGreetingVersion,
+		testGreetingSieve,
+		testGreetingLanguage,
+		"\"OWNER\" \"canonical@example.test\"\r\n",
+		"\"SASL\" \"PLAIN XOAUTH2 OAUTHBEARER EXTERNAL\"\r\n",
+		"OK \"Authentication successful\"\r\n",
+	)
+	harness.expectDone(t)
+
+	payload := decodeSieveInitialResponse(t, receiveSieveBackendAuthCommand(t, authCommands), mechanismPlain)
+	if payload != "\x00canonical@example.test*director-master\x00backend-master-secret" {
+		t.Fatalf("backend auth payload = %q, want canonical master-user binding", payload)
+	}
+}
+
+type staticSieveIdentityLookuper struct{}
+
+// LookupIdentity returns one canonical account for the ManageSieve EXTERNAL fixture.
+func (staticSieveIdentityLookuper) LookupIdentity(_ context.Context, request nauthilus.IdentityLookupRequest) (nauthilus.AuthResult, error) {
+	if request.Context.Username != "external@example.test" {
+		return nauthilus.AuthResult{Decision: nauthilus.DecisionRejected}, nil
+	}
+
+	return nauthilus.AuthResult{Decision: nauthilus.DecisionAuthenticated, Account: "canonical@example.test"}, nil
 }
 
 // TestAuthenticatedSieveConnectsSelectedBackendBeforeSuccess verifies the backend request boundary.

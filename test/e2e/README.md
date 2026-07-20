@@ -44,6 +44,10 @@ The default lane is fake-service based and deterministic:
 - mail SASL `XOAUTH2` and `OAUTHBEARER` validation through the fake
   Nauthilus OIDC discovery and introspection endpoint for IMAP, LMTP peer
   auth, ManageSieve and POP3 public listeners
+- mail SASL `EXTERNAL` through a public implicit-TLS IMAP socket with an
+  ephemeral CA and `clientAuth` certificate carrying one email SAN, including
+  state-dependent capability suppression without a client certificate and
+  canonical-account master-user backend handoff
 - a mixed authority lane where POP3 password auth stays on the generated gRPC
   AuthService while SASL bearer validation uses the HTTP OIDC introspection
   endpoint

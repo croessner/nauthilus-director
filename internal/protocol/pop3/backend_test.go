@@ -42,6 +42,7 @@ import (
 	"github.com/croessner/nauthilus-director/internal/config"
 	"github.com/croessner/nauthilus-director/internal/nauthilus"
 	"github.com/croessner/nauthilus-director/internal/placement"
+	"github.com/croessner/nauthilus-director/internal/protocol/certauth"
 	"github.com/croessner/nauthilus-director/internal/protocol/saslcred"
 )
 
@@ -569,6 +570,57 @@ func TestAuthenticatedPOP3ConnectsSelectedBackendBeforeFrontendSuccess(t *testin
 	if !connector.sawCommandPrefix("USER canonical@example.test*director-master") {
 		t.Fatal("backend did not receive formatted master-user USER before frontend success")
 	}
+}
+
+// TestExternalPOP3UsesCanonicalMasterUserBackend proves the certificate path has no credential replay.
+func TestExternalPOP3UsesCanonicalMasterUserBackend(t *testing.T) {
+	placer := &recordingSessionPlacer{}
+	lease := newRecordingPlacementLease(placement.SessionRequest{
+		BackendPool: "pop3-default",
+		ShardTag:    "mailstore-a",
+	})
+	lease.backend.Backend.TLS = backend.TLSConfig{Mode: backendTLSNone}
+	lease.backend.Backend.Auth = backend.AuthConfig{
+		Mode: backendAuthModeMasterUser,
+		MasterUser: backend.MasterUserConfig{
+			Username:   testPOP3BackendMasterUser,
+			Password:   config.Secret(testPOP3BackendMasterPass),
+			UserFormat: "{user}*{master_user}",
+			Mechanism:  "plain",
+		},
+	}
+	placer.lease = lease
+
+	connector := &recordingPOP3BackendConnector{}
+	config := testPlacementPOP3Config(TLSModeImplicit, nil, nil, placer)
+	config.AuthMechanisms = append(config.AuthMechanisms, saslcred.MechanismExternal)
+	config.CertificateAuthenticator = certauth.NewService(staticPOP3IdentityLookuper{})
+	config.BackendConnector = connector
+	leaf := &x509.Certificate{EmailAddresses: []string{"external@example.test"}}
+	harness := startPOP3HarnessWithState(t, config, tls.ConnectionState{
+		PeerCertificates: []*x509.Certificate{leaf},
+		VerifiedChains:   [][]*x509.Certificate{{leaf}},
+	})
+	harness.expectOK(t)
+
+	harness.write(t, "AUTH EXTERNAL =\r\n")
+	harness.expectOK(t)
+	harness.expectDone(t)
+
+	if !connector.sawCommandPrefix("USER canonical@example.test*director-master") {
+		t.Fatal("backend did not receive canonical master-user login for EXTERNAL")
+	}
+}
+
+type staticPOP3IdentityLookuper struct{}
+
+// LookupIdentity returns one canonical account for the POP3 EXTERNAL fixture.
+func (staticPOP3IdentityLookuper) LookupIdentity(_ context.Context, request nauthilus.IdentityLookupRequest) (nauthilus.AuthResult, error) {
+	if request.Context.Username != "external@example.test" {
+		return nauthilus.AuthResult{Decision: nauthilus.DecisionRejected}, nil
+	}
+
+	return nauthilus.AuthResult{Decision: nauthilus.DecisionAuthenticated, Account: "canonical@example.test"}, nil
 }
 
 // TestBackendAuthFailureMapsToTemporaryFrontendFailure verifies backend status text stays hidden.

@@ -1934,6 +1934,8 @@ type directorOptions struct {
 	BackendShards               map[string]string
 	BackendTLS                  config.BackendTLSConfig
 	FrontendTLSConfig           *tls.Config
+	ExternalAuthEnabled         bool
+	ListenerClientCA            string
 	ListenerCertPath            string
 	ListenerKeyPath             string
 	LocalSessions               *runtimectl.LocalSessionRegistry
@@ -3096,35 +3098,37 @@ func startDirector(t *testing.T, options directorOptions) directorInstance {
 		}),
 		listener.WithSessionHandlerFactory(func(listenerOptions listener.SessionOptions) listener.SessionHandler {
 			sessionConfig := imap.SessionConfig{
-				ListenerName:           listenerOptions.ListenerName,
-				AuthorityName:          listenerOptions.Config.Authority,
-				ServiceName:            listenerOptions.Config.ServiceName,
-				Network:                listenerOptions.Config.Network,
-				BackendPool:            listenerOptions.Config.BackendPool,
-				DirectorInstanceID:     listenerOptions.DirectorInstanceID,
-				DefaultTenant:          e2eTenant,
-				TLSMode:                listenerOptions.Config.TLS.Mode,
-				Capabilities:           listenerOptions.Config.IMAP.Capabilities,
-				AuthMechanisms:         listenerOptions.Config.IMAP.AuthMechanisms,
-				MaxBearerTokenBytes:    listenerOptions.BearerTokenMaxBytes,
-				SessionLeaseTTL:        sessionLeaseTTL,
-				SessionIdleGrace:       0,
-				PreauthTimeout:         time.Second,
-				AuthTimeout:            time.Second,
-				BackendConnectTimeout:  time.Second,
-				ProxyIdleTimeout:       proxyIdleTimeout,
-				MaxPreauthLineBytes:    8192,
-				MaxPreauthLiteralBytes: 16,
-				FrontendTLSConfig:      options.FrontendTLSConfig,
-				Authenticator:          listenerOptions.Authenticator,
-				BearerIntrospector:     listenerOptions.BearerIntrospector,
-				RoutingResolver:        resolver,
-				SessionStore:           store,
-				PlacementService:       placementService,
-				BackendConnector:       imap.NewTCPBackendConnector(nil),
-				ProxyRunner:            proxyRunner,
-				LocalSessions:          options.LocalSessions,
-				Observability:          options.Recorder,
+				ListenerName:                 listenerOptions.ListenerName,
+				AuthorityName:                listenerOptions.Config.Authority,
+				ServiceName:                  listenerOptions.Config.ServiceName,
+				Network:                      listenerOptions.Config.Network,
+				BackendPool:                  listenerOptions.Config.BackendPool,
+				DirectorInstanceID:           listenerOptions.DirectorInstanceID,
+				DefaultTenant:                e2eTenant,
+				TLSMode:                      listenerOptions.Config.TLS.Mode,
+				Capabilities:                 listenerOptions.Config.IMAP.Capabilities,
+				AuthMechanisms:               listenerOptions.Config.IMAP.AuthMechanisms,
+				MaxBearerTokenBytes:          listenerOptions.BearerTokenMaxBytes,
+				SessionLeaseTTL:              sessionLeaseTTL,
+				SessionIdleGrace:             0,
+				PreauthTimeout:               time.Second,
+				AuthTimeout:                  time.Second,
+				BackendConnectTimeout:        time.Second,
+				ProxyIdleTimeout:             proxyIdleTimeout,
+				MaxPreauthLineBytes:          8192,
+				MaxPreauthLiteralBytes:       16,
+				FrontendTLSConfig:            options.FrontendTLSConfig,
+				Authenticator:                listenerOptions.Authenticator,
+				BearerIntrospector:           listenerOptions.BearerIntrospector,
+				CertificateAuthenticator:     listenerOptions.CertificateAuthenticator,
+				AllowExternalAuthorizationID: listenerOptions.ExternalAuthPolicy.AllowAuthorizationID,
+				RoutingResolver:              resolver,
+				SessionStore:                 store,
+				PlacementService:             placementService,
+				BackendConnector:             imap.NewTCPBackendConnector(nil),
+				ProxyRunner:                  proxyRunner,
+				LocalSessions:                options.LocalSessions,
+				Observability:                options.Recorder,
 			}
 			if options.UsePlacementStubs {
 				sessionConfig.RoutingResolver = nil
@@ -3273,8 +3277,17 @@ func e2eConfig(t *testing.T, options directorOptions) config.Config {
 	listenerConfig.TLS.Mode = options.TLSMode
 	listenerConfig.TLS.Cert = options.ListenerCertPath
 	listenerConfig.TLS.Key = config.Secret(options.ListenerKeyPath)
+	listenerConfig.TLS.ClientCA = options.ListenerClientCA
 	listenerConfig.IMAP.Capabilities = []string{"IMAP4rev1", "ID", "SASL-IR", "STARTTLS", "AUTH=PLAIN", "AUTH=XOAUTH2", "AUTH=OAUTHBEARER"}
 	listenerConfig.IMAP.AuthMechanisms = []string{"plain", "xoauth2", "oauthbearer"}
+	if options.ExternalAuthEnabled {
+		listenerConfig.IMAP.Capabilities = append(listenerConfig.IMAP.Capabilities, "AUTH=EXTERNAL")
+		listenerConfig.IMAP.AuthMechanisms = append(listenerConfig.IMAP.AuthMechanisms, "external")
+
+		authority := cfg.Auth.Authorities[listenerConfig.Authority]
+		authority.Mechanisms.External.Enabled = true
+		cfg.Auth.Authorities[listenerConfig.Authority] = authority
+	}
 	listenerConfig.AuthorityContext.HTTPHeaders = authorityContextConfigValues(options.AuthorityContextHTTPHeaders)
 	cfg.Director.Listeners = map[string]config.ListenerConfig{e2eListenerName: listenerConfig}
 	if strings.TrimSpace(options.AuthorityURL) != "" {

@@ -55,6 +55,10 @@ auth:
                         - oauthbearer
                     token_max_bytes: 16384
                     validation: nauthilus_introspection
+                external:
+                    allow_authorization_id: false
+                    enabled: false
+                    identity_source: san_email
                 password:
                     enabled: true
                     names:

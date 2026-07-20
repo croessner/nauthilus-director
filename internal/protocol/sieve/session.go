@@ -30,6 +30,7 @@ import (
 	"github.com/croessner/nauthilus-director/internal/nauthilus"
 	"github.com/croessner/nauthilus-director/internal/observability"
 	"github.com/croessner/nauthilus-director/internal/placement"
+	"github.com/croessner/nauthilus-director/internal/protocol/certauth"
 	"github.com/croessner/nauthilus-director/internal/protocol/greeting"
 	"github.com/croessner/nauthilus-director/internal/proxy"
 	"github.com/croessner/nauthilus-director/internal/routing"
@@ -75,39 +76,41 @@ type CapabilitiesConfig struct {
 
 // SessionConfig contains immutable listener settings for one ManageSieve handler.
 type SessionConfig struct {
-	ListenerName           string
-	AuthorityName          string
-	AuthorityTransport     string
-	ServiceName            string
-	Network                string
-	BackendPool            string
-	TLSMode                string
-	AuthMechanisms         []string
-	Capabilities           CapabilitiesConfig
-	PreauthTimeout         time.Duration
-	AuthTimeout            time.Duration
-	BackendConnectTimeout  time.Duration
-	ProxyIdleTimeout       time.Duration
-	MaxPreauthLineBytes    int
-	MaxPreauthLiteralBytes int
-	MaxBearerTokenBytes    int
-	FrontendTLSConfig      *tls.Config
-	Authenticator          nauthilus.Authenticator
-	BearerIntrospector     nauthilus.BearerIntrospector
-	RoutingResolver        routing.RoutingResolver
-	PlacementService       placement.SessionPlacer
-	PlacementGate          runtimectl.PlacementGate
-	BackendConnector       BackendConnector
-	ProxyRunner            proxy.Runner
-	LocalSessions          *runtimectl.LocalSessionRegistry
-	Observability          observability.Recorder
-	DirectorInstanceID     string
-	DefaultTenant          string
-	DefaultShard           string
-	GreetingPolicy         greeting.Policy
-	SessionLeaseTTL        time.Duration
-	SessionIdleGrace       time.Duration
-	BackendRetentionTTL    time.Duration
+	ListenerName                 string
+	AuthorityName                string
+	AuthorityTransport           string
+	ServiceName                  string
+	Network                      string
+	BackendPool                  string
+	TLSMode                      string
+	AuthMechanisms               []string
+	Capabilities                 CapabilitiesConfig
+	PreauthTimeout               time.Duration
+	AuthTimeout                  time.Duration
+	BackendConnectTimeout        time.Duration
+	ProxyIdleTimeout             time.Duration
+	MaxPreauthLineBytes          int
+	MaxPreauthLiteralBytes       int
+	MaxBearerTokenBytes          int
+	FrontendTLSConfig            *tls.Config
+	Authenticator                nauthilus.Authenticator
+	BearerIntrospector           nauthilus.BearerIntrospector
+	CertificateAuthenticator     *certauth.Service
+	AllowExternalAuthorizationID bool
+	RoutingResolver              routing.RoutingResolver
+	PlacementService             placement.SessionPlacer
+	PlacementGate                runtimectl.PlacementGate
+	BackendConnector             BackendConnector
+	ProxyRunner                  proxy.Runner
+	LocalSessions                *runtimectl.LocalSessionRegistry
+	Observability                observability.Recorder
+	DirectorInstanceID           string
+	DefaultTenant                string
+	DefaultShard                 string
+	GreetingPolicy               greeting.Policy
+	SessionLeaseTTL              time.Duration
+	SessionIdleGrace             time.Duration
+	BackendRetentionTTL          time.Duration
 }
 
 // Handler creates bounded ManageSieve sessions for one configured listener.
@@ -121,23 +124,25 @@ type Session struct {
 	reader *bufio.Reader
 	writer *bufio.Writer
 
-	listenerName           string
-	authorityName          string
-	authorityTransport     string
-	serviceName            string
-	network                string
-	backendPool            string
-	tlsMode                string
-	authMechanisms         []string
-	capabilities           CapabilitiesConfig
-	preauthTimeout         time.Duration
-	authTimeout            time.Duration
-	maxPreauthLineBytes    int
-	maxPreauthLiteralBytes int
-	maxBearerTokenBytes    int
-	frontendTLSConfig      *tls.Config
-	authenticator          nauthilus.Authenticator
-	bearerIntrospector     nauthilus.BearerIntrospector
+	listenerName                 string
+	authorityName                string
+	authorityTransport           string
+	serviceName                  string
+	network                      string
+	backendPool                  string
+	tlsMode                      string
+	authMechanisms               []string
+	capabilities                 CapabilitiesConfig
+	preauthTimeout               time.Duration
+	authTimeout                  time.Duration
+	maxPreauthLineBytes          int
+	maxPreauthLiteralBytes       int
+	maxBearerTokenBytes          int
+	frontendTLSConfig            *tls.Config
+	authenticator                nauthilus.Authenticator
+	bearerIntrospector           nauthilus.BearerIntrospector
+	certificateAuthenticator     *certauth.Service
+	allowExternalAuthorizationID bool
 
 	tlsActive bool
 
@@ -260,44 +265,46 @@ func NewSession(config SessionConfig, conn net.Conn) (*Session, error) {
 	}
 
 	return &Session{
-		conn:                   conn,
-		reader:                 bufio.NewReaderSize(conn, maxLineBytes+1),
-		writer:                 bufio.NewWriter(conn),
-		listenerName:           config.ListenerName,
-		authorityName:          config.AuthorityName,
-		authorityTransport:     config.AuthorityTransport,
-		serviceName:            config.ServiceName,
-		network:                config.Network,
-		backendPool:            config.BackendPool,
-		tlsMode:                config.TLSMode,
-		authMechanisms:         append([]string(nil), config.AuthMechanisms...),
-		capabilities:           cloneCapabilities(config.Capabilities),
-		preauthTimeout:         config.PreauthTimeout,
-		authTimeout:            effectiveDuration(config.AuthTimeout, defaultAuthCallTimeout),
-		maxPreauthLineBytes:    maxLineBytes,
-		maxPreauthLiteralBytes: maxLiteralBytes,
-		maxBearerTokenBytes:    maxBearerBytes,
-		frontendTLSConfig:      cloneTLSConfig(config.FrontendTLSConfig),
-		authenticator:          config.Authenticator,
-		bearerIntrospector:     config.BearerIntrospector,
-		tlsActive:              config.TLSMode == TLSModeImplicit,
-		sessionID:              sessionID,
-		directorInstanceID:     config.DirectorInstanceID,
-		defaultTenant:          defaultTenant(config.DefaultTenant),
-		defaultShard:           defaultShard(config.DefaultShard),
-		greetingPolicy:         config.GreetingPolicy,
-		sessionLeaseTTL:        leaseTTL,
-		sessionIdleGrace:       defaultSessionGrace(config.SessionIdleGrace, config.SessionLeaseTTL),
-		backendRetentionTTL:    config.BackendRetentionTTL,
-		backendConnectTimeout:  config.BackendConnectTimeout,
-		proxyIdleTimeout:       defaultProxyIdleTimeout(config.ProxyIdleTimeout, leaseTTL),
-		routingResolver:        config.RoutingResolver,
-		placementService:       config.PlacementService,
-		placementGate:          config.PlacementGate,
-		backendConnector:       backendConnector,
-		proxyRunner:            proxyRunner,
-		localSessions:          config.LocalSessions,
-		observability:          observability.NormalizeRecorder(config.Observability),
+		conn:                         conn,
+		reader:                       bufio.NewReaderSize(conn, maxLineBytes+1),
+		writer:                       bufio.NewWriter(conn),
+		listenerName:                 config.ListenerName,
+		authorityName:                config.AuthorityName,
+		authorityTransport:           config.AuthorityTransport,
+		serviceName:                  config.ServiceName,
+		network:                      config.Network,
+		backendPool:                  config.BackendPool,
+		tlsMode:                      config.TLSMode,
+		authMechanisms:               append([]string(nil), config.AuthMechanisms...),
+		capabilities:                 cloneCapabilities(config.Capabilities),
+		preauthTimeout:               config.PreauthTimeout,
+		authTimeout:                  effectiveDuration(config.AuthTimeout, defaultAuthCallTimeout),
+		maxPreauthLineBytes:          maxLineBytes,
+		maxPreauthLiteralBytes:       maxLiteralBytes,
+		maxBearerTokenBytes:          maxBearerBytes,
+		frontendTLSConfig:            cloneTLSConfig(config.FrontendTLSConfig),
+		authenticator:                config.Authenticator,
+		bearerIntrospector:           config.BearerIntrospector,
+		certificateAuthenticator:     config.CertificateAuthenticator,
+		allowExternalAuthorizationID: config.AllowExternalAuthorizationID,
+		tlsActive:                    config.TLSMode == TLSModeImplicit,
+		sessionID:                    sessionID,
+		directorInstanceID:           config.DirectorInstanceID,
+		defaultTenant:                defaultTenant(config.DefaultTenant),
+		defaultShard:                 defaultShard(config.DefaultShard),
+		greetingPolicy:               config.GreetingPolicy,
+		sessionLeaseTTL:              leaseTTL,
+		sessionIdleGrace:             defaultSessionGrace(config.SessionIdleGrace, config.SessionLeaseTTL),
+		backendRetentionTTL:          config.BackendRetentionTTL,
+		backendConnectTimeout:        config.BackendConnectTimeout,
+		proxyIdleTimeout:             defaultProxyIdleTimeout(config.ProxyIdleTimeout, leaseTTL),
+		routingResolver:              config.RoutingResolver,
+		placementService:             config.PlacementService,
+		placementGate:                config.PlacementGate,
+		backendConnector:             backendConnector,
+		proxyRunner:                  proxyRunner,
+		localSessions:                config.LocalSessions,
+		observability:                observability.NormalizeRecorder(config.Observability),
 	}, nil
 }
 

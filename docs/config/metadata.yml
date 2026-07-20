@@ -20,6 +20,9 @@ paths:
   auth.authorities.*.mechanisms.bearer.introspection.**:
     stability: stable
     description: Mail SASL bearer-token introspection policy and endpoint client-auth material.
+  auth.authorities.*.mechanisms.external.**:
+    stability: stable
+    description: Certificate-backed SASL EXTERNAL identity policy. The only supported identity source is one verified rfc822Name email SAN; distinct authorization identities are denied by default.
   auth.authorities.*.oidc.client_credentials.introspection_endpoint_auth_method:
     stability: stable
     description: Endpoint client-auth method used when control-plane OIDC validation introspects operator tokens with this authority; mail SASL bearer introspection uses mechanisms.bearer.introspection.auth_method.

@@ -25,6 +25,7 @@ import (
 	"github.com/croessner/nauthilus-director/internal/nauthilus"
 	"github.com/croessner/nauthilus-director/internal/observability"
 	"github.com/croessner/nauthilus-director/internal/placement"
+	"github.com/croessner/nauthilus-director/internal/protocol/certauth"
 	"github.com/croessner/nauthilus-director/internal/protocol/greeting"
 	"github.com/croessner/nauthilus-director/internal/proxy"
 	"github.com/croessner/nauthilus-director/internal/routing"
@@ -62,41 +63,43 @@ func (p Placement) Clone() Placement {
 
 // SessionConfig contains the listener-owned values needed to create IMAP sessions.
 type SessionConfig struct {
-	ListenerName           string
-	AuthorityName          string
-	AuthorityTransport     string
-	ServiceName            string
-	Network                string
-	BackendPool            string
-	DirectorInstanceID     string
-	DefaultTenant          string
-	DefaultShard           string
-	GreetingPolicy         greeting.Policy
-	TLSMode                string
-	Capabilities           []string
-	AuthMechanisms         []string
-	MaxBearerTokenBytes    int
-	RequireIDBeforeAuth    bool
-	SessionLeaseTTL        time.Duration
-	SessionIdleGrace       time.Duration
-	BackendRetentionTTL    time.Duration
-	PreauthTimeout         time.Duration
-	AuthTimeout            time.Duration
-	BackendConnectTimeout  time.Duration
-	ProxyIdleTimeout       time.Duration
-	MaxPreauthLineBytes    int
-	MaxPreauthLiteralBytes int
-	FrontendTLSConfig      *tls.Config
-	Authenticator          nauthilus.Authenticator
-	BearerIntrospector     nauthilus.BearerIntrospector
-	RoutingResolver        routing.RoutingResolver
-	SessionStore           state.SessionStore
-	PlacementService       placement.SessionPlacer
-	BackendConnector       BackendConnector
-	ProxyRunner            proxy.Runner
-	LocalSessions          *runtimectl.LocalSessionRegistry
-	PlacementGate          runtimectl.PlacementGate
-	Observability          observability.Recorder
+	ListenerName                 string
+	AuthorityName                string
+	AuthorityTransport           string
+	ServiceName                  string
+	Network                      string
+	BackendPool                  string
+	DirectorInstanceID           string
+	DefaultTenant                string
+	DefaultShard                 string
+	GreetingPolicy               greeting.Policy
+	TLSMode                      string
+	Capabilities                 []string
+	AuthMechanisms               []string
+	MaxBearerTokenBytes          int
+	RequireIDBeforeAuth          bool
+	SessionLeaseTTL              time.Duration
+	SessionIdleGrace             time.Duration
+	BackendRetentionTTL          time.Duration
+	PreauthTimeout               time.Duration
+	AuthTimeout                  time.Duration
+	BackendConnectTimeout        time.Duration
+	ProxyIdleTimeout             time.Duration
+	MaxPreauthLineBytes          int
+	MaxPreauthLiteralBytes       int
+	FrontendTLSConfig            *tls.Config
+	Authenticator                nauthilus.Authenticator
+	BearerIntrospector           nauthilus.BearerIntrospector
+	CertificateAuthenticator     *certauth.Service
+	AllowExternalAuthorizationID bool
+	RoutingResolver              routing.RoutingResolver
+	SessionStore                 state.SessionStore
+	PlacementService             placement.SessionPlacer
+	BackendConnector             BackendConnector
+	ProxyRunner                  proxy.Runner
+	LocalSessions                *runtimectl.LocalSessionRegistry
+	PlacementGate                runtimectl.PlacementGate
+	Observability                observability.Recorder
 }
 
 // Context records stable, secret-safe session metadata for protocol handling.

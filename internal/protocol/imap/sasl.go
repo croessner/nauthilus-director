@@ -20,6 +20,8 @@ import (
 	"encoding/base64"
 	"fmt"
 	"strings"
+
+	"github.com/croessner/nauthilus-director/internal/protocol/saslcred"
 )
 
 const (
@@ -34,6 +36,10 @@ func parseSASLCredentials(
 	maxPayloadBytes int,
 	maxBearerTokenBytes int,
 ) (*frontendCredentials, error) {
+	if mechanism.Normalized() == mechanismExternal {
+		return parseExternalPayload(mechanism, encoded, maxPayloadBytes)
+	}
+
 	payload, err := decodeSASLPayload(encoded, maxPayloadBytes)
 	if err != nil {
 		return nil, err
@@ -49,6 +55,25 @@ func parseSASLCredentials(
 	default:
 		return nil, fmt.Errorf("%w: unsupported sasl mechanism", ErrUnsupportedAuthMechanism)
 	}
+}
+
+// parseExternalPayload delegates the credential-free authzid envelope to the shared parser.
+func parseExternalPayload(mechanism mechanismIdentity, encoded string, maxPayloadBytes int) (*frontendCredentials, error) {
+	sharedMechanism, err := saslcred.NewMechanism(mechanism.Normalized())
+	if err != nil {
+		return nil, fmt.Errorf("%w: unsupported sasl mechanism", ErrUnsupportedAuthMechanism)
+	}
+
+	credentials, err := saslcred.Parse(sharedMechanism, encoded, maxPayloadBytes, 0)
+	if err != nil {
+		return nil, fmt.Errorf("%w: invalid external response", ErrCredentialRejected)
+	}
+
+	return &frontendCredentials{
+		mechanism:       mechanism,
+		kind:            credentialKindExternal,
+		authorizationID: credentials.AuthorizationID,
+	}, nil
 }
 
 // decodeSASLPayload converts base64 input into bounded raw SASL bytes.

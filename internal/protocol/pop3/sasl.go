@@ -34,7 +34,7 @@ func parseSASLCredentials(
 	maxBearerTokenBytes int,
 ) (*frontendCredentials, error) {
 	switch mechanism.Normalized() {
-	case saslcred.MechanismXOAUTH2, saslcred.MechanismOAuthBearer:
+	case saslcred.MechanismXOAUTH2, saslcred.MechanismOAuthBearer, saslcred.MechanismExternal:
 	default:
 		return nil, fmt.Errorf("%w: %s", saslcred.ErrUnsupportedMechanism, mechanism.Normalized())
 	}

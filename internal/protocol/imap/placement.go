@@ -29,6 +29,8 @@ import (
 	"github.com/croessner/nauthilus-director/internal/observability"
 	"github.com/croessner/nauthilus-director/internal/placement"
 	"github.com/croessner/nauthilus-director/internal/protocol/authbinding"
+	"github.com/croessner/nauthilus-director/internal/protocol/certauth"
+	"github.com/croessner/nauthilus-director/internal/protocol/tlscontext"
 	"github.com/croessner/nauthilus-director/internal/proxy"
 	"github.com/croessner/nauthilus-director/internal/routing"
 	runtimectl "github.com/croessner/nauthilus-director/internal/runtime"
@@ -73,6 +75,10 @@ func (s *Session) authenticateWithAuthority(
 	defer cancel()
 
 	method := credentials.Mechanism().Normalized()
+	if credentials.Kind() == credentialKindExternal {
+		return s.authenticateExternal(authCtx, credentials)
+	}
+
 	if credentials.Kind() == credentialKindBearer {
 		if s.bearerIntrospector == nil {
 			return nauthilus.AuthResult{Decision: nauthilus.DecisionTemporaryFailure}, errors.New("imap: bearer introspector unavailable")
@@ -95,6 +101,32 @@ func (s *Session) authenticateWithAuthority(
 	request := credentials.NauthilusAuthRequest(s.NauthilusRequestContext(method))
 
 	return s.authenticator.Authenticate(authCtx, request)
+}
+
+// authenticateExternal binds the verified client certificate to one canonical Nauthilus account.
+func (s *Session) authenticateExternal(
+	ctx context.Context,
+	credentials *frontendCredentials,
+) (nauthilus.AuthResult, error) {
+	if s.certificateAuthenticator == nil {
+		return nauthilus.AuthResult{Decision: nauthilus.DecisionTemporaryFailure}, errors.New("imap: certificate authenticator unavailable")
+	}
+
+	state, stateAvailable := tlscontext.ConnectionState(s.conn)
+
+	result, err := s.certificateAuthenticator.Authenticate(ctx, certauth.Request{
+		Context:              s.NauthilusRequestContext(mechanismExternal),
+		State:                state,
+		AuthorizationID:      credentials.AuthorizationID(),
+		TLSActive:            s.tlsActive,
+		StateAvailable:       stateAvailable,
+		AllowAuthorizationID: s.allowExternalAuthorizationID,
+	})
+	if certauth.Rejected(err) {
+		return nauthilus.AuthResult{Decision: nauthilus.DecisionRejected}, nil
+	}
+
+	return result, err
 }
 
 // authContext derives the bounded authority call context for one authentication attempt.

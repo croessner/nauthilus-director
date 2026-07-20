@@ -21,12 +21,14 @@ import (
 	"bufio"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
 	"net"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -34,7 +36,28 @@ import (
 
 	"github.com/croessner/nauthilus-director/internal/nauthilus"
 	"github.com/croessner/nauthilus-director/internal/protocol/greeting"
+	"github.com/croessner/nauthilus-director/internal/protocol/saslcred"
 )
+
+// TestExternalCapabilityRequiresVerifiedClientCertificate proves POP3 advertises EXTERNAL truthfully.
+func TestExternalCapabilityRequiresVerifiedClientCertificate(t *testing.T) {
+	config := testPOP3Config(TLSModeImplicit, nil)
+	config.AuthMechanisms = append(config.AuthMechanisms, saslcred.MechanismExternal)
+	leaf := &x509.Certificate{EmailAddresses: []string{"cert@example.test"}}
+	session := newTestSession(t, config, stateConn{Conn: nopConn{}, state: tls.ConnectionState{
+		PeerCertificates: []*x509.Certificate{leaf},
+		VerifiedChains:   [][]*x509.Certificate{{leaf}},
+	}})
+
+	if !slices.Contains(session.effectiveSASLMechanisms(), "EXTERNAL") {
+		t.Fatalf("SASL mechanisms = %v, want EXTERNAL", session.effectiveSASLMechanisms())
+	}
+
+	session.conn = stateConn{Conn: nopConn{}, state: tls.ConnectionState{PeerCertificates: []*x509.Certificate{leaf}}}
+	if slices.Contains(session.effectiveSASLMechanisms(), "EXTERNAL") {
+		t.Fatalf("SASL mechanisms = %v, EXTERNAL must require verification", session.effectiveSASLMechanisms())
+	}
+}
 
 // TestGreetingRendersSafeOK verifies the POP3 greeting has no deployment-specific secret material.
 func TestGreetingRendersSafeOK(t *testing.T) {
@@ -539,6 +562,23 @@ func startPOP3Harness(t *testing.T, config SessionConfig) *pop3Harness {
 	t.Helper()
 
 	client, server := net.Pipe()
+
+	return startPOP3HarnessOnConn(t, config, client, server)
+}
+
+// startPOP3HarnessWithState starts one POP3 session with synthetic TLS state.
+func startPOP3HarnessWithState(t *testing.T, config SessionConfig, state tls.ConnectionState) *pop3Harness {
+	t.Helper()
+
+	client, server := net.Pipe()
+
+	return startPOP3HarnessOnConn(t, config, client, stateConn{Conn: server, state: state})
+}
+
+// startPOP3HarnessOnConn starts one POP3 session over the provided connection pair.
+func startPOP3HarnessOnConn(t *testing.T, config SessionConfig, client net.Conn, server net.Conn) *pop3Harness {
+	t.Helper()
+
 	session := newTestSession(t, config, server)
 	harness := &pop3Harness{
 		client:  client,

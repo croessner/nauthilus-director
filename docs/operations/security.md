@@ -224,6 +224,32 @@ tokens, token hashes, account keys, configured claim values and raw
 introspection errors must not appear in logs, traces, metrics, CLI output or
 test failure output.
 
+## Mail SASL EXTERNAL
+
+`EXTERNAL` authenticates IMAP, POP3 or ManageSieve clients from a verified TLS
+client certificate. Enable `auth.authorities.<name>.mechanisms.external` and add
+`external` to the listener's authentication mechanisms. The listener must use
+STARTTLS or implicit TLS and configure `tls.client_ca`; the Director advertises
+the mechanism only after the live TLS session contains a verified client
+certificate.
+
+An S/MIME certificate can be reused only if its profile is valid for TLS
+`clientAuth`. A certificate restricted to `emailProtection` is not accepted as
+a TLS client certificate and must not be made usable through a verification
+bypass.
+
+The certificate leaf must contain exactly one distinct `rfc822Name` email SAN.
+The Director does not fall back to the subject common name. It resolves that
+identity through Nauthilus and uses only the returned canonical account for
+routing and backend login. Distinct SASL authorization identities are denied by
+default. When `allow_authorization_id` is enabled, a second Nauthilus lookup
+must resolve the requested identity to the same canonical account.
+
+Because EXTERNAL supplies no reusable password or token, every backend in the
+listener pool must use `auth.mode: master_user`. Credential replay is rejected.
+Client private keys and CA material must remain mounted secrets and must not be
+placed in YAML, logs, traces or support transcripts.
+
 ## Protected Config
 
 Redaction is the default for local and remote config output:

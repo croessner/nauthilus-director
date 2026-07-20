@@ -28,6 +28,7 @@ import (
 	"github.com/croessner/nauthilus-director/internal/nauthilus"
 	"github.com/croessner/nauthilus-director/internal/observability"
 	"github.com/croessner/nauthilus-director/internal/protocol/authbinding"
+	"github.com/croessner/nauthilus-director/internal/protocol/certauth"
 	"github.com/croessner/nauthilus-director/internal/protocol/saslcred"
 	"github.com/croessner/nauthilus-director/internal/protocol/tlscontext"
 )
@@ -111,6 +112,9 @@ func (s *Session) authenticateThroughNauthilus(ctx context.Context, credentials 
 	if credentials.Kind() == saslcred.KindBearer {
 		return s.authenticateThroughBearerIntrospection(ctx, credentials)
 	}
+	if credentials.Kind() == saslcred.KindExternal {
+		return s.authenticateThroughExternal(ctx, credentials)
+	}
 
 	if s.authenticator == nil {
 		s.recordNauthilusAuth(ctx, sieveObservationResultFailure, sieveReasonTemporaryFailure, credentials.Mechanism().Normalized(), 0)
@@ -155,6 +159,45 @@ func (s *Session) authenticateThroughNauthilus(ctx context.Context, credentials 
 
 	s.recordNauthilusAuth(authCtx, sieveObservationResultOK, sieveReasonOK, credentials.Mechanism().Normalized(), authDuration)
 	authSpan.End(sieveObservationResultOK, sieveReasonOK)
+
+	if err := s.placeAuthenticatedSession(ctx, credentials, result); err != nil {
+		return commandOutcome{}, s.writeNo(codeTryLater, "Authentication service temporarily unavailable")
+	}
+
+	return s.transitionAuthenticatedSession(ctx, credentials)
+}
+
+// authenticateThroughExternal binds a verified client certificate to the canonical account.
+func (s *Session) authenticateThroughExternal(ctx context.Context, credentials *frontendCredentials) (commandOutcome, error) {
+	if s.certificateAuthenticator == nil {
+		s.recordNauthilusAuth(ctx, sieveObservationResultFailure, sieveReasonTemporaryFailure, credentials.Mechanism().Normalized(), 0)
+
+		return commandOutcome{}, s.writeNo(codeTryLater, "Authentication service temporarily unavailable")
+	}
+
+	authCtx, cancel := context.WithTimeout(ctx, s.authTimeout)
+	defer cancel()
+
+	state, stateAvailable := tlscontext.ConnectionState(s.conn)
+	result, err := s.certificateAuthenticator.Authenticate(authCtx, certauth.Request{
+		Context:              s.NauthilusRequestContext(credentials.Mechanism().Normalized()),
+		State:                state,
+		AuthorizationID:      credentials.AuthorizationID(),
+		TLSActive:            s.tlsActive,
+		StateAvailable:       stateAvailable,
+		AllowAuthorizationID: s.allowExternalAuthorizationID,
+	})
+	if err != nil {
+		if certauth.Rejected(err) {
+			s.recordNauthilusAuth(ctx, sieveObservationResultRejected, sieveReasonAuth, credentials.Mechanism().Normalized(), 0)
+
+			return commandOutcome{}, s.writeNo(codeAuthFailed, genericAuthFailedText)
+		}
+
+		s.recordNauthilusAuth(ctx, sieveObservationResultFailure, sieveReasonTemporaryFailure, credentials.Mechanism().Normalized(), 0)
+
+		return commandOutcome{}, s.writeNo(codeTryLater, "Authentication service temporarily unavailable")
+	}
 
 	if err := s.placeAuthenticatedSession(ctx, credentials, result); err != nil {
 		return commandOutcome{}, s.writeNo(codeTryLater, "Authentication service temporarily unavailable")
