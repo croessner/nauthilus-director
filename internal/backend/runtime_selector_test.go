@@ -20,6 +20,7 @@ package backend
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -949,6 +950,39 @@ func TestHealthRunnerSupportsStatefulProtocolHealth(t *testing.T) {
 	}
 }
 
+// TestHealthRunnerChecksBackendsConcurrently verifies one slow backend cannot age out peers.
+func TestHealthRunnerChecksBackendsConcurrently(t *testing.T) {
+	cfg := lightHealthBackendConfig(testBackendID, testPoolIMAP)
+	secondBackend := cfg.Director.Backends[testBackendID]
+	secondBackend.Address = "127.0.0.1:1994"
+	secondBackend.BackendNode = "mailstore-b"
+	cfg.Director.Backends[testBackendIDB] = secondBackend
+	pool := cfg.Director.BackendPools[testPoolIMAP]
+	pool.Backends = append(pool.Backends, testBackendIDB)
+	cfg.Director.BackendPools[testPoolIMAP] = pool
+
+	checker := &concurrentHealthChecker{delay: 50 * time.Millisecond}
+	coordinator := &fakeHealthCoordinator{owned: true}
+
+	runner, err := NewHealthRunner(mustStaticRegistry(t, cfg), coordinator, checker, HealthRunnerConfig{
+		InstanceID: "director-a",
+		Interval:   time.Second,
+		Timeout:    time.Second,
+		StateTTL:   time.Second,
+	})
+	if err != nil {
+		t.Fatalf("NewHealthRunner returned error: %v", err)
+	}
+
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce returned error: %v", err)
+	}
+
+	if checker.MaximumActive() != 2 {
+		t.Fatalf("maximum concurrent checks = %d, want 2", checker.MaximumActive())
+	}
+}
+
 // TestHealthRunnerPublishesHealthyLightCheck verifies light checks become shared health state.
 func TestHealthRunnerPublishesHealthyLightCheck(t *testing.T) {
 	cfg := lightHealthBackendConfig(testBackendID, testPoolIMAP)
@@ -1271,12 +1305,16 @@ func (r *recordingObservability) Has(name string) bool {
 }
 
 type recordingHealthChecker struct {
+	mu         sync.Mutex
 	deepChecks int
 	result     *HealthCheckResult
 }
 
 // CheckBackend records deep-check attempts without touching credentials.
 func (c *recordingHealthChecker) CheckBackend(_ context.Context, _ Backend, request HealthCheckRequest) HealthCheckResult {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	if request.Deep {
 		c.deepChecks++
 	}
@@ -1288,7 +1326,42 @@ func (c *recordingHealthChecker) CheckBackend(_ context.Context, _ Backend, requ
 	return HealthCheckResult{Healthy: true}
 }
 
+type concurrentHealthChecker struct {
+	mu        sync.Mutex
+	active    int
+	maxActive int
+	delay     time.Duration
+}
+
+// CheckBackend records concurrent health-check execution.
+func (c *concurrentHealthChecker) CheckBackend(context.Context, Backend, HealthCheckRequest) HealthCheckResult {
+	c.mu.Lock()
+
+	c.active++
+	if c.active > c.maxActive {
+		c.maxActive = c.active
+	}
+	c.mu.Unlock()
+
+	time.Sleep(c.delay)
+
+	c.mu.Lock()
+	c.active--
+	c.mu.Unlock()
+
+	return HealthCheckResult{Healthy: true}
+}
+
+// MaximumActive returns the highest observed concurrent check count.
+func (c *concurrentHealthChecker) MaximumActive() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return c.maxActive
+}
+
 type fakeHealthCoordinator struct {
+	mu           sync.Mutex
 	owned        bool
 	acquisitions int
 	published    int
@@ -1302,6 +1375,9 @@ func (c *fakeHealthCoordinator) PublishInstanceHeartbeat(context.Context, string
 
 // AcquireHealthOwner returns the configured owner state for the fake coordinator.
 func (c *fakeHealthCoordinator) AcquireHealthOwner(_ context.Context, request HealthOwnershipRequest) (HealthOwnershipRecord, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	c.acquisitions++
 
 	return HealthOwnershipRecord{
@@ -1320,6 +1396,9 @@ func (c *fakeHealthCoordinator) RenewHealthOwner(context.Context, HealthOwnershi
 
 // PublishHealthState records that a fenced state publication was attempted.
 func (c *fakeHealthCoordinator) PublishHealthState(_ context.Context, request HealthPublishRequest) (HealthState, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	c.published++
 	c.lastState = request.State
 

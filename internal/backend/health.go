@@ -18,6 +18,7 @@ package backend
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"time"
@@ -425,13 +426,22 @@ func (r *HealthRunner) RunOnce(ctx context.Context) error {
 		return err
 	}
 
-	for _, candidate := range backends {
-		if err := r.checkBackend(ctx, candidate); err != nil {
-			return err
-		}
+	errs := make([]error, len(backends))
+
+	var checks sync.WaitGroup
+	checks.Add(len(backends))
+
+	for index, candidate := range backends {
+		go func() {
+			defer checks.Done()
+
+			errs[index] = r.checkBackend(ctx, candidate)
+		}()
 	}
 
-	return nil
+	checks.Wait()
+
+	return errors.Join(errs...)
 }
 
 // LocalState returns the latest local light or owned deep health observation.
