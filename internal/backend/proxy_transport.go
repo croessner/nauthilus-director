@@ -95,6 +95,28 @@ type TransportError struct {
 	cause   error
 }
 
+// SetHealthCheckDeadline bounds all protocol I/O for health-only connections.
+func SetHealthCheckDeadline(ctx context.Context, conn net.Conn, request ConnectRequest) error {
+	if conn == nil || request.Purpose != ConnectPurposeHealth {
+		return nil
+	}
+
+	var deadline time.Time
+	if ctx != nil {
+		deadline, _ = ctx.Deadline()
+	}
+
+	if deadline.IsZero() && request.Timeout > 0 {
+		deadline = time.Now().Add(request.Timeout)
+	}
+
+	if deadline.IsZero() {
+		return nil
+	}
+
+	return conn.SetDeadline(deadline)
+}
+
 // Error returns only bounded transport facts and never raw socket addresses.
 func (e *TransportError) Error() string {
 	if e == nil {

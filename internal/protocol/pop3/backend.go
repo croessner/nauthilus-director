@@ -164,6 +164,12 @@ func (c *TCPBackendConnector) Connect(ctx context.Context, request backend.Conne
 		return nil, fmt.Errorf("%w: tcp dial", ErrBackendConnect)
 	}
 
+	if err := backend.SetHealthCheckDeadline(dialCtx, raw, request); err != nil {
+		_ = raw.Close()
+
+		return nil, fmt.Errorf("%w: health deadline", ErrBackendConnect)
+	}
+
 	if _, err := backend.NewTransport().WriteProxyProtocolPreface(ctx, raw, request); err != nil {
 		_ = raw.Close()
 

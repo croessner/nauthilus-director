@@ -69,6 +69,38 @@ func TestBackendTransportDisabledWritesNoBytes(t *testing.T) {
 	}
 }
 
+// TestSetHealthCheckDeadlinePreservesSessionStreamsAndBoundsHealthIO verifies purpose scoping.
+func TestSetHealthCheckDeadlinePreservesSessionStreamsAndBoundsHealthIO(t *testing.T) {
+	deadline := time.Now().Add(time.Minute).Round(time.Millisecond)
+
+	ctx, cancel := context.WithDeadline(context.Background(), deadline)
+	defer cancel()
+
+	sessionConn := newRecordingTransportConn(nil, nil)
+	if err := SetHealthCheckDeadline(ctx, sessionConn, ConnectRequest{
+		Purpose: ConnectPurposeSession,
+		Timeout: time.Second,
+	}); err != nil {
+		t.Fatalf("SetHealthCheckDeadline session returned error: %v", err)
+	}
+
+	if !sessionConn.deadline.IsZero() {
+		t.Fatalf("session deadline = %s, want unchanged", sessionConn.deadline)
+	}
+
+	healthConn := newRecordingTransportConn(nil, nil)
+	if err := SetHealthCheckDeadline(ctx, healthConn, ConnectRequest{
+		Purpose: ConnectPurposeHealth,
+		Timeout: time.Second,
+	}); err != nil {
+		t.Fatalf("SetHealthCheckDeadline health returned error: %v", err)
+	}
+
+	if !healthConn.deadline.Equal(deadline) {
+		t.Fatalf("health deadline = %s, want %s", healthConn.deadline, deadline)
+	}
+}
+
 // TestBackendTransportSessionWritesProxyHeaderBeforeBackendBytes verifies first-byte ordering.
 func TestBackendTransportSessionWritesProxyHeaderBeforeBackendBytes(t *testing.T) {
 	conn := newProxyRecordingTransportConn()
@@ -541,6 +573,7 @@ type recordingTransportConn struct {
 	remote   net.Addr
 	writeErr error
 	flushErr error
+	deadline time.Time
 	closed   bool
 	flushed  bool
 }
@@ -581,8 +614,10 @@ func (c *recordingTransportConn) RemoteAddr() net.Addr {
 	return c.remote
 }
 
-// SetDeadline accepts deadline changes for the net.Conn contract.
-func (c *recordingTransportConn) SetDeadline(_ time.Time) error {
+// SetDeadline records deadline changes for the net.Conn contract.
+func (c *recordingTransportConn) SetDeadline(deadline time.Time) error {
+	c.deadline = deadline
+
 	return nil
 }
 
