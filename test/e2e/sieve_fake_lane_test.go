@@ -124,7 +124,7 @@ func TestServerBinaryPublicSieveProductionFlow(t *testing.T) {
 
 	exerciseSieveStartTLSAuthProxyAndRouteLookup(t, sieveAddress, controlURL, ctl, authority, fakeSieveA, process)
 	exerciseSieveImplicitBearerAuth(t, sievesAddress, authority, fakeSieveB)
-	exerciseIMAPAndLMTPAffinityInfluenceSieve(t, sieveAddress, imapAddress, lmtpAddress, controlURL, fakeIMAPA, fakeSieveA, fakeLMTPA)
+	exerciseIMAPAndLMTPAffinityInfluenceSieve(t, sieveAddress, imapAddress, lmtpAddress, controlURL, ctl, fakeIMAPA, fakeSieveA, fakeLMTPA)
 	exerciseSieveAffinityInfluencesIMAP(t, sieveAddress, imapAddress, controlURL, ctl, fakeSieveA, fakeIMAPA)
 	exerciseSieveRuntimeControls(t, sieveAddress, controlURL, ctl, fakeSieveA, fakeSieveB, process)
 
@@ -348,6 +348,7 @@ func exerciseIMAPAndLMTPAffinityInfluenceSieve(
 	imapAddress string,
 	lmtpAddress string,
 	controlURL string,
+	ctl string,
 	fakeIMAPA *fakeIMAPBackend,
 	fakeSieveA *managesievebackend.Server,
 	fakeLMTPA *lmtpbackend.Server,
@@ -358,7 +359,7 @@ func exerciseIMAPAndLMTPAffinityInfluenceSieve(
 	defer func() { _ = imapClient.Close() }()
 	expectBackendProxy(t, imapClient, imapReader, fakeIMAPA, "SIA002")
 
-	routeOutput := runDirectorctl(t, buildDirectorctl(t), controlURL,
+	routeOutput := runDirectorctl(t, ctl, controlURL,
 		"route", "lookup",
 		"--protocol", e2eSieveProtocol,
 		"--user", e2eSieveCrossAccount,
