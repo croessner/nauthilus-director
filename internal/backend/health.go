@@ -398,7 +398,13 @@ func (r *HealthRunner) Run(ctx context.Context) error {
 
 	for {
 		if err := r.RunOnce(ctx); err != nil {
-			return err
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+
+			// A transient coordinator, Redis or backend error must not stop the
+			// freshness publisher. Placement remains fail-closed while health is
+			// stale, and the next bounded pass can restore service automatically.
 		}
 
 		timer := time.NewTimer(r.nextDelay())

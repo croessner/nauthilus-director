@@ -19,6 +19,7 @@ package backend
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -983,6 +984,54 @@ func TestHealthRunnerChecksBackendsConcurrently(t *testing.T) {
 	}
 }
 
+// TestHealthRunnerRecoversAfterTransientCoordinatorFailure verifies one
+// failed health pass cannot permanently stop freshness publication.
+func TestHealthRunnerRecoversAfterTransientCoordinatorFailure(t *testing.T) {
+	registry := mustStaticRegistry(t, lightHealthBackendConfig(testBackendID, testPoolIMAP))
+	coordinator := &fakeHealthCoordinator{owned: true, heartbeatFailures: 1}
+
+	runner, err := NewHealthRunner(registry, coordinator, &recordingHealthChecker{}, HealthRunnerConfig{
+		InstanceID: "director-a",
+		Interval:   time.Millisecond,
+		Timeout:    time.Millisecond,
+		StateTTL:   time.Second,
+	})
+	if err != nil {
+		t.Fatalf("NewHealthRunner returned error: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- runner.Run(ctx)
+	}()
+
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if coordinator.Published() > 0 {
+			cancel()
+
+			if runErr := <-done; !errors.Is(runErr, context.Canceled) {
+				t.Fatalf("Run returned error %v, want context cancellation", runErr)
+			}
+
+			if coordinator.HeartbeatCalls() < 2 {
+				t.Fatalf("heartbeat calls = %d, want at least 2", coordinator.HeartbeatCalls())
+			}
+
+			return
+		}
+
+		time.Sleep(time.Millisecond)
+	}
+
+	cancel()
+	<-done
+	t.Fatal("health runner did not publish after transient coordinator failure")
+}
+
 // TestHealthRunnerPublishesHealthyLightCheck verifies light checks become shared health state.
 func TestHealthRunnerPublishesHealthyLightCheck(t *testing.T) {
 	cfg := lightHealthBackendConfig(testBackendID, testPoolIMAP)
@@ -1361,16 +1410,44 @@ func (c *concurrentHealthChecker) MaximumActive() int {
 }
 
 type fakeHealthCoordinator struct {
-	mu           sync.Mutex
-	owned        bool
-	acquisitions int
-	published    int
-	lastState    HealthState
+	mu                sync.Mutex
+	owned             bool
+	heartbeatFailures int
+	heartbeatCalls    int
+	acquisitions      int
+	published         int
+	lastState         HealthState
 }
 
 // PublishInstanceHeartbeat records instance liveness for the fake coordinator.
 func (c *fakeHealthCoordinator) PublishInstanceHeartbeat(context.Context, string, time.Duration) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.heartbeatCalls++
+	if c.heartbeatFailures > 0 {
+		c.heartbeatFailures--
+
+		return errors.New("transient coordinator failure")
+	}
+
 	return nil
+}
+
+// Published returns the number of fenced health publications.
+func (c *fakeHealthCoordinator) Published() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return c.published
+}
+
+// HeartbeatCalls returns the number of attempted instance heartbeats.
+func (c *fakeHealthCoordinator) HeartbeatCalls() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return c.heartbeatCalls
 }
 
 // AcquireHealthOwner returns the configured owner state for the fake coordinator.
