@@ -45,7 +45,7 @@ These rules are mandatory for coding changes in this repository.
   model.
 - MUST: Keep OpenAPI-generated artifacts reproducible by documenting the
   generator, pinning `github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen`
-  to `v2.7.0`, providing a Makefile target, and checking for stale generated
+  to `v2.7.1`, providing a Makefile target, and checking for stale generated
   output in local guardrails.
 - MUST: Treat this repository as the production implementation, not as a new
   POC. `poc/` is an archived proof-of-concept only. Production code must not

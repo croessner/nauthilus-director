@@ -183,7 +183,7 @@ later implementation slices use.
   - `github.com/json-iterator/go` only where intentionally chosen over
     `encoding/json`
   - `github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen` pinned to
-    `v2.7.0` as a tool
+    `v2.7.1` as a tool
 - Pin OpenAPI generation to schema version `openapi: 3.0.3` unless a later
   explicit architecture decision changes it.
 - Add the minimal server and CLI command roots with `--version` support.
@@ -714,7 +714,7 @@ boundaries and CLI client transport rules before REST implementation expands.
   group set listed below.
 - OpenAPI schema version pinned to `3.0.3`.
 - Generator pinned to
-  `github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@v2.7.0`.
+  `github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@v2.7.1`.
 - Generated REST server boundary, DTOs and generated client-with-responses SDK.
 - `internal/rest` adapters from generated DTOs into explicit domain objects.
 - `internal/client/generated` OpenAPI client SDK for `nauthilus-directorctl`.

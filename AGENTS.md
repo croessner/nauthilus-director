@@ -46,7 +46,7 @@ POC package structure as a compatibility constraint.
   server boundary, REST DTOs, and generated clients should originate from the
   OpenAPI spec instead of being retrofitted later. Keep generated artifacts
   reproducible: use
-  `github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@v2.7.0`, pin the
+  `github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@v2.7.1`, pin the
   generator and schema version, provide a Makefile target, and add a
   stale-output check before relying on generated code.
 - `nauthilus-directorctl` must use the generated OpenAPI REST client SDK for

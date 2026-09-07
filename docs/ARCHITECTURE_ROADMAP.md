@@ -975,7 +975,7 @@ CLI mutating commands must state whether they change runtime state or request a 
 
 The REST API and `nauthilus-directorctl` should use an OpenAPI-first workflow from hour zero.
 
-Generator decision: use `oapi-codegen` `v2.7.0` from `github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen`. The initial generated surface should use Go's standard `net/http` server style, strict server interfaces, generated models and a generated client-with-responses SDK for `nauthilus-directorctl`.
+Generator decision: use `oapi-codegen` `v2.7.1` from `github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen`. The initial generated surface should use Go's standard `net/http` server style, strict server interfaces, generated models and a generated client-with-responses SDK for `nauthilus-directorctl`.
 
 Repository layout:
 

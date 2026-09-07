@@ -14,7 +14,7 @@ repo_root="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 cd "$repo_root"
 
 generator="github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen"
-generator_version="v2.7.0"
+generator_version="v2.7.1"
 spec="docs/specs/openapi/nauthilus-director.yaml"
 server_config="docs/specs/openapi/oapi-codegen.server.yml"
 client_config="docs/specs/openapi/oapi-codegen.client.yml"

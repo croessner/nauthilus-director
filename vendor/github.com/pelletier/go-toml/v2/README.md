@@ -105,7 +105,7 @@ type MyConfig struct {
 ### Unmarshaling
 
 [`Unmarshal`][unmarshal] reads a TOML document and fills a Go structure with its
-content.
+content. 
 
 Note that the struct variable names are _capitalized_, while the variables in the toml document are _lowercase_.
 

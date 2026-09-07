@@ -2,6 +2,16 @@
 
 This stack is a runnable integration playground for the production Director path. The Director image is built from this repository; every other image is pinned through `.env.example`.
 
+The `stalwart-configure` image runs as UID/GID `10001:10001`. Its CLI is installed
+under `/usr/local/bin`; only `/run/stalwart-bootstrap` needs persistent write
+access. Fresh named volumes inherit the image directory ownership. Before
+reusing a partially initialized older volume, ensure this directory is writable
+by `10001:10001` while preserving existing markers. Do not reset the volume to
+work around permissions. A completed bootstrap remains readable and is skipped.
+Run `make demo-cli-smoke` from the repository root to build the image and verify
+the real CLI and marker writes without network access in a temporary container.
+This check uses an anonymous volume and does not touch the demo stack's state.
+
 ## Topology
 
 - HAProxy publishes SMTP, IMAP, IMAPS, LMTPS, POP3, POP3S, Sieve and Sieve-over-TLS on host ports.

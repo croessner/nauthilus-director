@@ -41,12 +41,12 @@ Usage: $0 [OPTIONS] [GO_VERSIONS...]
 
 Test go-toml across multiple Go versions using Docker containers.
 
-The script reports the lowest continuous supported Go version (where all subsequent
-versions pass) and only exits with non-zero status if either of the two most recent
+The script reports the lowest continuous supported Go version (where all subsequent 
+versions pass) and only exits with non-zero status if either of the two most recent 
 Go versions fail, indicating immediate attention is needed.
 
-Note: For Go versions < 1.21, the script automatically updates go.mod to match the
-target version, but older versions may still fail due to missing standard library
+Note: For Go versions < 1.21, the script automatically updates go.mod to match the 
+target version, but older versions may still fail due to missing standard library 
 features (e.g., the 'slices' package introduced in Go 1.21).
 
 OPTIONS:
@@ -173,7 +173,7 @@ test_go_version() {
     if [[ $(echo "$go_version 1.21" | tr ' ' '\n' | sort -V | head -n1) == "$go_version" && "$go_version" != "1.21" ]]; then
         needs_go_mod_update=true
     fi
-
+    
     dockerfile_content="FROM golang:${go_version}-alpine
 
 # Install git (required for go mod)
@@ -195,7 +195,7 @@ RUN if [ -f go.mod ]; then sed -i 's/^go [0-9]\\+\\.[0-9]\\+\\(\\.[0-9]\\+\\)\\?
 # Note: Go versions < 1.21 may fail due to missing standard library packages (e.g., slices)
 # This is expected for projects that use Go 1.21+ features"
     fi
-
+    
     dockerfile_content="$dockerfile_content
 
 # Run tests
@@ -378,7 +378,7 @@ main() {
         # Find lowest continuous supported version and check recent versions
     local lowest_continuous_version=""
     local recent_versions_failed=false
-
+    
     # Sort versions to ensure proper order
     local sorted_versions=()
     for version in "${GO_VERSIONS[@]}"; do
@@ -386,19 +386,19 @@ main() {
     done
     # Sort versions numerically (1.11, 1.12, ..., 1.25)
     IFS=$'\n' sorted_versions=($(sort -V <<< "${sorted_versions[*]}"))
-
+    
     # Find lowest continuous supported version (all versions from this point onwards pass)
     for version in "${sorted_versions[@]}"; do
         local status_file="${OUTPUT_DIR}/go-${version}.txt.status"
         local all_subsequent_pass=true
-
+        
         # Check if this version and all subsequent versions pass
         local found_current=false
         for check_version in "${sorted_versions[@]}"; do
             if [[ "$check_version" == "$version" ]]; then
                 found_current=true
             fi
-
+            
             if [[ "$found_current" == true ]]; then
                 local check_status_file="${OUTPUT_DIR}/go-${check_version}.txt.status"
                 if [[ -f "$check_status_file" ]]; then
@@ -414,25 +414,25 @@ main() {
                 fi
             fi
         done
-
+        
         if [[ "$all_subsequent_pass" == true ]]; then
             lowest_continuous_version="$version"
             break
         fi
     done
-
+    
     # Check if the two most recent versions failed
     local num_versions=${#sorted_versions[@]}
     if [[ $num_versions -ge 2 ]]; then
         local second_recent="${sorted_versions[$((num_versions-2))]}"
         local most_recent="${sorted_versions[$((num_versions-1))]}"
-
+        
         local second_recent_status_file="${OUTPUT_DIR}/go-${second_recent}.txt.status"
         local most_recent_status_file="${OUTPUT_DIR}/go-${most_recent}.txt.status"
-
+        
         local second_recent_failed=false
         local most_recent_failed=false
-
+        
         if [[ -f "$second_recent_status_file" ]]; then
             local status
             status=$(cat "$second_recent_status_file")
@@ -442,7 +442,7 @@ main() {
         else
             second_recent_failed=true
         fi
-
+        
         if [[ -f "$most_recent_status_file" ]]; then
             local status
             status=$(cat "$most_recent_status_file")
@@ -452,7 +452,7 @@ main() {
         else
             most_recent_failed=true
         fi
-
+        
         if [[ "$second_recent_failed" == true || "$most_recent_failed" == true ]]; then
             recent_versions_failed=true
         fi
@@ -460,7 +460,7 @@ main() {
         # Only one version tested, check if it's the most recent and failed
         local only_version="${sorted_versions[0]}"
         local only_status_file="${OUTPUT_DIR}/go-${only_version}.txt.status"
-
+        
         if [[ -f "$only_status_file" ]]; then
             local status
             status=$(cat "$only_status_file")
@@ -471,18 +471,18 @@ main() {
             recent_versions_failed=true
         fi
     fi
-
+    
     # Display summary
     echo ""
     log "Test completed in ${duration}s"
     log "Summary report: $summary_file"
-
+    
     echo ""
     echo "========================================"
     echo "           FINAL RESULTS"
     echo "========================================"
     echo ""
-
+    
     # Display passed versions
     if [[ ${#passed_versions[@]} -gt 0 ]]; then
         log_success "PASSED (${#passed_versions[@]}/${#GO_VERSIONS[@]}):"
@@ -501,7 +501,7 @@ main() {
         done
         echo ""
     fi
-
+    
     # Display failed versions
     if [[ ${#failed_versions[@]} -gt 0 ]]; then
         log_error "FAILED (${#failed_versions[@]}/${#GO_VERSIONS[@]}):"
@@ -519,13 +519,13 @@ main() {
             echo -e "  ${RED}✗${NC} Go $version"
         done
         echo ""
-
+        
         # Show failure details
         echo "========================================"
         echo "         FAILURE DETAILS"
         echo "========================================"
         echo ""
-
+        
         for version in "${sorted_failed[@]}"; do
             echo -e "${RED}--- Go $version FAILURE LOGS (last 30 lines) ---${NC}"
             local result_file="${OUTPUT_DIR}/go-${version}.txt"
@@ -537,7 +537,7 @@ main() {
             echo ""
         done
     fi
-
+    
     # Display unknown versions
     if [[ ${#unknown_versions[@]} -gt 0 ]]; then
         log_warning "UNKNOWN (${#unknown_versions[@]}/${#GO_VERSIONS[@]}):"
@@ -546,12 +546,12 @@ main() {
         done
         echo ""
     fi
-
+    
     echo "========================================"
     echo "         COMPATIBILITY SUMMARY"
     echo "========================================"
     echo ""
-
+    
     if [[ -n "$lowest_continuous_version" ]]; then
         log_success "Lowest continuous supported version: Go $lowest_continuous_version"
         echo "  (All versions from Go $lowest_continuous_version onwards pass)"
@@ -559,12 +559,12 @@ main() {
         log_error "No continuous version support found"
         echo "  (No version has all subsequent versions passing)"
     fi
-
+    
     echo ""
     echo "========================================"
     echo "Full detailed logs available in: $OUTPUT_DIR"
     echo "========================================"
-
+    
     # Determine exit code based on recent versions
     if [[ "$recent_versions_failed" == true ]]; then
         log_error "OVERALL RESULT: Recent Go versions failed - this needs attention!"

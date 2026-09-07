@@ -9,6 +9,7 @@ Start here:
 | --- | --- |
 | Production artifacts, Docker and systemd | [`production-deployment.md`](production-deployment.md) |
 | Control-plane authentication, authorization and diagnostics | [`security.md`](security.md) |
+| September 2026 dependency and container security review | [`security-maintenance-2026-09-07.md`](security-maintenance-2026-09-07.md) |
 | Nauthilus OIDC caller auth and control OIDC | [`oidc-nauthilus.md`](oidc-nauthilus.md) |
 | Reload, shutdown and upgrade flow | [`reload-upgrade.md`](reload-upgrade.md) |
 | Failure-mode diagnosis | [`failure-modes.md`](failure-modes.md) |
