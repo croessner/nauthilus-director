@@ -79,6 +79,10 @@ func NewKeyBuilder(options KeyBuilderOptions) (KeyBuilder, error) {
 		return KeyBuilder{}, newStateError(RedisErrorKindConfig, "keys", "prefix required", nil)
 	}
 
+	if strings.ContainsAny(prefix, "{}") {
+		return KeyBuilder{}, newStateError(RedisErrorKindConfig, "keys", "namespace prefix must not contain hash-tag braces", nil)
+	}
+
 	if options.SchemaVersion <= 0 {
 		return KeyBuilder{}, newStateError(RedisErrorKindConfig, "keys", "schema version required", nil)
 	}
@@ -152,7 +156,7 @@ func (b KeyBuilder) BackendRuntimeKey(backendID string) (string, error) {
 		return "", newStateError(RedisErrorKindAmbiguousState, "keys", "backend id required", nil)
 	}
 
-	return b.namespaceBase() + ":runtime:backend:" + backendID, nil
+	return b.namespaceBase() + ":{backend-control}:runtime:backend:" + backendID, nil
 }
 
 // BackendHash returns the stable backend hash used inside Redis Cluster hash tags.
@@ -189,24 +193,24 @@ func (b KeyBuilder) BackendReservationKeys(backendID string) (BackendReservation
 	}, nil
 }
 
-// InstanceKey returns the Redis key for one director instance heartbeat.
+// InstanceKey co-locates instance heartbeats with fenced health ownership.
 func (b KeyBuilder) InstanceKey(instanceID string) (string, error) {
 	instanceID = strings.TrimSpace(instanceID)
 	if instanceID == "" {
 		return "", newStateError(RedisErrorKindAmbiguousState, "keys", "instance id required", nil)
 	}
 
-	return b.namespaceBase() + ":runtime:instance:" + instanceID, nil
+	return b.namespaceBase() + ":{health}:runtime:instance:" + instanceID, nil
 }
 
-// HealthOwnerKey returns the Redis key for one backend health ownership lease.
+// HealthOwnerKey keeps ownership leases inside the health coordination slot.
 func (b KeyBuilder) HealthOwnerKey(backendID string) (string, error) {
 	backendID = strings.TrimSpace(backendID)
 	if backendID == "" {
 		return "", newStateError(RedisErrorKindAmbiguousState, "keys", "backend id required", nil)
 	}
 
-	return b.namespaceBase() + ":health:backend:" + backendID + ":owner", nil
+	return b.namespaceBase() + ":{health}:health:backend:" + backendID + ":owner", nil
 }
 
 // HealthStateKey returns the Redis key for one backend published health result.
@@ -216,7 +220,7 @@ func (b KeyBuilder) HealthStateKey(backendID string) (string, error) {
 		return "", newStateError(RedisErrorKindAmbiguousState, "keys", "backend id required", nil)
 	}
 
-	return b.namespaceBase() + ":health:backend:" + backendID + ":state", nil
+	return b.namespaceBase() + ":{health}:health:backend:" + backendID + ":state", nil
 }
 
 // BackendSessionIndexKey returns the repairable backend-to-session index key.
@@ -284,14 +288,14 @@ func (b KeyBuilder) SessionIndexShardKeyByNumber(shard int) (string, error) {
 		return "", err
 	}
 
-	return fmt.Sprintf("%s:idx:sessions:%02d", b.namespaceBase(), shard), nil
+	return b.sessionIndexKey(shard, false), nil
 }
 
 // SessionIndexShardKeys returns every repairable session locator shard key.
 func (b KeyBuilder) SessionIndexShardKeys() []string {
 	keys := make([]string, 0, b.sessionIndexShards)
 	for shard := range b.sessionIndexShards {
-		keys = append(keys, fmt.Sprintf("%s:idx:sessions:%02d", b.namespaceBase(), shard))
+		keys = append(keys, b.sessionIndexKey(shard, false))
 	}
 
 	return keys
@@ -313,22 +317,22 @@ func (b KeyBuilder) SessionDueIndexShardKeyByNumber(shard int) (string, error) {
 		return "", err
 	}
 
-	return fmt.Sprintf("%s:idx:sessions_due:%02d", b.namespaceBase(), shard), nil
+	return b.sessionIndexKey(shard, true), nil
 }
 
 // SessionDueIndexShardKeys returns every due-time repair shard key.
 func (b KeyBuilder) SessionDueIndexShardKeys() []string {
 	keys := make([]string, 0, b.sessionIndexShards)
 	for shard := range b.sessionIndexShards {
-		keys = append(keys, fmt.Sprintf("%s:idx:sessions_due:%02d", b.namespaceBase(), shard))
+		keys = append(keys, b.sessionIndexKey(shard, true))
 	}
 
 	return keys
 }
 
-// BackendIndexKey returns the repairable backend index key.
+// BackendIndexKey co-locates the backend inventory with atomic runtime overrides.
 func (b KeyBuilder) BackendIndexKey() string {
-	return b.namespaceBase() + ":idx:backends"
+	return b.namespaceBase() + ":{backend-control}:idx:backends"
 }
 
 // AggregateSessionMarkerKey returns the repairable per-session aggregate marker hash.
@@ -636,4 +640,14 @@ func normalizeIndexShardCount(value int, fallback int) int {
 	}
 
 	return value
+}
+
+// sessionIndexKey co-locates each bounded locator/due pair for compare-and-repair operations.
+func (b KeyBuilder) sessionIndexKey(shard int, due bool) string {
+	family := "sessions"
+	if due {
+		family = "sessions_due"
+	}
+
+	return fmt.Sprintf("%s:idx:%s:%02d:{session-index:%02d}", b.namespaceBase(), family, shard, shard)
 }

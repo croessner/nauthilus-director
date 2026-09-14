@@ -466,7 +466,7 @@ func (s *RedisSessionStore) validateScriptKeys(name string, keys []string) error
 // isPerAffinityScript reports whether a script must stay inside one affinity slot.
 func isPerAffinityScript(name string) bool {
 	switch name {
-	case scriptAttach, scriptOpen, scriptHeartbeat, scriptClose, scriptLookup, scriptMove, scriptKick, scriptClear,
+	case scriptAttach, scriptOpen, scriptHeartbeat, scriptClose, scriptLookup, scriptMove, scriptKick, scriptClear, scriptReap, scriptSessionKill,
 		scriptBackendPinSet, scriptBackendPinGet, scriptBackendPinClear,
 		scriptUserHoldSet, scriptUserHoldGet, scriptUserHoldClear:
 		return true

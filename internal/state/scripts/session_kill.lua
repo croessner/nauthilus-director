@@ -4,7 +4,7 @@
 --
 -- Marks one indexed session for controlled shutdown through heartbeat.
 
-local session_index_key = KEYS[1]
+local session_key = KEYS[1]
 
 local session_id = ARGV[1]
 local reason = ARGV[2]
@@ -39,20 +39,7 @@ require_value(session_id, "session_id_required")
 require_value(reason, "reason_required")
 
 local now = now_ms()
-local session_key = redis.call("HGET", session_index_key, session_id)
-if session_key == false or session_key == nil then
-	return {
-		"status", "missing",
-		"session_id", session_id,
-		"control_generation", "",
-		"control_action", "none",
-		"server_time_ms", tostring(now)
-	}
-end
-
-session_key = require_value(session_key, "session_locator_invalid")
 if redis.call("EXISTS", session_key) == 0 then
-	redis.call("HDEL", session_index_key, session_id)
 	return {
 		"status", "stale_index_repaired",
 		"session_id", session_id,

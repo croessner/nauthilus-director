@@ -437,7 +437,16 @@ func (s *RedisSessionStore) runSessionKillScript(
 	request SessionKillRequest,
 	sessionIndexKey string,
 ) (SessionKillRecord, error) {
-	value, err := s.runScript(ctx, scriptSessionKill, []string{sessionIndexKey},
+	keys, err := s.indexedSessionKeys(ctx, sessionIndexKey, strings.TrimSpace(request.SessionID))
+	if err != nil {
+		return SessionKillRecord{}, err
+	}
+
+	if len(keys) == 0 {
+		return s.missingSessionKillRecord(ctx, request.SessionID)
+	}
+
+	value, err := s.runScript(ctx, scriptSessionKill, []string{keys[2]},
 		normalizedStateValue(request.SessionID),
 		normalizedStateValue(request.Reason),
 		normalizedStateValue(request.Actor),
@@ -446,7 +455,18 @@ func (s *RedisSessionStore) runSessionKillScript(
 		return SessionKillRecord{}, err
 	}
 
-	return parseSessionKillRecord(value)
+	record, err := parseSessionKillRecord(value)
+	if err == nil && record.Status == SessionKillStatusStaleIndexRepaired {
+		dueKey, keyErr := s.keys.SessionDueIndexShardKey(request.SessionID)
+		if keyErr != nil {
+			return SessionKillRecord{}, keyErr
+		}
+
+		err = s.removeReapedIndexes(ctx, sessionIndexKey, dueKey, request.SessionID,
+			ReapRecord{ServerTime: record.ServerTime, sessionKey: keys[2]})
+	}
+
+	return record, err
 }
 
 // backendSessionEvidence ties one backend index member to its containing key.

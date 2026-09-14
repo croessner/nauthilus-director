@@ -438,7 +438,7 @@ func TestBackendAndIndexKeysFollowRuntimeShape(t *testing.T) {
 		t.Fatalf("BackendRuntimeKey returned error: %v", err)
 	}
 
-	if backendKey != "nd:v1:runtime:backend:"+testBackendIMAP {
+	if backendKey != "nd:v1:{backend-control}:runtime:backend:"+testBackendIMAP {
 		t.Fatalf("backend key = %q", backendKey)
 	}
 
@@ -446,7 +446,7 @@ func TestBackendAndIndexKeysFollowRuntimeShape(t *testing.T) {
 		t.Fatalf("session index key = %q", got)
 	}
 
-	if got := builder.BackendIndexKey(); got != "nd:v1:idx:backends" {
+	if got := builder.BackendIndexKey(); got != "nd:v1:{backend-control}:idx:backends" {
 		t.Fatalf("backend index key = %q", got)
 	}
 
@@ -455,7 +455,7 @@ func TestBackendAndIndexKeysFollowRuntimeShape(t *testing.T) {
 		t.Fatalf("InstanceKey returned error: %v", err)
 	}
 
-	if instanceKey != "nd:v1:runtime:instance:director-a" {
+	if instanceKey != "nd:v1:{health}:runtime:instance:director-a" {
 		t.Fatalf("instance key = %q", instanceKey)
 	}
 
@@ -464,7 +464,7 @@ func TestBackendAndIndexKeysFollowRuntimeShape(t *testing.T) {
 		t.Fatalf("HealthOwnerKey returned error: %v", err)
 	}
 
-	if ownerKey != "nd:v1:health:backend:"+testBackendIMAP+":owner" {
+	if ownerKey != "nd:v1:{health}:health:backend:"+testBackendIMAP+":owner" {
 		t.Fatalf("health owner key = %q", ownerKey)
 	}
 
@@ -473,7 +473,7 @@ func TestBackendAndIndexKeysFollowRuntimeShape(t *testing.T) {
 		t.Fatalf("HealthStateKey returned error: %v", err)
 	}
 
-	if healthKey != "nd:v1:health:backend:"+testBackendIMAP+":state" {
+	if healthKey != "nd:v1:{health}:health:backend:"+testBackendIMAP+":state" {
 		t.Fatalf("health state key = %q", healthKey)
 	}
 

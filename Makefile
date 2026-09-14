@@ -345,7 +345,7 @@ check-docs:
 copyright-check:
 	sh ./scripts/check-go-headers.sh
 
-guardrails: docs-check check-packaging check-release-hardening copyright-check check-openapi fix vet lint test race e2e build-check
+guardrails: test-cluster docs-check check-packaging check-release-hardening copyright-check check-openapi fix vet lint test race e2e build-check
 
 govulncheck:
 	@command -v $(GOVULNCHECK) >/dev/null 2>&1 || { echo "$(GOVULNCHECK) not found. Install it with: go install golang.org/x/vuln/cmd/govulncheck@latest"; exit 1; }
@@ -417,3 +417,9 @@ version:
 	@echo $(VERSION)
 
 .PHONY: all build install install-bin install-man uninstall uninstall-bin uninstall-man build-check clean fix vet lint-config lint test race e2e e2e-interop docs-check check-packaging check-release-hardening systemd-verify docker-build docker-client-build docker-build-all docker-smoke docker-client-smoke docker-smoke-all generate-openapi check-openapi generate-docs check-docs copyright-check guardrails govulncheck release-guardrails install-hooks scale-smoke scale-stress poc-test poc-race version
+
+# Exercise real Cluster routing in addition to standalone Redis-compatible tests.
+test-cluster:
+	./test/redis-cluster/run.sh $(GO) test -count=1 -v ./internal/state -run '^TestRedisCluster|^TestKeyBuilderRejectsNamespaceHashTags$$'
+
+.PHONY: test-cluster

@@ -409,6 +409,10 @@ type ReapRecord struct {
 	AggregateMarkersRemoved int
 	IdleAffinitiesAdded     int
 	ServerTime              time.Time
+	nextDue                 int
+	backendSessionsKey      string
+	userSessionsKey         string
+	sessionKey              string
 	aggregateRemovals       []string
 	idleAffinities          []aggregateIdleAffinity
 	releases                []BackendReservationReleaseRequest

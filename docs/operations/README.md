@@ -21,3 +21,5 @@ manage Redis-backed runtime state only; they do not rewrite YAML configuration.
 
 Documentation in this directory must use redacted examples or file-path
 references for credentials and tokens. It must not include secret values.
+
+- [Redis Cluster state ownership and migration](redis-cluster-state.md)

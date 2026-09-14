@@ -24,6 +24,7 @@ import (
 )
 
 const scriptReap = "reap"
+const statusReaped = "reaped"
 
 // ReapSessions repairs expired session leases, counts and listing indexes.
 func (s *RedisSessionStore) ReapSessions(ctx context.Context, request ReapRequest) (ReapRecord, error) {
@@ -38,48 +39,50 @@ func (s *RedisSessionStore) ReapSessions(ctx context.Context, request ReapReques
 		deadline = time.Now().Add(request.MaxPassDuration)
 	}
 
-	total := ReapRecord{Status: "reaped"}
+	now, err := s.client.Time(redisContext(ctx)).Result()
+	if err != nil {
+		return ReapRecord{}, ClassifyRedisError(scriptReap, err)
+	}
 
-	for shard := 0; shard < s.keys.sessionIndexShards && remaining > 0; shard++ {
-		if !deadline.IsZero() && !time.Now().Before(deadline) {
+	candidates, err := s.dueSessionCandidates(ctx, now, remaining)
+	if err != nil {
+		return ReapRecord{}, err
+	}
+
+	total := ReapRecord{Status: statusReaped, ServerTime: now}
+
+	for shard, candidate := range candidates {
+		if remaining <= 0 || (!deadline.IsZero() && !time.Now().Before(deadline)) {
 			break
 		}
-
 		sessionIndexKey, err := s.keys.SessionIndexShardKeyByNumber(shard)
 		if err != nil {
 			return ReapRecord{}, err
 		}
-
 		sessionDueIndexKey, err := s.keys.SessionDueIndexShardKeyByNumber(shard)
 		if err != nil {
 			return ReapRecord{}, err
 		}
 
-		value, err := s.runScript(ctx, scriptReap, []string{sessionIndexKey, sessionDueIndexKey}, remaining)
-		if err != nil {
-			return ReapRecord{}, err
+		for _, sessionID := range candidate.Val() {
+			if remaining <= 0 || (!deadline.IsZero() && !time.Now().Before(deadline)) {
+				break
+			}
+
+			record, err := s.reapIndexedSession(ctx, sessionIndexKey, sessionDueIndexKey, sessionID, now)
+			if err != nil {
+				return ReapRecord{}, err
+			}
+
+			total.ScannedSessions += record.ScannedSessions
+			total.ExpiredSessions += record.ExpiredSessions
+			total.StaleIndexEntries += record.StaleIndexEntries
+			total.AggregateMarkersRemoved += record.AggregateMarkersRemoved
+			total.IdleAffinitiesAdded += record.IdleAffinitiesAdded
+			total.RepairedBackends += record.RepairedBackends
+			total.ServerTime = record.ServerTime
+			remaining -= record.ScannedSessions
 		}
-
-		record, err := parseReapRecord(value)
-		if err != nil {
-			return ReapRecord{}, err
-		}
-
-		total.ScannedSessions += record.ScannedSessions
-		total.ExpiredSessions += record.ExpiredSessions
-		total.StaleIndexEntries += record.StaleIndexEntries
-		total.AggregateMarkersRemoved += record.AggregateMarkersRemoved
-		total.IdleAffinitiesAdded += record.IdleAffinitiesAdded
-		total.RepairedBackends += s.releaseReapedBackendReservations(ctx, record.releases)
-		s.removeReapedSessionAggregates(ctx, record.aggregateRemovals)
-		s.addReapedIdleAffinities(ctx, record.idleAffinities)
-		total.ServerTime = record.ServerTime
-
-		if total.ScannedSessions > 0 {
-			total.Status = record.Status
-		}
-
-		remaining -= record.ScannedSessions
 	}
 
 	repairedReservations, err := s.reapIndexedBackendReservations(ctx, request.Limit)
@@ -160,6 +163,13 @@ func parseReapRecord(value any) (ReapRecord, error) {
 		return ReapRecord{}, err
 	}
 
+	record.nextDue, err = parseOptionalIntField(fields, "next_due_ms")
+	if err != nil {
+		return ReapRecord{}, newStateError(RedisErrorKindAmbiguousState, "script_result", "invalid next due time", err)
+	}
+
+	record.backendSessionsKey = fields["backend_sessions_key"]
+	record.userSessionsKey = fields["user_sessions_key"]
 	record.releases, err = parseBackendReservationReleases(fields["reservation_releases"])
 	if err != nil {
 		return ReapRecord{}, err
