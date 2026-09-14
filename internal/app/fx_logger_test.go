@@ -86,20 +86,20 @@ func TestFxLoggerFiltersDebugEventsAtInfo(t *testing.T) {
 
 // TestLMTPBackendCapabilityPolicyFailsClosed verifies app wiring suppresses unsafe LMTP extensions.
 func TestLMTPBackendCapabilityPolicyFailsClosed(t *testing.T) {
-	if got := lmtpBackendCapabilities(nil, "lmtp-default", nil, "CHUNKING", "8BITMIME"); len(got) != 0 {
+	if got := lmtpBackendCapabilities(context.Background(), nil, "lmtp-default", nil, "CHUNKING", "8BITMIME"); len(got) != 0 {
 		t.Fatalf("nil capability reader allowed capabilities %v", got)
 	}
 
-	if got := lmtpBackendCapabilities(fakeBackendCapabilityReader{err: errors.New("redis unavailable")}, "lmtp-default", nil, "CHUNKING"); len(got) != 0 {
+	if got := lmtpBackendCapabilities(context.Background(), fakeBackendCapabilityReader{err: errors.New("redis unavailable")}, "lmtp-default", nil, "CHUNKING"); len(got) != 0 {
 		t.Fatalf("capability reader error allowed capabilities %v", got)
 	}
 
 	allowed := fakeBackendCapabilityReader{allowed: map[string]bool{"CHUNKING": true, "8BITMIME": true}}
-	if got := strings.Join(lmtpBackendCapabilities(allowed, "lmtp-default", nil, "CHUNKING", "8BITMIME"), ","); got != "CHUNKING,8BITMIME" {
+	if got := strings.Join(lmtpBackendCapabilities(context.Background(), allowed, "lmtp-default", nil, "CHUNKING", "8BITMIME"), ","); got != "CHUNKING,8BITMIME" {
 		t.Fatalf("fresh backend capability proof allowed %q, want CHUNKING,8BITMIME", got)
 	}
 
-	if got := strings.Join(lmtpBackendCapabilities(allowed, "lmtp-default", []string{"CHUNKING"}, "CHUNKING", "8BITMIME"), ","); got != "8BITMIME" {
+	if got := strings.Join(lmtpBackendCapabilities(context.Background(), allowed, "lmtp-default", []string{"CHUNKING"}, "CHUNKING", "8BITMIME"), ","); got != "8BITMIME" {
 		t.Fatalf("deny-filtered backend capability proof allowed %q, want 8BITMIME", got)
 	}
 }

@@ -1139,36 +1139,37 @@ func deliverLMTPMessage(t *testing.T, client *lmtpClient, recipient string, body
 }
 
 type lmtpProcessConfigOptions struct {
-	RedisAddress                string
-	AuthorityURL                string
-	AuthorityOIDC               processAuthorityOIDCOptions
-	AuthorityBearer             processAuthorityBearerOptions
-	LMTPAddress                 string
-	LMTPSAddress                string
-	IMAPAddress                 string
-	ControlAddress              string
-	IMAPGreeting                greetingPolicyFixture
-	LMTPGreeting                greetingPolicyFixture
-	LMTPSGreeting               greetingPolicyFixture
-	BackendRetentionTTL         string
-	LMTPBackends                map[string]string
-	IMAPBackends                map[string]string
-	LMTPBackendHAProxy          map[string]bool
-	LMTPBackendHealth           map[string]bool
-	LMTPBackendDeepHealth       map[string]bool
-	LMTPListenerTLSMode         string
-	LMTPExtraCapabilities       []string
-	LMTPCapabilityFilterDeny    []string
-	LMTPMaxMessageBytes         int64
-	LMTPDisableChunking         bool
-	LMTPPeerAuthMechanisms      []string
-	TLS                         lmtpPeerTLSBundle
-	DisableLMTPPeerAuth         bool
-	IMAPBackendTLSMode          string
-	IMAPBackendTLSInsecure      bool
-	IMAPBackendCredentialReplay bool
-	LMTPBackendTLSMode          string
-	LMTPBackendTLSInsecure      bool
+	PreserveBackendDeliveryReceipt bool
+	RedisAddress                   string
+	AuthorityURL                   string
+	AuthorityOIDC                  processAuthorityOIDCOptions
+	AuthorityBearer                processAuthorityBearerOptions
+	LMTPAddress                    string
+	LMTPSAddress                   string
+	IMAPAddress                    string
+	ControlAddress                 string
+	IMAPGreeting                   greetingPolicyFixture
+	LMTPGreeting                   greetingPolicyFixture
+	LMTPSGreeting                  greetingPolicyFixture
+	BackendRetentionTTL            string
+	LMTPBackends                   map[string]string
+	IMAPBackends                   map[string]string
+	LMTPBackendHAProxy             map[string]bool
+	LMTPBackendHealth              map[string]bool
+	LMTPBackendDeepHealth          map[string]bool
+	LMTPListenerTLSMode            string
+	LMTPExtraCapabilities          []string
+	LMTPCapabilityFilterDeny       []string
+	LMTPMaxMessageBytes            int64
+	LMTPDisableChunking            bool
+	LMTPPeerAuthMechanisms         []string
+	TLS                            lmtpPeerTLSBundle
+	DisableLMTPPeerAuth            bool
+	IMAPBackendTLSMode             string
+	IMAPBackendTLSInsecure         bool
+	IMAPBackendCredentialReplay    bool
+	LMTPBackendTLSMode             string
+	LMTPBackendTLSInsecure         bool
 }
 
 // writeLMTPProcessConfig writes a production-style config for real LMTP E2E.
@@ -1305,6 +1306,7 @@ director:
         require_client_cert: false
         min_tls_version: TLS1.2
       lmtp:
+        preserve_backend_delivery_receipt: %t
         client_auth:
           required: %t
           authority: default
@@ -1483,6 +1485,7 @@ director:
 		lmtpListenerTLSMode,
 		options.TLS.ServerCertPath,
 		options.TLS.ServerKeyPath,
+		options.PreserveBackendDeliveryReceipt,
 		lmtpPeerAuthRequired,
 		quotedYAMLStrings(lmtpPeerAuthMechanisms),
 		quotedYAMLStrings(lmtpCapabilities),
@@ -1650,20 +1653,22 @@ func lmtpHealthCapabilityFacts(capabilities []string) (backend.CapabilitySet, ba
 }
 
 type lmtpBackendChunkingFixtureOptions struct {
-	BackendCapabilities         []string
-	HealthCapabilities          []string
-	HealthCapabilitiesByBackend map[string][]string
-	ExtraCapabilities           []string
-	CapabilityFilterDeny        []string
-	MaxMessageBytes             int64
-	DisableFrontendChunking     bool
-	DetectCommandBatching       bool
-	FinalStatus                 map[string]lmtpbackend.Status
-	FinalStatusLimit            int
-	NonFinalBDATStatuses        []lmtpbackend.Status
+	PreserveBackendDeliveryReceipt bool
+	BackendCapabilities            []string
+	HealthCapabilities             []string
+	HealthCapabilitiesByBackend    map[string][]string
+	ExtraCapabilities              []string
+	CapabilityFilterDeny           []string
+	MaxMessageBytes                int64
+	DisableFrontendChunking        bool
+	DetectCommandBatching          bool
+	FinalStatus                    map[string]lmtpbackend.Status
+	FinalStatusLimit               int
+	NonFinalBDATStatuses           []lmtpbackend.Status
 }
 
 type lmtpBackendChunkingFixture struct {
+	redis     redisSessionFixture
 	address   string
 	process   *directorProcess
 	fakeLMTPA *lmtpbackend.Server
@@ -1701,24 +1706,26 @@ func startLMTPBackendChunkingFixture(t *testing.T, options lmtpBackendChunkingFi
 		publishHealthyLMTPBackends(t, redisFixture, []string{e2eLMTPBackendAID, e2eLMTPBackendBID}, options.HealthCapabilities...)
 	}
 	configPath := writeLMTPProcessConfig(t, lmtpProcessConfigOptions{
-		RedisAddress:             redisFixture.addr,
-		AuthorityURL:             authority.URL(),
-		LMTPAddress:              lmtpAddress,
-		LMTPSAddress:             lmtpsAddress,
-		IMAPAddress:              imapAddress,
-		ControlAddress:           controlAddress,
-		LMTPExtraCapabilities:    options.ExtraCapabilities,
-		LMTPCapabilityFilterDeny: options.CapabilityFilterDeny,
-		LMTPMaxMessageBytes:      options.MaxMessageBytes,
-		LMTPDisableChunking:      options.DisableFrontendChunking,
-		LMTPBackends:             map[string]string{e2eLMTPBackendAID: fakeLMTPA.Address(), e2eLMTPBackendBID: fakeLMTPB.Address()},
-		IMAPBackends:             map[string]string{e2eBackendAID: fakeIMAPA.Address(), e2eBackendBID: fakeIMAPB.Address()},
-		TLS:                      tlsBundle,
+		RedisAddress:                   redisFixture.addr,
+		PreserveBackendDeliveryReceipt: options.PreserveBackendDeliveryReceipt,
+		AuthorityURL:                   authority.URL(),
+		LMTPAddress:                    lmtpAddress,
+		LMTPSAddress:                   lmtpsAddress,
+		IMAPAddress:                    imapAddress,
+		ControlAddress:                 controlAddress,
+		LMTPExtraCapabilities:          options.ExtraCapabilities,
+		LMTPCapabilityFilterDeny:       options.CapabilityFilterDeny,
+		LMTPMaxMessageBytes:            options.MaxMessageBytes,
+		LMTPDisableChunking:            options.DisableFrontendChunking,
+		LMTPBackends:                   map[string]string{e2eLMTPBackendAID: fakeLMTPA.Address(), e2eLMTPBackendBID: fakeLMTPB.Address()},
+		IMAPBackends:                   map[string]string{e2eBackendAID: fakeIMAPA.Address(), e2eBackendBID: fakeIMAPB.Address()},
+		TLS:                            tlsBundle,
 	})
 	process := startDirectorProcess(t, binary, configPath)
 	waitForLMTPGreeting(t, lmtpAddress, process)
 
 	return lmtpBackendChunkingFixture{
+		redis:     redisFixture,
 		address:   lmtpAddress,
 		process:   process,
 		fakeLMTPA: fakeLMTPA,

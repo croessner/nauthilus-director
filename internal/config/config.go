@@ -473,11 +473,12 @@ type IMAPListenerConfig struct {
 }
 
 type LMTPListenerConfig struct {
-	Greeting         ListenerGreetingConfig     `mapstructure:"greeting" yaml:"greeting" validate:"required"`
-	ClientAuth       LMTPClientAuthConfig       `mapstructure:"client_auth" yaml:"client_auth" validate:"required"`
-	Capabilities     []string                   `mapstructure:"capabilities" yaml:"capabilities"`
-	CapabilityFilter LMTPCapabilityFilterConfig `mapstructure:"capability_filter" yaml:"capability_filter" validate:"required"`
-	Size             LMTPSizeConfig             `mapstructure:"size" yaml:"size" validate:"required"`
+	PreserveBackendDeliveryReceipt bool                       `mapstructure:"preserve_backend_delivery_receipt" yaml:"preserve_backend_delivery_receipt"`
+	Greeting                       ListenerGreetingConfig     `mapstructure:"greeting" yaml:"greeting" validate:"required"`
+	ClientAuth                     LMTPClientAuthConfig       `mapstructure:"client_auth" yaml:"client_auth" validate:"required"`
+	Capabilities                   []string                   `mapstructure:"capabilities" yaml:"capabilities"`
+	CapabilityFilter               LMTPCapabilityFilterConfig `mapstructure:"capability_filter" yaml:"capability_filter" validate:"required"`
+	Size                           LMTPSizeConfig             `mapstructure:"size" yaml:"size" validate:"required"`
 }
 
 type LMTPCapabilityFilterConfig struct {

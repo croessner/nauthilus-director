@@ -620,6 +620,7 @@ director:
                 greeting:
                     display_name: nauthilus-director
                     software_version: default
+                preserve_backend_delivery_receipt: false
                 size:
                     max_message_bytes: 104857600
             network: tcp
@@ -667,6 +668,7 @@ director:
                 greeting:
                     display_name: nauthilus-director
                     software_version: default
+                preserve_backend_delivery_receipt: false
                 size:
                     max_message_bytes: 104857600
             network: tcp

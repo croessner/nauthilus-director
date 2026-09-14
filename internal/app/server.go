@@ -103,6 +103,11 @@ type lmtpSizeProofReader struct {
 	denied []string
 }
 
+type lmtpCapabilityProofReader struct {
+	source backendCapabilityReader
+	denied []string
+}
+
 // CheckBackend dispatches health checks to the matching protocol checker.
 func (c protocolHealthChecker) CheckBackend(ctx context.Context, target backend.Backend, request backend.HealthCheckRequest) backend.HealthCheckResult {
 	switch strings.ToLower(strings.TrimSpace(target.Protocol)) {
@@ -704,61 +709,64 @@ func lmtpSessionHandler(
 	processVersion string,
 ) listener.SessionHandler {
 	var (
-		listenerCapabilities []string
-		capabilityFilterDeny []string
-		maxMessageBytes      int64
-		peerAuth             config.LMTPClientAuthConfig
-		greetingPolicy       = greetingPolicyFromConfig(config.ListenerGreetingConfig{}, processVersion)
+		listenerCapabilities           []string
+		capabilityFilterDeny           []string
+		maxMessageBytes                int64
+		preserveBackendDeliveryReceipt bool
+		peerAuth                       config.LMTPClientAuthConfig
+		greetingPolicy                 = greetingPolicyFromConfig(config.ListenerGreetingConfig{}, processVersion)
 	)
 
 	if options.Config.LMTP != nil {
 		listenerCapabilities = options.Config.LMTP.Capabilities
 		capabilityFilterDeny = options.Config.LMTP.CapabilityFilter.Deny
 		maxMessageBytes = options.Config.LMTP.Size.MaxMessageBytes
+		preserveBackendDeliveryReceipt = options.Config.LMTP.PreserveBackendDeliveryReceipt
 		peerAuth = options.Config.LMTP.ClientAuth
 		greetingPolicy = greetingPolicyFromConfig(options.Config.LMTP.Greeting, processVersion)
 	}
 
 	return lmtp.NewHandler(lmtp.SessionConfig{
-		ListenerName:            options.ListenerName,
-		AuthorityName:           options.Config.Authority,
-		AuthorityTransport:      options.AuthorityTransport,
-		ServiceName:             options.Config.ServiceName,
-		Network:                 options.Config.Network,
-		BackendPool:             options.Config.BackendPool,
-		DirectorInstanceID:      options.DirectorInstanceID,
-		DefaultTenant:           options.DefaultTenant,
-		DefaultShard:            options.DefaultShard,
-		GreetingPolicy:          greetingPolicy,
-		TLSMode:                 options.Config.TLS.Mode,
-		Capabilities:            listenerCapabilities,
-		CapabilityFilterDeny:    capabilityFilterDeny,
-		MaxMessageBytes:         maxMessageBytes,
-		PreauthTimeout:          options.Timeouts.Preauth.Std(),
-		AuthTimeout:             options.Timeouts.Auth.Std(),
-		BackendConnectTimeout:   options.Timeouts.BackendConnect.Std(),
-		SessionLeaseTTL:         options.SessionLeaseTTL,
-		SessionIdleGrace:        options.SessionIdleGrace,
-		BackendRetentionTTL:     retentionTTL,
-		MaxLineBytes:            options.Security.MaxPreauthLineBytes,
-		MaxBearerTokenBytes:     options.BearerTokenMaxBytes,
-		RequirePeerAuth:         peerAuth.Required,
-		RequireTLSClientCert:    options.Config.TLS.RequireClientCert,
-		PeerAuthMechanisms:      peerAuth.Mechanisms,
-		FrontendTLSConfig:       options.FrontendTLSConfig,
-		Authenticator:           options.Authenticator,
-		BearerIntrospector:      options.BearerIntrospector,
-		IdentityLookuper:        options.IdentityLookuper,
-		RoutingResolver:         resolver,
-		SessionStore:            store,
-		BackendSelector:         selector,
-		PlacementService:        placementService,
-		BackendConnector:        lmtp.NewTCPBackendConnector(nil),
-		PlacementGate:           placementGate,
-		BackendCapabilities:     lmtpBackendCapabilities(capabilityReader, options.Config.BackendPool, capabilityFilterDeny, "CHUNKING", "8BITMIME"),
-		BackendSizeProof:        lmtpSizeProofReader{source: capabilityReader, denied: capabilityFilterDeny},
-		RecipientLookupRequired: true,
-		Observability:           options.Observability,
+		PreserveBackendDeliveryReceipt: preserveBackendDeliveryReceipt,
+		ListenerName:                   options.ListenerName,
+		AuthorityName:                  options.Config.Authority,
+		AuthorityTransport:             options.AuthorityTransport,
+		ServiceName:                    options.Config.ServiceName,
+		Network:                        options.Config.Network,
+		BackendPool:                    options.Config.BackendPool,
+		DirectorInstanceID:             options.DirectorInstanceID,
+		DefaultTenant:                  options.DefaultTenant,
+		DefaultShard:                   options.DefaultShard,
+		GreetingPolicy:                 greetingPolicy,
+		TLSMode:                        options.Config.TLS.Mode,
+		Capabilities:                   listenerCapabilities,
+		CapabilityFilterDeny:           capabilityFilterDeny,
+		MaxMessageBytes:                maxMessageBytes,
+		PreauthTimeout:                 options.Timeouts.Preauth.Std(),
+		AuthTimeout:                    options.Timeouts.Auth.Std(),
+		BackendConnectTimeout:          options.Timeouts.BackendConnect.Std(),
+		SessionLeaseTTL:                options.SessionLeaseTTL,
+		SessionIdleGrace:               options.SessionIdleGrace,
+		BackendRetentionTTL:            retentionTTL,
+		MaxLineBytes:                   options.Security.MaxPreauthLineBytes,
+		MaxBearerTokenBytes:            options.BearerTokenMaxBytes,
+		RequirePeerAuth:                peerAuth.Required,
+		RequireTLSClientCert:           options.Config.TLS.RequireClientCert,
+		PeerAuthMechanisms:             peerAuth.Mechanisms,
+		FrontendTLSConfig:              options.FrontendTLSConfig,
+		Authenticator:                  options.Authenticator,
+		BearerIntrospector:             options.BearerIntrospector,
+		IdentityLookuper:               options.IdentityLookuper,
+		RoutingResolver:                resolver,
+		SessionStore:                   store,
+		BackendSelector:                selector,
+		PlacementService:               placementService,
+		BackendConnector:               lmtp.NewTCPBackendConnector(nil),
+		PlacementGate:                  placementGate,
+		BackendCapabilityProof:         lmtpCapabilityProofReader{source: capabilityReader, denied: capabilityFilterDeny},
+		BackendSizeProof:               lmtpSizeProofReader{source: capabilityReader, denied: capabilityFilterDeny},
+		RecipientLookupRequired:        true,
+		Observability:                  options.Observability,
 		MTLSPeerAuth: lmtp.MTLSPeerAuthConfig{
 			SatisfiesRequired: peerAuth.MTLS.SatisfiesRequired,
 			IdentitySource:    peerAuth.MTLS.IdentitySource,
@@ -921,7 +929,7 @@ func pop3SessionHandler(
 }
 
 // lmtpBackendCapabilities returns mediated capabilities with fresh backend-pool proof.
-func lmtpBackendCapabilities(capabilities backendCapabilityReader, backendPool string, denied []string, desired ...string) []string {
+func lmtpBackendCapabilities(ctx context.Context, capabilities backendCapabilityReader, backendPool string, denied []string, desired ...string) []string {
 	if capabilities == nil {
 		return nil
 	}
@@ -934,7 +942,7 @@ func lmtpBackendCapabilities(capabilities backendCapabilityReader, backendPool s
 			continue
 		}
 
-		allowed, err := capabilities.PoolSupportsCapability(context.Background(), backendPool, capability)
+		allowed, err := capabilities.PoolSupportsCapability(ctx, backendPool, capability)
 		if err != nil || !allowed {
 			continue
 		}
@@ -943,6 +951,11 @@ func lmtpBackendCapabilities(capabilities backendCapabilityReader, backendPool s
 	}
 
 	return allowedCapabilities
+}
+
+// Capabilities evaluates backend proof at LHLO time rather than freezing startup health.
+func (r lmtpCapabilityProofReader) Capabilities(ctx context.Context, backendPool string) []string {
+	return lmtpBackendCapabilities(ctx, r.source, backendPool, r.denied, "CHUNKING", "8BITMIME")
 }
 
 // PoolSupportsSize returns listener-filtered backend-pool SIZE proof.

@@ -50,47 +50,54 @@ var errNilSessionConnection = errors.New("lmtp: session connection is nil")
 
 // SessionConfig contains listener-owned values needed by the LMTP protocol boundary.
 type SessionConfig struct {
-	ListenerName            string
-	AuthorityName           string
-	AuthorityTransport      string
-	ServiceName             string
-	Network                 string
-	BackendPool             string
-	DirectorInstanceID      string
-	DefaultTenant           string
-	DefaultShard            string
-	GreetingPolicy          greeting.Policy
-	TLSMode                 string
-	Capabilities            []string
-	CapabilityFilterDeny    []string
-	MaxMessageBytes         int64
-	PreauthTimeout          time.Duration
-	AuthTimeout             time.Duration
-	BackendConnectTimeout   time.Duration
-	SessionLeaseTTL         time.Duration
-	SessionIdleGrace        time.Duration
-	BackendRetentionTTL     time.Duration
-	MaxLineBytes            int
-	MaxBearerTokenBytes     int
-	RequirePeerAuth         bool
-	RequireTLSClientCert    bool
-	PeerAuthMechanisms      []string
-	MTLSPeerAuth            MTLSPeerAuthConfig
-	BackendCapabilities     []string
-	RecipientLookupRequired bool
-	FrontendTLSConfig       *tls.Config
-	Authenticator           nauthilus.Authenticator
-	BearerIntrospector      nauthilus.BearerIntrospector
-	IdentityLookuper        nauthilus.IdentityLookuper
-	RoutingResolver         routing.RoutingResolver
-	SessionStore            state.SessionStore
-	BackendSelector         backend.Selector
-	PlacementService        placement.DeliveryPlacer
-	BackendConnector        BackendConnector
-	BackendSizeProof        BackendSizeProofReader
-	PlacementGate           runtimectl.PlacementGate
-	MessageSink             MessageSink
-	Observability           observability.Recorder
+	PreserveBackendDeliveryReceipt bool
+	ListenerName                   string
+	AuthorityName                  string
+	AuthorityTransport             string
+	ServiceName                    string
+	Network                        string
+	BackendPool                    string
+	DirectorInstanceID             string
+	DefaultTenant                  string
+	DefaultShard                   string
+	GreetingPolicy                 greeting.Policy
+	TLSMode                        string
+	Capabilities                   []string
+	CapabilityFilterDeny           []string
+	MaxMessageBytes                int64
+	PreauthTimeout                 time.Duration
+	AuthTimeout                    time.Duration
+	BackendConnectTimeout          time.Duration
+	SessionLeaseTTL                time.Duration
+	SessionIdleGrace               time.Duration
+	BackendRetentionTTL            time.Duration
+	MaxLineBytes                   int
+	MaxBearerTokenBytes            int
+	RequirePeerAuth                bool
+	RequireTLSClientCert           bool
+	PeerAuthMechanisms             []string
+	MTLSPeerAuth                   MTLSPeerAuthConfig
+	BackendCapabilities            []string
+	RecipientLookupRequired        bool
+	FrontendTLSConfig              *tls.Config
+	Authenticator                  nauthilus.Authenticator
+	BearerIntrospector             nauthilus.BearerIntrospector
+	IdentityLookuper               nauthilus.IdentityLookuper
+	RoutingResolver                routing.RoutingResolver
+	SessionStore                   state.SessionStore
+	BackendSelector                backend.Selector
+	PlacementService               placement.DeliveryPlacer
+	BackendConnector               BackendConnector
+	BackendSizeProof               BackendSizeProofReader
+	BackendCapabilityProof         BackendCapabilityProofReader
+	PlacementGate                  runtimectl.PlacementGate
+	MessageSink                    MessageSink
+	Observability                  observability.Recorder
+}
+
+// BackendCapabilityProofReader refreshes mediated capabilities from current pool health.
+type BackendCapabilityProofReader interface {
+	Capabilities(ctx context.Context, backendPool string) []string
 }
 
 // BackendSizeProofReader reports fresh pool-wide SIZE capability proof.

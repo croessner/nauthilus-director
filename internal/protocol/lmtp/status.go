@@ -52,11 +52,58 @@ type backendStatusResponse struct {
 	lines []string
 }
 
-// DeliveryStatus is a sanitized frontend reply for one accepted recipient.
+// DeliveryStatus is a sanitized frontend reply, optionally carrying a validated native receipt.
 type DeliveryStatus struct {
 	Status   string
 	Enhanced string
 	Text     string
+}
+
+// deliveryReceipt extracts the native Dovecot session without forwarding recipient or arbitrary text.
+// Only an exact successful, single-line final DATA/BDAT receipt can cross this opt-in boundary.
+func (r backendStatusResponse) deliveryReceipt() string {
+	if r.code != responseStatusOK || len(r.lines) != 1 {
+		return ""
+	}
+
+	line := r.lines[0]
+	if !strings.HasPrefix(line, "2.0.0 ") || !strings.HasSuffix(line, " Saved") {
+		return ""
+	}
+
+	value := strings.TrimSuffix(strings.TrimPrefix(line, "2.0.0 "), " Saved")
+	if strings.HasPrefix(value, "<") {
+		end := strings.Index(value, "> ")
+		if end < 2 || strings.ContainsAny(value[1:end], "<>\r\n\x00") {
+			return ""
+		}
+
+		value = value[end+2:]
+	}
+
+	if !validDeliveryReceiptSession(value) {
+		return ""
+	}
+
+	return value + " Saved"
+}
+
+// validDeliveryReceiptSession permits only the bounded native session alphabet.
+func validDeliveryReceiptSession(value string) bool {
+	if len(value) < 16 || len(value) > 128 {
+		return false
+	}
+
+	for _, c := range value {
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case strings.ContainsRune("+/=_-.:", c):
+		default:
+			return false
+		}
+	}
+
+	return true
 }
 
 // readBackendStatusResponse reads one bounded SMTP-style multiline response.

@@ -418,6 +418,17 @@ with an operator-facing service name such as
 .PP
 Supported listener-specific LMTP settings live under
 .BR director.listeners.<name>.lmtp .
+.PP
+.B preserve_backend_delivery_receipt
+defaults to false. On a trusted internal LMTP listener, enable it when a native
+delivery observer must correlate a successful Dovecot delivery with its Sieve
+session. Only a single-line final 250 2.0.0 reply with a bounded native session
+identifier followed by Saved is preserved. An optional recipient prefix is
+removed. Arbitrary success text, error text, malformed receipts, and intermediate
+replies retain the normal sanitized responses. This option does not authenticate
+the frontend or weaken backend TLS, recipient routing, or session affinity.
+Receipts are returned only to that LMTP client, not added to logs or metric labels.
+.PP
 The implemented surface uses configured
 .B capabilities
 for the

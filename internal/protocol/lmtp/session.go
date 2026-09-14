@@ -68,20 +68,21 @@ type Session struct {
 	backendConnector   BackendConnector
 	frontendTLSConfig  *tls.Config
 
-	listenerName           string
-	authorityName          string
-	authorityTransport     string
-	serviceName            string
-	network                string
-	backendPool            string
-	directorInstanceID     string
-	defaultTenant          string
-	defaultShard           string
-	tlsMode                string
-	configuredCapabilities []string
-	capabilityPolicy       CapabilityPolicy
-	peerAuthMechanisms     []string
-	mtlsPeerAuth           MTLSPeerAuthConfig
+	listenerName                   string
+	authorityName                  string
+	authorityTransport             string
+	serviceName                    string
+	network                        string
+	backendPool                    string
+	directorInstanceID             string
+	defaultTenant                  string
+	defaultShard                   string
+	tlsMode                        string
+	configuredCapabilities         []string
+	capabilityPolicy               CapabilityPolicy
+	preserveBackendDeliveryReceipt bool
+	peerAuthMechanisms             []string
+	mtlsPeerAuth                   MTLSPeerAuthConfig
 
 	preauthTimeout             time.Duration
 	authTimeout                time.Duration
@@ -100,6 +101,7 @@ type Session struct {
 	sessionStore               state.SessionStore
 	backendSelector            backend.Selector
 	backendSizeProof           BackendSizeProofReader
+	backendCapabilityProof     BackendCapabilityProofReader
 	placementService           placement.DeliveryPlacer
 	placementGate              runtimectl.PlacementGate
 	observability              observability.Recorder
@@ -160,51 +162,53 @@ func NewSession(config SessionConfig, conn net.Conn) (*Session, error) {
 	capabilityPolicy := NewCapabilityPolicy(config.Capabilities, config.CapabilityFilterDeny)
 
 	return &Session{
-		conn:                       conn,
-		reader:                     bufio.NewReaderSize(conn, maxLineBytes+1),
-		writer:                     bufio.NewWriter(conn),
-		authenticator:              config.Authenticator,
-		bearerIntrospector:         config.BearerIntrospector,
-		identityLookuper:           config.IdentityLookuper,
-		messageSink:                messageSink,
-		backendConnector:           config.BackendConnector,
-		frontendTLSConfig:          cloneTLSConfig(config.FrontendTLSConfig),
-		listenerName:               config.ListenerName,
-		authorityName:              config.AuthorityName,
-		authorityTransport:         config.AuthorityTransport,
-		serviceName:                config.ServiceName,
-		network:                    config.Network,
-		backendPool:                config.BackendPool,
-		directorInstanceID:         config.DirectorInstanceID,
-		defaultTenant:              defaultLookupTenant(config.DefaultTenant),
-		defaultShard:               defaultLookupShard(config.DefaultShard),
-		tlsMode:                    config.TLSMode,
-		configuredCapabilities:     capabilityPolicy.ConfiguredCapabilities(),
-		capabilityPolicy:           capabilityPolicy,
-		peerAuthMechanisms:         append([]string(nil), config.PeerAuthMechanisms...),
-		mtlsPeerAuth:               config.MTLSPeerAuth,
-		preauthTimeout:             config.PreauthTimeout,
-		authTimeout:                config.AuthTimeout,
-		backendConnectTimeout:      config.BackendConnectTimeout,
-		sessionLeaseTTL:            defaultDeliveryLease(config.SessionLeaseTTL),
-		sessionIdleGrace:           defaultDeliveryGrace(config.SessionIdleGrace, config.SessionLeaseTTL),
-		backendRetentionTTL:        config.BackendRetentionTTL,
-		maxLineBytes:               maxLineBytes,
-		maxMessageBytes:            config.MaxMessageBytes,
-		maxBearerTokenBytes:        config.MaxBearerTokenBytes,
-		requirePeerAuth:            config.RequirePeerAuth,
-		requireTLSClientCert:       config.RequireTLSClientCert,
-		backendSafeCapabilities:    capabilityPolicy.FilterBackendCapabilities(config.BackendCapabilities),
-		recipientPlacementRequired: config.RecipientLookupRequired,
-		routingResolver:            config.RoutingResolver,
-		sessionStore:               config.SessionStore,
-		backendSelector:            config.BackendSelector,
-		backendSizeProof:           config.BackendSizeProof,
-		placementService:           config.PlacementService,
-		placementGate:              config.PlacementGate,
-		observability:              observability.NormalizeRecorder(config.Observability),
-		greetingPolicy:             config.GreetingPolicy,
-		tlsActive:                  config.TLSMode == TLSModeImplicit,
+		conn:                           conn,
+		reader:                         bufio.NewReaderSize(conn, maxLineBytes+1),
+		writer:                         bufio.NewWriter(conn),
+		authenticator:                  config.Authenticator,
+		bearerIntrospector:             config.BearerIntrospector,
+		identityLookuper:               config.IdentityLookuper,
+		messageSink:                    messageSink,
+		backendConnector:               config.BackendConnector,
+		frontendTLSConfig:              cloneTLSConfig(config.FrontendTLSConfig),
+		listenerName:                   config.ListenerName,
+		authorityName:                  config.AuthorityName,
+		authorityTransport:             config.AuthorityTransport,
+		serviceName:                    config.ServiceName,
+		network:                        config.Network,
+		backendPool:                    config.BackendPool,
+		directorInstanceID:             config.DirectorInstanceID,
+		defaultTenant:                  defaultLookupTenant(config.DefaultTenant),
+		defaultShard:                   defaultLookupShard(config.DefaultShard),
+		tlsMode:                        config.TLSMode,
+		configuredCapabilities:         capabilityPolicy.ConfiguredCapabilities(),
+		capabilityPolicy:               capabilityPolicy,
+		preserveBackendDeliveryReceipt: config.PreserveBackendDeliveryReceipt,
+		peerAuthMechanisms:             append([]string(nil), config.PeerAuthMechanisms...),
+		mtlsPeerAuth:                   config.MTLSPeerAuth,
+		preauthTimeout:                 config.PreauthTimeout,
+		authTimeout:                    config.AuthTimeout,
+		backendConnectTimeout:          config.BackendConnectTimeout,
+		sessionLeaseTTL:                defaultDeliveryLease(config.SessionLeaseTTL),
+		sessionIdleGrace:               defaultDeliveryGrace(config.SessionIdleGrace, config.SessionLeaseTTL),
+		backendRetentionTTL:            config.BackendRetentionTTL,
+		maxLineBytes:                   maxLineBytes,
+		maxMessageBytes:                config.MaxMessageBytes,
+		maxBearerTokenBytes:            config.MaxBearerTokenBytes,
+		requirePeerAuth:                config.RequirePeerAuth,
+		requireTLSClientCert:           config.RequireTLSClientCert,
+		backendSafeCapabilities:        capabilityPolicy.FilterBackendCapabilities(config.BackendCapabilities),
+		recipientPlacementRequired:     config.RecipientLookupRequired,
+		routingResolver:                config.RoutingResolver,
+		sessionStore:                   config.SessionStore,
+		backendSelector:                config.BackendSelector,
+		backendSizeProof:               config.BackendSizeProof,
+		backendCapabilityProof:         config.BackendCapabilityProof,
+		placementService:               config.PlacementService,
+		placementGate:                  config.PlacementGate,
+		observability:                  observability.NormalizeRecorder(config.Observability),
+		greetingPolicy:                 config.GreetingPolicy,
+		tlsActive:                      config.TLSMode == TLSModeImplicit,
 	}, nil
 }
 
@@ -402,7 +406,7 @@ func (s *Session) effectiveCapability(ctx context.Context, configured string) (s
 	case capabilityEnhancedStatusCodes:
 		return capabilityEnhancedStatusCodes, lmtpReasonOK
 	case capability8BITMIME:
-		return s.effectiveBackendCapability(capability8BITMIME)
+		return s.effectiveBackendCapability(ctx, capability8BITMIME)
 	case capabilitySTARTTLS:
 		return s.effectiveSTARTTLSCapability()
 	case capabilityAUTH:
@@ -413,7 +417,7 @@ func (s *Session) effectiveCapability(ctx context.Context, configured string) (s
 
 		return capability, lmtpReasonOK
 	case capabilityCHUNKING:
-		return s.effectiveBackendCapability(capabilityCHUNKING)
+		return s.effectiveBackendCapability(ctx, capabilityCHUNKING)
 	case capabilityPIPELINING:
 		return capabilityPIPELINING, lmtpReasonOK
 	case capabilitySIZE:
@@ -424,8 +428,8 @@ func (s *Session) effectiveCapability(ctx context.Context, configured string) (s
 }
 
 // effectiveBackendCapability returns a token-only backend-mediated capability when proof is safe.
-func (s *Session) effectiveBackendCapability(capability string) (string, string) {
-	if s.backendCapabilitySafe(capability) {
+func (s *Session) effectiveBackendCapability(ctx context.Context, capability string) (string, string) {
+	if s.backendCapabilitySafe(ctx, capability) {
 		return capability, lmtpReasonOK
 	}
 
@@ -452,8 +456,17 @@ func (s *Session) effectiveSizeCapability(ctx context.Context) (string, string) 
 }
 
 // backendCapabilitySafe reports whether fresh backend-pool proof allows a mediated capability.
-func (s *Session) backendCapabilitySafe(capability string) bool {
-	return !s.capabilityPolicy.Denies(capability) && containsCapability(s.backendSafeCapabilities, capability)
+func (s *Session) backendCapabilitySafe(ctx context.Context, capability string) bool {
+	if s.capabilityPolicy.Denies(capability) {
+		return false
+	}
+
+	capabilities := s.backendSafeCapabilities
+	if s.backendCapabilityProof != nil {
+		capabilities = s.backendCapabilityProof.Capabilities(ctx, s.backendPool)
+	}
+
+	return containsCapability(capabilities, capability)
 }
 
 // effectiveSizeMaximum combines listener policy with fresh backend-pool SIZE proof.

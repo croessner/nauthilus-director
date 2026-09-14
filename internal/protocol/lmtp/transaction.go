@@ -40,9 +40,10 @@ const (
 )
 
 type backendTransaction struct {
-	connection       *BackendConnection
-	target           backend.Backend
-	capabilityPolicy CapabilityPolicy
+	connection                     *BackendConnection
+	target                         backend.Backend
+	capabilityPolicy               CapabilityPolicy
+	preserveBackendDeliveryReceipt bool
 }
 
 // backendForwardingEnabled reports whether this session should deliver to real LMTP backends.
@@ -112,9 +113,10 @@ func (s *Session) ensureBackendTransaction(ctx context.Context, target backend.B
 	connectSpan.End(lmtpObservationResultOK, lmtpReasonOK)
 
 	transaction := &backendTransaction{
-		connection:       connection,
-		target:           target,
-		capabilityPolicy: s.capabilityPolicy,
+		connection:                     connection,
+		target:                         target,
+		capabilityPolicy:               s.capabilityPolicy,
+		preserveBackendDeliveryReceipt: s.preserveBackendDeliveryReceipt,
 	}
 
 	sizeDeclared := s.sizeAdvertised && s.transaction.declaredSizePresent
@@ -385,7 +387,14 @@ func (t *backendTransaction) readFinalStatuses(recipientCount int) MessageResult
 			return MessageResult{Statuses: statuses}
 		}
 
-		statuses = append(statuses, deliveryStatusFromBackend(response, backendReplyContextFinal))
+		status := deliveryStatusFromBackend(response, backendReplyContextFinal)
+		if t.preserveBackendDeliveryReceipt {
+			if receipt := response.deliveryReceipt(); receipt != "" {
+				status.Text = receipt
+			}
+		}
+
+		statuses = append(statuses, status)
 	}
 
 	return MessageResult{Statuses: statuses}
