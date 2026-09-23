@@ -38,6 +38,7 @@ import (
 	"github.com/croessner/nauthilus-director/internal/backend"
 	"github.com/croessner/nauthilus-director/internal/config"
 	"github.com/croessner/nauthilus-director/internal/nauthilus"
+	"github.com/croessner/nauthilus-director/internal/state"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -707,12 +708,23 @@ func readHealthOwners(ctx context.Context, client *redis.Client, backendIDs []st
 
 // interopHealthOwnerKey returns the production Redis owner key for one backend.
 func interopHealthOwnerKey(backendID string) string {
-	return interopClusterRedisKeyPrefix + ":v1:health:backend:" + backendID + ":owner"
+	key, _ := interopKeyBuilder().HealthOwnerKey(backendID)
+
+	return key
 }
 
 // interopHealthStateKey returns the production Redis health-state key for one backend.
 func interopHealthStateKey(backendID string) string {
-	return interopClusterRedisKeyPrefix + ":v1:health:backend:" + backendID + ":state"
+	key, _ := interopKeyBuilder().HealthStateKey(backendID)
+
+	return key
+}
+
+// interopKeyBuilder derives production key names for the interop Redis namespace.
+func interopKeyBuilder() state.KeyBuilder {
+	builder, _ := state.NewKeyBuilder(state.KeyBuilderOptions{Prefix: interopClusterRedisKeyPrefix, SchemaVersion: 1})
+
+	return builder
 }
 
 // stringSet converts values into a membership map.

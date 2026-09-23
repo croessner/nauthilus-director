@@ -89,6 +89,7 @@ type RedisSessionStore struct {
 	redisMode        string
 	indexPageDefault int
 	indexPageMax     int
+	local            *storeLocalState
 }
 
 // affinityMutationResult keeps authoritative affinity state and repair deltas together.
@@ -149,6 +150,7 @@ func NewRedisSessionStore(client RedisClient, keys KeyBuilder, registry *ScriptR
 		redisMode:        applied.redisMode,
 		indexPageDefault: applied.indexPageDefault,
 		indexPageMax:     applied.indexPageMax,
+		local:            newStoreLocalState(),
 	}, nil
 }
 
@@ -230,6 +232,7 @@ func (s *RedisSessionStore) AttachSelectedBackend(
 		attachment.ReservationID,
 		attachment.MaxConnections,
 		normalizedStateValue(attachment.BackendNode),
+		s.keys.BackendReservationBucketCount(),
 	)
 	if err != nil {
 		return SessionBackendRecord{}, err
@@ -240,7 +243,9 @@ func (s *RedisSessionStore) AttachSelectedBackend(
 		return SessionBackendRecord{}, err
 	}
 
-	activeCount, countErr := s.backendReservationActiveCount(ctx, attachment.BackendIdentifier)
+	s.releaseReplacedBackendReservation(ctx, attachment.BackendIdentifier, record.replacedReservationID)
+
+	activeCount, countErr := s.backendReservationGroupCount(ctx, attachment.BackendIdentifier, attachment.ReservationID)
 	if countErr != nil {
 		return SessionBackendRecord{}, countErr
 	}
@@ -460,7 +465,7 @@ func (s *RedisSessionStore) validateScriptKeys(name string, keys []string) error
 		return s.keys.validateBackendReservationOwnedKeys(name, keys)
 	}
 
-	return nil
+	return validateSameSlotScriptKeys(name, keys)
 }
 
 // isPerAffinityScript reports whether a script must stay inside one affinity slot.
@@ -764,6 +769,8 @@ func parseSessionBackendRecord(value any) (SessionBackendRecord, error) {
 		ReservationID:     parsed.Fields[scriptFieldBackendReservation],
 		ServerTime:        parsed.ServerTime,
 		ControlGeneration: parsed.Fields[scriptFieldControlGeneration],
+
+		replacedReservationID: strings.TrimSpace(parsed.Fields["replaced_backend_reservation_id"]),
 	}
 
 	record.BackendActiveCount, err = parseIntField(parsed.Fields, "backend_active_session_count")
@@ -865,9 +872,7 @@ func (s *RedisSessionStore) writeRepairableAttachIndexes(
 		return err
 	}
 
-	if err := s.runRequiredRepairableIndexCommand(ctx, "attach_backend_index", func(redisCtx context.Context) error {
-		return s.client.SAdd(redisCtx, s.keys.BackendIndexKey(), attachment.BackendIdentifier).Err()
-	}); err != nil {
+	if err := s.ensureBackendIndexedRequired(ctx, "attach_backend_index", attachment.BackendIdentifier); err != nil {
 		return err
 	}
 
@@ -978,6 +983,23 @@ func (s *RedisSessionStore) releaseRepairableBackendReservation(ctx context.Cont
 	}
 }
 
+// releaseReplacedBackendReservation frees the bucket a retried attach no longer references.
+//
+// The session now names the newer reservation of the same caller, so the older
+// one would otherwise hold capacity until its lease expires.
+func (s *RedisSessionStore) releaseReplacedBackendReservation(ctx context.Context, backendIdentifier string, reservationID string) {
+	if reservationID == "" {
+		return
+	}
+
+	if _, err := s.ReleaseBackendReservation(ctx, BackendReservationReleaseRequest{
+		BackendIdentifier: backendIdentifier,
+		ReservationID:     reservationID,
+	}); err != nil {
+		s.recordRedisOperation(redisContext(ctx), "attach_replaced_reservation_release", time.Now(), err)
+	}
+}
+
 // refreshRepairableBackendReservation extends the backend reservation with the session lease.
 func (s *RedisSessionStore) refreshRepairableBackendReservation(ctx context.Context, delta sessionMutationDelta, ttl time.Duration) error {
 	if !delta.BackendCounted || delta.BackendReservation == "" {
@@ -988,7 +1010,7 @@ func (s *RedisSessionStore) refreshRepairableBackendReservation(ctx context.Cont
 		return newStateError(RedisErrorKindAmbiguousState, scriptHeartbeat, "backend max connections required", nil)
 	}
 
-	_, err := s.ReserveBackendCapacity(ctx, BackendReservationRequest{
+	_, err := s.refreshBackendReservation(ctx, BackendReservationRequest{
 		BackendIdentifier: delta.BackendIdentifier,
 		ReservationID:     delta.BackendReservation,
 		MaxConnections:    delta.BackendMaxConn,

@@ -3,11 +3,13 @@
 -- SPDX-License-Identifier: AGPL-3.0-only
 --
 -- Acquires or renews a backend deep-health owner lease with a fencing token
--- derived from the durable health state record.
+-- derived from the durable health state record. Owner and state share the
+-- backend's own hash tag. The caller verifies its own instance liveness before
+-- dispatch, so no shared cross-backend key is part of this atomic boundary.
+-- A caller that does not own the lease learns the current lease expiry.
 
-local instance_key = KEYS[1]
-local owner_key = KEYS[2]
-local state_key = KEYS[3]
+local owner_key = KEYS[1]
+local state_key = KEYS[2]
 
 local instance_id = ARGV[1]
 local backend_id = ARGV[2]
@@ -37,10 +39,6 @@ if lease_ttl_ms == nil or lease_ttl_ms <= 0 then
 	return ambiguous("lease_ttl_required")
 end
 
-if redis.call("EXISTS", instance_key) == 0 then
-	return ambiguous("instance_missing")
-end
-
 local now = now_ms()
 local current_owner = redis.call("HGET", owner_key, "instance_id")
 local token = redis.call("HGET", owner_key, "fencing_token")
@@ -54,6 +52,11 @@ elseif current_owner == instance_id then
 	status = "renewed"
 else
 	token = tonumber(require_value(token, "fencing_token_required"))
+	local owner_expires_at = tonumber(redis.call("HGET", owner_key, "expires_at_ms") or "")
+	if owner_expires_at == nil then
+		owner_expires_at = now + lease_ttl_ms
+	end
+
 	return {
 		"status", status,
 		"backend_id", backend_id,
@@ -61,7 +64,7 @@ else
 		"instance_id", instance_id,
 		"fencing_token", tostring(token),
 		"server_time_ms", tostring(now),
-		"expires_at_ms", tostring(now + lease_ttl_ms)
+		"expires_at_ms", tostring(owner_expires_at)
 	}
 end
 

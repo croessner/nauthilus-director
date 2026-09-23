@@ -1154,6 +1154,51 @@ func TestHealthRunnerKeepsNonOwnerLightCheckLocal(t *testing.T) {
 	}
 }
 
+// TestHealthRunnerSkipsAcquireWhileForeignLeaseValid avoids guaranteed "held by other" round trips.
+func TestHealthRunnerSkipsAcquireWhileForeignLeaseValid(t *testing.T) {
+	for _, deep := range []bool{false, true} {
+		cfg := lightHealthBackendConfig(testBackendID, testPoolIMAP)
+		if deep {
+			cfg = singleBackendConfig(string(MaintenanceModeDisabled), 100)
+		}
+
+		checker := &recordingHealthChecker{}
+		coordinator := &fakeHealthCoordinator{owned: false, foreignLease: time.Minute}
+
+		runner, err := NewHealthRunner(mustStaticRegistry(t, cfg), coordinator, checker, HealthRunnerConfig{
+			InstanceID: "director-a",
+			Interval:   time.Second,
+			Timeout:    time.Second,
+			StateTTL:   time.Second,
+		})
+		if err != nil {
+			t.Fatalf("NewHealthRunner returned error: %v", err)
+		}
+
+		for range 3 {
+			if err := runner.RunOnce(context.Background()); err != nil {
+				t.Fatalf("RunOnce returned error: %v", err)
+			}
+		}
+
+		if coordinator.acquisitions != 1 || coordinator.published != 0 || checker.deepChecks != 0 {
+			t.Fatalf("deep=%t acquisitions/published/deep checks = %d/%d/%d, want 1/0/0",
+				deep, coordinator.acquisitions, coordinator.published, checker.deepChecks)
+		}
+
+		runner.foreign[testBackendID] = time.Now().Add(-time.Millisecond)
+		coordinator.owned = true
+
+		if err := runner.RunOnce(context.Background()); err != nil {
+			t.Fatalf("RunOnce after foreign lease expiry returned error: %v", err)
+		}
+
+		if coordinator.acquisitions != 2 || coordinator.published != 1 {
+			t.Fatalf("deep=%t takeover acquisitions/published = %d/%d, want 2/1", deep, coordinator.acquisitions, coordinator.published)
+		}
+	}
+}
+
 // TestHealthRunnerPublishesLightCheckForSupportedProtocols verifies protocol-neutral publication.
 func TestHealthRunnerPublishesLightCheckForSupportedProtocols(t *testing.T) {
 	testCases := []struct {
@@ -1412,6 +1457,7 @@ func (c *concurrentHealthChecker) MaximumActive() int {
 type fakeHealthCoordinator struct {
 	mu                sync.Mutex
 	owned             bool
+	foreignLease      time.Duration
 	heartbeatFailures int
 	heartbeatCalls    int
 	acquisitions      int
@@ -1457,13 +1503,21 @@ func (c *fakeHealthCoordinator) AcquireHealthOwner(_ context.Context, request He
 
 	c.acquisitions++
 
-	return HealthOwnershipRecord{
+	record := HealthOwnershipRecord{
 		InstanceID:        request.InstanceID,
 		OwnerInstanceID:   request.InstanceID,
 		BackendIdentifier: request.BackendIdentifier,
 		FencingToken:      1,
 		Owned:             c.owned,
-	}, nil
+	}
+
+	if !c.owned && c.foreignLease > 0 {
+		record.OwnerInstanceID = "director-other"
+		record.ServerTime = time.Unix(1000, 0)
+		record.ExpiresAt = record.ServerTime.Add(c.foreignLease)
+	}
+
+	return record, nil
 }
 
 // RenewHealthOwner is unused by the current runner but satisfies the coordinator contract.

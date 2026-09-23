@@ -20,6 +20,7 @@ package placement
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -479,6 +480,52 @@ func TestServiceRepairsReservationsBeforeInitialSelection(t *testing.T) {
 
 	if store.reapBackendCalls != 1 {
 		t.Fatalf("backend reservation reap calls = %d, want one candidate repair", store.reapBackendCalls)
+	}
+}
+
+// TestServiceRateLimitsReservationRepairPerBackend keeps bucket-wide repair off the per-login path.
+func TestServiceRateLimitsReservationRepairPerBackend(t *testing.T) {
+	store := &placementStoreFixture{}
+	selector := &placementSelectorFixture{registry: placementRegistryFixture()}
+	service := mustPlacementService(t, selector, store)
+	now := time.Unix(1000, 0)
+	service.reservationRepair.now = func() time.Time { return now }
+
+	for index := range 3 {
+		if _, err := service.PlaceSession(context.Background(), placementRequest(fmt.Sprintf("session-throttled-%d", index), placementShardA)); err != nil {
+			t.Fatalf("PlaceSession %d returned error: %v", index, err)
+		}
+	}
+
+	if store.reapBackendCalls != 1 {
+		t.Fatalf("backend reservation reap calls within one interval = %d, want 1", store.reapBackendCalls)
+	}
+
+	now = now.Add(reservationRepairInterval)
+
+	if _, err := service.PlaceSession(context.Background(), placementRequest("session-throttled-next", placementShardA)); err != nil {
+		t.Fatalf("PlaceSession after interval returned error: %v", err)
+	}
+
+	if store.reapBackendCalls != 2 {
+		t.Fatalf("backend reservation reap calls after interval = %d, want 2", store.reapBackendCalls)
+	}
+}
+
+// TestServiceRetriesReservationRepairAfterFailure keeps a failed repair from suppressing the next attempt.
+func TestServiceRetriesReservationRepairAfterFailure(t *testing.T) {
+	store := &placementStoreFixture{reapBackendErr: errors.New("redis unavailable")}
+	selector := &placementSelectorFixture{registry: placementRegistryFixture()}
+	service := mustPlacementService(t, selector, store)
+
+	for index := range 2 {
+		if _, err := service.PlaceSession(context.Background(), placementRequest(fmt.Sprintf("session-retry-%d", index), placementShardA)); err == nil {
+			t.Fatalf("PlaceSession %d returned nil error, want repair failure", index)
+		}
+	}
+
+	if store.reapBackendCalls != 2 {
+		t.Fatalf("backend reservation reap calls after failures = %d, want 2", store.reapBackendCalls)
 	}
 }
 

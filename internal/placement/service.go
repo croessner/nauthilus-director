@@ -186,10 +186,11 @@ type LeaseHandle interface {
 
 // Service coordinates backend-node placement, holder state and reservations.
 type Service struct {
-	registry     backend.Registry
-	selector     backend.Selector
-	nodeSelector BackendNodeSelector
-	store        StateStore
+	registry          backend.Registry
+	selector          backend.Selector
+	nodeSelector      BackendNodeSelector
+	store             StateStore
+	reservationRepair *reservationRepairSchedule
 }
 
 // NewService creates a shared placement service over registry, selector and state.
@@ -212,10 +213,11 @@ func NewService(registry backend.Registry, selector backend.Selector, store Stat
 	}
 
 	return &Service{
-		registry:     registry,
-		selector:     selector,
-		nodeSelector: nodeSelector,
-		store:        store,
+		registry:          registry,
+		selector:          selector,
+		nodeSelector:      nodeSelector,
+		store:             store,
+		reservationRepair: newReservationRepairSchedule(reservationRepairInterval),
 	}, nil
 }
 
@@ -380,6 +382,9 @@ func (s *Service) selectInitialBackend(
 }
 
 // repairInitialBackendReservations repairs expired capacity leases before they influence selection.
+//
+// Each backend is repaired at most once per interval per process; the repair
+// reads every reservation bucket and would otherwise multiply per-login load.
 func (s *Service) repairInitialBackendReservations(ctx context.Context, request Request, shardTag string) error {
 	candidates, err := s.registry.BackendsForShard(ctx, backend.RegistryRequest{
 		Protocol:    request.Protocol,
@@ -395,11 +400,17 @@ func (s *Service) repairInitialBackendReservations(ctx context.Context, request 
 	}
 
 	for _, candidate := range candidates {
+		if !s.reservationRepair.claim(candidate.Identifier) {
+			continue
+		}
+
 		_, err = s.store.ReapBackendReservations(ctx, state.BackendReservationReapRequest{
 			BackendIdentifier: candidate.Identifier,
 			Limit:             reservationRepairLimit,
 		})
 		if err != nil {
+			s.reservationRepair.release(candidate.Identifier)
+
 			return err
 		}
 	}

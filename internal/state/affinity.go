@@ -116,14 +116,18 @@ type SessionBackendAttachment struct {
 
 // SessionBackendRecord describes the attached backend count and session generation.
 type SessionBackendRecord struct {
-	Status             string
-	BackendIdentifier  string
-	BackendNode        string
-	ReservationID      string
+	Status            string
+	BackendIdentifier string
+	BackendNode       string
+	ReservationID     string
+	// BackendActiveCount is the active count of the reservation bucket that owns
+	// this session's capacity; BackendSnapshot reports the backend-wide total.
 	BackendActiveCount int
 	ServerTime         time.Time
 	LeaseExpiresAt     time.Time
 	ControlGeneration  string
+
+	replacedReservationID string
 }
 
 // BackendReservationRequest asks Redis to reserve one backend capacity slot.
@@ -148,13 +152,18 @@ type BackendReservationReapRequest struct {
 
 // BackendReservationRecord describes one backend reservation mutation result.
 type BackendReservationRecord struct {
-	Status             string
-	BackendIdentifier  string
-	ReservationID      string
+	Status            string
+	BackendIdentifier string
+	// ReservationID is the bucket-bound identifier to use for refresh and release.
+	ReservationID string
+	// BackendActiveCount is the owning bucket's count after reserve or release,
+	// and the backend-wide total after ReapBackendReservations.
 	BackendActiveCount int
 	RepairedCount      int
 	ServerTime         time.Time
 	LeaseExpiresAt     time.Time
+
+	created int
 }
 
 // RuntimeSessionRecord describes one Redis-visible frontend session for control reads.

@@ -268,3 +268,102 @@ func TestRedisClusterReaperPreservesReplacedLocator(t *testing.T) {
 		t.Fatal("delayed cleanup removed a newer due entry")
 	}
 }
+
+// TestRedisClusterSlotFunctionMatchesServer proves the local slot function equals CLUSTER KEYSLOT.
+func TestRedisClusterSlotFunctionMatchesServer(t *testing.T) {
+	store := clusterContractStore(t)
+	keys := []string{store.keys.BackendIndexKey(), store.keys.AggregateRepairKey()}
+	for _, backendID := range []string{testBackendIMAP, testBackendLMTP, "sink-imap"} {
+		for bucket := range store.keys.BackendReservationBucketCount() {
+			group, _ := store.keys.BackendReservationBucketKeys(backendID, bucket)
+			keys = append(keys, group.State, group.Due)
+		}
+		legacy, _ := store.keys.LegacyBackendReservationKeys(backendID)
+		owner, _ := store.keys.HealthOwnerKey(backendID)
+		health, _ := store.keys.HealthStateKey(backendID)
+		legacyHealth, _ := store.keys.LegacyHealthStateKey(backendID)
+		keys = append(keys, legacy.State, owner, health, legacyHealth)
+	}
+	for _, group := range append(store.keys.AggregateKeyGroups(), store.keys.LegacyAggregateKeys()) {
+		keys = append(keys, append(group.sessionScriptKeys(), group.IdleAffinities)...)
+	}
+	for _, key := range keys {
+		want, err := store.client.ClusterKeySlot(t.Context(), key).Result()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := redisClusterSlot(key); int64(got) != want {
+			t.Fatalf("slot(%q) = %d, server = %d", key, got, want)
+		}
+	}
+}
+
+// TestRedisClusterBucketedStateOperations runs every bucketed and mixed-version contract through real Cluster routing.
+func TestRedisClusterBucketedStateOperations(t *testing.T) {
+	for name, exercise := range map[string]func(*testing.T, *RedisSessionStore, redis.Cmdable){
+		"rolling reservations": exerciseRollingUpgradeReservations,
+		"rolling aggregates":   exerciseRollingUpgradeAggregates,
+		"rolling health":       exerciseRollingUpgradeHealth,
+		"capacity race":        exerciseReservationCapacityRace,
+	} {
+		t.Run(name, func(t *testing.T) {
+			store := clusterContractStore(t)
+			exercise(t, store, store.client)
+		})
+	}
+}
+
+// TestRedisClusterDistributesBucketedState verifies one busy backend's state reaches every master evenly.
+func TestRedisClusterDistributesBucketedState(t *testing.T) {
+	store := clusterContractStore(t)
+	const sessions = 120
+	for i := range sessions {
+		key := AffinityKey{Tenant: "cluster-test", AccountKey: fmt.Sprintf("bucket-%d@example.test", i)}
+		sessionID := fmt.Sprintf("bucket-session-%03d", i)
+		if _, err := store.OpenSession(t.Context(), testSessionRecord(key, sessionID)); err != nil {
+			t.Fatal(err)
+		}
+		reservation, err := store.ReserveBackendCapacity(t.Context(), BackendReservationRequest{BackendIdentifier: "sink-imap", ReservationID: sessionID, MaxConnections: 1000, LeaseTTL: time.Minute})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.AttachSelectedBackend(t.Context(), SessionBackendAttachment{Key: key, SessionID: sessionID, BackendIdentifier: "sink-imap", BackendNode: testBackendNodeA, ReservationID: reservation.ReservationID, MaxConnections: 1000}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	client := store.client.(*redis.ClusterClient)
+	var mu sync.Mutex
+	counts := make(map[string][2]int)
+	err := client.ForEachMaster(t.Context(), func(ctx context.Context, node *redis.Client) error {
+		var found [2]int
+		for index, pattern := range []string{":{backend:*}:runtime:backend:sink-imap:reservations", ":{agg:*}:runtime:aggregates:sessions"} {
+			iterator := node.Scan(ctx, 0, store.keys.namespaceBase()+pattern, 100).Iterator()
+			for iterator.Next(ctx) {
+				found[index]++
+			}
+			if err := iterator.Err(); err != nil {
+				return err
+			}
+		}
+		mu.Lock()
+		counts[node.Options().Addr] = found
+		mu.Unlock()
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(counts) != 3 {
+		t.Fatalf("masters = %v", counts)
+	}
+	for address, found := range counts {
+		if found[0] != store.keys.BackendReservationBucketCount()/3 || found[1] != store.keys.AggregateBucketCount()/3 {
+			t.Fatalf("master %s holds %d reservation buckets and %d aggregate groups, want an equal third: %v", address, found[0], found[1], counts)
+		}
+	}
+	total, err := store.backendReservationActiveCount(t.Context(), "sink-imap")
+	if err != nil || total != sessions {
+		t.Fatalf("backend-wide reservations = %d, %v; want %d", total, err, sessions)
+	}
+	t.Logf("reservation buckets / aggregate groups per master: %v", counts)
+}

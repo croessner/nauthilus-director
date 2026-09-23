@@ -270,10 +270,11 @@ func openStressSessions(ctx context.Context, store *state.RedisSessionStore, con
 	for index := range config.Sessions {
 		item := stressSessionForIndex(index)
 		started := time.Now()
-		err := openOneStressSession(ctx, store, item, config.LeaseTTL, maxConnections(config))
+		reservationID, err := openOneStressSession(ctx, store, item, config.LeaseTTL, maxConnections(config))
 		stats.Observe(time.Since(started), err)
 
 		if err == nil {
+			item.ReservationID = reservationID
 			sessions = append(sessions, item)
 		}
 	}
@@ -287,10 +288,11 @@ func openExpiredStressSessions(ctx context.Context, store *state.RedisSessionSto
 	for index := range config.ReapExpired {
 		item := stressSessionForIndex(config.Sessions + index)
 		started := time.Now()
-		err := openOneStressSession(ctx, store, item, 20*time.Millisecond, maxConnections(config)+config.ReapExpired)
+		reservationID, err := openOneStressSession(ctx, store, item, 20*time.Millisecond, maxConnections(config)+config.ReapExpired)
 		stats.Observe(time.Since(started), err)
 
 		if err == nil {
+			item.ReservationID = reservationID
 			sessions = append(sessions, item)
 		}
 	}
@@ -301,31 +303,36 @@ func openExpiredStressSessions(ctx context.Context, store *state.RedisSessionSto
 }
 
 // openOneStressSession reserves backend capacity, opens a lease and attaches the backend.
+//
+// It returns the bucket-bound reservation identifier issued by the store.
 func openOneStressSession(
 	ctx context.Context,
 	store *state.RedisSessionStore,
 	item stressSession,
 	leaseTTL time.Duration,
 	maxConnections int,
-) error {
-	if _, err := store.ReserveBackendCapacity(ctx, state.BackendReservationRequest{BackendIdentifier: defaultBackendID, ReservationID: item.ReservationID, MaxConnections: maxConnections, LeaseTTL: leaseTTL}); err != nil {
-		return err
+) (string, error) {
+	reservation, err := store.ReserveBackendCapacity(ctx, state.BackendReservationRequest{BackendIdentifier: defaultBackendID, ReservationID: item.ReservationID, MaxConnections: maxConnections, LeaseTTL: leaseTTL})
+	if err != nil {
+		return "", err
 	}
+
+	release := state.BackendReservationReleaseRequest{BackendIdentifier: defaultBackendID, ReservationID: reservation.ReservationID}
 
 	if _, err := store.OpenSession(ctx, state.SessionRecord{ID: item.SessionID, Key: item.Key, Protocol: defaultProtocolIMAP, ListenerName: defaultProtocolIMAP, ServiceName: defaultProtocolIMAP, ShardTag: "scale-shard-a", DirectorInstanceID: "scale-harness", LeaseTTL: leaseTTL, IdleGrace: time.Minute}); err != nil {
-		_, _ = store.ReleaseBackendReservation(ctx, state.BackendReservationReleaseRequest{BackendIdentifier: defaultBackendID, ReservationID: item.ReservationID})
+		_, _ = store.ReleaseBackendReservation(ctx, release)
 
-		return err
+		return "", err
 	}
 
-	if _, err := store.AttachSelectedBackend(ctx, state.SessionBackendAttachment{Key: item.Key, SessionID: item.SessionID, BackendIdentifier: defaultBackendID, ReservationID: item.ReservationID, MaxConnections: maxConnections}); err != nil {
-		_, _ = store.ReleaseBackendReservation(ctx, state.BackendReservationReleaseRequest{BackendIdentifier: defaultBackendID, ReservationID: item.ReservationID})
+	if _, err := store.AttachSelectedBackend(ctx, state.SessionBackendAttachment{Key: item.Key, SessionID: item.SessionID, BackendIdentifier: defaultBackendID, ReservationID: reservation.ReservationID, MaxConnections: maxConnections}); err != nil {
+		_, _ = store.ReleaseBackendReservation(ctx, release)
 		_, _ = store.CloseSession(ctx, item.Key, item.SessionID)
 
-		return err
+		return "", err
 	}
 
-	return nil
+	return reservation.ReservationID, nil
 }
 
 // heartbeatStressSessions refreshes a bounded sample of active sessions.
@@ -553,7 +560,6 @@ func stressSessionForIndex(index int) stressSession {
 // summarizeSlots computes a Redis Cluster slot spread over synthetic key groups.
 func summarizeSlots(builder state.KeyBuilder, sessions []stressSession) slotSummary {
 	counts := make(map[int]int)
-	reservationKeys, reservationErr := builder.BackendReservationKeys(defaultBackendID)
 
 	for _, item := range sessions {
 		sessionKey, err := builder.SessionKey(item.Key.Tenant, item.Key.AccountKey, item.SessionID)
@@ -561,7 +567,8 @@ func summarizeSlots(builder state.KeyBuilder, sessions []stressSession) slotSumm
 			counts[redisSlot(sessionKey)]++
 		}
 
-		if reservationErr == nil {
+		reservationKeys, err := builder.BackendReservationGroupKeys(defaultBackendID, item.ReservationID)
+		if err == nil {
 			counts[redisSlot(reservationKeys.State)]++
 		}
 	}

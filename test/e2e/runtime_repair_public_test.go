@@ -243,11 +243,15 @@ func seedRuntimeAggregateOnlyDrift(t *testing.T, redisAddress string, shard stri
 		if err != nil {
 			t.Fatalf("marshal aggregate marker: %v", err)
 		}
-		if err := client.HSet(context.Background(), builder.AggregateSessionMarkerKey(), sessionID, string(encoded)).Err(); err != nil {
+		group, err := builder.AggregateSessionKeys(sessionID)
+		if err != nil {
+			t.Fatalf("aggregate keys %s: %v", sessionID, err)
+		}
+		if err := client.HSet(context.Background(), group.Sessions, sessionID, string(encoded)).Err(); err != nil {
 			t.Fatalf("seed aggregate marker %s: %v", sessionID, err)
 		}
 		for _, dimension := range []string{"backend", "listener", "protocol", "service", "shard_tag"} {
-			if err := client.HIncrBy(context.Background(), builder.AggregateActiveDimensionKey(dimension), dimensions[dimension], 1).Err(); err != nil {
+			if err := client.HIncrBy(context.Background(), group.Dimension(dimension), dimensions[dimension], 1).Err(); err != nil {
 				t.Fatalf("seed aggregate counter %s: %v", dimension, err)
 			}
 		}

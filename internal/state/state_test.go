@@ -24,6 +24,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -334,24 +335,38 @@ func TestBackendReservationScriptWrappersUseBackendOwnedKeys(t *testing.T) {
 	builder := mustKeyBuilder(t)
 	store := &RedisSessionStore{keys: builder}
 
-	keys, err := builder.BackendReservationKeys(testBackendIMAP)
+	keys, err := builder.BackendReservationBucketKeys(testBackendIMAP, 3)
 	if err != nil {
-		t.Fatalf("BackendReservationKeys returned error: %v", err)
+		t.Fatalf("BackendReservationBucketKeys returned error: %v", err)
+	}
+
+	legacy, err := builder.LegacyBackendReservationKeys(testBackendIMAP)
+	if err != nil {
+		t.Fatalf("LegacyBackendReservationKeys returned error: %v", err)
 	}
 
 	for _, operation := range []string{scriptBackendReserve, scriptBackendRelease, scriptBackendReap} {
-		if err := store.validateScriptKeys(operation, []string{keys.State, keys.Due}); err != nil {
-			t.Fatalf("validateScriptKeys(%s) returned error: %v", operation, err)
+		for _, group := range []BackendReservationKeys{keys, legacy} {
+			if err := store.validateScriptKeys(operation, []string{group.State, group.Due}); err != nil {
+				t.Fatalf("validateScriptKeys(%s) returned error: %v", operation, err)
+			}
 		}
 	}
 
-	other, err := builder.BackendReservationKeys(testBackendLMTP)
+	other, err := builder.BackendReservationBucketKeys(testBackendLMTP, 3)
 	if err != nil {
-		t.Fatalf("BackendReservationKeys other returned error: %v", err)
+		t.Fatalf("BackendReservationBucketKeys other returned error: %v", err)
 	}
 
-	if err := store.validateScriptKeys(scriptBackendReserve, []string{keys.State, other.Due}); !IsRedisErrorKind(err, RedisErrorKindConfig) {
-		t.Fatalf("mixed backend reservation keys error = %v, want config", err)
+	sibling, err := builder.BackendReservationBucketKeys(testBackendIMAP, 4)
+	if err != nil {
+		t.Fatalf("BackendReservationBucketKeys sibling returned error: %v", err)
+	}
+
+	for _, mixed := range [][]string{{keys.State, other.Due}, {keys.State, sibling.Due}, {keys.State, legacy.Due}} {
+		if err := store.validateScriptKeys(scriptBackendReserve, mixed); !IsRedisErrorKind(err, RedisErrorKindConfig) {
+			t.Fatalf("mixed backend reservation keys %v error = %v, want config", mixed, err)
+		}
 	}
 }
 
@@ -455,8 +470,13 @@ func TestBackendAndIndexKeysFollowRuntimeShape(t *testing.T) {
 		t.Fatalf("InstanceKey returned error: %v", err)
 	}
 
-	if instanceKey != "nd:v1:{health}:runtime:instance:director-a" {
+	if instanceKey != "nd:v1:runtime:instance:director-a" {
 		t.Fatalf("instance key = %q", instanceKey)
+	}
+
+	backendHash, err := builder.BackendHash(testBackendIMAP)
+	if err != nil {
+		t.Fatalf("BackendHash returned error: %v", err)
 	}
 
 	ownerKey, err := builder.HealthOwnerKey(testBackendIMAP)
@@ -464,7 +484,7 @@ func TestBackendAndIndexKeysFollowRuntimeShape(t *testing.T) {
 		t.Fatalf("HealthOwnerKey returned error: %v", err)
 	}
 
-	if ownerKey != "nd:v1:{health}:health:backend:"+testBackendIMAP+":owner" {
+	if ownerKey != "nd:v1:{health:"+backendHash+"}:health:backend:"+testBackendIMAP+":owner" {
 		t.Fatalf("health owner key = %q", ownerKey)
 	}
 
@@ -473,8 +493,17 @@ func TestBackendAndIndexKeysFollowRuntimeShape(t *testing.T) {
 		t.Fatalf("HealthStateKey returned error: %v", err)
 	}
 
-	if healthKey != "nd:v1:{health}:health:backend:"+testBackendIMAP+":state" {
+	if healthKey != "nd:v1:{health:"+backendHash+"}:health:backend:"+testBackendIMAP+":state" {
 		t.Fatalf("health state key = %q", healthKey)
+	}
+
+	legacyHealthKey, err := builder.LegacyHealthStateKey(testBackendIMAP)
+	if err != nil {
+		t.Fatalf("LegacyHealthStateKey returned error: %v", err)
+	}
+
+	if legacyHealthKey != "nd:v1:{health}:health:backend:"+testBackendIMAP+":state" {
+		t.Fatalf("legacy health state key = %q", legacyHealthKey)
 	}
 
 	backendSessions, err := builder.BackendSessionIndexKey(testBackendIMAP)
@@ -486,17 +515,26 @@ func TestBackendAndIndexKeysFollowRuntimeShape(t *testing.T) {
 		t.Fatalf("backend session index key = %q", backendSessions)
 	}
 
-	reservationKeys, err := builder.BackendReservationKeys(testBackendIMAP)
+	reservationKeys, err := builder.BackendReservationBucketKeys(testBackendIMAP, 0)
 	if err != nil {
-		t.Fatalf("BackendReservationKeys returned error: %v", err)
+		t.Fatalf("BackendReservationBucketKeys returned error: %v", err)
 	}
 
-	if !strings.HasPrefix(reservationKeys.State, "nd:v1:{backend:") || !strings.HasSuffix(reservationKeys.State, ":runtime:backend:"+testBackendIMAP+":reservations") {
+	if !strings.HasPrefix(reservationKeys.State, "nd:v1:{backend:"+backendHash+":00.") || !strings.HasSuffix(reservationKeys.State, ":runtime:backend:"+testBackendIMAP+":reservations") {
 		t.Fatalf("backend reservation key = %q", reservationKeys.State)
 	}
 
 	if got := redisHashTag(t, reservationKeys.Due); got != redisHashTag(t, reservationKeys.State) {
 		t.Fatalf("backend reservation due hash tag = %q, want %q", got, redisHashTag(t, reservationKeys.State))
+	}
+
+	legacyReservationKeys, err := builder.LegacyBackendReservationKeys(testBackendIMAP)
+	if err != nil {
+		t.Fatalf("LegacyBackendReservationKeys returned error: %v", err)
+	}
+
+	if legacyReservationKeys.State != "nd:v1:{backend:"+backendHash+"}:runtime:backend:"+testBackendIMAP+":reservations" {
+		t.Fatalf("legacy backend reservation key = %q", legacyReservationKeys.State)
 	}
 
 	if got := builder.UserIndexKey(); got != "nd:v1:idx:users" {
@@ -966,16 +1004,25 @@ func TestRuntimeAggregatesAreIdempotentAndUnderflowSafe(t *testing.T) {
 		t.Fatalf("protocol aggregate = %d, want 1", got)
 	}
 
-	store.decrementAggregateCounters(context.Background(), aggregateSessionDimensions{
+	notCounted, err := builder.AggregateSessionKeys("not-counted")
+	if err != nil {
+		t.Fatalf("AggregateSessionKeys returned error: %v", err)
+	}
+
+	store.adjustAggregateCounters(context.Background(), notCounted, aggregateSessionDimensions{
 		SessionID:    "not-counted",
 		Protocol:     testProtocolPOP3,
 		ListenerName: testProtocolPOP3,
 		ServiceName:  testProtocolPOP3,
 		ShardTag:     testShardC,
-	})
+	}, -1)
 
-	if got := aggregateHashField(t, store, builder.AggregateActiveDimensionKey(aggregateDimensionProtocol), testProtocolPOP3); got != "" {
+	if got := aggregateHashField(t, store, notCounted.Protocol, testProtocolPOP3); got != "" {
 		t.Fatalf("underflow field = %q, want absent", got)
+	}
+
+	if removed, err := store.removeAggregateMarker(context.Background(), notCounted, "not-counted"); err != nil || removed {
+		t.Fatalf("removeAggregateMarker absent = %v, %v; want false, nil", removed, err)
 	}
 
 	if _, err := store.CloseSession(context.Background(), key, sessionID); err != nil {
@@ -1012,12 +1059,13 @@ func TestReaperUpdatesRuntimeAggregateRepairCounters(t *testing.T) {
 	cleanupAffinity(t, client, builder, key, sessionID)
 	cleanupBackend(t, client, builder, testBackendIMAP)
 
-	if _, err := store.ReserveBackendCapacity(context.Background(), BackendReservationRequest{
+	reservation, err := store.ReserveBackendCapacity(context.Background(), BackendReservationRequest{
 		BackendIdentifier: testBackendIMAP,
 		ReservationID:     reservationID,
 		MaxConnections:    10,
 		LeaseTTL:          time.Second,
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("ReserveBackendCapacity returned error: %v", err)
 	}
 
@@ -1033,7 +1081,7 @@ func TestReaperUpdatesRuntimeAggregateRepairCounters(t *testing.T) {
 		Key:               key,
 		SessionID:         sessionID,
 		BackendIdentifier: testBackendIMAP,
-		ReservationID:     reservationID,
+		ReservationID:     reservation.ReservationID,
 		MaxConnections:    10,
 	}); err != nil {
 		t.Fatalf("AttachSelectedBackend returned error: %v", err)
@@ -1130,7 +1178,7 @@ func TestRedisRuntimeAggregateReconcileDrift(t *testing.T) {
 	if got := runtimeDimensionCount(summary.ActiveSessions.ByShardTag, obsoleteShard); got != 0 {
 		t.Fatalf("obsolete shard aggregate count = %d, want 0", got)
 	}
-	if markerCount := client.HLen(context.Background(), builder.AggregateSessionMarkerKey()).Val(); markerCount != 0 {
+	if markerCount := aggregateMarkerCountForTest(t, client, builder); markerCount != 0 {
 		t.Fatalf("aggregate markers = %d, want 0", markerCount)
 	}
 }
@@ -1169,7 +1217,7 @@ func TestRedisRuntimeAggregateReconcileDryRun(t *testing.T) {
 	if summary.ActiveSessions.Total.Count != len(sessionIDs) {
 		t.Fatalf("dry-run active total = %d, want unchanged %d", summary.ActiveSessions.Total.Count, len(sessionIDs))
 	}
-	if markerCount := client.HLen(context.Background(), builder.AggregateSessionMarkerKey()).Val(); markerCount != int64(len(sessionIDs)) {
+	if markerCount := aggregateMarkerCountForTest(t, client, builder); markerCount != int64(len(sessionIDs)) {
 		t.Fatalf("dry-run aggregate markers = %d, want unchanged %d", markerCount, len(sessionIDs))
 	}
 }
@@ -1210,7 +1258,7 @@ func TestRedisRuntimeAggregateReconcileCorruptAuthoritative(t *testing.T) {
 	if exists := client.Exists(context.Background(), sessionKey).Val(); exists != 1 {
 		t.Fatalf("corrupt authoritative session exists = %d, want preserved", exists)
 	}
-	if markerCount := client.HLen(context.Background(), builder.AggregateSessionMarkerKey()).Val(); markerCount != 1 {
+	if markerCount := aggregateMarkerCountForTest(t, client, builder); markerCount != 1 {
 		t.Fatalf("aggregate markers = %d, want conflict marker preserved", markerCount)
 	}
 }
@@ -1223,10 +1271,11 @@ func TestRedisRuntimeAggregateReconcileMalformedMarkerWithoutAuthoritativeSessio
 
 	cleanupRuntimeAggregateState(t, client, builder)
 
-	if err := client.HSet(context.Background(), builder.AggregateSessionMarkerKey(), sessionID, "{not-json").Err(); err != nil {
+	group := aggregateSessionGroupForTest(t, builder, sessionID)
+	if err := client.HSet(context.Background(), group.Sessions, sessionID, "{not-json").Err(); err != nil {
 		t.Fatalf("seed malformed aggregate marker: %v", err)
 	}
-	if err := client.HSet(context.Background(), builder.AggregateActiveDimensionKey(aggregateDimensionShardTag), obsoleteShard, 1).Err(); err != nil {
+	if err := client.HSet(context.Background(), group.ShardTag, obsoleteShard, 1).Err(); err != nil {
 		t.Fatalf("seed obsolete shard counter: %v", err)
 	}
 
@@ -1282,11 +1331,12 @@ func TestRedisRuntimeAggregateReconcileShardTagRename(t *testing.T) {
 		t.Fatalf("encode obsolete aggregate marker: %v", err)
 	}
 
-	if err := client.HSet(context.Background(), builder.AggregateSessionMarkerKey(), sessionID, encoded).Err(); err != nil {
+	group := aggregateSessionGroupForTest(t, builder, sessionID)
+	if err := client.HSet(context.Background(), group.Sessions, sessionID, encoded).Err(); err != nil {
 		t.Fatalf("seed obsolete aggregate marker: %v", err)
 	}
-	store.decrementAggregateCounters(context.Background(), current)
-	store.incrementAggregateCounters(context.Background(), obsolete)
+	store.adjustAggregateCounters(context.Background(), group, current, -1)
+	store.adjustAggregateCounters(context.Background(), group, obsolete, 1)
 
 	record, err := store.ReconcileRuntimeAggregates(context.Background(), RuntimeAggregateReconcileRequest{
 		Limit:           10,
@@ -1934,9 +1984,9 @@ func TestRedisBackendAttachAndCloseCountsExactlyOnce(t *testing.T) {
 		t.Fatalf("redis backend active count = %d, want 1", count)
 	}
 
-	reservationKeys, err := builder.BackendReservationKeys(backendID)
+	reservationKeys, err := builder.BackendReservationBucketKeys(backendID, parseBackendReservationRef(reservation.ReservationID).Bucket)
 	if err != nil {
-		t.Fatalf("BackendReservationKeys returned error: %v", err)
+		t.Fatalf("BackendReservationBucketKeys returned error: %v", err)
 	}
 
 	beforeHeartbeat := client.ZScore(context.Background(), reservationKeys.Due, reservation.ReservationID).Val()
@@ -1968,16 +2018,28 @@ func TestRedisBackendReservationsEnforceCapacity(t *testing.T) {
 
 	cleanupBackend(t, client, builder, backendID)
 
-	assertBackendReservationCount(t, reserveBackendForTest(t, store, backendID, testReservationOne, 2), 1, "first reservation")
+	first := reserveBackendForTest(t, store, backendID, testReservationOne, 2)
+	assertBackendReservationCount(t, first, 1, "first reservation")
 	assertBackendReservationCount(t, reserveBackendForTest(t, store, backendID, testReservationOne, 2), 1, "idempotent reservation")
-	assertBackendReservationCount(t, reserveBackendForTest(t, store, backendID, testReservationTwo, 2), 2, "second reservation")
+	assertBackendReservationCount(t, reserveBackendForTest(t, store, backendID, first.ReservationID, 2), 1, "idempotent refresh")
+
+	if count := redisBackendActiveCount(t, client, builder, backendID); count != 1 {
+		t.Fatalf("backend active count after idempotent reservations = %d, want 1", count)
+	}
+
+	second := reserveBackendForTest(t, store, backendID, testReservationTwo, 2)
+
+	if count := redisBackendActiveCount(t, client, builder, backendID); count != 2 {
+		t.Fatalf("backend active count after second reservation = %d, want 2", count)
+	}
+
 	assertBackendReservationCapacityFull(t, store, backendID, testReservationThree)
-	assertBackendReservationRelease(t, store, backendID, testReservationOne, 1, 1, "release")
-	assertBackendReservationRelease(t, store, backendID, testReservationOne, 1, 0, "repeated release")
+	assertBackendReservationRelease(t, store, backendID, first.ReservationID, 0, 1, "release")
+	assertBackendReservationRelease(t, store, backendID, first.ReservationID, 0, 0, "repeated release")
 
 	if _, err := store.ReleaseBackendReservation(context.Background(), BackendReservationReleaseRequest{
 		BackendIdentifier: backendID,
-		ReservationID:     testReservationTwo,
+		ReservationID:     second.ReservationID,
 	}); err != nil {
 		t.Fatalf("release second reservation returned error: %v", err)
 	}
@@ -1994,12 +2056,13 @@ func TestRedisBackendReservationReapRepairsExpiredReservations(t *testing.T) {
 
 	cleanupBackend(t, client, builder, backendID)
 
-	if _, err := store.ReserveBackendCapacity(context.Background(), BackendReservationRequest{
+	expired, err := store.ReserveBackendCapacity(context.Background(), BackendReservationRequest{
 		BackendIdentifier: backendID,
 		ReservationID:     testExpiredReserve,
 		MaxConnections:    1,
 		LeaseTTL:          25 * time.Millisecond,
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("ReserveBackendCapacity returned error: %v", err)
 	}
 
@@ -2019,7 +2082,7 @@ func TestRedisBackendReservationReapRepairsExpiredReservations(t *testing.T) {
 
 	if _, err := store.ReleaseBackendReservation(context.Background(), BackendReservationReleaseRequest{
 		BackendIdentifier: backendID,
-		ReservationID:     testExpiredReserve,
+		ReservationID:     expired.ReservationID,
 	}); err != nil {
 		t.Fatalf("release after reap returned error: %v", err)
 	}
@@ -4881,14 +4944,15 @@ func cleanupBackend(t *testing.T, client *redis.Client, builder KeyBuilder, back
 		t.Fatalf("BackendSessionIndexShardKeys returned error: %v", err)
 	}
 
-	reservationKeys, err := builder.BackendReservationKeys(backendID)
-	if err != nil {
-		t.Fatalf("BackendReservationKeys returned error: %v", err)
+	redisKeys := append([]string{backendKey}, backendSessionsKeys...)
+	for _, group := range backendReservationGroupsForTest(t, builder, backendID) {
+		redisKeys = append(redisKeys, group.State, group.Due)
 	}
 
-	redisKeys := append([]string{backendKey, reservationKeys.State, reservationKeys.Due}, backendSessionsKeys...)
-	if err := client.Del(context.Background(), redisKeys...).Err(); err != nil {
-		t.Fatalf("cleanup backend keys: %v", err)
+	for _, key := range redisKeys {
+		if err := client.Del(context.Background(), key).Err(); err != nil {
+			t.Fatalf("cleanup backend keys: %v", err)
+		}
 	}
 
 	if err := client.SRem(context.Background(), builder.BackendIndexKey(), backendID).Err(); err != nil {
@@ -4949,20 +5013,41 @@ func assertRuntimeAuthoritativeReadsClean(t *testing.T, store *RedisSessionStore
 func cleanupRuntimeAggregateState(t *testing.T, client *redis.Client, builder KeyBuilder) {
 	t.Helper()
 
-	keys := []string{
-		builder.AggregateSessionMarkerKey(),
-		builder.AggregateActiveDimensionKey(aggregateDimensionBackend),
-		builder.AggregateActiveDimensionKey(aggregateDimensionListener),
-		builder.AggregateActiveDimensionKey(aggregateDimensionProtocol),
-		builder.AggregateActiveDimensionKey(aggregateDimensionService),
-		builder.AggregateActiveDimensionKey(aggregateDimensionShardTag),
-		builder.AggregateActiveDimensionKey("reserved_backend"),
-		builder.AggregateIdleAffinityKey(),
-		builder.AggregateRepairKey(),
+	keys := []string{builder.AggregateRepairKey(), builder.LegacyAggregateReservedBackendKey()}
+	for _, group := range append(builder.AggregateKeyGroups(), builder.LegacyAggregateKeys()) {
+		keys = append(keys, group.sessionScriptKeys()...)
+		keys = append(keys, group.IdleAffinities)
 	}
-	if err := client.Del(context.Background(), keys...).Err(); err != nil {
-		t.Fatalf("cleanup aggregate keys: %v", err)
+
+	for _, key := range keys {
+		if err := client.Del(context.Background(), key).Err(); err != nil {
+			t.Fatalf("cleanup aggregate keys: %v", err)
+		}
 	}
+}
+
+// aggregateSessionGroupForTest returns the bucketed aggregate group of one session.
+func aggregateSessionGroupForTest(t *testing.T, builder KeyBuilder, sessionID string) AggregateKeys {
+	t.Helper()
+
+	group, err := builder.AggregateSessionKeys(sessionID)
+	if err != nil {
+		t.Fatalf("AggregateSessionKeys returned error: %v", err)
+	}
+
+	return group
+}
+
+// aggregateMarkerCountForTest counts aggregate markers across bucketed and legacy groups.
+func aggregateMarkerCountForTest(t *testing.T, client *redis.Client, builder KeyBuilder) int64 {
+	t.Helper()
+
+	total := int64(0)
+	for _, group := range append(builder.AggregateKeyGroups(), builder.LegacyAggregateKeys()) {
+		total += client.HLen(context.Background(), group.Sessions).Val()
+	}
+
+	return total
 }
 
 // seedRuntimeAggregateDrift writes repairable summary markers without authoritative sessions.
@@ -4983,11 +5068,12 @@ func seedRuntimeAggregateDrift(t *testing.T, store *RedisSessionStore, shard str
 			t.Fatalf("encode aggregate dimensions: %v", err)
 		}
 
-		if err := store.client.HSet(context.Background(), store.keys.AggregateSessionMarkerKey(), sessionID, encoded).Err(); err != nil {
+		group := aggregateSessionGroupForTest(t, store.keys, sessionID)
+		if err := store.client.HSet(context.Background(), group.Sessions, sessionID, encoded).Err(); err != nil {
 			t.Fatalf("seed aggregate marker: %v", err)
 		}
 
-		store.incrementAggregateCounters(context.Background(), dimensions)
+		store.adjustAggregateCounters(context.Background(), group, dimensions, 1)
 	}
 }
 
@@ -5041,17 +5127,41 @@ func cleanupHealth(t *testing.T, client *redis.Client, builder KeyBuilder, backe
 func redisBackendActiveCount(t *testing.T, client *redis.Client, builder KeyBuilder, backendID string) int {
 	t.Helper()
 
-	reservationKeys, err := builder.BackendReservationKeys(backendID)
+	total := 0
+
+	for _, group := range backendReservationGroupsForTest(t, builder, backendID) {
+		count, err := client.HGet(context.Background(), group.State, scriptFieldActiveSessionCount).Int()
+		if err != nil && !errors.Is(err, redis.Nil) {
+			t.Fatalf("read backend active count: %v", err)
+		}
+
+		total += count
+	}
+
+	return total
+}
+
+// backendReservationGroupsForTest returns every bucket group followed by the legacy group.
+func backendReservationGroupsForTest(t *testing.T, builder KeyBuilder, backendID string) []BackendReservationKeys {
+	t.Helper()
+
+	groups := make([]BackendReservationKeys, 0, builder.BackendReservationBucketCount()+1)
+
+	for bucket := range builder.BackendReservationBucketCount() {
+		group, err := builder.BackendReservationBucketKeys(backendID, bucket)
+		if err != nil {
+			t.Fatalf("BackendReservationBucketKeys returned error: %v", err)
+		}
+
+		groups = append(groups, group)
+	}
+
+	legacy, err := builder.LegacyBackendReservationKeys(backendID)
 	if err != nil {
-		t.Fatalf("BackendReservationKeys returned error: %v", err)
+		t.Fatalf("LegacyBackendReservationKeys returned error: %v", err)
 	}
 
-	count, err := client.HGet(context.Background(), reservationKeys.State, scriptFieldActiveSessionCount).Int()
-	if err != nil && !errors.Is(err, redis.Nil) {
-		t.Fatalf("read backend active count: %v", err)
-	}
-
-	return count
+	return append(groups, legacy)
 }
 
 // reserveBackendForTest reserves one backend capacity slot for an integration fixture.
@@ -5325,9 +5435,9 @@ func (r *recordingStateObservability) Record(_ context.Context, event observabil
 
 // last returns the latest state observation with the supplied event name.
 func (r *recordingStateObservability) last(name string) (observability.Event, bool) {
-	for index := len(r.events) - 1; index >= 0; index-- {
-		if r.events[index].Name == name {
-			return r.events[index], true
+	for _, v := range slices.Backward(r.events) {
+		if v.Name == name {
+			return v, true
 		}
 	}
 

@@ -44,6 +44,9 @@ type HealthOwnershipRecord = backend.HealthOwnershipRecord
 type HealthPublishRequest = backend.HealthPublishRequest
 
 // PublishInstanceHeartbeat records this director instance as live for health ownership.
+//
+// The marker is write-only for Director code; its successful write gates this
+// process' own owner requests and gives operators a list of live instances.
 func (s *RedisSessionStore) PublishInstanceHeartbeat(ctx context.Context, instanceID string, ttl time.Duration) error {
 	instanceKey, err := s.keys.InstanceKey(instanceID)
 	if err != nil {
@@ -59,7 +62,24 @@ func (s *RedisSessionStore) PublishInstanceHeartbeat(ctx context.Context, instan
 	err = ClassifyRedisError("instance_heartbeat", s.client.Set(redisCtx, instanceKey, "1", ttl).Err())
 	s.recordRedisOperation(redisCtx, "instance_heartbeat", started, err)
 
+	if err == nil {
+		s.local.markInstanceLive(strings.TrimSpace(instanceID), started.Add(ttl))
+	}
+
 	return err
+}
+
+// requireLiveInstance fails closed unless this process published a still-valid heartbeat.
+//
+// The heartbeat key is written only by the owning process, so its local write
+// result and TTL are exact liveness evidence. Checking it here keeps the owner
+// scripts inside one backend slot instead of a shared cross-backend key.
+func (s *RedisSessionStore) requireLiveInstance(instanceID string) error {
+	if !s.local.instanceLive(strings.TrimSpace(instanceID)) {
+		return newStateError(RedisErrorKindAmbiguousState, "health_owner", "instance heartbeat missing", nil)
+	}
+
+	return nil
 }
 
 // AcquireHealthOwner creates or renews a fenced deep-health owner lease.
@@ -68,12 +88,16 @@ func (s *RedisSessionStore) AcquireHealthOwner(ctx context.Context, request Heal
 		return HealthOwnershipRecord{}, err
 	}
 
-	instanceKey, ownerKey, stateKey, err := s.healthOwnershipKeys(request)
+	if err := s.requireLiveInstance(request.InstanceID); err != nil {
+		return HealthOwnershipRecord{}, err
+	}
+
+	ownerKey, stateKey, err := s.healthStateKeys(request.BackendIdentifier)
 	if err != nil {
 		return HealthOwnershipRecord{}, err
 	}
 
-	value, err := s.runScript(ctx, scriptHealthOwnerAcquire, []string{instanceKey, ownerKey, stateKey},
+	value, err := s.runScript(ctx, scriptHealthOwnerAcquire, []string{ownerKey, stateKey},
 		normalizedStateValue(request.InstanceID),
 		normalizedStateValue(request.BackendIdentifier),
 		durationMilliseconds(request.LeaseTTL),
@@ -91,12 +115,16 @@ func (s *RedisSessionStore) RenewHealthOwner(ctx context.Context, request Health
 		return HealthOwnershipRecord{}, err
 	}
 
-	instanceKey, ownerKey, _, err := s.healthOwnershipKeys(request)
+	if err := s.requireLiveInstance(request.InstanceID); err != nil {
+		return HealthOwnershipRecord{}, err
+	}
+
+	ownerKey, _, err := s.healthStateKeys(request.BackendIdentifier)
 	if err != nil {
 		return HealthOwnershipRecord{}, err
 	}
 
-	value, err := s.runScript(ctx, scriptHealthOwnerRenew, []string{instanceKey, ownerKey},
+	value, err := s.runScript(ctx, scriptHealthOwnerRenew, []string{ownerKey},
 		normalizedStateValue(request.InstanceID),
 		normalizedStateValue(request.BackendIdentifier),
 		request.FencingToken,
@@ -138,12 +166,79 @@ func (s *RedisSessionStore) PublishHealthState(ctx context.Context, request Heal
 }
 
 // ReadHealthState reads the last published deep-health result without mutating it.
+//
+// Until a current writer has published a fresh result into the backend's own
+// slot, a fresh result published by earlier releases into the shared legacy
+// slot is used. This keeps placement supplied with health during a rolling
+// upgrade, including when current owners stop publishing before older ones.
 func (s *RedisSessionStore) ReadHealthState(ctx context.Context, backendIdentifier string) (backend.HealthState, error) {
 	_, stateKey, err := s.healthStateKeys(backendIdentifier)
 	if err != nil {
 		return backend.HealthState{}, err
 	}
 
+	fields, err := s.readHealthStateFields(ctx, stateKey)
+	if err != nil {
+		return backend.HealthState{}, err
+	}
+
+	current, err := parseHealthStateFields(fields)
+	if err != nil {
+		return backend.HealthState{}, err
+	}
+
+	if len(fields) > 0 && current.Status != backend.HealthStatusStale {
+		return current, nil
+	}
+
+	legacyFields, err := s.readLegacyHealthStateFields(ctx, backendIdentifier)
+	if err != nil {
+		return backend.HealthState{}, err
+	}
+
+	if len(legacyFields) == 0 {
+		return current, nil
+	}
+
+	legacy, err := parseHealthStateFields(legacyFields)
+	if err != nil {
+		if len(fields) > 0 {
+			return current, nil
+		}
+
+		return backend.HealthState{}, err
+	}
+
+	if len(fields) > 0 && legacy.Status == backend.HealthStatusStale {
+		return current, nil
+	}
+
+	return legacy, nil
+}
+
+// readLegacyHealthStateFields reads the shared-slot result of earlier releases unless it is known absent.
+func (s *RedisSessionStore) readLegacyHealthStateFields(ctx context.Context, backendIdentifier string) (map[string]string, error) {
+	legacyKey, err := s.keys.LegacyHealthStateKey(backendIdentifier)
+	if err != nil {
+		return nil, err
+	}
+
+	if present, known := s.local.legacyPresence(legacyKey); known && !present {
+		return nil, nil
+	}
+
+	fields, err := s.readHealthStateFields(ctx, legacyKey)
+	if err != nil {
+		return nil, err
+	}
+
+	s.local.storeLegacyPresence(legacyKey, len(fields) > 0)
+
+	return fields, nil
+}
+
+// readHealthStateFields reads one published health hash, treating a missing key as empty.
+func (s *RedisSessionStore) readHealthStateFields(ctx context.Context, stateKey string) (map[string]string, error) {
 	redisCtx := redisContext(ctx)
 	started := time.Now()
 
@@ -152,15 +247,18 @@ func (s *RedisSessionStore) ReadHealthState(ctx context.Context, backendIdentifi
 		classified := ClassifyRedisError("health_state_read", err)
 		s.recordRedisOperation(redisCtx, "health_state_read", started, classified)
 
-		return backend.HealthState{}, classified
+		return nil, classified
 	}
 
 	s.recordRedisOperation(redisCtx, "health_state_read", started, nil)
 
-	return parseHealthStateFields(fields)
+	return fields, nil
 }
 
 // BackendSnapshot reads runtime override, active count and health state for selector input.
+//
+// The active count is advisory and may be up to backendReservationTotalTTL old;
+// reservation admission enforces capacity exactly.
 func (s *RedisSessionStore) BackendSnapshot(ctx context.Context, backendIdentifier string) (backend.RuntimeSnapshot, error) {
 	runtimeKey, _, err := s.backendRuntimeKeys(backendIdentifier)
 	if err != nil {
@@ -185,7 +283,7 @@ func (s *RedisSessionStore) BackendSnapshot(ctx context.Context, backendIdentifi
 		return backend.RuntimeSnapshot{}, err
 	}
 
-	activeSessions, err := s.backendReservationActiveCount(ctx, backendIdentifier)
+	activeSessions, err := s.advisoryBackendReservationCount(ctx, backendIdentifier)
 	if err != nil {
 		return backend.RuntimeSnapshot{}, err
 	}
@@ -200,21 +298,6 @@ func (s *RedisSessionStore) BackendSnapshot(ctx context.Context, backendIdentifi
 		Health:          health,
 		ActiveSessions:  activeSessions,
 	}, nil
-}
-
-// healthOwnershipKeys returns all keys needed for an ownership acquisition.
-func (s *RedisSessionStore) healthOwnershipKeys(request HealthOwnershipRequest) (string, string, string, error) {
-	instanceKey, err := s.keys.InstanceKey(request.InstanceID)
-	if err != nil {
-		return "", "", "", err
-	}
-
-	ownerKey, stateKey, err := s.healthStateKeys(request.BackendIdentifier)
-	if err != nil {
-		return "", "", "", err
-	}
-
-	return instanceKey, ownerKey, stateKey, nil
 }
 
 // healthStateKeys returns the owner and state keys for one backend.

@@ -182,12 +182,27 @@ Backend-pin mutations use the same per-affinity key group as user movement:
   delivery holds, shard affinity, movement overrides, backend pins and backend
   reservations.
 
-Backend capacity reservations use a separate same-slot key group per backend:
+Backend capacity reservations use twelve same-slot key groups per backend.
+Each bucket tag is chosen so its Cluster slot lies in the bucket's twelfth of
+the slot space; the buckets of one backend therefore spread evenly across
+masters that own equal, contiguous slot ranges:
 
 ```text
-<prefix>:v<schema>:{backend:<backend_hash>}:runtime:backend:<backend_id>:reservations
-<prefix>:v<schema>:{backend:<backend_hash>}:runtime:backend:<backend_id>:reservations_due
+<prefix>:v<schema>:{backend:<backend_hash>:<NN>.<nonce>}:runtime:backend:<backend_id>:reservations
+<prefix>:v<schema>:{backend:<backend_hash>:<NN>.<nonce>}:runtime:backend:<backend_id>:reservations_due
 ```
+
+A new reservation lands in the bucket selected by its caller identifier and
+receives the identifier `<caller_id>#rb<NN>`. Refresh and release must use that
+returned identifier. Each active bucket enforces an exact share of
+`max_connections`; the shares add up to the limit, and a full bucket spills
+into buckets with free share, then into full buckets holding expired leases,
+before admission fails. `attach.lua` accepts a retried reservation of the same
+caller in another bucket and reports the replaced identifier for release. `backend_reserve.lua`
+repairs up to sixteen expired leases of its own bucket before the capacity
+check. The single-group layout of earlier releases
+(`{backend:<backend_hash>}`) stays readable: its count reduces the bucket
+shares, and identifiers without a bucket suffix release and refresh there.
 
 Runtime listing and repair keys are secondary, repairable indexes:
 
@@ -198,11 +213,21 @@ Runtime listing and repair keys are secondary, repairable indexes:
 <prefix>:v<schema>:idx:user:<affinity_hash>:sessions:<shard>
 <prefix>:v<schema>:idx:backend:<backend_id>:sessions:<shard>
 <prefix>:v<schema>:idx:backends
-<prefix>:v<schema>:runtime:aggregates:*
+<prefix>:v<schema>:{agg:<NN>.<nonce>}:runtime:aggregates:sessions
+<prefix>:v<schema>:{agg:<NN>.<nonce>}:runtime:aggregates:active:<dimension>
+<prefix>:v<schema>:{agg:<NN>.<nonce>}:runtime:aggregates:idle_affinities
+<prefix>:v<schema>:runtime:aggregates:repairs
 ```
 
+Session aggregate markers and their dimension counters live in the aggregate
+group selected by the session identifier and change together through
+`aggregate_session_upsert.lua` and `aggregate_session_remove.lua`. Idle
+affinity markers use the group selected by the affinity hash. Summaries and
+repair sum every group plus the untagged layout of earlier releases.
+
 `KeyBuilder` validates same-tag affinity script keys and same-tag backend
-reservation script keys. Secondary index writes are recorded as
+reservation script keys; every other multi-key script must share one explicit
+hash tag. Secondary index writes are recorded as
 non-authoritative follow-up Redis writes and are repaired by runtime reads and
 the reaper.
 
@@ -218,7 +243,7 @@ flowchart LR
         A7["user_hold_*.lua"]
     end
 
-    subgraph "Backend same-slot capacity"
+    subgraph "Backend same-slot capacity per bucket"
         B1["backend_reserve.lua"]
         B2["backend_release.lua"]
         B3["backend_reap.lua"]

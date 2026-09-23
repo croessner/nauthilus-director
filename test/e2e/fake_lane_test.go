@@ -2985,20 +2985,20 @@ func seedProcessRuntimeSessions(t *testing.T, store *state.RedisSessionStore, co
 func attachProcessRuntimeBackend(t *testing.T, store *state.RedisSessionStore, key state.AffinityKey, sessionID string) {
 	t.Helper()
 
-	reservationID := "reservation-" + sessionID
-	if _, err := store.ReserveBackendCapacity(context.Background(), state.BackendReservationRequest{
+	reservation, err := store.ReserveBackendCapacity(context.Background(), state.BackendReservationRequest{
 		BackendIdentifier: e2eBackendAID,
-		ReservationID:     reservationID,
+		ReservationID:     "reservation-" + sessionID,
 		MaxConnections:    100,
 		LeaseTTL:          5 * time.Minute,
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("ReserveBackendCapacity %s: %v", sessionID, err)
 	}
 	if _, err := store.AttachSelectedBackend(context.Background(), state.SessionBackendAttachment{
 		Key:               key,
 		SessionID:         sessionID,
 		BackendIdentifier: e2eBackendAID,
-		ReservationID:     reservationID,
+		ReservationID:     reservation.ReservationID,
 		MaxConnections:    100,
 	}); err != nil {
 		t.Fatalf("AttachSelectedBackend %s: %v", sessionID, err)

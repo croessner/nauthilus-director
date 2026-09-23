@@ -15,6 +15,7 @@ local backend_id = ARGV[2]
 local reservation_id = ARGV[3]
 local max_connections = tonumber(ARGV[4])
 local backend_node = ARGV[5]
+local reservation_buckets = tonumber(ARGV[6])
 
 local function ambiguous(message)
 	error("NDAMBIGUOUS " .. message)
@@ -23,6 +24,20 @@ end
 local function now_ms()
 	local now = redis.call("TIME")
 	return (tonumber(now[1]) * 1000) + math.floor(tonumber(now[2]) / 1000)
+end
+
+local function reservation_owner(value)
+	local marker = string.find(value, "#rb%d%d$")
+	if marker == nil or marker <= 1 then
+		return value
+	end
+
+	local bucket = tonumber(string.sub(value, marker + 3))
+	if reservation_buckets == nil or bucket == nil or bucket >= reservation_buckets then
+		return value
+	end
+
+	return string.sub(value, 1, marker - 1)
 end
 
 local function require_value(value, message)
@@ -90,8 +105,16 @@ if current_backend ~= false and current_backend ~= nil and current_backend ~= ""
 	end
 
 	local current_reservation = require_value(redis.call("HGET", session_key, "backend_reservation_id"), "reservation_required")
+	local replaced_reservation = ""
 	if current_reservation ~= reservation_id then
-		return ambiguous("session_reservation_conflict")
+		-- A retried admission for the same caller may land in another bucket.
+		-- Only the bucket suffix may differ; any other identity is a conflict.
+		if reservation_owner(current_reservation) ~= reservation_owner(reservation_id) then
+			return ambiguous("session_reservation_conflict")
+		end
+
+		redis.call("HSET", session_key, "backend_reservation_id", reservation_id, "updated_at_ms", now)
+		replaced_reservation = current_reservation
 	end
 
 	return {
@@ -99,6 +122,7 @@ if current_backend ~= false and current_backend ~= nil and current_backend ~= ""
 		"backend_id", backend_id,
 		"backend_node", state_backend_node,
 		"backend_reservation_id", reservation_id,
+		"replaced_backend_reservation_id", replaced_reservation,
 		"backend_max_connections", tostring(max_connections),
 		"binding_generation", binding_generation,
 		"backend_active_session_count", "0",

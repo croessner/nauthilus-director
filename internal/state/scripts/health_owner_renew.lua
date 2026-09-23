@@ -3,9 +3,9 @@
 -- SPDX-License-Identifier: AGPL-3.0-only
 --
 -- Renews a backend deep-health owner lease only for the current fenced owner.
+-- The caller verifies its own instance liveness before dispatch.
 
-local instance_key = KEYS[1]
-local owner_key = KEYS[2]
+local owner_key = KEYS[1]
 
 local instance_id = ARGV[1]
 local backend_id = ARGV[2]
@@ -38,10 +38,6 @@ end
 
 if lease_ttl_ms == nil or lease_ttl_ms <= 0 then
 	return ambiguous("lease_ttl_required")
-end
-
-if redis.call("EXISTS", instance_key) == 0 then
-	return ambiguous("instance_missing")
 end
 
 local owner_instance = require_value(redis.call("HGET", owner_key, "instance_id"), "owner_missing")

@@ -151,6 +151,7 @@ type HealthRunner struct {
 	mu          sync.RWMutex
 	local       map[string]HealthState
 	transitions map[string]*HealthTransitionTracker
+	foreign     map[string]time.Time
 	cancel      context.CancelFunc
 	done        chan error
 }
@@ -299,6 +300,7 @@ func NewHealthRunner(registry Registry, coordinator HealthCoordinator, checker H
 		recorder:    observability.NormalizeRecorder(config.Observability),
 		local:       make(map[string]HealthState),
 		transitions: make(map[string]*HealthTransitionTracker),
+		foreign:     make(map[string]time.Time),
 	}, nil
 }
 
@@ -477,6 +479,10 @@ func (r *HealthRunner) checkBackend(ctx context.Context, candidate Backend) erro
 		return r.publishOwnedHealthState(ctx, candidate, state)
 	}
 
+	if r.foreignLeaseActive(candidate.Identifier) {
+		return nil
+	}
+
 	owner, err := r.coordinator.AcquireHealthOwner(ctx, HealthOwnershipRequest{
 		InstanceID:        r.config.InstanceID,
 		BackendIdentifier: candidate.Identifier,
@@ -485,6 +491,8 @@ func (r *HealthRunner) checkBackend(ctx context.Context, candidate Backend) erro
 	if err != nil {
 		return err
 	}
+
+	r.observeOwner(candidate.Identifier, owner)
 
 	if !owner.Owned {
 		return nil
@@ -498,6 +506,10 @@ func (r *HealthRunner) checkBackend(ctx context.Context, candidate Backend) erro
 
 // publishOwnedHealthState publishes a locally thresholded state only from the fenced owner.
 func (r *HealthRunner) publishOwnedHealthState(ctx context.Context, candidate Backend, state HealthState) error {
+	if r.foreignLeaseActive(candidate.Identifier) {
+		return nil
+	}
+
 	owner, err := r.coordinator.AcquireHealthOwner(ctx, HealthOwnershipRequest{
 		InstanceID:        r.config.InstanceID,
 		BackendIdentifier: candidate.Identifier,
@@ -506,6 +518,8 @@ func (r *HealthRunner) publishOwnedHealthState(ctx context.Context, candidate Ba
 	if err != nil {
 		return err
 	}
+
+	r.observeOwner(candidate.Identifier, owner)
 
 	if !owner.Owned {
 		return nil
@@ -525,6 +539,40 @@ func (r *HealthRunner) publishHealthState(ctx context.Context, candidate Backend
 	})
 
 	return err
+}
+
+// foreignLeaseActive reports whether another instance's owner lease is known to be still valid.
+//
+// Acquisition cannot succeed before that lease expires, so skipping the
+// attempt only removes a guaranteed "held by other" round trip. Takeover
+// timing is unchanged: the first pass after expiry acquires as before.
+func (r *HealthRunner) foreignLeaseActive(identifier string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	until, ok := r.foreign[strings.TrimSpace(identifier)]
+
+	return ok && time.Now().Before(until)
+}
+
+// observeOwner remembers the remaining lease of a foreign owner in local clock terms.
+//
+// The remaining lease is derived from two Redis server timestamps, so clock
+// skew between this process and Redis cannot extend the skip window.
+func (r *HealthRunner) observeOwner(identifier string, owner HealthOwnershipRecord) {
+	identifier = strings.TrimSpace(identifier)
+	remaining := owner.ExpiresAt.Sub(owner.ServerTime)
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if owner.Owned || owner.ServerTime.IsZero() || owner.ExpiresAt.IsZero() || remaining <= 0 {
+		delete(r.foreign, identifier)
+
+		return
+	}
+
+	r.foreign[identifier] = time.Now().Add(remaining)
 }
 
 // healthSupportedProtocol reports whether a protocol has production health probes.

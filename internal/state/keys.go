@@ -40,6 +40,8 @@ type KeyBuilder struct {
 	sessionIndexShards int
 	userIndexShards    int
 	backendIndexShards int
+	aggregateTags      []string
+	tagCache           *spreadHashTagCache
 }
 
 // AffinityKeys contains the per-affinity Redis key group.
@@ -52,11 +54,23 @@ type AffinityKeys struct {
 	Hold       string
 }
 
-// BackendReservationKeys contains the Redis key group for one backend slot.
+// BackendReservationKeys contains the same-slot Redis key group for one backend reservation bucket.
 type BackendReservationKeys struct {
 	HashTag string
 	State   string
 	Due     string
+}
+
+// AggregateKeys contains one same-slot group of repairable operator aggregates.
+type AggregateKeys struct {
+	HashTag        string
+	Sessions       string
+	IdleAffinities string
+	Protocol       string
+	Listener       string
+	Service        string
+	ShardTag       string
+	Backend        string
 }
 
 const (
@@ -70,6 +84,17 @@ const (
 	defaultSessionIndexShards = 64
 	defaultUserIndexShards    = 32
 	defaultBackendIndexShards = 32
+
+	// backendReservationBuckets splits each backend's capacity reservations into
+	// independent Cluster slots. The value is part of the persisted key contract;
+	// twelve buckets divide evenly across three, four or six equal masters.
+	backendReservationBuckets = 12
+	// aggregateBuckets splits operator aggregates into independent Cluster slots.
+	aggregateBuckets = 12
+
+	aggregateHashTagFamily          = "agg"
+	backendReservationHashTagFamily = "backend:"
+	healthHashTagFamily             = "health:"
 )
 
 // NewKeyBuilder creates a Redis key builder with a stable namespace prefix.
@@ -87,12 +112,21 @@ func NewKeyBuilder(options KeyBuilderOptions) (KeyBuilder, error) {
 		return KeyBuilder{}, newStateError(RedisErrorKindConfig, "keys", "schema version required", nil)
 	}
 
+	tagCache := &spreadHashTagCache{}
+
+	aggregateTags, err := tagCache.bucketTags(aggregateHashTagFamily, aggregateBuckets)
+	if err != nil {
+		return KeyBuilder{}, err
+	}
+
 	return KeyBuilder{
 		prefix:             prefix,
 		schemaVersion:      options.SchemaVersion,
 		sessionIndexShards: normalizeIndexShardCount(options.SessionIndexShards, defaultSessionIndexShards),
 		userIndexShards:    normalizeIndexShardCount(options.UserIndexShards, defaultUserIndexShards),
 		backendIndexShards: normalizeIndexShardCount(options.BackendIndexShards, defaultBackendIndexShards),
+		aggregateTags:      aggregateTags,
+		tagCache:           tagCache,
 	}, nil
 }
 
@@ -171,8 +205,12 @@ func (b KeyBuilder) BackendHash(backendID string) (string, error) {
 	return hex.EncodeToString(sum[:]), nil
 }
 
-// BackendReservationKeys returns the same-slot reservation key group for one backend.
-func (b KeyBuilder) BackendReservationKeys(backendID string) (BackendReservationKeys, error) {
+// LegacyBackendReservationKeys returns the single-slot reservation group used before bucketing.
+//
+// Current writers never admit new reservations here. The group stays readable so
+// capacity counts, releases and lease repair remain correct while reservations
+// created by earlier releases drain during a rolling upgrade.
+func (b KeyBuilder) LegacyBackendReservationKeys(backendID string) (BackendReservationKeys, error) {
 	backendID = strings.TrimSpace(backendID)
 	if backendID == "" {
 		return BackendReservationKeys{}, newStateError(RedisErrorKindAmbiguousState, "keys", "backend id required", nil)
@@ -183,44 +221,133 @@ func (b KeyBuilder) BackendReservationKeys(backendID string) (BackendReservation
 		return BackendReservationKeys{}, err
 	}
 
-	hashTag := "{backend:" + backendHash + "}"
+	return b.backendReservationKeyGroup("{"+backendReservationHashTagFamily+backendHash+"}", backendID), nil
+}
+
+// BackendReservationBucketCount returns the number of reservation buckets per backend.
+func (b KeyBuilder) BackendReservationBucketCount() int {
+	return backendReservationBuckets
+}
+
+// BackendReservationBucketKeys returns the same-slot reservation group for one backend bucket.
+func (b KeyBuilder) BackendReservationBucketKeys(backendID string, bucket int) (BackendReservationKeys, error) {
+	backendID = strings.TrimSpace(backendID)
+	if backendID == "" {
+		return BackendReservationKeys{}, newStateError(RedisErrorKindAmbiguousState, "keys", "backend id required", nil)
+	}
+
+	if err := b.validateShardNumber("keys", bucket, backendReservationBuckets); err != nil {
+		return BackendReservationKeys{}, err
+	}
+
+	backendHash, err := b.BackendHash(backendID)
+	if err != nil {
+		return BackendReservationKeys{}, err
+	}
+
+	tags, err := b.spreadTags().bucketTags(backendReservationHashTagFamily+backendHash, backendReservationBuckets)
+	if err != nil {
+		return BackendReservationKeys{}, err
+	}
+
+	return b.backendReservationKeyGroup(tags[bucket], backendID), nil
+}
+
+// BackendReservationGroupKeys returns the group that stores one issued reservation identifier.
+//
+// Identifiers carrying a bucket suffix resolve to that bucket; all others were
+// issued before bucketing and resolve to the legacy group.
+func (b KeyBuilder) BackendReservationGroupKeys(backendID string, reservationID string) (BackendReservationKeys, error) {
+	ref := parseBackendReservationRef(strings.TrimSpace(reservationID))
+	if ref.Bucket == legacyBackendReservationBucket {
+		return b.LegacyBackendReservationKeys(backendID)
+	}
+
+	return b.BackendReservationBucketKeys(backendID, ref.Bucket)
+}
+
+// BackendReservationBucket maps a reservation identifier to one of the first active buckets.
+func (b KeyBuilder) BackendReservationBucket(reservationID string, activeBuckets int) (int, error) {
+	if activeBuckets <= 0 || activeBuckets > backendReservationBuckets {
+		activeBuckets = backendReservationBuckets
+	}
+
+	return b.indexShard("keys", reservationID, activeBuckets, "reservation id required")
+}
+
+// backendReservationKeyGroup builds the state and due keys that share one hash tag.
+func (b KeyBuilder) backendReservationKeyGroup(hashTag string, backendID string) BackendReservationKeys {
 	base := b.namespaceBase() + ":" + hashTag + ":runtime:backend:" + backendID
 
 	return BackendReservationKeys{
 		HashTag: hashTag,
 		State:   base + ":reservations",
 		Due:     base + ":reservations_due",
-	}, nil
+	}
 }
 
-// InstanceKey co-locates instance heartbeats with fenced health ownership.
+// InstanceKey returns the untagged liveness marker of one director instance.
+//
+// Director code only writes it. A successful write with its TTL is the Redis
+// reachability proof that gates this instance's own health-owner requests, and
+// operators can list live instances with a bounded SCAN. No script reads it
+// together with another key, so it routes by its own name.
 func (b KeyBuilder) InstanceKey(instanceID string) (string, error) {
 	instanceID = strings.TrimSpace(instanceID)
 	if instanceID == "" {
 		return "", newStateError(RedisErrorKindAmbiguousState, "keys", "instance id required", nil)
 	}
 
-	return b.namespaceBase() + ":{health}:runtime:instance:" + instanceID, nil
+	return b.namespaceBase() + ":runtime:instance:" + instanceID, nil
 }
 
-// HealthOwnerKey keeps ownership leases inside the health coordination slot.
+// HealthOwnerKey returns the fenced owner lease inside the backend's own health slot.
 func (b KeyBuilder) HealthOwnerKey(backendID string) (string, error) {
-	backendID = strings.TrimSpace(backendID)
-	if backendID == "" {
-		return "", newStateError(RedisErrorKindAmbiguousState, "keys", "backend id required", nil)
+	base, err := b.healthBase(backendID)
+	if err != nil {
+		return "", err
 	}
 
-	return b.namespaceBase() + ":{health}:health:backend:" + backendID + ":owner", nil
+	return base + ":owner", nil
 }
 
-// HealthStateKey returns the Redis key for one backend published health result.
+// HealthStateKey returns the published health result inside the backend's own health slot.
 func (b KeyBuilder) HealthStateKey(backendID string) (string, error) {
+	base, err := b.healthBase(backendID)
+	if err != nil {
+		return "", err
+	}
+
+	return base + ":state", nil
+}
+
+// LegacyHealthStateKey returns the shared-slot health result written before per-backend tags.
+//
+// Current writers never publish here. Readers fall back to it only while the
+// per-backend result has not been published yet, which keeps placement fed
+// with fresh health while older instances still own the legacy lease.
+func (b KeyBuilder) LegacyHealthStateKey(backendID string) (string, error) {
 	backendID = strings.TrimSpace(backendID)
 	if backendID == "" {
 		return "", newStateError(RedisErrorKindAmbiguousState, "keys", "backend id required", nil)
 	}
 
 	return b.namespaceBase() + ":{health}:health:backend:" + backendID + ":state", nil
+}
+
+// healthBase returns the per-backend health key prefix with its own hash tag.
+func (b KeyBuilder) healthBase(backendID string) (string, error) {
+	backendID = strings.TrimSpace(backendID)
+	if backendID == "" {
+		return "", newStateError(RedisErrorKindAmbiguousState, "keys", "backend id required", nil)
+	}
+
+	backendHash, err := b.BackendHash(backendID)
+	if err != nil {
+		return "", err
+	}
+
+	return b.namespaceBase() + ":{" + healthHashTagFamily + backendHash + "}:health:backend:" + backendID, nil
 }
 
 // BackendSessionIndexKey returns the repairable backend-to-session index key.
@@ -335,19 +462,121 @@ func (b KeyBuilder) BackendIndexKey() string {
 	return b.namespaceBase() + ":{backend-control}:idx:backends"
 }
 
-// AggregateSessionMarkerKey returns the repairable per-session aggregate marker hash.
-func (b KeyBuilder) AggregateSessionMarkerKey() string {
-	return b.namespaceBase() + ":runtime:aggregates:sessions"
+// AggregateBucketCount returns the number of same-slot aggregate groups.
+func (b KeyBuilder) AggregateBucketCount() int {
+	return aggregateBuckets
 }
 
-// AggregateActiveDimensionKey returns one repairable active-session aggregate hash.
-func (b KeyBuilder) AggregateActiveDimensionKey(dimension string) string {
-	return b.namespaceBase() + ":runtime:aggregates:active:" + strings.TrimSpace(dimension)
+// AggregateKeys returns one same-slot aggregate group.
+func (b KeyBuilder) AggregateKeys(bucket int) (AggregateKeys, error) {
+	if err := b.validateShardNumber("keys", bucket, aggregateBuckets); err != nil {
+		return AggregateKeys{}, err
+	}
+
+	if len(b.aggregateTags) != aggregateBuckets {
+		return AggregateKeys{}, newStateError(RedisErrorKindConfig, "keys", "key builder not initialized", nil)
+	}
+
+	return b.aggregateKeyGroup(b.aggregateTags[bucket]), nil
 }
 
-// AggregateIdleAffinityKey returns the repairable idle-affinity aggregate set.
-func (b KeyBuilder) AggregateIdleAffinityKey() string {
-	return b.namespaceBase() + ":runtime:aggregates:idle_affinities"
+// AggregateKeyGroups returns every same-slot aggregate group in bucket order.
+//
+// A builder that was not created by NewKeyBuilder has no groups.
+func (b KeyBuilder) AggregateKeyGroups() []AggregateKeys {
+	groups := make([]AggregateKeys, 0, aggregateBuckets)
+
+	for bucket := range aggregateBuckets {
+		group, err := b.AggregateKeys(bucket)
+		if err != nil {
+			return nil
+		}
+
+		groups = append(groups, group)
+	}
+
+	return groups
+}
+
+// AggregateSessionKeys returns the aggregate group that owns one session marker and its counters.
+func (b KeyBuilder) AggregateSessionKeys(sessionID string) (AggregateKeys, error) {
+	bucket, err := b.indexShard("keys", sessionID, aggregateBuckets, "session id required")
+	if err != nil {
+		return AggregateKeys{}, err
+	}
+
+	return b.AggregateKeys(bucket)
+}
+
+// AggregateIdleAffinityKeys returns the aggregate group that owns one idle-affinity marker.
+func (b KeyBuilder) AggregateIdleAffinityKeys(affinityHash string) (AggregateKeys, error) {
+	bucket, err := b.indexShard("keys", affinityHash, aggregateBuckets, "affinity hash required")
+	if err != nil {
+		return AggregateKeys{}, err
+	}
+
+	return b.AggregateKeys(bucket)
+}
+
+// LegacyAggregateKeys returns the untagged single-key aggregates written before bucketing.
+//
+// Current writers only remove entries from this group. Summaries and repair
+// still read it so sessions opened by earlier releases stay visible until they
+// end during a rolling upgrade.
+func (b KeyBuilder) LegacyAggregateKeys() AggregateKeys {
+	return b.aggregateKeyGroup("")
+}
+
+// LegacyAggregateReservedBackendKey returns the retired reservation snapshot hash of earlier releases.
+func (b KeyBuilder) LegacyAggregateReservedBackendKey() string {
+	return b.namespaceBase() + ":runtime:aggregates:active:reserved_backend"
+}
+
+// aggregateKeyGroup builds one aggregate group; an empty tag yields the legacy untagged keys.
+func (b KeyBuilder) aggregateKeyGroup(hashTag string) AggregateKeys {
+	base := b.namespaceBase() + ":runtime:aggregates"
+	if hashTag != "" {
+		base = b.namespaceBase() + ":" + hashTag + ":runtime:aggregates"
+	}
+
+	return AggregateKeys{
+		HashTag:        hashTag,
+		Sessions:       base + ":sessions",
+		IdleAffinities: base + ":idle_affinities",
+		Protocol:       base + ":active:" + aggregateDimensionProtocol,
+		Listener:       base + ":active:" + aggregateDimensionListener,
+		Service:        base + ":active:" + aggregateDimensionService,
+		ShardTag:       base + ":active:" + aggregateDimensionShardTag,
+		Backend:        base + ":active:" + aggregateDimensionBackend,
+	}
+}
+
+// Legacy reports whether the group is the untagged pre-bucketing aggregate layout.
+func (k AggregateKeys) Legacy() bool {
+	return k.HashTag == ""
+}
+
+// Dimension returns the counter hash for one bounded active-session dimension.
+func (k AggregateKeys) Dimension(dimension string) string {
+	switch strings.TrimSpace(dimension) {
+	case aggregateDimensionProtocol:
+		return k.Protocol
+	case aggregateDimensionListener:
+		return k.Listener
+	case aggregateDimensionService:
+		return k.Service
+	case aggregateDimensionShardTag:
+		return k.ShardTag
+	case aggregateDimensionBackend:
+		return k.Backend
+	default:
+		return ""
+	}
+}
+
+// sessionScriptKeys returns the marker and dimension counters in aggregate script order.
+func (k AggregateKeys) sessionScriptKeys() []string {
+	return []string{k.Sessions, k.Protocol, k.Listener, k.Service, k.ShardTag, k.Backend}
 }
 
 // AggregateRepairKey returns the cumulative repair-counter hash.
@@ -453,6 +682,15 @@ func (b KeyBuilder) BackendSessionIndexShard(sessionID string) (int, error) {
 	return b.indexShard("keys", sessionID, b.backendIndexShards, "session id required")
 }
 
+// spreadTags returns the builder's shared tag memo, tolerating zero-value builders in tests.
+func (b KeyBuilder) spreadTags() *spreadHashTagCache {
+	if b.tagCache != nil {
+		return b.tagCache
+	}
+
+	return &spreadHashTagCache{}
+}
+
 // namespaceBase returns the versioned Redis namespace prefix.
 func (b KeyBuilder) namespaceBase() string {
 	return fmt.Sprintf("%s:v%d", b.prefix, b.schemaVersion)
@@ -534,6 +772,31 @@ func (b KeyBuilder) validateSingleHashTaggedKeys(
 
 		if keyHashTag != hashTag {
 			return newStateError(RedisErrorKindConfig, operation, mismatchMessage, nil)
+		}
+	}
+
+	return nil
+}
+
+// validateSameSlotScriptKeys rejects multi-key scripts whose keys do not share one explicit hash tag.
+//
+// Redis Cluster rejects such calls with CROSSSLOT, while a standalone server
+// silently accepts them. Checking locally keeps both topologies on the same
+// fail-closed contract.
+func validateSameSlotScriptKeys(operation string, keys []string) error {
+	if len(keys) <= 1 {
+		return nil
+	}
+
+	first, tagged := redisClusterHashTag(keys[0])
+	if !tagged {
+		return newStateError(RedisErrorKindConfig, operation, "multi-key script requires a shared hash tag", nil)
+	}
+
+	for _, key := range keys[1:] {
+		tag, ok := redisClusterHashTag(key)
+		if !ok || tag != first {
+			return newStateError(RedisErrorKindConfig, operation, "script keys use multiple hash tags", nil)
 		}
 	}
 
