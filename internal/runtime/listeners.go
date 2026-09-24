@@ -551,8 +551,7 @@ func (s *ListenerService) recordListenerFailure(ctx context.Context, operation s
 
 // listenerFailureReasonClass maps runtime errors into bounded failure classes.
 func listenerFailureReasonClass(err error) string {
-	var runtimeErr *Error
-	if errors.As(err, &runtimeErr) {
+	if runtimeErr, ok := errors.AsType[*Error](err); ok {
 		return string(runtimeErr.Kind)
 	}
 

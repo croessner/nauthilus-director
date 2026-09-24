@@ -187,8 +187,7 @@ func run(args []string, stdout io.Writer, stderr io.Writer) int {
 	root := newDirectorCtlCommand(stdout, stderr)
 	root.SetArgs(args)
 	if err := root.Execute(); err != nil {
-		var exitErr exitCodeError
-		if errors.As(err, &exitErr) {
+		if exitErr, ok := errors.AsType[exitCodeError](err); ok {
 			return exitErr.code
 		}
 		_, _ = fmt.Fprintln(stderr, err)
@@ -3207,8 +3206,7 @@ func (app application) usageError(format string, args ...any) int {
 
 // requestError reports a failed generated-client request.
 func (app application) requestError(operation string, err error) int {
-	var diagnostic *controlResponseDiagnostic
-	if errors.As(err, &diagnostic) {
+	if diagnostic, ok := errors.AsType[*controlResponseDiagnostic](err); ok {
 		return app.renderControlFailure(operation, diagnostic.status, nil, diagnostic.contentType, diagnostic.body, diagnostic.err)
 	}
 

@@ -350,8 +350,7 @@ func authObservationReasonClass(err error) string {
 
 // authError extracts the classified authority error when one is present.
 func authError(err error) *AuthError {
-	var authErr *AuthError
-	if errors.As(err, &authErr) {
+	if authErr, ok := errors.AsType[*AuthError](err); ok {
 		return authErr
 	}
 

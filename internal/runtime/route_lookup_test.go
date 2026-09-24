@@ -20,6 +20,7 @@ package runtime
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -1853,9 +1854,9 @@ func (r *recordingRuntimeObservation) last(name string) (observability.Event, bo
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	for index := len(r.events) - 1; index >= 0; index-- {
-		if r.events[index].Name == name {
-			return r.events[index], true
+	for _, v := range slices.Backward(r.events) {
+		if v.Name == name {
+			return v, true
 		}
 	}
 

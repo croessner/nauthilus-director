@@ -19,6 +19,7 @@ package nauthilus
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 
 	"github.com/croessner/nauthilus-director/internal/observability"
@@ -253,9 +254,9 @@ func (r *recordingAuthObservation) Record(_ context.Context, event observability
 
 // last returns the latest auth observation with the supplied event name.
 func (r *recordingAuthObservation) last(name string) (observability.Event, bool) {
-	for index := len(r.events) - 1; index >= 0; index-- {
-		if r.events[index].Name == name {
-			return r.events[index], true
+	for _, v := range slices.Backward(r.events) {
+		if v.Name == name {
+			return v, true
 		}
 	}
 

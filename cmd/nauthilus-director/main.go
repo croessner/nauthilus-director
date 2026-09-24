@@ -76,8 +76,7 @@ func runWithContext(ctx context.Context, args []string, stdout io.Writer, stderr
 	root := newDirectorCommand(ctx, stdout, stderr)
 	root.SetArgs(args)
 	if err := root.Execute(); err != nil {
-		var exitErr exitCodeError
-		if errors.As(err, &exitErr) {
+		if exitErr, ok := errors.AsType[exitCodeError](err); ok {
 			return exitErr.code
 		}
 		_, _ = fmt.Fprintln(stderr, err)

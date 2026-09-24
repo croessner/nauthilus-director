@@ -96,8 +96,8 @@ type Server struct {
 	options              Options
 	observations         chan Observation
 	proxyProtocolHeaders chan string
-	missingProxyProtocol int64
-	proxyProtocolCount   int64
+	missingProxyProtocol atomic.Int64
+	proxyProtocolCount   atomic.Int64
 }
 
 type connectionState struct {
@@ -187,12 +187,12 @@ func (s *Server) ExpectProxyProtocolHeader(t testing.TB) string {
 
 // ProxyProtocolHeaderCount returns how many required PROXY prefaces arrived.
 func (s *Server) ProxyProtocolHeaderCount() int64 {
-	return atomic.LoadInt64(&s.proxyProtocolCount)
+	return s.proxyProtocolCount.Load()
 }
 
 // MissingProxyProtocolCount returns how often a required PROXY preface was absent.
 func (s *Server) MissingProxyProtocolCount() int64 {
-	return atomic.LoadInt64(&s.missingProxyProtocol)
+	return s.missingProxyProtocol.Load()
 }
 
 // accept serves backend connections until the listener closes.
@@ -262,12 +262,12 @@ func (s *Server) prepare(conn net.Conn) (net.Conn, bool) {
 func (s *Server) consumeProxyProtocolPreface(conn net.Conn) bool {
 	header, ok := readProxyProtocolPreface(conn)
 	if !ok || !strings.HasPrefix(header, "PROXY ") {
-		atomic.AddInt64(&s.missingProxyProtocol, 1)
+		s.missingProxyProtocol.Add(1)
 
 		return false
 	}
 
-	atomic.AddInt64(&s.proxyProtocolCount, 1)
+	s.proxyProtocolCount.Add(1)
 	s.proxyProtocolHeaders <- header
 
 	return true

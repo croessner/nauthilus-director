@@ -2173,8 +2173,7 @@ func statusForError(err error) int {
 
 // runtimeErrorStatus maps runtime domain errors to REST statuses.
 func runtimeErrorStatus(err error) (int, bool) {
-	var runtimeErr *runtime.Error
-	if errors.As(err, &runtimeErr) {
+	if runtimeErr, ok := errors.AsType[*runtime.Error](err); ok {
 		switch runtimeErr.Kind {
 		case runtime.ErrorKindInvalidRequest:
 			return http.StatusBadRequest, true
@@ -2221,8 +2220,7 @@ func redisErrorStatus(err error) int {
 
 // codeForError returns a stable problem code for domain failures.
 func codeForError(err error) string {
-	var runtimeErr *runtime.Error
-	if errors.As(err, &runtimeErr) {
+	if runtimeErr, ok := errors.AsType[*runtime.Error](err); ok {
 		return string(runtimeErr.Kind)
 	}
 
