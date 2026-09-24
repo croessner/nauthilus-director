@@ -60,6 +60,12 @@ func newNetworkGRPCAuthService(
 	return newNetworkGRPCAuthServiceWithDialOptions(authority, authorityContext, nil)
 }
 
+// grpcRoundRobinServiceConfig spreads calls over every address the resolver returns. With a dns:/// target
+// on a headless service each call goes to the next ready authority pod instead of staying on the first one;
+// with a single virtual address it behaves like the default pick_first. The authority ages connections, so
+// the client re-resolves and finds new pods.
+const grpcRoundRobinServiceConfig = `{"loadBalancingConfig":[{"round_robin":{}}]}`
+
 // newNetworkGRPCAuthServiceWithDialOptions creates the adapter with optional test dial options.
 func newNetworkGRPCAuthServiceWithDialOptions(
 	authority config.AuthorityConfig,
@@ -84,6 +90,7 @@ func newNetworkGRPCAuthServiceWithDialOptions(
 	dialOptions := []grpc.DialOption{
 		grpc.WithTransportCredentials(transport),
 		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(maxHTTPResponseBytes)),
+		grpc.WithDefaultServiceConfig(grpcRoundRobinServiceConfig),
 	}
 	if configuredAuthority := strings.TrimSpace(authority.GRPC.Authority); configuredAuthority != "" {
 		dialOptions = append(dialOptions, grpc.WithAuthority(configuredAuthority))

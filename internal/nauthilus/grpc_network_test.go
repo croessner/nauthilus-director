@@ -22,6 +22,7 @@ import (
 	"encoding/base64"
 	"net"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/croessner/nauthilus-director/internal/config"
@@ -29,6 +30,7 @@ import (
 	commonv1 "github.com/croessner/nauthilus-director/internal/nauthilus/grpcapi/common/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/resolver"
 )
 
 // TestGRPCNetworkClientAuthenticatesAgainstProtoService verifies the generated client boundary.
@@ -441,3 +443,101 @@ func assertIncomingMetadataValue(t *testing.T, md metadata.MD, key string, want 
 		t.Fatalf("%s metadata %s did not match expected listener context", operation, key)
 	}
 }
+
+// countingProtoAuthServer counts authentication calls per backend.
+type countingProtoAuthServer struct {
+	authv1.UnimplementedAuthServiceServer
+
+	calls atomic.Int64
+}
+
+// Authenticate counts the call and returns an authority success response.
+func (s *countingProtoAuthServer) Authenticate(context.Context, *authv1.AuthRequest) (*authv1.AuthResponse, error) {
+	s.calls.Add(1)
+
+	return &authv1.AuthResponse{
+		Ok:           true,
+		Decision:     authv1.AuthDecision_AUTH_DECISION_OK,
+		AccountField: "account",
+		Attributes: map[string]*commonv1.AttributeValues{
+			"account": {Values: []string{"alice@example.test"}},
+		},
+	}, nil
+}
+
+// TestGRPCNetworkClientSpreadsCallsOverResolvedAuthorities verifies round_robin across resolved addresses.
+func TestGRPCNetworkClientSpreadsCallsOverResolvedAuthorities(t *testing.T) {
+	servers := make([]*countingProtoAuthServer, 2)
+	addresses := make([]resolver.Address, 0, len(servers))
+
+	for index := range servers {
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("net.Listen: %v", err)
+		}
+
+		grpcServer := grpc.NewServer()
+		servers[index] = &countingProtoAuthServer{}
+		authv1.RegisterAuthServiceServer(grpcServer, servers[index])
+
+		go func() {
+			_ = grpcServer.Serve(listener)
+		}()
+
+		t.Cleanup(grpcServer.Stop)
+
+		addresses = append(addresses, resolver.Address{Addr: listener.Addr().String()})
+	}
+
+	builder := staticResolverBuilder{addresses: addresses}
+
+	service, err := newNetworkGRPCAuthServiceWithDialOptions(
+		testGRPCAuthority(t, "roundrobintest:///authority"),
+		AuthorityContext{},
+		[]grpc.DialOption{grpc.WithResolvers(builder)},
+	)
+	if err != nil {
+		t.Fatalf("newNetworkGRPCAuthServiceWithDialOptions: %v", err)
+	}
+
+	client := newTestGRPCClient(t, service)
+
+	for range 20 {
+		if _, err := client.Authenticate(context.Background(), AuthRequest{
+			Context:    RequestContext{Username: "alice@example.test", Protocol: "imap", Method: "plain"},
+			Credential: NewSecret("secret-password"),
+		}); err != nil {
+			t.Fatalf("Authenticate returned error: %v", err)
+		}
+	}
+
+	for index, server := range servers {
+		if calls := server.calls.Load(); calls < 5 {
+			t.Fatalf("authority %d received %d of 20 calls, want calls spread over both authorities", index, calls)
+		}
+	}
+}
+
+// staticResolverBuilder resolves every target to a fixed address list.
+type staticResolverBuilder struct {
+	addresses []resolver.Address
+}
+
+// Build publishes the fixed addresses to the client connection.
+func (b staticResolverBuilder) Build(_ resolver.Target, conn resolver.ClientConn, _ resolver.BuildOptions) (resolver.Resolver, error) {
+	return staticResolver{}, conn.UpdateState(resolver.State{Addresses: b.addresses})
+}
+
+// Scheme returns the test-only resolver scheme.
+func (staticResolverBuilder) Scheme() string {
+	return "roundrobintest"
+}
+
+// staticResolver never re-resolves.
+type staticResolver struct{}
+
+// ResolveNow is a no-op because the address list is fixed.
+func (staticResolver) ResolveNow(resolver.ResolveNowOptions) {}
+
+// Close is a no-op.
+func (staticResolver) Close() {}
