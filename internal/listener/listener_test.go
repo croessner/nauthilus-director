@@ -31,6 +31,7 @@ import (
 	"net"
 	"os"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -1197,9 +1198,9 @@ func (r *recordingListenerObservability) last(name string) (observability.Event,
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	for index := len(r.events) - 1; index >= 0; index-- {
-		if r.events[index].Name == name {
-			return r.events[index], true
+	for _, v := range slices.Backward(r.events) {
+		if v.Name == name {
+			return v, true
 		}
 	}
 
@@ -1221,8 +1222,7 @@ func (r *recordingListenerObservability) lastMatching(name string, label string,
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	for index := len(r.events) - 1; index >= 0; index-- {
-		event := r.events[index]
+	for _, event := range slices.Backward(r.events) {
 		if event.Name == name && event.MetricLabels[label] == value {
 			return event, true
 		}
