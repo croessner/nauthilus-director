@@ -489,11 +489,31 @@ func BackendBindingReasonClass(source string) string {
 	}
 }
 
+// fieldNameSeparators maps the separators of diagnostic field names to underscores. A Replacer is immutable and
+// safe for concurrent use, so it is built once instead of for every field of every event.
+var fieldNameSeparators = strings.NewReplacer("-", "_", ".", "_", " ", "_")
+
 // normalizeFieldName canonicalizes diagnostic field names for policy checks.
 func normalizeFieldName(name string) string {
-	replacer := strings.NewReplacer("-", "_", ".", "_", " ", "_")
+	if canonicalFieldName(name) {
+		return name
+	}
 
-	return strings.ToLower(strings.TrimSpace(replacer.Replace(name)))
+	return strings.ToLower(strings.TrimSpace(fieldNameSeparators.Replace(name)))
+}
+
+// canonicalFieldName reports whether name is already lower case without separators or surrounding spaces, which is
+// the case for almost every field the director emits.
+func canonicalFieldName(name string) bool {
+	for index := range len(name) {
+		switch character := name[index]; {
+		case character >= 'A' && character <= 'Z', character == '-', character == '.', character == ' ',
+			character >= 0x80, character == '\t', character == '\n', character == '\r', character == '\v', character == '\f':
+			return false
+		}
+	}
+
+	return true
 }
 
 // normalizeReasonToken canonicalizes reason values without preserving raw text.
