@@ -76,7 +76,8 @@ type BackendDialer interface {
 
 // TCPBackendConnector connects to configured POP3 backends over TCP only.
 type TCPBackendConnector struct {
-	dialer BackendDialer
+	dialer     BackendDialer
+	tlsConfigs *backend.ClientTLSConfigCache
 }
 
 // BackendConnection owns the POP3 backend stream before proxy handoff can take over.
@@ -84,6 +85,7 @@ type BackendConnection struct {
 	conn         net.Conn
 	reader       *bufio.Reader
 	writer       *bufio.Writer
+	tlsConfigs   *backend.ClientTLSConfigCache
 	capabilities backend.CapabilitySet
 	tlsActive    bool
 	tlsVerified  bool
@@ -95,7 +97,7 @@ func NewTCPBackendConnector(dialer BackendDialer) *TCPBackendConnector {
 		dialer = &net.Dialer{}
 	}
 
-	return &TCPBackendConnector{dialer: dialer}
+	return &TCPBackendConnector{dialer: dialer, tlsConfigs: backend.NewClientTLSConfigCache()}
 }
 
 // Conn returns the backend stream for the later proxy boundary.
@@ -177,6 +179,8 @@ func (c *TCPBackendConnector) Connect(ctx context.Context, request backend.Conne
 	}
 
 	connection := newBackendConnection(raw)
+	connection.tlsConfigs = c.tlsConfigs
+
 	if err := connection.prepare(dialCtx, target); err != nil {
 		_ = raw.Close()
 
@@ -330,10 +334,17 @@ func (c *BackendConnection) startTLS(ctx context.Context, target backend.Backend
 
 // wrapTLS performs the backend TLS handshake with configured verification policy.
 func (c *BackendConnection) wrapTLS(ctx context.Context, target backend.Backend) error {
-	tlsConfig, verified, err := backendTLSConfig(target)
+	tlsConfig, err := c.tlsConfigs.Config(target, func() (*tls.Config, error) {
+		built, _, buildErr := backendTLSConfig(target)
+
+		return built, buildErr
+	})
 	if err != nil {
 		return err
 	}
+
+	// The flag follows from the settings that backendTLSConfig validated when it built the configuration.
+	verified := !target.TLS.InsecureSkipVerify
 
 	tlsConn := tls.Client(c.conn, tlsConfig)
 	if err := tlsConn.HandshakeContext(ctx); err != nil {
