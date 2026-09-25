@@ -506,6 +506,35 @@ func registerRedisLifecycle(lifecycle fx.Lifecycle, client redis.UniversalClient
 	})
 }
 
+// registerRedisPoolMetrics exports the connection pool statistics of the process Redis client.
+func registerRedisPoolMetrics(runtime *observability.Runtime, client redis.UniversalClient) error {
+	return runtime.RegisterRedisPool(redisPoolStatsSource{client: client})
+}
+
+// redisPoolStatsSource adapts go-redis pool statistics to the observability boundary.
+type redisPoolStatsSource struct {
+	client redis.UniversalClient
+}
+
+// RedisPoolStats reads the pool statistics summed over every node of the topology.
+func (s redisPoolStatsSource) RedisPoolStats() observability.RedisPoolStats {
+	stats := s.client.PoolStats()
+	if stats == nil {
+		return observability.RedisPoolStats{}
+	}
+
+	return observability.RedisPoolStats{
+		Hits:             uint64(stats.Hits),
+		Misses:           uint64(stats.Misses),
+		Timeouts:         uint64(stats.Timeouts),
+		Waits:            uint64(stats.WaitCount),
+		WaitDuration:     time.Duration(stats.WaitDurationNs),
+		TotalConnections: uint64(stats.TotalConns),
+		IdleConnections:  uint64(stats.IdleConns),
+		PendingRequests:  uint64(stats.PendingRequests),
+	}
+}
+
 // registerControlLifecycle starts the control API before public protocol listeners.
 func registerControlLifecycle(lifecycle fx.Lifecycle, handle controlHandle) {
 	if handle.server == nil {

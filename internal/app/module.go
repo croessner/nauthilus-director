@@ -51,6 +51,7 @@ func Module() fx.Option {
 			registerObservabilityLifecycle,
 			registerListenerRuntimeService,
 			registerRedisLifecycle,
+			registerRedisPoolMetrics,
 			registerControlLifecycle,
 			registerListenerLifecycle,
 			registerHealthRunnerLifecycle,

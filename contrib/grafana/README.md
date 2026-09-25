@@ -84,6 +84,14 @@ Histograms also expose their Prometheus `_bucket`, `_sum` and `_count` series.
 | `nauthilus_director_proxy_lifetime_duration_seconds` | histogram | `operation`, `result`, `reason_class` |
 | `nauthilus_director_redis_operations_total` | counter | `operation`, `redis_mode`, `result`, `reason_class` |
 | `nauthilus_director_redis_operation_duration_seconds` | histogram | `operation`, `redis_mode`, `result`, `reason_class` |
+| `nauthilus_director_redis_pool_hits_total` | counter | none |
+| `nauthilus_director_redis_pool_misses_total` | counter | none |
+| `nauthilus_director_redis_pool_timeouts_total` | counter | none |
+| `nauthilus_director_redis_pool_waits_total` | counter | none |
+| `nauthilus_director_redis_pool_wait_duration_seconds_total` | counter | none |
+| `nauthilus_director_redis_pool_connections` | gauge | none |
+| `nauthilus_director_redis_pool_idle_connections` | gauge | none |
+| `nauthilus_director_redis_pool_pending_requests` | gauge | none |
 | `nauthilus_director_reload_total` | counter | `operation`, `result`, `reason_class` |
 | `nauthilus_director_rest_requests_total` | counter | `method`, `route`, `operation`, `status_class`, `result` |
 | `nauthilus_director_rest_request_duration_seconds` | histogram | `method`, `route`, `operation`, `status_class`, `result` |
@@ -92,4 +100,11 @@ Histograms also expose their Prometheus `_bucket`, `_sum` and `_count` series.
 | `nauthilus_director_runtime_operations_total` | counter | `operation`, `result`, `reason_class` |
 | `nauthilus_director_runtime_operation_duration_seconds` | histogram | `operation`, `result`, `reason_class` |
 | `nauthilus_director_sessions_total` | counter | `protocol`, `service`, `listener`, `backend_pool`, `tls_mode`, `result`, `reason_class` |
+
+The Redis operation durations include the time spent waiting for a pooled
+connection. Compare them with `nauthilus_director_redis_pool_waits_total`,
+`nauthilus_director_redis_pool_wait_duration_seconds_total` and
+`nauthilus_director_redis_pool_pending_requests` to tell a saturated client
+pool apart from slow Redis commands. The pool metrics are summed over every
+Redis node the client talks to.
 
