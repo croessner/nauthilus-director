@@ -182,6 +182,15 @@ func (s *RedisSessionStore) ReadHealthState(ctx context.Context, backendIdentifi
 		return backend.HealthState{}, err
 	}
 
+	return s.resolveHealthState(ctx, backendIdentifier, fields)
+}
+
+// resolveHealthState chooses between the backend's own published health fields and the legacy shared slot.
+func (s *RedisSessionStore) resolveHealthState(
+	ctx context.Context,
+	backendIdentifier string,
+	fields map[string]string,
+) (backend.HealthState, error) {
 	current, err := parseHealthStateFields(fields)
 	if err != nil {
 		return backend.HealthState{}, err
@@ -298,6 +307,126 @@ func (s *RedisSessionStore) BackendSnapshot(ctx context.Context, backendIdentifi
 		Health:          health,
 		ActiveSessions:  activeSessions,
 	}, nil
+}
+
+// backendSnapshotReads holds the pipelined runtime-override and health reads of one backend.
+type backendSnapshotReads struct {
+	runtime *redis.MapStringStringCmd
+	health  *redis.MapStringStringCmd
+}
+
+// BackendSnapshots reads the selector input of several backends in order. The runtime overrides and the current
+// health states of all backends share one pipelined round-trip instead of two sequential round-trips per backend;
+// both stay live reads, so drain and maintenance changes apply to the next placement exactly as with
+// BackendSnapshot. The advisory active counts and the legacy health fallback keep their local caches.
+func (s *RedisSessionStore) BackendSnapshots(ctx context.Context, backendIdentifiers []string) ([]backend.RuntimeSnapshot, error) {
+	runtimeKeys := make([]string, len(backendIdentifiers))
+	healthKeys := make([]string, len(backendIdentifiers))
+
+	for index, backendIdentifier := range backendIdentifiers {
+		runtimeKey, _, err := s.backendRuntimeKeys(backendIdentifier)
+		if err != nil {
+			return nil, err
+		}
+
+		_, healthKey, err := s.healthStateKeys(backendIdentifier)
+		if err != nil {
+			return nil, err
+		}
+
+		runtimeKeys[index] = runtimeKey
+		healthKeys[index] = healthKey
+	}
+
+	reads, err := s.pipelineBackendSnapshotReads(ctx, runtimeKeys, healthKeys)
+	if err != nil {
+		return nil, err
+	}
+
+	snapshots := make([]backend.RuntimeSnapshot, len(backendIdentifiers))
+
+	for index, backendIdentifier := range backendIdentifiers {
+		override, _, err := parseRuntimeSnapshotFields(reads[index].runtime.Val())
+		if err != nil {
+			return nil, err
+		}
+
+		activeSessions, err := s.advisoryBackendReservationCount(ctx, backendIdentifier)
+		if err != nil {
+			return nil, err
+		}
+
+		health, err := s.resolveHealthState(ctx, backendIdentifier, reads[index].health.Val())
+		if err != nil {
+			return nil, err
+		}
+
+		snapshots[index] = backend.RuntimeSnapshot{
+			RuntimeOverride: override,
+			Health:          health,
+			ActiveSessions:  activeSessions,
+		}
+	}
+
+	return snapshots, nil
+}
+
+// pipelineBackendSnapshotReads sends every runtime-override and health read in one pipeline and records them under
+// the operation names of the single-backend reads.
+func (s *RedisSessionStore) pipelineBackendSnapshotReads(
+	ctx context.Context,
+	runtimeKeys []string,
+	healthKeys []string,
+) ([]backendSnapshotReads, error) {
+	redisCtx := redisContext(ctx)
+	started := time.Now()
+	reads := make([]backendSnapshotReads, len(runtimeKeys))
+
+	_, pipelineErr := s.client.Pipelined(redisCtx, func(pipe redis.Pipeliner) error {
+		for index := range runtimeKeys {
+			reads[index] = backendSnapshotReads{
+				runtime: pipe.HGetAll(redisCtx, runtimeKeys[index]),
+				health:  pipe.HGetAll(redisCtx, healthKeys[index]),
+			}
+		}
+
+		return nil
+	})
+	if pipelineErr != nil && !isRedisNil(pipelineErr) {
+		var firstErr error
+
+		for _, read := range reads {
+			for _, command := range []struct {
+				operation string
+				read      *redis.MapStringStringCmd
+			}{
+				{operation: "backend_snapshot", read: read.runtime},
+				{operation: "health_state_read", read: read.health},
+			} {
+				if err := command.read.Err(); err != nil && !isRedisNil(err) {
+					classified := ClassifyRedisError(command.operation, err)
+					s.recordRedisOperation(redisCtx, command.operation, started, classified)
+
+					if firstErr == nil {
+						firstErr = classified
+					}
+				}
+			}
+		}
+
+		if firstErr == nil {
+			firstErr = ClassifyRedisError("backend_snapshot", pipelineErr)
+		}
+
+		return nil, firstErr
+	}
+
+	for range reads {
+		s.recordRedisOperation(redisCtx, "backend_snapshot", started, nil)
+		s.recordRedisOperation(redisCtx, "health_state_read", started, nil)
+	}
+
+	return reads, nil
 }
 
 // healthStateKeys returns the owner and state keys for one backend.

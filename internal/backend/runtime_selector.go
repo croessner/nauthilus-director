@@ -18,6 +18,7 @@ package backend
 
 import (
 	"context"
+	"fmt"
 	"time"
 )
 
@@ -213,11 +214,13 @@ func (s *RuntimeSelector) effectiveBackends(ctx context.Context, candidates []Ba
 	policy := s.policy.EffectiveBackend
 	policy.EnforceHealth = policy.EnforceHealth && s.healthEnforced(now)
 
-	for _, candidate := range candidates {
-		snapshot, err := s.backendSnapshot(ctx, candidate.Identifier)
-		if err != nil {
-			return nil, err
-		}
+	snapshots, err := s.candidateSnapshots(ctx, candidates)
+	if err != nil {
+		return nil, err
+	}
+
+	for index, candidate := range candidates {
+		snapshot := snapshots[index]
 
 		state, err := NewEffectiveBackendState(EffectiveBackendInput{
 			Backend:         candidate,
@@ -235,6 +238,41 @@ func (s *RuntimeSelector) effectiveBackends(ctx context.Context, candidates []Ba
 	}
 
 	return effective, nil
+}
+
+// candidateSnapshots reads the runtime state of every candidate in candidate order, in one batch when the reader
+// supports it.
+func (s *RuntimeSelector) candidateSnapshots(ctx context.Context, candidates []Backend) ([]RuntimeSnapshot, error) {
+	if batch, ok := s.snapshots.(BatchRuntimeSnapshotReader); ok && len(candidates) > 1 {
+		identifiers := make([]string, len(candidates))
+		for index, candidate := range candidates {
+			identifiers[index] = candidate.Identifier
+		}
+
+		snapshots, err := batch.BackendSnapshots(ctx, identifiers)
+		if err != nil {
+			return nil, err
+		}
+
+		if len(snapshots) != len(candidates) {
+			return nil, fmt.Errorf("backend snapshot batch returned %d results for %d candidates", len(snapshots), len(candidates))
+		}
+
+		return snapshots, nil
+	}
+
+	snapshots := make([]RuntimeSnapshot, len(candidates))
+
+	for index, candidate := range candidates {
+		snapshot, err := s.backendSnapshot(ctx, candidate.Identifier)
+		if err != nil {
+			return nil, err
+		}
+
+		snapshots[index] = snapshot
+	}
+
+	return snapshots, nil
 }
 
 // backendSnapshot reads runtime state or returns config-only defaults.

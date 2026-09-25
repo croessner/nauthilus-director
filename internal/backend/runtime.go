@@ -108,6 +108,12 @@ type RuntimeSnapshotReader interface {
 	BackendSnapshot(ctx context.Context, backendIdentifier string) (RuntimeSnapshot, error)
 }
 
+// BatchRuntimeSnapshotReader reads the snapshots of several backends at once, in identifier order. Readers
+// implement it when a batch saves round-trips over one BackendSnapshot call per backend.
+type BatchRuntimeSnapshotReader interface {
+	BackendSnapshots(ctx context.Context, backendIdentifiers []string) ([]RuntimeSnapshot, error)
+}
+
 // EffectiveBackendState is the shared selector, route lookup and control view.
 type EffectiveBackendState struct {
 	Backend              Backend

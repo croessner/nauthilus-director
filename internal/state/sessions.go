@@ -816,24 +816,26 @@ func (s *RedisSessionStore) writeRepairableOpenIndexes(ctx context.Context, delt
 		return
 	}
 
-	s.runRepairableIndexCommand(ctx, "open_session_index", func(redisCtx context.Context) error {
-		return s.client.HSet(redisCtx, sessionIndexKey, delta.SessionID, sessionKey).Err()
-	})
-	s.runRepairableIndexCommand(ctx, "open_session_due_index", func(redisCtx context.Context) error {
-		return s.client.ZAdd(redisCtx, sessionDueIndexKey, redisZ(delta.LeaseExpiresAt, delta.SessionID)).Err()
-	})
-	s.runRepairableIndexCommand(ctx, "open_user_index", func(redisCtx context.Context) error {
-		return s.client.HSet(redisCtx, userIndexKey, delta.AffinityHash, userIndexValue(delta.Tenant, delta.AccountKey)).Err()
-	})
-	s.runRepairableIndexCommand(ctx, "open_user_session_index", func(redisCtx context.Context) error {
-		return s.client.SAdd(redisCtx, userSessionIndexKey, delta.SessionID).Err()
-	})
-	s.runRepairableIndexCommand(ctx, "open_session_index_metadata", func(redisCtx context.Context) error {
-		return s.client.HSet(redisCtx, sessionKey,
-			scriptFieldSessionIndexKey, sessionIndexKey,
-			scriptFieldSessionDueIndexKey, sessionDueIndexKey,
-			scriptFieldUserSessionsKey, userSessionIndexKey,
-		).Err()
+	s.runRepairableIndexPipeline(ctx, []repairableIndexWrite{
+		{operation: "open_session_index", queue: func(redisCtx context.Context, pipe redis.Pipeliner) redis.Cmder {
+			return pipe.HSet(redisCtx, sessionIndexKey, delta.SessionID, sessionKey)
+		}},
+		{operation: "open_session_due_index", queue: func(redisCtx context.Context, pipe redis.Pipeliner) redis.Cmder {
+			return pipe.ZAdd(redisCtx, sessionDueIndexKey, redisZ(delta.LeaseExpiresAt, delta.SessionID))
+		}},
+		{operation: "open_user_index", queue: func(redisCtx context.Context, pipe redis.Pipeliner) redis.Cmder {
+			return pipe.HSet(redisCtx, userIndexKey, delta.AffinityHash, userIndexValue(delta.Tenant, delta.AccountKey))
+		}},
+		{operation: "open_user_session_index", queue: func(redisCtx context.Context, pipe redis.Pipeliner) redis.Cmder {
+			return pipe.SAdd(redisCtx, userSessionIndexKey, delta.SessionID)
+		}},
+		{operation: "open_session_index_metadata", queue: func(redisCtx context.Context, pipe redis.Pipeliner) redis.Cmder {
+			return pipe.HSet(redisCtx, sessionKey,
+				scriptFieldSessionIndexKey, sessionIndexKey,
+				scriptFieldSessionDueIndexKey, sessionDueIndexKey,
+				scriptFieldUserSessionsKey, userSessionIndexKey,
+			)
+		}},
 	})
 }
 
@@ -884,25 +886,27 @@ func (s *RedisSessionStore) writeRepairableAttachIndexes(
 		return err
 	}
 
-	s.runRepairableIndexCommand(ctx, "attach_backend_session_legacy_index", func(redisCtx context.Context) error {
-		return s.client.SRem(redisCtx, backendSessionIndexKey, attachment.SessionID).Err()
-	})
-	s.runRepairableIndexCommand(ctx, "attach_user_session_index", func(redisCtx context.Context) error {
-		return s.client.SAdd(redisCtx, userSessionIndexKey, attachment.SessionID).Err()
-	})
-	s.runRepairableIndexCommand(ctx, "attach_session_due_index", func(redisCtx context.Context) error {
-		return s.client.ZAdd(redisCtx, sessionDueIndexKey, redisZ(leaseExpiresAt, attachment.SessionID)).Err()
-	})
-	s.runRepairableIndexCommand(ctx, "attach_session_index", func(redisCtx context.Context) error {
-		return s.client.HSet(redisCtx, sessionIndexKey, attachment.SessionID, sessionKey).Err()
-	})
-	s.runRepairableIndexCommand(ctx, "attach_session_index_metadata", func(redisCtx context.Context) error {
-		return s.client.HSet(redisCtx, sessionKey,
-			scriptFieldSessionIndexKey, sessionIndexKey,
-			scriptFieldSessionDueIndexKey, sessionDueIndexKey,
-			scriptFieldUserSessionsKey, userSessionIndexKey,
-			"backend_sessions_key", backendSessionIndexKey,
-		).Err()
+	s.runRepairableIndexPipeline(ctx, []repairableIndexWrite{
+		{operation: "attach_backend_session_legacy_index", queue: func(redisCtx context.Context, pipe redis.Pipeliner) redis.Cmder {
+			return pipe.SRem(redisCtx, backendSessionIndexKey, attachment.SessionID)
+		}},
+		{operation: "attach_user_session_index", queue: func(redisCtx context.Context, pipe redis.Pipeliner) redis.Cmder {
+			return pipe.SAdd(redisCtx, userSessionIndexKey, attachment.SessionID)
+		}},
+		{operation: "attach_session_due_index", queue: func(redisCtx context.Context, pipe redis.Pipeliner) redis.Cmder {
+			return pipe.ZAdd(redisCtx, sessionDueIndexKey, redisZ(leaseExpiresAt, attachment.SessionID))
+		}},
+		{operation: "attach_session_index", queue: func(redisCtx context.Context, pipe redis.Pipeliner) redis.Cmder {
+			return pipe.HSet(redisCtx, sessionIndexKey, attachment.SessionID, sessionKey)
+		}},
+		{operation: "attach_session_index_metadata", queue: func(redisCtx context.Context, pipe redis.Pipeliner) redis.Cmder {
+			return pipe.HSet(redisCtx, sessionKey,
+				scriptFieldSessionIndexKey, sessionIndexKey,
+				scriptFieldSessionDueIndexKey, sessionDueIndexKey,
+				scriptFieldUserSessionsKey, userSessionIndexKey,
+				"backend_sessions_key", backendSessionIndexKey,
+			)
+		}},
 	})
 
 	return nil
@@ -931,39 +935,59 @@ func (s *RedisSessionStore) writeRepairableCloseIndexes(ctx context.Context, del
 		return
 	}
 
-	s.runRepairableIndexCommand(ctx, "close_session_index", func(redisCtx context.Context) error {
-		return s.client.HDel(redisCtx, sessionIndexKey, delta.SessionID).Err()
-	})
-	s.runRepairableIndexCommand(ctx, "close_session_due_index", func(redisCtx context.Context) error {
-		return s.client.ZRem(redisCtx, sessionDueIndexKey, delta.SessionID).Err()
-	})
-	s.runRepairableIndexCommand(ctx, "close_user_session_index", func(redisCtx context.Context) error {
-		return s.client.SRem(redisCtx, userSessionIndexKey, delta.SessionID).Err()
-	})
+	writes := []repairableIndexWrite{
+		{operation: "close_session_index", queue: func(redisCtx context.Context, pipe redis.Pipeliner) redis.Cmder {
+			return pipe.HDel(redisCtx, sessionIndexKey, delta.SessionID)
+		}},
+		{operation: "close_session_due_index", queue: func(redisCtx context.Context, pipe redis.Pipeliner) redis.Cmder {
+			return pipe.ZRem(redisCtx, sessionDueIndexKey, delta.SessionID)
+		}},
+		{operation: "close_user_session_index", queue: func(redisCtx context.Context, pipe redis.Pipeliner) redis.Cmder {
+			return pipe.SRem(redisCtx, userSessionIndexKey, delta.SessionID)
+		}},
+	}
 
 	if delta.BackendIdentifier == "" {
+		s.runRepairableIndexPipeline(ctx, writes)
+
 		return
 	}
 
-	backendSessionIndexKey, err := s.keys.BackendSessionIndexShardKey(delta.BackendIdentifier, delta.SessionID)
+	backendWrite, err := s.closeBackendSessionIndexWrite(delta)
 	if err != nil {
+		s.runRepairableIndexPipeline(ctx, writes)
 		s.recordRedisOperation(redisContext(ctx), "close_backend_session_index", time.Now(), err)
 
 		return
 	}
 
-	s.runRepairableIndexCommand(ctx, "close_backend_session_index", func(redisCtx context.Context) error {
-		sessionKey, keyErr := s.keys.SessionKey(delta.Tenant, delta.AccountKey, delta.SessionID)
-		if keyErr != nil {
-			return keyErr
-		}
-
-		return s.client.SRem(redisCtx, backendSessionIndexKey, delta.SessionID, encodeBackendSessionIndexMember(delta.SessionID, sessionKey)).Err()
-	})
+	s.runRepairableIndexPipeline(ctx, append(writes, backendWrite))
 
 	if delta.BackendCounted {
 		s.releaseRepairableBackendReservation(ctx, delta)
 	}
+}
+
+// closeBackendSessionIndexWrite removes the closed session from its backend index, including the legacy member.
+func (s *RedisSessionStore) closeBackendSessionIndexWrite(delta sessionMutationDelta) (repairableIndexWrite, error) {
+	backendSessionIndexKey, err := s.keys.BackendSessionIndexShardKey(delta.BackendIdentifier, delta.SessionID)
+	if err != nil {
+		return repairableIndexWrite{}, err
+	}
+
+	sessionKey, err := s.keys.SessionKey(delta.Tenant, delta.AccountKey, delta.SessionID)
+	if err != nil {
+		return repairableIndexWrite{}, err
+	}
+
+	member := encodeBackendSessionIndexMember(delta.SessionID, sessionKey)
+
+	return repairableIndexWrite{
+		operation: "close_backend_session_index",
+		queue: func(redisCtx context.Context, pipe redis.Pipeliner) redis.Cmder {
+			return pipe.SRem(redisCtx, backendSessionIndexKey, delta.SessionID, member)
+		},
+	}, nil
 }
 
 // releaseRepairableBackendReservation releases one backend reservation after a close delta.
@@ -1049,6 +1073,43 @@ func (s *RedisSessionStore) runRepairableIndexCommand(ctx context.Context, opera
 	started := time.Now()
 	err := ClassifyRedisError(operation, command(redisCtx))
 	s.recordRedisOperation(redisCtx, operation, started, err)
+}
+
+// repairableIndexWrite is one non-authoritative index write queued into a shared pipeline.
+type repairableIndexWrite struct {
+	operation string
+	queue     func(context.Context, redis.Pipeliner) redis.Cmder
+}
+
+// runRepairableIndexPipeline sends independent repairable index writes in one pipeline instead of one round-trip
+// each. The writes touch unrelated keys, so their relative order does not matter; a Cluster client splits the
+// pipeline per node. Every write keeps its own operation metric and error classification, and its recorded
+// duration is the duration of the whole pipeline.
+func (s *RedisSessionStore) runRepairableIndexPipeline(ctx context.Context, writes []repairableIndexWrite) {
+	if len(writes) == 0 {
+		return
+	}
+
+	redisCtx := redisContext(ctx)
+	started := time.Now()
+	commands := make([]redis.Cmder, len(writes))
+
+	_, pipelineErr := s.client.Pipelined(redisCtx, func(pipe redis.Pipeliner) error {
+		for index, write := range writes {
+			commands[index] = write.queue(redisCtx, pipe)
+		}
+
+		return nil
+	})
+
+	for index, write := range writes {
+		err := pipelineErr
+		if commands[index] != nil {
+			err = commands[index].Err()
+		}
+
+		s.recordRedisOperation(redisCtx, write.operation, started, ClassifyRedisError(write.operation, err))
+	}
 }
 
 // runRequiredRepairableIndexCommand records a required repair write and returns failures.
