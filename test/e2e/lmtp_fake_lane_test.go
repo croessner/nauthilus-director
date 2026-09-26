@@ -709,6 +709,37 @@ func TestServerBinaryPublicLMTPSIZEForwardingTranscript(t *testing.T) {
 	assertLMTPProcessOutputSafe(t, fixture.process.output.String())
 }
 
+// TestServerBinaryPublicLMTP7BITBodyTranscript proves the Postfix MAIL shape
+// "SIZE=n BODY=7BIT" is accepted and reaches the backend without the default
+// body type.
+func TestServerBinaryPublicLMTP7BITBodyTranscript(t *testing.T) {
+	fixture := startLMTPBackendChunkingFixture(t, lmtpBackendChunkingFixtureOptions{
+		BackendCapabilities:     []string{"8BITMIME", "SIZE 100"},
+		HealthCapabilities:      []string{"8BITMIME", "SIZE 100"},
+		ExtraCapabilities:       []string{"8BITMIME", "SIZE"},
+		MaxMessageBytes:         50,
+		DisableFrontendChunking: true,
+	})
+
+	client, capabilities := authenticatedLMTPClientWithCapabilities(t, fixture.address, "seven-bit.example")
+	defer client.Close()
+	assertLMTPHasCapability(t, capabilities, "8BITMIME")
+	client.WriteLine("MAIL FROM:<sender@example.test> SIZE=42 BODY=7BIT")
+	client.ExpectLine("250 2.0.0 Sender accepted\r\n")
+	client.WriteLine("RCPT TO:<" + e2eLMTPRecipientA + ">")
+	client.ExpectLine("250 2.0.0 Recipient accepted\r\n")
+	client.WriteLine("DATA")
+	client.ExpectLine("354 2.0.0 End data with <CR><LF>.<CR><LF>\r\n")
+	client.WriteRaw("seven-bit-body\r\n.\r\n")
+	client.ExpectLine("250 2.1.5 Message accepted\r\n")
+
+	observation := fixture.fakeLMTPA.ExpectObservation(t)
+	assertBackendMAILCommand(t, observation, "MAIL FROM:<sender@example.test> SIZE=42")
+	assertNoBackendMAILParameter(t, observation, "BODY=")
+	assertLMTPBackendObservation(t, observation, []string{lmtpPath(e2eLMTPRecipientA)}, false)
+	assertLMTPProcessOutputSafe(t, fixture.process.output.String())
+}
+
 // TestServerBinaryPublicLMTPSIZESuppressedByMixedHealth proves pool proof is fail-closed.
 func TestServerBinaryPublicLMTPSIZESuppressedByMixedHealth(t *testing.T) {
 	fixture := startLMTPBackendChunkingFixture(t, lmtpBackendChunkingFixtureOptions{

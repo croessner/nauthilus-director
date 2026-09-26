@@ -83,7 +83,9 @@ capability surface:
 
 - `SMTPUTF8` gates `MAIL FROM ... SMTPUTF8` and UTF-8 envelope paths.
 - `8BITMIME` gates `MAIL FROM ... BODY=8BITMIME` and forwards that parameter to
-  the backend after backend-pool capability proof.
+  the backend after backend-pool capability proof. It gates the RFC 6152
+  default `BODY=7BIT` as well, which Postfix sends whenever the sender declared
+  it; the director accepts it and does not repeat it to the backend.
 - `CHUNKING` gates frontend `BDAT`, while backend `BDAT` delivery is selected
   separately per chosen backend capability.
 - `ENHANCEDSTATUSCODES`, `STARTTLS` and `AUTH ...` are mediated by implemented

@@ -309,6 +309,9 @@ func Test8BITMIMECapabilityGatesMailBodyParameter(t *testing.T) {
 	t.Run("advertised transaction opt-in", test8BITMIMEAdvertisedTransactionOptIn)
 	t.Run("duplicate body parameter", test8BITMIMEDuplicateBodyParameter)
 	t.Run("unsupported body values", test8BITMIMEUnsupportedBodyValues)
+	t.Run("advertised 7bit body", test8BITMIMEAdvertised7BITBody)
+	t.Run("7bit body without capability", test8BITMIME7BITBodyWithoutCapability)
+	t.Run("conflicting body parameters", test8BITMIMEConflictingBodyParameters)
 	t.Run("coexists with smtputf8", test8BITMIMECoexistsWithSMTPUTF8)
 }
 
@@ -992,7 +995,7 @@ func test8BITMIMEDuplicateBodyParameter(t *testing.T) {
 
 // test8BITMIMEUnsupportedBodyValues verifies unsupported BODY modes remain fail-closed.
 func test8BITMIMEUnsupportedBodyValues(t *testing.T) {
-	for _, parameter := range []string{"BODY=BINARYMIME", "BODY=7BIT", "BODY=8BITMIME=YES"} {
+	for _, parameter := range []string{"BODY=BINARYMIME", "BODY=7BIT=YES", "BODY=8BITMIME=YES"} {
 		t.Run(parameter, func(t *testing.T) {
 			config := test8BITMIMEConfig()
 
@@ -1004,6 +1007,58 @@ func test8BITMIMEUnsupportedBodyValues(t *testing.T) {
 			harness.expectLine(t, "501 5.5.4 Invalid MAIL command\r\n")
 		})
 	}
+}
+
+// test8BITMIMEAdvertised7BITBody verifies the RFC 6152 BODY=7BIT declaration
+// that Postfix sends for senders who declared 7BIT is accepted once 8BITMIME
+// is advertised.
+func test8BITMIMEAdvertised7BITBody(t *testing.T) {
+	for _, parameter := range []string{"BODY=7BIT", "body=7bit", "SIZE=42 BODY=7BIT"} {
+		t.Run(parameter, func(t *testing.T) {
+			config := testSIZEConfig(1024, backend.PoolSizeProof{Supported: true})
+			config.Capabilities = []string{capability8BITMIME, capabilitySIZE}
+			config.BackendCapabilities = []string{capability8BITMIME}
+
+			harness := startLMTPHarness(t, config)
+			harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+			harness.write(t, "LHLO submitter.example\r\n")
+			harness.drainLHLO(t)
+			harness.write(t, "MAIL FROM:<sender@example.test> "+parameter+"\r\n")
+			harness.expectLine(t, "250 2.0.0 Sender accepted\r\n")
+
+			if harness.session.transaction.body8BitMIME {
+				t.Fatalf("BODY=7BIT marked the transaction as 8BITMIME")
+			}
+		})
+	}
+}
+
+// test8BITMIME7BITBodyWithoutCapability verifies BODY stays gated by the
+// 8BITMIME advertisement like BODY=8BITMIME.
+func test8BITMIME7BITBodyWithoutCapability(t *testing.T) {
+	config := testSessionConfig()
+	config.TLSMode = TLSModeImplicit
+	config.Capabilities = []string{capability8BITMIME}
+
+	harness := startLMTPHarness(t, config)
+	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+	harness.write(t, "LHLO submitter.example\r\n")
+	harness.expectLine(t, "250 nauthilus-director\r\n")
+	harness.write(t, "MAIL FROM:<sender@example.test> BODY=7BIT\r\n")
+	harness.expectLine(t, "501 5.5.4 Invalid MAIL command\r\n")
+}
+
+// test8BITMIMEConflictingBodyParameters verifies one MAIL command cannot carry
+// two BODY declarations of different values.
+func test8BITMIMEConflictingBodyParameters(t *testing.T) {
+	config := test8BITMIMEConfig()
+
+	harness := startLMTPHarness(t, config)
+	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+	harness.write(t, "LHLO submitter.example\r\n")
+	harness.drainLHLO(t)
+	harness.write(t, "MAIL FROM:<sender@example.test> BODY=7BIT BODY=8BITMIME\r\n")
+	harness.expectLine(t, "501 5.5.4 Invalid MAIL command\r\n")
 }
 
 // test8BITMIMECoexistsWithSMTPUTF8 verifies both MAIL opt-ins can share one transaction.
@@ -3510,6 +3565,48 @@ func TestBackendMAILForwardsAccepted8BITMIMEParameter(t *testing.T) {
 	harness.expectLine(t, "250-SMTPUTF8\r\n")
 	harness.expectLine(t, "250 8BITMIME\r\n")
 	harness.write(t, "MAIL FROM:<sender@example.test> BODY=8BITMIME SMTPUTF8\r\n")
+	harness.expectLine(t, "250 2.0.0 Sender accepted\r\n")
+	harness.write(t, "RCPT TO:<recipient@example.test>\r\n")
+	harness.expectLine(t, "250 2.0.0 Recipient accepted\r\n")
+	harness.write(t, "DATA\r\n")
+	harness.expectLine(t, "354 2.0.0 End data with <CR><LF>.<CR><LF>\r\n")
+	harness.write(t, "body\r\n.\r\n")
+	harness.expectLine(t, "250 2.1.5 Message accepted\r\n")
+
+	store.assertClosed(t, 1)
+	dialer.Wait(t)
+}
+
+// TestBackendMAILOmitsAccepted7BITBodyParameter verifies BODY=7BIT, the
+// default body type, is accepted from the submitter and not repeated to the
+// backend.
+func TestBackendMAILOmitsAccepted7BITBodyParameter(t *testing.T) {
+	identity := identityLookuperForRecipients(map[string]string{testRecipientSingle: testPlacementShardA})
+	resolver := &recordingRoutingResolver{}
+	store := &recordingDeliveryStore{}
+	selector := &recordingBackendSelector{}
+	dialer := scriptedLMTPBackendDialer(t, func(t *testing.T, conn net.Conn) {
+		reader := greetTransactionBackend(t, conn)
+		expectLMTPBackendLine(t, reader, "MAIL FROM:<sender@example.test>")
+		writeLMTPBackendLine(t, conn, "250 2.1.0 sender ok")
+		expectLMTPBackendLine(t, reader, "RCPT TO:<recipient@example.test>")
+		writeLMTPBackendLine(t, conn, "250 2.1.5 recipient ok")
+		expectLMTPBackendLine(t, reader, "DATA")
+		writeLMTPBackendLine(t, conn, "354 2.0.0 data")
+		expectLMTPBackendLine(t, reader, "body")
+		expectLMTPBackendLine(t, reader, ".")
+		writeLMTPBackendLine(t, conn, "250 2.1.5 delivered")
+	})
+	config := backendForwardingSessionConfig(identity, resolver, store, selector, dialer)
+	config.Capabilities = []string{capability8BITMIME}
+	config.BackendCapabilities = []string{capability8BITMIME}
+
+	harness := startLMTPHarness(t, config)
+	harness.expectLine(t, "220 2.0.0 nauthilus-director LMTP ready\r\n")
+	harness.write(t, "LHLO submitter.example\r\n")
+	harness.expectLine(t, "250-nauthilus-director\r\n")
+	harness.expectLine(t, "250 8BITMIME\r\n")
+	harness.write(t, "MAIL FROM:<sender@example.test> BODY=7BIT\r\n")
 	harness.expectLine(t, "250 2.0.0 Sender accepted\r\n")
 	harness.write(t, "RCPT TO:<recipient@example.test>\r\n")
 	harness.expectLine(t, "250 2.0.0 Recipient accepted\r\n")

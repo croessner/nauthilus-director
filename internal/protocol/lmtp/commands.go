@@ -432,7 +432,7 @@ func (s *Session) requireMAILCapabilities(mail mailCommand) error {
 		return s.rejectEnhanced(responseStatusParameter, enhancedParameter, malformedMailText)
 	}
 
-	if mail.body8BitMIME && !s.eightBitAdvertised {
+	if mail.bodyDeclared && !s.eightBitAdvertised {
 		return s.rejectEnhanced(responseStatusParameter, enhancedParameter, malformedMailText)
 	}
 

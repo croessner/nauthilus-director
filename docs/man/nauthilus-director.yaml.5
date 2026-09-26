@@ -564,6 +564,9 @@ writes.
 BODY=8BITMIME is accepted only when 8BITMIME was advertised in the current
 LHLO response and is forwarded to the selected backend without inspecting,
 rewriting or downgrading DATA or BDAT payload bytes.
+BODY=7BIT (RFC 6152), which Postfix sends for every message whose sender
+declared it, is accepted under the same condition; it names the default body
+type and is therefore not repeated to the backend.
 After a successful delivery or transaction close, LMTP retains the selected
 backend node under
 .B director.affinity.backend_retention

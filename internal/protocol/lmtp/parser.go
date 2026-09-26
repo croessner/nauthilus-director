@@ -64,6 +64,7 @@ type mailCommand struct {
 	wirePath            string
 	smtpUTF8            bool
 	body8BitMIME        bool
+	bodyDeclared        bool
 	declaredSizeBytes   int64
 	declaredSizePresent bool
 }
@@ -189,12 +190,18 @@ func parseMailCommand(command frontendCommand) (mailCommand, error) {
 			}
 
 			bodySeen = true
+			parsed.bodyDeclared = true
 
-			if !strings.EqualFold(mailBodyParameterValue(parameter), capability8BITMIME) {
+			// RFC 6152 defines BODY=7BIT and BODY=8BITMIME. 7BIT is the
+			// default body type, so it only needs validating; Postfix sends
+			// it for every message whose sender declared it.
+			switch value := mailBodyParameterValue(parameter); {
+			case strings.EqualFold(value, capability8BITMIME):
+				parsed.body8BitMIME = true
+			case strings.EqualFold(value, mailBody7BIT):
+			default:
 				return mailCommand{}, fmt.Errorf("%w: unsupported BODY parameter", ErrMalformedCommand)
 			}
-
-			parsed.body8BitMIME = true
 		case isMailSizeParameter(parameter):
 			if sizeSeen {
 				return mailCommand{}, fmt.Errorf("%w: duplicate SIZE parameter", ErrMalformedCommand)

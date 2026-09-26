@@ -474,7 +474,8 @@ director:
           # CHUNKING controls frontend BDAT availability; selected backend
           # CHUNKING is evaluated separately and may enable backend BDAT
           # delivery for frontend DATA or BDAT. 8BITMIME requires
-          # BODY=8BITMIME parsing and backend-safe forwarding. SIZE accepts
+          # BODY=8BITMIME parsing and backend-safe forwarding; BODY=7BIT is
+          # accepted with it and not forwarded. SIZE accepts
           # MAIL FROM SIZE=<n> only after current-session advertisement and
           # forwards the accepted declaration only to a selected backend that
           # advertised SIZE. PIPELINING is a frontend ordered-reply contract and
@@ -549,7 +550,8 @@ director:
           # CHUNKING controls frontend BDAT availability; selected backend
           # CHUNKING is evaluated separately and may enable backend BDAT
           # delivery for frontend DATA or BDAT. 8BITMIME requires
-          # BODY=8BITMIME parsing and backend-safe forwarding. SIZE accepts
+          # BODY=8BITMIME parsing and backend-safe forwarding; BODY=7BIT is
+          # accepted with it and not forwarded. SIZE accepts
           # MAIL FROM SIZE=<n> only after current-session advertisement and
           # forwards the accepted declaration only to a selected backend that
           # advertised SIZE. PIPELINING is a frontend ordered-reply contract and

@@ -41,6 +41,7 @@ import (
 const (
 	capabilityAUTH                = "AUTH"
 	capability8BITMIME            = "8BITMIME"
+	mailBody7BIT                  = "7BIT"
 	capabilityCHUNKING            = "CHUNKING"
 	capabilityEnhancedStatusCodes = "ENHANCEDSTATUSCODES"
 	capabilityPIPELINING          = "PIPELINING"
