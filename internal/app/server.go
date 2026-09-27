@@ -31,6 +31,7 @@ import (
 	"github.com/croessner/nauthilus-director/internal/placement"
 	"github.com/croessner/nauthilus-director/internal/protocol/greeting"
 	"github.com/croessner/nauthilus-director/internal/protocol/imap"
+	"github.com/croessner/nauthilus-director/internal/protocol/jmap"
 	"github.com/croessner/nauthilus-director/internal/protocol/lmtp"
 	"github.com/croessner/nauthilus-director/internal/protocol/pop3"
 	"github.com/croessner/nauthilus-director/internal/protocol/sieve"
@@ -49,6 +50,7 @@ const (
 	protocolLMTP  = "lmtp"
 	protocolSIEVE = "sieve"
 	protocolPOP3  = "pop3"
+	protocolJMAP  = "jmap"
 )
 
 // Options configures one production server process instance.
@@ -88,6 +90,7 @@ type reaperHandle struct {
 
 type protocolHealthChecker struct {
 	imap  backend.HealthChecker
+	jmap  backend.HealthChecker
 	lmtp  backend.HealthChecker
 	pop3  backend.HealthChecker
 	sieve backend.HealthChecker
@@ -113,6 +116,8 @@ func (c protocolHealthChecker) CheckBackend(ctx context.Context, target backend.
 	switch strings.ToLower(strings.TrimSpace(target.Protocol)) {
 	case protocolIMAP:
 		return c.imap.CheckBackend(ctx, target, request)
+	case protocolJMAP:
+		return c.jmap.CheckBackend(ctx, target, request)
 	case protocolLMTP:
 		return c.lmtp.CheckBackend(ctx, target, request)
 	case protocolPOP3:
@@ -641,6 +646,8 @@ func sessionHandlerFactory(
 			return sieveSessionHandler(options, resolver, placementService, retentionTTL, placementGate, processVersion)
 		case protocolPOP3:
 			return pop3SessionHandler(options, resolver, placementService, retentionTTL, placementGate, processVersion)
+		case protocolJMAP:
+			return jmapSessionHandler(options, resolver, placementService, retentionTTL, placementGate)
 		default:
 			return unsupportedProtocolHandler{protocol: options.Config.Protocol}
 		}
@@ -957,6 +964,64 @@ func pop3SessionHandler(
 	})
 }
 
+// jmapSessionHandler builds the JMAP HTTP reverse-proxy boundary for one listener.
+func jmapSessionHandler(
+	options listener.SessionOptions,
+	resolver routing.RoutingResolver,
+	placementService *placement.Service,
+	retentionTTL time.Duration,
+	placementGate runtimectl.PlacementGate,
+) listener.SessionHandler {
+	var settings config.JMAPListenerConfig
+	if options.Config.JMAP != nil {
+		settings = *options.Config.JMAP
+	}
+
+	// A nil service must stay a nil interface so the handler fails closed instead of panicking.
+	var placer placement.RequestPlacer
+	if placementService != nil {
+		placer = placementService
+	}
+
+	handler, err := jmap.NewHandler(jmap.Config{
+		ListenerName:          options.ListenerName,
+		AuthorityName:         options.Config.Authority,
+		ServiceName:           options.Config.ServiceName,
+		BackendPool:           options.Config.BackendPool,
+		DirectorInstanceID:    options.DirectorInstanceID,
+		DefaultTenant:         options.DefaultTenant,
+		Settings:              settings,
+		AuthTimeout:           options.Timeouts.Auth.Std(),
+		BackendConnectTimeout: options.Timeouts.BackendConnect.Std(),
+		SessionLeaseTTL:       options.SessionLeaseTTL,
+		SessionIdleGrace:      options.SessionIdleGrace,
+		BackendRetentionTTL:   retentionTTL,
+		MaxBearerTokenBytes:   options.BearerTokenMaxBytes,
+		Authenticator:         options.Authenticator,
+		IdentityLookuper:      options.IdentityLookuper,
+		BearerIntrospector:    options.BearerIntrospector,
+		RoutingResolver:       resolver,
+		PlacementService:      placer,
+		PlacementGate:         placementGate,
+		LocalSessions:         options.LocalSessions,
+		Observability:         options.Observability,
+	})
+	if err != nil {
+		return unavailableHandler{err: err}
+	}
+
+	return handler
+}
+
+type unavailableHandler struct {
+	err error
+}
+
+// Serve closes streams of a listener whose protocol handler could not be constructed.
+func (h unavailableHandler) Serve(context.Context, net.Conn) error {
+	return h.err
+}
+
 // lmtpBackendCapabilities returns mediated capabilities with fresh backend-pool proof.
 func lmtpBackendCapabilities(ctx context.Context, capabilities backendCapabilityReader, backendPool string, denied []string, desired ...string) []string {
 	if capabilities == nil {
@@ -1139,6 +1204,7 @@ func healthRunner(
 		store,
 		protocolHealthChecker{
 			imap:  imap.NewHealthChecker(imap.NewTCPBackendConnector(nil)),
+			jmap:  jmap.NewHealthChecker(nil),
 			lmtp:  lmtp.NewHealthChecker(lmtp.NewTCPBackendConnector(nil)),
 			pop3:  pop3.NewHealthChecker(pop3.NewTCPBackendConnector(nil)),
 			sieve: sieve.NewHealthChecker(sieve.NewTCPBackendConnector(nil)),

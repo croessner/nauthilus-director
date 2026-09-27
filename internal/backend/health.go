@@ -578,7 +578,7 @@ func (r *HealthRunner) observeOwner(identifier string, owner HealthOwnershipReco
 // healthSupportedProtocol reports whether a protocol has production health probes.
 func healthSupportedProtocol(protocol string) bool {
 	switch strings.ToLower(strings.TrimSpace(protocol)) {
-	case protocolIMAP, protocolLMTP, protocolSIEVE, protocolPOP3:
+	case protocolIMAP, protocolLMTP, protocolSIEVE, protocolPOP3, protocolJMAP:
 		return true
 	default:
 		return false

@@ -51,6 +51,8 @@ const (
 	metricNameBackendRuntime          = "nauthilus_director_backend_runtime_operations_total"
 	metricNameEventsTotal             = "nauthilus_director_observability_events_total"
 	metricNameFailuresTotal           = "nauthilus_director_observability_sink_failures_total"
+	metricNameJMAPRequests            = "nauthilus_director_jmap_requests_total"
+	metricNameJMAPRequestSeconds      = "nauthilus_director_jmap_request_duration_seconds"
 	metricNameListenerLifecycle       = "nauthilus_director_listener_lifecycle_total"
 	metricNameLMTPBackendStatus       = "nauthilus_director_lmtp_backend_status_total"
 	metricNameLMTPBDATStreams         = "nauthilus_director_lmtp_bdat_streams_total"
@@ -93,6 +95,15 @@ var (
 		metricLabelListener,
 		metricLabelBackendPool,
 		metricLabelTLSMode,
+	}
+	jmapRequestLabels = []string{
+		metricLabelProtocol,
+		metricLabelListener,
+		metricLabelBackendPool,
+		metricLabelOperation,
+		metricLabelStatusClass,
+		metricLabelResult,
+		metricLabelReasonClass,
 	}
 	listenerLifecycleLabels = []string{
 		metricLabelProtocol,
@@ -231,6 +242,8 @@ type prometheusInstruments struct {
 	backendSelectionSeconds  *prometheus.HistogramVec
 	backendRuntime           *prometheus.CounterVec
 	events                   *prometheus.CounterVec
+	jmapRequests             *prometheus.CounterVec
+	jmapRequestSeconds       *prometheus.HistogramVec
 	listenerLifecycle        *prometheus.CounterVec
 	lmtpBackendStatus        *prometheus.CounterVec
 	lmtpBDATSeconds          *prometheus.HistogramVec
@@ -387,6 +400,10 @@ func (m *prometheusRuntime) recordTypedEvent(event Event) {
 		return
 	}
 
+	if m.recordJMAPMetric(event) {
+		return
+	}
+
 	m.recordRuntimeMetric(event)
 }
 
@@ -492,6 +509,18 @@ func (m *prometheusRuntime) recordLMTPMetric(event Event) bool {
 	default:
 		return false
 	}
+
+	return true
+}
+
+// recordJMAPMetric counts and times JMAP HTTP requests by bounded endpoint and status class.
+func (m *prometheusRuntime) recordJMAPMetric(event Event) bool {
+	if event.Name != EventJMAPRequest {
+		return false
+	}
+
+	m.instrument.jmapRequests.WithLabelValues(metricValues(event, jmapRequestLabels)...).Inc()
+	observeDuration(m.instrument.jmapRequestSeconds, event, jmapRequestLabels)
 
 	return true
 }
@@ -649,6 +678,8 @@ func newPrometheusInstruments() (prometheusInstruments, error) {
 		backendSelectionSeconds:  builders.histogramVec(metricNameBackendSelectionSeconds, "Backend selection duration in seconds.", backendConnectBuckets(), protocolBackendLabels...),
 		backendRuntime:           builders.counterVec(metricNameBackendRuntime, "Total backend runtime override operations.", operationResultReasonLabels...),
 		events:                   builders.counterVec(metricNameEventsTotal, "Total normalized observability events recorded by the director.", metricLabelOperation, metricLabelResult),
+		jmapRequests:             builders.counterVec(metricNameJMAPRequests, "Total JMAP HTTP requests by bounded endpoint, status class and authentication result.", jmapRequestLabels...),
+		jmapRequestSeconds:       builders.histogramVec(metricNameJMAPRequestSeconds, "JMAP HTTP request duration in seconds, including event-stream lifetimes.", mailSessionBuckets(), jmapRequestLabels...),
 		listenerLifecycle:        builders.counterVec(metricNameListenerLifecycle, "Total listener lifecycle outcomes.", listenerLifecycleLabels...),
 		lmtpBackendStatus:        builders.counterVec(metricNameLMTPBackendStatus, "Total LMTP backend status classes by bounded backend dimensions.", lmtpBackendStatusLabels...),
 		lmtpBDATSeconds:          builders.histogramVec(metricNameLMTPBDATSeconds, "LMTP BDAT forwarding duration in seconds.", mailSessionBuckets(), lmtpStatusLabels...),
@@ -699,6 +730,8 @@ func (i prometheusInstruments) collectors() []prometheus.Collector {
 		i.backendSelectionSeconds,
 		i.backendRuntime,
 		i.events,
+		i.jmapRequests,
+		i.jmapRequestSeconds,
 		i.listenerLifecycle,
 		i.lmtpBackendStatus,
 		i.lmtpBDATSeconds,

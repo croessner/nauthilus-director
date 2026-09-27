@@ -1683,3 +1683,41 @@ func placementSelectionResult(selected backend.Backend, reason string) backend.S
 func placementBackendError(message string) error {
 	return &backend.Error{Kind: backend.ErrorKindNoBackend, Operation: "placement_test", Message: message}
 }
+
+// TestServiceRequestHoldReusesActiveBindingWithoutCapacity verifies request holds share node affinity.
+func TestServiceRequestHoldReusesActiveBindingWithoutCapacity(t *testing.T) {
+	store := &placementStoreFixture{
+		affinity: state.AffinityRecord{
+			Key:                placementKey(),
+			ShardTag:           placementShardA,
+			BackendNode:        placementNodeA,
+			Status:             "found",
+			Present:            true,
+			BindingStatus:      state.BindingStatusActive,
+			ActiveSessionCount: 1,
+			ActiveHolderCount:  1,
+		},
+	}
+	selector := &placementSelectorFixture{registry: placementRegistryFixture()}
+	service := mustPlacementService(t, selector, store)
+
+	request := placementRequest("request-hold-1", placementShardB)
+	request.HolderKind = state.HolderKindSession
+
+	lease, err := service.PlaceRequestHold(context.Background(), request)
+	if err != nil {
+		t.Fatalf("PlaceRequestHold returned error: %v", err)
+	}
+
+	if lease.Backend().Backend.Identifier != placementBackendA {
+		t.Fatalf("selected backend = %q, want active node backend", lease.Backend().Backend.Identifier)
+	}
+
+	if store.opened[0].HolderKind != state.HolderKindDelivery {
+		t.Fatalf("request hold kind = %q, want non-session holder kind", store.opened[0].HolderKind)
+	}
+
+	if store.reserveCalls != 0 || store.attachCalls != 0 {
+		t.Fatalf("request hold counted backend reserve=%d attach=%d, want none", store.reserveCalls, store.attachCalls)
+	}
+}

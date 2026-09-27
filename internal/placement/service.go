@@ -173,6 +173,15 @@ type DeliveryPlacer interface {
 	PlaceDeliveryHold(context.Context, DeliveryRequest) (LeaseHandle, error)
 }
 
+// RequestHoldRequest identifies one short request-scoped placement hold.
+type RequestHoldRequest = Request
+
+// RequestPlacer is the narrow API used by request/response protocols such as JMAP.
+type RequestPlacer interface {
+	SessionPlacer
+	PlaceRequestHold(context.Context, RequestHoldRequest) (LeaseHandle, error)
+}
+
 // LeaseHandle owns one opened holder and its selected backend accounting.
 type LeaseHandle interface {
 	Affinity() state.AffinityRecord
@@ -241,6 +250,17 @@ func (s *Service) PlaceSession(ctx context.Context, request SessionRequest) (Lea
 
 // PlaceDeliveryHold opens a delivery-scoped holder without counting backend capacity.
 func (s *Service) PlaceDeliveryHold(ctx context.Context, request DeliveryRequest) (LeaseHandle, error) {
+	request.HolderKind = state.HolderKindDelivery
+
+	return s.openPlacement(ctx, request)
+}
+
+// PlaceRequestHold opens a short request-scoped holder without counting backend capacity.
+//
+// Request holds keep the account's backend-node binding alive for the duration of one proxied
+// request exactly like delivery holds do: they are stored with the non-session holder kind, stay
+// invisible to runtime session listings and never reserve backend connection capacity.
+func (s *Service) PlaceRequestHold(ctx context.Context, request RequestHoldRequest) (LeaseHandle, error) {
 	request.HolderKind = state.HolderKindDelivery
 
 	return s.openPlacement(ctx, request)

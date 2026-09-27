@@ -17,6 +17,7 @@
 package backend
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -27,6 +28,7 @@ import (
 	"time"
 
 	"github.com/croessner/nauthilus-director/internal/observability"
+	proxyproto "github.com/pires/go-proxyproto"
 )
 
 const (
@@ -666,4 +668,51 @@ func (r *recordingBackendProxyRecorder) singleEvent(t *testing.T) observability.
 	}
 
 	return r.events[0]
+}
+
+// TestBackendTransportWritesProxyV2WhenRequested verifies the binary header for HTTP backends.
+func TestBackendTransportWritesProxyV2WhenRequested(t *testing.T) {
+	conn := newProxyRecordingTransportConn()
+	request := ConnectRequest{
+		Target:         proxyTransportTarget(true),
+		Purpose:        ConnectPurposeSession,
+		ProxyAddresses: testProxySessionAddresses(),
+		ProxyVersion:   ProxyProtocolV2,
+	}
+
+	if _, err := NewTransport().WriteProxyProtocolPreface(context.Background(), conn, request); err != nil {
+		t.Fatalf("WriteProxyProtocolPreface returned error: %v", err)
+	}
+
+	header, err := proxyproto.Read(bufio.NewReader(strings.NewReader(conn.String())))
+	if err != nil {
+		t.Fatalf("parse written header: %v", err)
+	}
+
+	if header.Version != 2 {
+		t.Fatalf("header version = %d, want 2", header.Version)
+	}
+
+	source, _, ok := header.TCPAddrs()
+	if !ok || source.IP.String() != testProxySourceIPv4 {
+		t.Fatalf("header source = %v, want %s", source, testProxySourceIPv4)
+	}
+}
+
+// TestBackendTransportRejectsUnknownProxyVersion keeps the version vocabulary closed.
+func TestBackendTransportRejectsUnknownProxyVersion(t *testing.T) {
+	conn := newProxyRecordingTransportConn()
+	request := ConnectRequest{
+		Target:         proxyTransportTarget(true),
+		Purpose:        ConnectPurposeSession,
+		ProxyAddresses: testProxySessionAddresses(),
+		ProxyVersion:   ProxyProtocolVersion(3),
+	}
+
+	_, err := NewTransport().WriteProxyProtocolPreface(context.Background(), conn, request)
+	assertTransportReason(t, err, TransportReasonConfig)
+
+	if conn.String() != "" {
+		t.Fatal("unknown version wrote header bytes")
+	}
 }

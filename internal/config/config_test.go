@@ -1957,7 +1957,7 @@ func TestListenerValidationRejectsUnsupportedProtocol(t *testing.T) {
 	entry.Protocol = "nntp"
 	cfg.Director.Listeners["lmtp"] = entry
 
-	expectValidationError(t, cfg, "director.listeners.lmtp.protocol must be imap, lmtp, pop3, or sieve")
+	expectValidationError(t, cfg, "director.listeners.lmtp.protocol must be imap, jmap, lmtp, pop3, or sieve")
 }
 
 // TestLMTPCapabilitiesNormalizeStableWireForms protects deterministic LHLO inputs.

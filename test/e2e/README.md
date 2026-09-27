@@ -23,6 +23,16 @@ The default lane is fake-service based and deterministic:
 - deterministic fake ManageSieve backend under
   `test/e2e/fakes/managesieve_backend/`
 - deterministic fake LMTP backend under `test/e2e/fakes/lmtp_backend/`
+- deterministic fake JMAP backend under `test/e2e/fakes/jmap_backend/`, which
+  requires a PROXY preface, terminates TLS and records the client address of
+  every backend connection
+- a real-binary JMAP lane: Basic and Bearer (introspection with the listener
+  resource plus identity lookup) authentication, inbound PROXY v2 client
+  addresses reaching the backend through outbound PROXY v2, two clients never
+  sharing a backend connection, fail-closed routing for accounts without a
+  shard attribute, the path allowlist and local health path, an event stream
+  ended by `nauthilus-directorctl users kick`, HTTPS backend health probes and
+  bounded JMAP request metrics
 - public loopback sockets for frontend IMAP, LMTP, LMTPS, STARTTLS, implicit
   TLS and fake backend handoff
 - public greeting disclosure proof through real `nauthilus-director` binaries

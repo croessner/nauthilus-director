@@ -45,6 +45,8 @@ const (
 	testProtocolIMAP      = "imap"
 	testProtocolLMTP      = "lmtp"
 	testProtocolPOP3      = "pop3"
+	testProtocolJMAP      = "jmap"
+	testJMAPUser          = "jmap-user@example.test"
 	testRedisKey          = "{alice}:session"
 	testRedisModeCluster  = "cluster"
 	testRedisOpen         = "open"
@@ -565,5 +567,37 @@ func lmtpBackendStatusMetricLabels(result string, reason string, statusClass str
 		metricLabelResult:      result,
 		metricLabelShardTag:    testBackendShardTag,
 		metricLabelStatusClass: statusClass,
+	}
+}
+
+// TestJMAPRequestMetricsUseBoundedLabels keeps JMAP request metrics free of paths and identities.
+func TestJMAPRequestMetricsUseBoundedLabels(t *testing.T) {
+	runtime := newMetricsTestRuntime(t, false)
+	event := measuredEvent(t, EventJMAPRequest, map[string]string{
+		fieldUsername:   testJMAPUser,
+		fieldRemoteAddr: "203.0.113.9:4711",
+		"path":          "/jmap/download/" + testJMAPUser + "/blob/name",
+	}, map[string]string{
+		metricLabelProtocol:    testProtocolJMAP,
+		metricLabelListener:    testProtocolJMAP,
+		metricLabelBackendPool: "jmap-default",
+		metricLabelOperation:   "api",
+		metricLabelStatusClass: "2xx",
+		metricLabelResult:      "authenticated",
+		metricLabelReasonClass: reasonClassOK,
+	}, 0.004)
+	runtime.Recorder().Record(context.Background(), event)
+
+	body := gatherMetricsText(t, runtime)
+	for _, want := range []string{metricNameJMAPRequests, metricNameJMAPRequestSeconds, `operation="api"`, `status_class="2xx"`, `result="authenticated"`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("JMAP metric missing %q:\n%s", want, body)
+		}
+	}
+
+	for _, forbidden := range []string{testJMAPUser, "203.0.113.9", "/jmap/download"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("JMAP metric leaked %q:\n%s", forbidden, body)
+		}
 	}
 }

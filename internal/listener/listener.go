@@ -39,19 +39,21 @@ import (
 )
 
 const (
-	protocolIMAP      = "imap"
-	protocolLMTP      = "lmtp"
-	protocolSIEVE     = "sieve"
-	protocolPOP3      = "pop3"
-	tlsModeDisabled   = "disabled"
-	tlsModeImplicit   = "implicit"
-	tlsModeNone       = "none"
-	tlsModePlaintext  = "plaintext"
-	tlsModeStartTLS   = "starttls"
-	networkTCP        = "tcp"
-	networkTCP4       = "tcp4"
-	networkTCP6       = "tcp6"
-	defaultTLSMinName = "TLS1.2"
+	protocolIMAP       = "imap"
+	protocolLMTP       = "lmtp"
+	protocolSIEVE      = "sieve"
+	protocolPOP3       = "pop3"
+	protocolJMAP       = "jmap"
+	httpProtocolHTTP11 = "http/1.1"
+	tlsModeDisabled    = "disabled"
+	tlsModeImplicit    = "implicit"
+	tlsModeNone        = "none"
+	tlsModePlaintext   = "plaintext"
+	tlsModeStartTLS    = "starttls"
+	networkTCP         = "tcp"
+	networkTCP4        = "tcp4"
+	networkTCP6        = "tcp6"
+	defaultTLSMinName  = "TLS1.2"
 )
 
 var (
@@ -88,6 +90,12 @@ const (
 // SessionHandler owns one accepted frontend stream.
 type SessionHandler interface {
 	Serve(ctx context.Context, conn net.Conn) error
+}
+
+// AcceptStateObserver is implemented by handlers that keep idle multiplexed streams, such as
+// HTTP keep-alive connections, and must release them when the listener stops accepting.
+type AcceptStateObserver interface {
+	AcceptStateChanged(accepting bool)
 }
 
 // SessionHandlerFactory builds a protocol handler for one configured listener.
@@ -632,6 +640,11 @@ func bearerIntrospectorForListener(
 		return nil, errors.New("sasl bearer introspector factory unavailable")
 	}
 
+	if strings.EqualFold(strings.TrimSpace(entry.Protocol), protocolJMAP) {
+		// JMAP owns its token binding policy; the authority contributes only the endpoint and client.
+		authority.Mechanisms.Bearer.Introspection = entry.JMAP.Auth.Bearer.BearerIntrospectionPolicy(authority.Mechanisms.Bearer.Introspection)
+	}
+
 	return options.bearerIntrospectorFactory(ctx, authority)
 }
 
@@ -646,6 +659,8 @@ func listenerNeedsBearerIntrospection(entry config.ListenerConfig) bool {
 		return entry.Sieve != nil && mechanismsIncludeBearer(entry.Sieve.AuthMechanisms)
 	case protocolPOP3:
 		return entry.POP3 != nil && mechanismsIncludeBearer(entry.POP3.AuthMechanisms)
+	case protocolJMAP:
+		return entry.JMAP != nil && entry.JMAP.Auth.Bearer.Enabled
 	default:
 		return false
 	}
@@ -693,7 +708,7 @@ func sortedSupportedListenerNames(listeners map[string]config.ListenerConfig) ([
 	names := make([]string, 0, len(listeners))
 	for name, entry := range listeners {
 		switch entry.Protocol {
-		case protocolIMAP, protocolLMTP, protocolSIEVE, protocolPOP3:
+		case protocolIMAP, protocolLMTP, protocolSIEVE, protocolPOP3, protocolJMAP:
 			names = append(names, name)
 		default:
 			return nil, errors.New("listener " + name + ": unsupported protocol " + entry.Protocol)

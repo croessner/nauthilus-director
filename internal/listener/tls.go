@@ -66,6 +66,11 @@ func buildListenerTLSConfig(listener config.ListenerConfig) (*tls.Config, error)
 		return nil, err
 	}
 
+	if strings.EqualFold(strings.TrimSpace(listener.Protocol), protocolJMAP) {
+		// The JMAP listener serves HTTP/1.1 only, so one frontend connection maps to one client.
+		tlsConfig.NextProtos = []string{httpProtocolHTTP11}
+	}
+
 	return tlsConfig, nil
 }
 

@@ -434,6 +434,7 @@ type ListenerConfig struct {
 	LMTP             *LMTPListenerConfig    `mapstructure:"lmtp" yaml:"lmtp,omitempty"`
 	Sieve            *SieveListenerConfig   `mapstructure:"sieve" yaml:"sieve,omitempty"`
 	POP3             *POP3ListenerConfig    `mapstructure:"pop3" yaml:"pop3,omitempty"`
+	JMAP             *JMAPListenerConfig    `mapstructure:"jmap" yaml:"jmap,omitempty"`
 }
 
 // AuthorityContextConfig contains static listener facts sent to the selected authority.

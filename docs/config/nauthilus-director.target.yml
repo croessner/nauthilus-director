@@ -709,6 +709,71 @@ director:
           - USER
           - SASL
 
+    # JMAP-to-JMAP HTTPS reverse proxy (docs/operations/jmap.md). The default
+    # configuration has no JMAP listener; every jmap value below except
+    # public_base_url, health_path, realm and the bearer block is the default.
+    jmap:
+      protocol: jmap
+      service_name: jmap
+      network: tcp
+      address: "127.0.0.1:18443"
+      authority: default
+      backend_pool: jmap-default
+
+      proxy_protocol:
+        enabled: false
+        trusted_cidrs: []
+
+      tls:
+        # JMAP listeners require implicit TLS and serve HTTP/1.1 only.
+        mode: implicit
+        cert: /etc/nauthilus-director/jmap.crt
+        key: /etc/nauthilus-director/jmap.key
+        client_ca: ""
+        require_client_cert: false
+        min_tls_version: TLS1.2
+
+      jmap:
+        # Backends advertise this URL in the session resource; the Director
+        # logs a warning when a session URL leaves this origin.
+        public_base_url: https://mail.example.org
+        # Local unauthenticated health answer for load balancers.
+        health_path: /director/healthz
+        auth:
+          realm: mail.example.org
+          basic:
+            enabled: true
+          bearer:
+            # Token binding owned by this listener; the introspection endpoint
+            # and client come from the authority. The mail SASL bearer binding
+            # of the authority is never inherited.
+            enabled: true
+            required_audience: ""
+            required_resource: https://mail.example.org/
+            required_scope: email
+            account_claim: ""
+          cache:
+            # Successful results only, keyed by an HMAC of scheme, credential
+            # and client address; the backend re-verifies every request.
+            ttl: 30s
+            max_entries: 10000
+        routing:
+          # forbidden (403), unavailable (503) or hash_fallback.
+          missing_shard: forbidden
+        limits:
+          max_header_bytes: 65536
+          max_request_body_bytes: 10485760
+          max_upload_body_bytes: 52428800
+        timeouts:
+          read_header: 10s
+          read: 10m
+          idle: 2m
+          backend_response_header: 2m
+        placement:
+          request_lease_ttl: 2m
+        event_source:
+          heartbeat_interval: 30s
+
   routing:
     default_selector: rendezvous_hash
     default_shard: default
@@ -822,6 +887,13 @@ director:
       backends:
         - mailstore-a-pop3
         - mailstore-b-pop3
+
+    jmap-default:
+      protocol: jmap
+      selector: rendezvous_hash
+      backends:
+        - mailstore-a-jmap
+        - mailstore-b-jmap
 
   backends:
     mailstore-a-imap:
@@ -1150,3 +1222,60 @@ director:
         deep_check: true
         username: healthcheck@example.org
         password_file: /etc/nauthilus-director/mailstore-health-password
+
+    # JMAP backends share shard_tag and backend_node with the mail endpoints of
+    # the same mailstore. They use verified HTTPS and no director-owned
+    # credentials: the client's Authorization header passes through unchanged.
+    mailstore-a-jmap:
+      protocol: jmap
+      shard_tag: mailstore-a
+      backend_node: mailstore-a-node-1
+      address: "127.0.0.1:1443"
+      weight: 100
+      max_connections: 1000
+      maintenance: disabled
+
+      haproxy:
+        # JMAP backend connections write PROXY v2 with the client address.
+        enabled: false
+
+      tls:
+        mode: implicit
+        ca_file: /etc/nauthilus-director/mailstore-ca.pem
+        server_name: mailstore-a.example.org
+        min_tls_version: TLS1.2
+        insecure_skip_verify: false
+
+      auth:
+        mode: none
+
+      health_check:
+        # HTTPS GET /jmap/healthz without credentials.
+        enabled: true
+        deep_check: false
+
+    mailstore-b-jmap:
+      protocol: jmap
+      shard_tag: mailstore-b
+      backend_node: mailstore-b-node-1
+      address: "127.0.0.1:2443"
+      weight: 100
+      max_connections: 1000
+      maintenance: disabled
+
+      haproxy:
+        enabled: false
+
+      tls:
+        mode: implicit
+        ca_file: /etc/nauthilus-director/mailstore-ca.pem
+        server_name: mailstore-b.example.org
+        min_tls_version: TLS1.2
+        insecure_skip_verify: false
+
+      auth:
+        mode: none
+
+      health_check:
+        enabled: true
+        deep_check: false

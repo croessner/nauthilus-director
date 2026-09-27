@@ -156,6 +156,11 @@ func (d DirectorConfig) Normalize() DirectorConfig {
 				listener.POP3 = &pop3
 			}
 
+			if listener.JMAP != nil {
+				jmap := listener.JMAP.Normalize()
+				listener.JMAP = &jmap
+			}
+
 			listeners[name] = listener
 		}
 

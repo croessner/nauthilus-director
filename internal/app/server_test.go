@@ -36,6 +36,8 @@ import (
 	"github.com/croessner/nauthilus-director/internal/backend"
 	"github.com/croessner/nauthilus-director/internal/config"
 	"github.com/croessner/nauthilus-director/internal/listener"
+	"github.com/croessner/nauthilus-director/internal/nauthilus"
+	"github.com/croessner/nauthilus-director/internal/protocol/jmap"
 	"github.com/croessner/nauthilus-director/internal/protocol/pop3"
 	"github.com/croessner/nauthilus-director/internal/protocol/sieve"
 	"github.com/croessner/nauthilus-director/internal/routing"
@@ -313,6 +315,53 @@ func TestSessionHandlerFactoryDispatchesPOP3(t *testing.T) {
 	if len(handlerConfig.AuthMechanisms) != 3 {
 		t.Fatalf("POP3 auth methods = %v, want default userpass and bearer methods", handlerConfig.AuthMechanisms)
 	}
+}
+
+// TestSessionHandlerFactoryDispatchesJMAP verifies the app path recognizes JMAP listeners.
+func TestSessionHandlerFactoryDispatchesJMAP(t *testing.T) {
+	factory := sessionHandlerFactory(nil, nil, nil, nil, nil, 0, nil, nil, "test-version")
+	options := listener.SessionOptions{
+		ListenerName: "jmap",
+		Config: config.ListenerConfig{
+			Protocol:    "jmap",
+			ServiceName: "jmap",
+			BackendPool: "jmap-default",
+			JMAP:        &config.JMAPListenerConfig{},
+		},
+	}
+
+	if _, ok := factory(options).(unavailableHandler); !ok {
+		t.Fatal("JMAP listener without an authenticator must fail closed")
+	}
+
+	options.Authenticator = jmapTestAuthenticator{}
+	if _, ok := factory(options).(*jmap.Handler); !ok {
+		t.Fatalf("handler type = %T, want JMAP handler", factory(options))
+	}
+}
+
+// TestProtocolHealthCheckerDispatchesJMAP verifies JMAP backends reach the HTTPS checker.
+func TestProtocolHealthCheckerDispatchesJMAP(t *testing.T) {
+	checker := protocolHealthChecker{jmap: jmapTestHealthChecker{}}
+
+	result := checker.CheckBackend(context.Background(), backend.Backend{Protocol: "jmap"}, backend.HealthCheckRequest{})
+	if !result.Healthy {
+		t.Fatalf("JMAP health result = %+v, want dispatch to the JMAP checker", result)
+	}
+}
+
+type jmapTestAuthenticator struct{}
+
+// Authenticate rejects every credential without contacting an authority.
+func (jmapTestAuthenticator) Authenticate(context.Context, nauthilus.AuthRequest) (nauthilus.AuthResult, error) {
+	return nauthilus.AuthResult{Decision: nauthilus.DecisionRejected}, nil
+}
+
+type jmapTestHealthChecker struct{}
+
+// CheckBackend reports a healthy backend.
+func (jmapTestHealthChecker) CheckBackend(context.Context, backend.Backend, backend.HealthCheckRequest) backend.HealthCheckResult {
+	return backend.HealthCheckResult{Healthy: true}
 }
 
 // readHandlerGreeting starts one handler over net.Pipe and returns its first wire line.

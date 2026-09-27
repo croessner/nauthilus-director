@@ -41,6 +41,10 @@ const (
 	EventSievePreAuth = "sieve.pre_auth"
 	// EventPOP3PreAuth records pre-auth POP3 command handling.
 	EventPOP3PreAuth = "pop3.pre_auth"
+	// EventJMAPRequest records one proxied or refused JMAP HTTP request without credentials or paths.
+	EventJMAPRequest = "jmap.request"
+	// EventJMAPSessionURL records a JMAP session resource whose advertised URLs leave the public origin.
+	EventJMAPSessionURL = "jmap.session_url"
 	// EventLMTPBDATStream records LMTP BDAT chunk and completion outcomes.
 	EventLMTPBDATStream = "lmtp.bdat_stream"
 	// EventLMTPBackendStatus records bounded backend status classes for LMTP delivery.

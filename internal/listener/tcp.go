@@ -40,8 +40,10 @@ type managedListener struct {
 	handler       SessionHandler
 	tlsConfig     *tls.Config
 	proxyProtocol *proxyProtocolPolicy
-	listenConfig  net.ListenConfig
-	observability observability.Recorder
+	// handshakeTimeout bounds implicit TLS handshakes; zero keeps the unbounded mail-protocol behavior.
+	handshakeTimeout time.Duration
+	listenConfig     net.ListenConfig
+	observability    observability.Recorder
 
 	mu        sync.Mutex
 	listener  net.Listener
@@ -158,13 +160,23 @@ func newManagedListener(
 			LocalSessions:            options.localSessions,
 			Observability:            options.observability,
 		}),
-		tlsConfig:     tlsConfig,
-		proxyProtocol: proxyPolicy,
-		listenConfig:  options.listenConfig,
-		observability: observability.NormalizeRecorder(options.observability),
-		active:        map[net.Conn]context.CancelFunc{},
-		state:         StateStopped,
+		tlsConfig:        tlsConfig,
+		proxyProtocol:    proxyPolicy,
+		handshakeTimeout: listenerHandshakeTimeout(entry),
+		listenConfig:     options.listenConfig,
+		observability:    observability.NormalizeRecorder(options.observability),
+		active:           map[net.Conn]context.CancelFunc{},
+		state:            StateStopped,
 	}, nil
+}
+
+// listenerHandshakeTimeout returns the implicit TLS handshake bound for HTTP listeners.
+func listenerHandshakeTimeout(entry config.ListenerConfig) time.Duration {
+	if entry.JMAP == nil || !strings.EqualFold(strings.TrimSpace(entry.Protocol), protocolJMAP) {
+		return 0
+	}
+
+	return entry.JMAP.Timeouts.ReadHeader.Std()
 }
 
 // start binds the configured address and starts the accept loop.
@@ -190,6 +202,8 @@ func (l *managedListener) start(ctx context.Context) error {
 	l.state = StateAccepting
 	l.drainMode = ""
 	l.mu.Unlock()
+
+	l.notifyAcceptState(true)
 
 	l.acceptWG.Add(1)
 	go l.acceptLoop(ln)
@@ -323,7 +337,7 @@ func (l *managedListener) prepareConnection(conn net.Conn) (net.Conn, error) {
 
 	if l.config.listener.TLS.Mode == tlsModeImplicit {
 		tlsConn := tls.Server(prepared, l.tlsConfig.Clone())
-		if err := tlsConn.Handshake(); err != nil {
+		if err := l.handshakeImplicitTLS(tlsConn); err != nil {
 			return nil, err
 		}
 
@@ -331,6 +345,23 @@ func (l *managedListener) prepareConnection(conn net.Conn) (net.Conn, error) {
 	}
 
 	return prepared, nil
+}
+
+// handshakeImplicitTLS completes the frontend TLS handshake, bounded when the listener sets a limit.
+func (l *managedListener) handshakeImplicitTLS(conn *tls.Conn) error {
+	if l.handshakeTimeout <= 0 {
+		return conn.Handshake()
+	}
+
+	if err := conn.SetDeadline(time.Now().Add(l.handshakeTimeout)); err != nil {
+		return err
+	}
+
+	if err := conn.Handshake(); err != nil {
+		return err
+	}
+
+	return conn.SetDeadline(time.Time{})
 }
 
 // trackConnection records an active connection for deadline-enforced shutdown.
@@ -451,7 +482,16 @@ func (l *managedListener) closeAcceptSocket(mode DrainMode) net.Listener {
 		_ = ln.Close()
 	}
 
+	l.notifyAcceptState(false)
+
 	return ln
+}
+
+// notifyAcceptState tells handlers with idle keep-alive streams whether new streams are accepted.
+func (l *managedListener) notifyAcceptState(accepting bool) {
+	if observer, ok := l.handler.(AcceptStateObserver); ok {
+		observer.AcceptStateChanged(accepting)
+	}
 }
 
 // markStopped records a non-accepting listener after startup, resume or full stop failure.

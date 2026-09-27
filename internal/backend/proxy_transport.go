@@ -72,13 +72,25 @@ type ProxyAddresses struct {
 	Destination net.Addr
 }
 
+// ProxyProtocolVersion selects the outbound PROXY protocol wire format.
+type ProxyProtocolVersion byte
+
+const (
+	// ProxyProtocolV1 writes the human-readable PROXY v1 header; it is the default for mail protocols.
+	ProxyProtocolV1 ProxyProtocolVersion = 1
+	// ProxyProtocolV2 writes the binary PROXY v2 header.
+	ProxyProtocolV2 ProxyProtocolVersion = 2
+)
+
 // ConnectRequest describes the transport preface facts for one backend connection.
 type ConnectRequest struct {
 	Target         Backend
 	Timeout        time.Duration
 	Purpose        ConnectPurpose
 	ProxyAddresses *ProxyAddresses
-	Observability  observability.Recorder
+	// ProxyVersion selects the outbound PROXY header format; the zero value keeps v1.
+	ProxyVersion  ProxyProtocolVersion
+	Observability observability.Recorder
 }
 
 // TransportResult reports the bounded outcome of backend transport preparation.
@@ -191,7 +203,7 @@ func (Transport) WriteProxyProtocolPreface(ctx context.Context, conn net.Conn, r
 		return result, err
 	}
 
-	header, reason := newBackendProxyHeader(source, destination)
+	header, reason := newBackendProxyHeader(request.ProxyVersion, source, destination)
 	if reason != "" {
 		result, err := failBackendTransport(conn, reason, purpose, nil)
 		recordBackendProxyProtocol(ctx, request, result)
@@ -233,7 +245,7 @@ func backendProxyAddresses(conn net.Conn, request ConnectRequest, purpose Connec
 }
 
 // newBackendProxyHeader validates TCP address data before delegating wire rendering.
-func newBackendProxyHeader(source net.Addr, destination net.Addr) (*proxyproto.Header, TransportReason) {
+func newBackendProxyHeader(version ProxyProtocolVersion, source net.Addr, destination net.Addr) (*proxyproto.Header, TransportReason) {
 	sourceTCP, sourceFamily, reason := normalizeBackendProxyAddr(source)
 	if reason != "" {
 		return nil, reason
@@ -248,7 +260,17 @@ func newBackendProxyHeader(source net.Addr, destination net.Addr) (*proxyproto.H
 		return nil, TransportReasonUnsupportedFamily
 	}
 
-	header := proxyproto.HeaderProxyFromAddrs(1, sourceTCP, destinationTCP)
+	wireVersion := byte(ProxyProtocolV1)
+
+	switch version {
+	case 0, ProxyProtocolV1:
+	case ProxyProtocolV2:
+		wireVersion = byte(ProxyProtocolV2)
+	default:
+		return nil, TransportReasonConfig
+	}
+
+	header := proxyproto.HeaderProxyFromAddrs(wireVersion, sourceTCP, destinationTCP)
 	if !header.Command.IsProxy() {
 		return nil, TransportReasonUnsupportedFamily
 	}

@@ -804,8 +804,9 @@ func validateDirector(director DirectorConfig, authorities map[string]AuthorityC
 		case protocolLMTP:
 		case protocolSIEVE:
 		case protocolPOP3:
+		case protocolJMAP:
 		default:
-			addProblem(problems, path+".protocol must be imap, lmtp, pop3, or sieve")
+			addProblem(problems, path+".protocol must be imap, jmap, lmtp, pop3, or sieve")
 		}
 
 		if listenerTLSModeIsPlaintext(listener.TLS.Mode) && listener.Protocol != protocolLMTP {
@@ -838,6 +839,8 @@ func validateDirector(director DirectorConfig, authorities map[string]AuthorityC
 			} else {
 				validatePOP3Listener(path+".pop3", listener, authority, authorityOK, problems)
 			}
+		case protocolJMAP:
+			validateJMAPListener(path+".jmap", listener, authority, authorityOK, problems)
 		}
 		if strings.TrimSpace(listener.TLS.Mode) == "" {
 			addProblem(problems, path+".tls.mode is required")
@@ -885,7 +888,10 @@ func validateDirector(director DirectorConfig, authorities map[string]AuthorityC
 		validateBackendAddress(path+".address", backend.Address, problems)
 		validateBackendTLS(path+".tls", backend.Address, backend.TLS, problems)
 		validateBackendAuth(path+".auth", backend, bearerReplayMechanisms[name], problems)
-		if backend.HealthCheck.Enabled && backend.HealthCheck.PasswordFile.IsZero() {
+		if strings.EqualFold(strings.TrimSpace(backend.Protocol), protocolJMAP) {
+			// JMAP health probes are unauthenticated HTTPS requests and never use a health identity.
+			validateJMAPBackend(path, backend, problems)
+		} else if backend.HealthCheck.Enabled && backend.HealthCheck.PasswordFile.IsZero() {
 			addProblem(problems, path+".health_check.password_file is required when health check is enabled")
 		}
 	}
@@ -1273,62 +1279,46 @@ func validateBackendPool(path string, pool BackendPoolConfig, problems *[]string
 		if strings.ToLower(strings.TrimSpace(pool.Selector)) != "rendezvous_hash" {
 			addProblem(problems, path+".selector for POP3 pools must be rendezvous_hash")
 		}
+	case protocolJMAP:
+		if strings.ToLower(strings.TrimSpace(pool.Selector)) != "rendezvous_hash" {
+			addProblem(problems, path+".selector for JMAP pools must be rendezvous_hash")
+		}
 	default:
-		addProblem(problems, path+".protocol must be imap, lmtp, pop3, or sieve")
+		addProblem(problems, path+".protocol must be imap, jmap, lmtp, pop3, or sieve")
 	}
 }
 
 // validateBackendProtocol rejects backend protocols without production support.
 func validateBackendProtocol(path string, protocol string, problems *[]string) {
 	switch strings.ToLower(strings.TrimSpace(protocol)) {
-	case protocolIMAP, protocolLMTP, protocolSIEVE, protocolPOP3:
+	case protocolIMAP, protocolLMTP, protocolSIEVE, protocolPOP3, protocolJMAP:
 	default:
-		addProblem(problems, path+".protocol must be imap, lmtp, pop3, or sieve")
+		addProblem(problems, path+".protocol must be imap, jmap, lmtp, pop3, or sieve")
 	}
 }
 
 // validateListenerProtocolSubconfigs rejects protocol-specific policy under the wrong listener type.
 func validateListenerProtocolSubconfigs(path string, listener ListenerConfig, problems *[]string) {
 	switch listener.Protocol {
-	case protocolIMAP:
-		if listener.LMTP != nil {
-			addProblem(problems, path+".lmtp must not be set for imap listeners")
-		}
-		if listener.Sieve != nil {
-			addProblem(problems, path+".sieve must not be set for imap listeners")
-		}
-		if listener.POP3 != nil {
-			addProblem(problems, path+".pop3 must not be set for imap listeners")
-		}
-	case protocolLMTP:
-		if listener.IMAP != nil {
-			addProblem(problems, path+".imap must not be set for lmtp listeners")
-		}
-		if listener.Sieve != nil {
-			addProblem(problems, path+".sieve must not be set for lmtp listeners")
-		}
-		if listener.POP3 != nil {
-			addProblem(problems, path+".pop3 must not be set for lmtp listeners")
-		}
-	case protocolSIEVE:
-		if listener.IMAP != nil {
-			addProblem(problems, path+".imap must not be set for sieve listeners")
-		}
-		if listener.LMTP != nil {
-			addProblem(problems, path+".lmtp must not be set for sieve listeners")
-		}
-		if listener.POP3 != nil {
-			addProblem(problems, path+".pop3 must not be set for sieve listeners")
-		}
-	case protocolPOP3:
-		if listener.IMAP != nil {
-			addProblem(problems, path+".imap must not be set for pop3 listeners")
-		}
-		if listener.LMTP != nil {
-			addProblem(problems, path+".lmtp must not be set for pop3 listeners")
-		}
-		if listener.Sieve != nil {
-			addProblem(problems, path+".sieve must not be set for pop3 listeners")
+	case protocolIMAP, protocolLMTP, protocolSIEVE, protocolPOP3, protocolJMAP:
+	default:
+		return
+	}
+
+	subconfigs := []struct {
+		protocol string
+		present  bool
+	}{
+		{protocol: protocolIMAP, present: listener.IMAP != nil},
+		{protocol: protocolLMTP, present: listener.LMTP != nil},
+		{protocol: protocolSIEVE, present: listener.Sieve != nil},
+		{protocol: protocolPOP3, present: listener.POP3 != nil},
+		{protocol: protocolJMAP, present: listener.JMAP != nil},
+	}
+
+	for _, subconfig := range subconfigs {
+		if subconfig.present && subconfig.protocol != listener.Protocol {
+			addProblem(problems, path+"."+subconfig.protocol+" must not be set for "+listener.Protocol+" listeners")
 		}
 	}
 }
