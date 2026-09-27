@@ -805,6 +805,33 @@ Scope the token must carry; required when bearer is enabled.
 .B auth.bearer.account_claim
 Claim that names the account; empty uses the default claim chain.
 .TP
+.B auth.bearer.introspection_client
+Optional dedicated introspection client for this listener:
+.BR client_id ,
+.B auth_method
+.RB ( client_secret_basic
+by default,
+.B client_secret_post
+or
+.BR private_key_jwt ),
+.B client_secret_file
+for the secret methods, or
+.BR client_private_key_file ,
+.B client_key_id
+and
+.B client_assertion_alg
+for
+.BR private_key_jwt .
+It replaces the authority's introspection client credentials for this listener
+only; the endpoint stays the authority's, and IMAP, POP3 and ManageSieve keep
+the authority client.
+An empty
+.B client_id
+inherits the authority client.
+Secrets are file paths only; the file must be readable when the listener
+starts, errors name the setting but never the path or content, and the file is
+read again for every introspection.
+.TP
 .B auth.cache.ttl
 Lifetime of the process-local cache of successful authentication results.
 Entries are keyed by an HMAC, under a random per-process key, of the scheme,

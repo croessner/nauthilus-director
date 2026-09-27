@@ -752,6 +752,16 @@ director:
             required_resource: https://mail.example.org/
             required_scope: email
             account_claim: ""
+            # Optional dedicated introspection client for this listener only;
+            # an empty client_id inherits the authority's client. Secrets are
+            # file paths, checked for readability at listener start.
+            introspection_client:
+              client_id: ""
+              auth_method: ""
+              client_secret_file: ""
+              client_private_key_file: ""
+              client_key_id: ""
+              client_assertion_alg: ""
           cache:
             # Successful results only, keyed by an HMAC of scheme, credential
             # and client address; the backend re-verifies every request.

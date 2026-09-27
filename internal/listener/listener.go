@@ -647,7 +647,12 @@ func bearerIntrospectorForListener(
 	}
 
 	if strings.EqualFold(strings.TrimSpace(entry.Protocol), protocolJMAP) {
-		// JMAP owns its token binding policy; the authority contributes only the endpoint and client.
+		// JMAP owns its token binding policy and may carry its own introspection client; the
+		// authority contributes the endpoint and, unless replaced, the client credentials.
+		if err := entry.JMAP.Auth.Bearer.IntrospectionClient.CheckMaterial(); err != nil {
+			return nil, err
+		}
+
 		authority.Mechanisms.Bearer.Introspection = entry.JMAP.Auth.Bearer.BearerIntrospectionPolicy(authority.Mechanisms.Bearer.Introspection)
 	}
 

@@ -45,6 +45,7 @@ const (
 	jmapDefaultRequestLeaseTTL       = 2 * time.Minute
 	jmapDefaultHeartbeatInterval     = 30 * time.Second
 	jmapMaxCacheTTL                  = 10 * time.Minute
+	jmapMaxPrivateKeyFileBytes       = 64 * 1024
 	jmapPathWellKnown                = "/.well-known/jmap"
 	jmapPathPrefix                   = "/jmap/"
 )
@@ -80,11 +81,46 @@ type JMAPBasicAuthConfig struct {
 // audience, resource, scope and account-claim policy is owned by the JMAP listener and never
 // inherited from the mail SASL bearer policy of the authority.
 type JMAPBearerAuthConfig struct {
-	Enabled          bool   `mapstructure:"enabled" yaml:"enabled"`
-	RequiredAudience string `mapstructure:"required_audience" yaml:"required_audience"`
-	RequiredResource string `mapstructure:"required_resource" yaml:"required_resource"`
-	RequiredScope    string `mapstructure:"required_scope" yaml:"required_scope"`
-	AccountClaim     string `mapstructure:"account_claim" yaml:"account_claim"`
+	Enabled             bool                          `mapstructure:"enabled" yaml:"enabled"`
+	RequiredAudience    string                        `mapstructure:"required_audience" yaml:"required_audience"`
+	RequiredResource    string                        `mapstructure:"required_resource" yaml:"required_resource"`
+	RequiredScope       string                        `mapstructure:"required_scope" yaml:"required_scope"`
+	AccountClaim        string                        `mapstructure:"account_claim" yaml:"account_claim"`
+	IntrospectionClient JMAPIntrospectionClientConfig `mapstructure:"introspection_client" yaml:"introspection_client"`
+}
+
+// JMAPIntrospectionClientConfig optionally replaces the authority's introspection client
+// credentials for one JMAP listener. An empty client_id inherits the authority client.
+// Secrets are accepted only as mounted files.
+type JMAPIntrospectionClientConfig struct {
+	ClientID             string       `mapstructure:"client_id" yaml:"client_id"`
+	AuthMethod           string       `mapstructure:"auth_method" yaml:"auth_method"`
+	ClientSecretFile     SecretString `mapstructure:"client_secret_file" yaml:"client_secret_file" protected:"true"`
+	ClientPrivateKeyFile SecretString `mapstructure:"client_private_key_file" yaml:"client_private_key_file" protected:"true"`
+	ClientKeyID          string       `mapstructure:"client_key_id" yaml:"client_key_id"`
+	ClientAssertionAlg   string       `mapstructure:"client_assertion_alg" yaml:"client_assertion_alg"`
+}
+
+// Dedicated reports whether the listener carries its own introspection client.
+func (c JMAPIntrospectionClientConfig) Dedicated() bool {
+	return strings.TrimSpace(c.ClientID) != ""
+}
+
+// CheckMaterial verifies at startup that the dedicated client's secret or key file is readable,
+// without returning or logging its content.
+func (c JMAPIntrospectionClientConfig) CheckMaterial() error {
+	if !c.Dedicated() {
+		return nil
+	}
+
+	options := SecretFileOptions{Field: "jmap introspection client_secret_file", Path: c.ClientSecretFile, MaxBytes: MaxSecretFileBytes}
+	if c.AuthMethod == oidcPrivateKeyJWT {
+		options = SecretFileOptions{Field: "jmap introspection client_private_key_file", Path: c.ClientPrivateKeyFile, MaxBytes: jmapMaxPrivateKeyFileBytes}
+	}
+
+	_, err := ReadSecretFile(options)
+
+	return err
 }
 
 // JMAPAuthCacheConfig bounds the process-local cache of successful authentication results.
@@ -169,6 +205,7 @@ func (a JMAPAuthConfig) normalize() JMAPAuthConfig {
 	a.Bearer.RequiredResource = strings.TrimSpace(a.Bearer.RequiredResource)
 	a.Bearer.RequiredScope = strings.TrimSpace(a.Bearer.RequiredScope)
 	a.Bearer.AccountClaim = strings.TrimSpace(a.Bearer.AccountClaim)
+	a.Bearer.IntrospectionClient = a.Bearer.IntrospectionClient.normalize()
 
 	if a.Cache.TTL == 0 {
 		a.Cache.TTL = NewDuration(jmapDefaultCacheTTL)
@@ -179,6 +216,20 @@ func (a JMAPAuthConfig) normalize() JMAPAuthConfig {
 	}
 
 	return a
+}
+
+// normalize trims the dedicated client and defaults its method to client_secret_basic.
+func (c JMAPIntrospectionClientConfig) normalize() JMAPIntrospectionClientConfig {
+	c.ClientID = strings.TrimSpace(c.ClientID)
+	c.AuthMethod = normalizedOIDCConfigMethod(c.AuthMethod)
+	c.ClientKeyID = strings.TrimSpace(c.ClientKeyID)
+	c.ClientAssertionAlg = strings.TrimSpace(c.ClientAssertionAlg)
+
+	if c.ClientID != "" && c.AuthMethod == "" {
+		c.AuthMethod = oidcClientSecretBasic
+	}
+
+	return c
 }
 
 // normalize applies JMAP size limit defaults.
@@ -225,6 +276,17 @@ func (a JMAPBearerAuthConfig) BearerIntrospectionPolicy(authority BearerIntrospe
 	authority.RequiredResource = a.RequiredResource
 	authority.RequiredScope = a.RequiredScope
 	authority.AccountClaim = a.AccountClaim
+
+	if client := a.IntrospectionClient.normalize(); client.Dedicated() {
+		// The dedicated client replaces every authority credential; nothing is merged.
+		authority.ClientID = client.ClientID
+		authority.AuthMethod = client.AuthMethod
+		authority.ClientSecret = SecretString{}
+		authority.ClientSecretFile = client.ClientSecretFile
+		authority.ClientPrivateKeyFile = client.ClientPrivateKeyFile
+		authority.ClientKeyID = client.ClientKeyID
+		authority.ClientAssertionAlg = client.ClientAssertionAlg
+	}
 
 	return authority.Normalize()
 }
@@ -324,6 +386,18 @@ func validateJMAPBearer(path string, bearer JMAPBearerAuthConfig, authority Auth
 
 	validateOIDCTokenBinding(path, bearer.RequiredAudience, bearer.RequiredResource, problems)
 	validateBearerAccountClaim(path+".account_claim", bearer.AccountClaim, problems)
+
+	if client := bearer.IntrospectionClient; client.Dedicated() {
+		validateBearerIntrospectionClientAuth(path+".introspection_client", bearer.BearerIntrospectionPolicy(authority.Mechanisms.Bearer.Introspection), problems)
+	} else if hasJMAPIntrospectionClientMaterial(client) {
+		addProblem(problems, path+".introspection_client.client_id is required when client credentials are set")
+	}
+}
+
+// hasJMAPIntrospectionClientMaterial reports credentials configured without a client id.
+func hasJMAPIntrospectionClientMaterial(client JMAPIntrospectionClientConfig) bool {
+	return !client.ClientSecretFile.IsZero() || !client.ClientPrivateKeyFile.IsZero() || client.ClientKeyID != "" ||
+		client.ClientAssertionAlg != "" || client.AuthMethod != ""
 }
 
 // validateJMAPRouting accepts the documented missing-shard policies.

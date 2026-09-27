@@ -23,6 +23,8 @@ import (
 	"crypto/x509"
 	"net"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -245,5 +247,66 @@ func TestReloadRemovingJMAPListenerClosesHandler(t *testing.T) {
 
 	if handler.closeCount() != 1 {
 		t.Fatalf("removed JMAP handler closed %d times, want 1", handler.closeCount())
+	}
+}
+
+// TestJMAPListenerUsesDedicatedIntrospectionClient keeps IMAP on the authority client.
+func TestJMAPListenerUsesDedicatedIntrospectionClient(t *testing.T) {
+	secretFile := filepath.Join(t.TempDir(), "jmap-introspection-secret")
+	if err := os.WriteFile(secretFile, []byte("jmap-secret\n"), 0o600); err != nil {
+		t.Fatalf("write secret: %v", err)
+	}
+
+	cfg := jmapListenerConfig(t)
+	entry := cfg.Director.Listeners[testJMAPListener]
+	jmap := *entry.JMAP
+	jmap.Auth.Bearer.IntrospectionClient = config.JMAPIntrospectionClientConfig{ClientID: "jmap-introspection", ClientSecretFile: config.Secret(secretFile)}
+	entry.JMAP = &jmap
+	cfg.Director.Listeners[testJMAPListener] = entry
+	cfg.Director.Listeners[testIMAPListener] = singleListenerConfig(t, testIMAPListener, tlsModeStartTLS).Director.Listeners[testIMAPListener]
+
+	var (
+		mu      sync.Mutex
+		clients = map[string]string{}
+	)
+
+	_, err := NewManagerWithConfig(cfg,
+		WithBearerIntrospectorFactory(func(_ context.Context, authority config.AuthorityConfig) (nauthilus.BearerIntrospector, error) {
+			introspection := authority.Mechanisms.Bearer.Introspection
+			mu.Lock()
+			clients[introspection.RequiredScope] = introspection.ClientID + "|" + introspection.ClientSecretFile.Value()
+			mu.Unlock()
+
+			return noopBearerIntrospector{}, nil
+		}),
+		WithSessionHandlerFactory(func(SessionOptions) SessionHandler { return &acceptStateHandler{} }),
+	)
+	if err != nil {
+		t.Fatalf("NewManagerWithConfig returned error: %v", err)
+	}
+
+	authority := cfg.Auth.Authorities["default"].Mechanisms.Bearer.Introspection
+	if got := clients["mail:jmap"]; got != "jmap-introspection|"+secretFile {
+		t.Fatalf("JMAP introspection client = %q, want the dedicated client", got)
+	}
+
+	if got := clients[authority.RequiredScope]; got != authority.ClientID+"|"+authority.ClientSecretFile.Value() {
+		t.Fatalf("IMAP introspection client = %q, want the authority client", got)
+	}
+}
+
+// TestJMAPListenerRejectsUnreadableIntrospectionSecret fails startup without printing the path.
+func TestJMAPListenerRejectsUnreadableIntrospectionSecret(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing-secret")
+	cfg := jmapListenerConfig(t)
+	entry := cfg.Director.Listeners[testJMAPListener]
+	jmap := *entry.JMAP
+	jmap.Auth.Bearer.IntrospectionClient = config.JMAPIntrospectionClientConfig{ClientID: "jmap-introspection", ClientSecretFile: config.Secret(missing)}
+	entry.JMAP = &jmap
+	cfg.Director.Listeners[testJMAPListener] = entry
+
+	_, err := newTestManagerWithConfig(cfg, WithSessionHandlerFactory(func(SessionOptions) SessionHandler { return &acceptStateHandler{} }))
+	if err == nil || strings.Contains(err.Error(), missing) {
+		t.Fatalf("error = %v, want a path-free startup failure", err)
 	}
 }

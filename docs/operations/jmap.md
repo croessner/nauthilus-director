@@ -119,7 +119,16 @@ director.
   listener's own token policy: `required_audience` and/or `required_resource`
   (for example the RFC 8707 resource `https://mail.example.org/`),
   `required_scope` and `account_claim`. The mail SASL bearer policy of the
-  authority is never inherited. The token's account is then looked up without
+  authority is never inherited. `jmap.auth.bearer.introspection_client`
+  optionally gives the listener its own introspection client (`client_id`,
+  `auth_method`, and `client_secret_file` or `client_private_key_file` with
+  `client_key_id`/`client_assertion_alg` for `private_key_jwt`), replacing the
+  authority's client credentials for this listener only; IMAP, POP3 and
+  ManageSieve keep the authority client. Without `client_id` the authority
+  client is inherited. Secrets are accepted only as files; the file is checked
+  for readability when the listener starts (a failure names the setting, never
+  the path or content) and read again for every introspection, so rotation
+  needs no restart. The token's account is then looked up without
   a credential (protocol `jmap`, method `recipient_lookup`), and the lookup
   result supplies the canonical account and the routing attributes, including
   the shard attribute that a token alone does not carry.
@@ -289,6 +298,11 @@ director:
             required_resource: https://mail.example.org/
             required_scope: mail:account:read
             account_claim: mail_account
+            # Optional: a dedicated introspection client for this listener.
+            introspection_client:
+              client_id: director-jmap-introspection
+              auth_method: client_secret_basic
+              client_secret_file: /etc/nauthilus-director/jmap-introspection/client-secret
           cache:
             ttl: 30s
             max_entries: 10000
@@ -345,7 +359,9 @@ block (Basic only, fail-closed routing). The full option reference is in
 reserve no backend capacity.
 
 Validation refuses a JMAP listener without implicit TLS, without any enabled
-scheme, with Bearer but without a token binding or scope, with Basic on an
+scheme, with Bearer but without a token binding or scope, with an
+`introspection_client` whose credentials do not match its `auth_method` or
+that sets credentials without `client_id`, with Basic on an
 authority without the password mechanism, and JMAP backends without implicit
 TLS, with director-owned backend credentials or with `deep_check`.
 

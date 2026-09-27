@@ -212,13 +212,10 @@ func (h *Handler) startServerLocked() {
 	listener := newConnListener()
 	h.server = server
 	h.listener = listener
-	h.serving.Add(1)
 
-	go func() {
-		defer h.serving.Done()
-
+	h.serving.Go(func() {
 		_ = server.Serve(listener)
-	}()
+	})
 }
 
 // running reports whether an HTTP server accept loop is active.

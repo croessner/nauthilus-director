@@ -57,6 +57,8 @@ const (
 	e2eJMAPClientA         = "203.0.113.10"
 	e2eJMAPClientB         = "203.0.113.20"
 	e2eJMAPHealthPath      = "/director/healthz"
+	e2eJMAPIntrospectionID = "jmap-e2e-introspection"
+	e2eJMAPIntrospectionPW = "jmap-e2e-introspection-secret-sentinel"
 )
 
 // jmapFakeAuthority is a Nauthilus-shaped HTTP authority with password, lookup and introspection paths.
@@ -64,8 +66,9 @@ type jmapFakeAuthority struct {
 	server   *http.Server
 	listener net.Listener
 
-	mu       sync.Mutex
-	requests []map[string]any
+	mu                   sync.Mutex
+	requests             []map[string]any
+	introspectionClients []string
 }
 
 // jmapShardFor returns the fixture shard attribute of one account.
@@ -176,7 +179,14 @@ func (f *jmapFakeAuthority) handleIntrospection(writer http.ResponseWriter, requ
 	}
 
 	clientID, clientSecret, ok := request.BasicAuth()
-	if !ok || clientID != e2eSASLClientID || clientSecret != e2eSASLClientSecret {
+
+	f.mu.Lock()
+	f.introspectionClients = append(f.introspectionClients, clientID)
+	f.mu.Unlock()
+
+	// JMAP tokens are introspected only by the listener's dedicated client, never by the
+	// authority-wide mail SASL client.
+	if !ok || clientID != e2eJMAPIntrospectionID || clientSecret != e2eJMAPIntrospectionPW {
 		http.Error(writer, "invalid client", http.StatusUnauthorized)
 
 		return
@@ -227,7 +237,7 @@ func TestServerBinaryPublicJMAPProxyFlow(t *testing.T) {
 	exerciseJMAPBackendHealthAndMetrics(t, fixture)
 
 	stopDirectorProcess(t, fixture.process)
-	assertOutputOmits(t, fixture.process.output.String(), e2eJMAPPassword, e2eJMAPToken, e2eJMAPForeignToken, e2eSASLClientSecret)
+	assertOutputOmits(t, fixture.process.output.String(), e2eJMAPPassword, e2eJMAPToken, e2eJMAPForeignToken, e2eSASLClientSecret, e2eJMAPIntrospectionPW)
 }
 
 // startJMAPProcess starts Valkey, the fake authority, two JMAP backends and the director.
@@ -377,6 +387,10 @@ director:
             required_resource: %q
             required_scope: %q
             account_claim: dovecot_account
+            introspection_client:
+              client_id: %q
+              auth_method: client_secret_basic
+              client_secret_file: %q
         event_source:
           heartbeat_interval: 200ms
   backend_pools:
@@ -408,6 +422,8 @@ director:
 		e2eJMAPHealthPath,
 		e2eJMAPResource,
 		e2eJMAPScope,
+		e2eJMAPIntrospectionID,
+		writeProcessSecretFile(t, e2eJMAPIntrospectionPW),
 		jmapBackendYAML(e2eJMAPBackendA, e2eJMAPShardA, options.BackendA, options.CertPath),
 		jmapBackendYAML(e2eJMAPBackendB, e2eJMAPShardB, options.BackendB, options.CertPath),
 	)
@@ -626,6 +642,20 @@ func exerciseJMAPBearerRouting(t *testing.T, f jmapProcessFixture) {
 
 	if !sawLookup {
 		t.Fatal("bearer login did not look up the token account")
+	}
+
+	f.authority.mu.Lock()
+	clients := append([]string(nil), f.authority.introspectionClients...)
+	f.authority.mu.Unlock()
+
+	if len(clients) == 0 {
+		t.Fatal("bearer login did not introspect the token")
+	}
+
+	for _, client := range clients {
+		if client != e2eJMAPIntrospectionID {
+			t.Fatalf("introspection client = %q, want the JMAP listener's dedicated client", client)
+		}
 	}
 
 	status, header, _ = jmapDo(t, client, http.MethodGet, f.url("/.well-known/jmap"), "", bearerAuth(e2eJMAPForeignToken))
