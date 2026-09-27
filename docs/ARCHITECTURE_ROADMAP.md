@@ -53,6 +53,7 @@ The director should ultimately support these frontend protocol families:
 - POP3 / POP3S
 - LMTP / LMTPS
 - ManageSieve / Sieve service proxying
+- JMAP-to-JMAP HTTPS reverse proxying (see `docs/operations/jmap.md`)
 - REST control API for management, inspection and automation
 
 The protocol support should be layered so that shared pieces are reused:

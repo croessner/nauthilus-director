@@ -1,7 +1,7 @@
 .\" Copyright (C) 2026 Christian Rößner
 .\"
 .\" SPDX-License-Identifier: AGPL-3.0-only
-.TH NAUTHILUS-DIRECTOR.YAML 5 "2026-06-05" "nauthilus-director" "File Formats"
+.TH NAUTHILUS-DIRECTOR.YAML 5 "2026-09-27" "nauthilus-director" "File Formats"
 .SH NAME
 nauthilus-director.yaml \- Nauthilus Director YAML configuration format
 .SH DESCRIPTION
@@ -354,8 +354,12 @@ Backend entries may enable backend-side HAProxy PROXY protocol with
 When enabled, every Director-created TCP connection to that backend writes one
 PROXY preface before backend TLS, STARTTLS negotiation, greeting reads,
 capability discovery, authentication or protocol forwarding.
-The setting applies to real IMAP and LMTP sessions and to light and deep backend
-health checks.
+The setting applies to real IMAP, LMTP, ManageSieve, POP3 and JMAP sessions and
+to light and deep backend health checks.
+Mail protocol connections write PROXY protocol version 1.
+JMAP backend connections always write version 2, because each backend
+connection belongs to exactly one frontend HTTP connection and carries that
+client's address.
 .PP
 When
 .B haproxy.enabled
@@ -714,6 +718,197 @@ and
 .BR credential_replay .
 .B credential_replay
 requires verified backend TLS and an explicit allowed-mechanism list.
+.SH JMAP LISTENERS AND BACKENDS
+JMAP listener entries use the protocol value
+.BR jmap .
+A JMAP listener is an HTTPS reverse proxy for JMAP-to-JMAP routing only.
+It never translates JMAP into another mail protocol and never interprets JMAP
+method calls.
+The Director ships no default JMAP listener; a deployment adds one explicitly.
+.PP
+A JMAP listener requires
+.B tls.mode: implicit
+and serves HTTP/1.1 only.
+The optional
+.B proxy_protocol
+block works as for the mail listeners: a trusted upstream sends a PROXY v1 or
+v2 header before TLS.
+Listener-specific settings live under
+.BR director.listeners.<name>.jmap ;
+every value has a default, so an empty
+.B jmap: {}
+block is valid.
+.TP
+.B public_base_url
+Absolute HTTPS URL the backends advertise in the JMAP session resource.
+When set, the Director compares the origin of
+.BR apiUrl ,
+.BR downloadUrl ,
+.B uploadUrl
+and
+.B eventSourceUrl
+with it and logs a
+.B jmap.session_url
+warning on mismatch.
+The session resource itself is always passed through unchanged.
+Default: empty (no check).
+.TP
+.B health_path
+Optional local path, for example
+.BR /director/healthz ,
+that answers 200 without authentication and without contacting a backend.
+It must not overlap
+.B /.well-known/jmap
+or
+.BR /jmap/ .
+Default: empty (disabled).
+.TP
+.B auth.realm
+Realm used in
+.B WWW-Authenticate
+challenges.
+Default:
+.BR jmap .
+.TP
+.B auth.basic.enabled
+Accept HTTP Basic credentials, verified through the authority password path
+with protocol
+.B jmap
+and method
+.BR plain .
+Default:
+.BR true .
+.TP
+.B auth.bearer.enabled
+Accept HTTP Bearer tokens.
+The token is introspected at the introspection endpoint of the listener
+authority
+.RB ( auth.authorities.<name>.mechanisms.bearer.introspection ),
+then the token account is resolved with a no-credential identity lookup
+(protocol
+.BR jmap ,
+method
+.BR recipient_lookup )
+whose attributes drive routing.
+Default:
+.BR false .
+.TP
+.BR auth.bearer.required_audience ,\  auth.bearer.required_resource
+Token binding owned by this listener, typically the RFC 8707 resource
+.BR https://mail.example.org/ .
+At least one is required when bearer is enabled.
+The mail SASL bearer binding of the authority is never inherited.
+.TP
+.B auth.bearer.required_scope
+Scope the token must carry; required when bearer is enabled.
+.TP
+.B auth.bearer.account_claim
+Claim that names the account; empty uses the default claim chain.
+.TP
+.B auth.cache.ttl
+Lifetime of the process-local cache of successful authentication results.
+Entries are keyed by an HMAC, under a random per-process key, of the scheme,
+credential and client address; rejected and failed credentials are never
+cached.
+Default:
+.BR 30s ;
+maximum
+.BR 10m .
+.TP
+.B auth.cache.max_entries
+Upper bound of cached results; the least recently used entry is evicted.
+Default:
+.BR 10000 .
+.TP
+.B routing.missing_shard
+Answer for an authenticated account whose authority result carries no
+.B director.routing.auth_attributes.shard_tag
+value:
+.B forbidden
+(403, the default),
+.B unavailable
+(503) or
+.B hash_fallback
+(route by rendezvous hash like the mail protocols).
+JMAP fails closed by default because a hashed shard would silently serve an
+empty mailbox on the wrong backend.
+.TP
+.BR limits.max_header_bytes ,\  limits.max_request_body_bytes ,\  limits.max_upload_body_bytes
+Header limit (default 64 KiB), request body limit for every endpoint except
+uploads (default 10 MiB) and upload body limit (default 50 MiB).
+Oversized bodies are answered 413 before or while they are forwarded.
+.TP
+.BR timeouts.read_header ,\  timeouts.read ,\  timeouts.idle ,\  timeouts.backend_response_header
+Frontend TLS handshake and request header bound (default 10s), whole request
+read bound (default 10m), keep-alive idle bound (default 2m) and backend
+response header bound (default 2m).
+There is no write timeout, so event streams stay open.
+.TP
+.B placement.request_lease_ttl
+TTL of the short placement hold every proxied request keeps while it runs.
+Request holds keep the account's backend-node binding like other holders but
+reserve no backend capacity and are not listed as sessions.
+Default:
+.BR 2m .
+.TP
+.B event_source.heartbeat_interval
+Heartbeat interval of the session lease an event stream holds for its whole
+lifetime; at most half of
+.BR runtime.timeouts.proxy_idle .
+Kick, drain and move control actions end the stream at the next heartbeat,
+local runtime closes end it at once.
+Default:
+.BR 30s .
+.PP
+Only these paths are proxied:
+.BR /.well-known/jmap ,
+.BR /jmap/api/ ,
+.BR /jmap/upload/... ,
+.B /jmap/download/...
+and
+.BR /jmap/eventsource/ .
+Every other path, including a non-canonical spelling of an allowed one, is
+answered 404 without authentication.
+Requests are routed strictly by the authenticated account, never by account
+identifiers in the request path.
+Client-supplied
+.BR Forwarded ,
+.BR X-Forwarded-* ,
+.BR X-Real-IP ,
+.B X-Client-IP
+and
+.B True-Client-IP
+headers are removed; the Authorization header is forwarded unchanged because the
+backend verifies every request itself.
+.PP
+JMAP backend pools use
+.B director.backend_pools.<name>.protocol: jmap
+with the
+.B rendezvous_hash
+selector.
+Backend entries use
+.BR protocol:\ jmap ,
+.B tls.mode: implicit
+with verified TLS
+.RB ( ca_file ,
+.BR server_name )
+and
+.BR auth.mode:\ none .
+They should share
+.B shard_tag
+and
+.B backend_node
+with the IMAP, POP3, ManageSieve and LMTP endpoints of the same mailstore, so
+active affinity keeps all protocols of one account on one backend node.
+With
+.B health_check.enabled: true
+the Director probes
+.B GET /jmap/healthz
+over HTTPS, with the PROXY header when
+.B haproxy.enabled
+is true; no health identity or password file is used and
+.B deep_check
+is not supported.
 .SH OBSERVABILITY SAFETY
 LMTP, ManageSieve and POP3 logs, traces and Prometheus metrics expose operation,
 result, bounded
@@ -740,6 +935,40 @@ client addresses, session IDs, backend identifiers, backend nodes, raw errors,
 raw frontend or backend socket addresses, or secrets.
 Backend identifiers and backend nodes may appear only in logs and traces where
 the operator-diagnostic policy permits them; they are never Prometheus labels.
+.PP
+JMAP requests are counted in
+.B nauthilus_director_jmap_requests_total
+and timed in
+.B nauthilus_director_jmap_request_duration_seconds
+with the labels
+.BR protocol ,
+.BR listener ,
+.BR backend_pool ,
+.B operation
+(the endpoint:
+.BR session ,
+.BR api ,
+.BR upload ,
+.BR download ,
+.BR eventsource ,
+.B health
+or
+.BR unknown ),
+.BR status_class ,
+.B result
+(the authentication outcome:
+.BR authenticated ,
+.BR cached ,
+.BR missing ,
+.BR malformed ,
+.BR rejected ,
+.B tempfail
+or
+.BR none )
+and
+.BR reason_class .
+Paths, account names, client addresses and Authorization headers are never
+labels or log fields.
 .PP
 Observable LMTP output must not contain raw recipients, envelope senders,
 message IDs, subjects, DATA or BDAT content. Observable ManageSieve output must

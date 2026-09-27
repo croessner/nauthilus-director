@@ -1,7 +1,7 @@
 .\" Copyright (C) 2026 Christian Rößner
 .\"
 .\" SPDX-License-Identifier: AGPL-3.0-only
-.TH NAUTHILUS-DIRECTOR 1 "2026-06-05" "nauthilus-director" "User Commands"
+.TH NAUTHILUS-DIRECTOR 1 "2026-09-27" "nauthilus-director" "User Commands"
 .SH NAME
 nauthilus-director \- run and inspect the Nauthilus Director server process
 .SH SYNOPSIS
@@ -43,7 +43,10 @@ configured IMAP, POP3, implicit-TLS POP3 service, LMTP, LMTPS, ManageSieve
 .B sieve
 and implicit-TLS ManageSieve
 .B sieves
-listeners and the in-process control API when enabled.
+listeners, any configured HTTPS
+.B jmap
+reverse-proxy listeners and the in-process control API when enabled.
+The default configuration defines no JMAP listener.
 The explicit
 .B serve
 subcommand is an alias for the same server startup path.

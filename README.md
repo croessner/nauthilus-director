@@ -62,6 +62,9 @@ routing facts, but it does not choose concrete director backends.
 - LMTP backend DATA fallback and backend BDAT delivery selected per backend
   CHUNKING capability
 - ManageSieve and implicit-TLS Sieve proxying with safe authentication gates
+- JMAP-to-JMAP HTTPS reverse proxying with per-request Basic or Bearer
+  authentication, fail-closed per-account routing and per-client backend
+  connections that carry the client address in a PROXY v2 header
 - Redis-backed session affinity and active session coordination
 - Runtime control for listeners, backends, sessions, users and route lookups
 - Side-effect-free route diagnostics that do not authenticate or mutate Redis
@@ -115,7 +118,7 @@ full target model and milestone history.
 │   ├── config/                  Typed config loading, validation and redaction
 │   ├── listener/                Frontend listener lifecycle
 │   ├── nauthilus/               HTTP, gRPC and OIDC authority clients
-│   ├── protocol/                IMAP, LMTP, POP3 and Sieve protocol handlers
+│   ├── protocol/                IMAP, JMAP, LMTP, POP3 and Sieve protocol handlers
 │   ├── rest/                    Control API adapters and generated server edge
 │   ├── routing/                 Director-owned routing resolution
 │   ├── runtime/                 Operator-facing runtime control domain
@@ -257,7 +260,8 @@ Important config roots include:
   backend pools and backends
 
 See [`docs/man/nauthilus-director.yaml.5`](docs/man/nauthilus-director.yaml.5)
-for the config-format reference.
+for the config-format reference and
+[`docs/operations/jmap.md`](docs/operations/jmap.md) for the JMAP listener.
 
 ## Operations
 
