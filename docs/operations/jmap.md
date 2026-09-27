@@ -70,8 +70,12 @@ authentication:
 
 A path that is not in canonical form, such as `/jmap/api/../healthz` or
 `/jmap//api/`, is not forwarded. The backend's own `/jmap/healthz` is not
-reachable through the listener. A wrong method is answered 405 with an
-`Allow` header.
+reachable through the listener. Upload and download paths need at least one
+segment after `/jmap/upload/` or `/jmap/download/`. A method the endpoint does
+not accept, including `OPTIONS`, is answered 405 with an `Allow` header before
+authentication. A request with an `Upgrade` header is answered 400: no request
+switches protocols, and `Connection`/`Upgrade` are additionally removed from
+every forwarded request.
 
 Request bodies are limited to `jmap.limits.max_request_body_bytes` (default
 10 MiB) and uploads to `jmap.limits.max_upload_body_bytes` (default 50 MiB).
@@ -179,21 +183,34 @@ binding — JMAP backends must therefore share `shard_tag` and `backend_node`
 with the other protocol endpoints of the same mailstore.
 
 - **Ordinary requests** open a short request hold for the request's lifetime
-  (`jmap.placement.request_lease_ttl`, default 2m). Request holds keep the
-  backend-node binding like other holders but reserve no backend capacity and
-  are not listed as sessions (they are stored with the non-session holder kind).
+  (`jmap.placement.request_lease_ttl`, default 2m). A request that runs longer
+  than half the TTL — a large upload, a slow download or API call — refreshes
+  the hold every half TTL until it ends, so the binding never lapses under a
+  running request. Request holds keep the backend-node binding like other
+  holders but reserve no backend capacity and are not listed as sessions (they
+  are stored with the non-session holder kind). Control actions do not cut
+  ordinary requests; the next request is placed again.
 - **Event streams** (`/jmap/eventsource/`) open a counted session lease for
   their whole lifetime. The lease is refreshed every
   `jmap.event_source.heartbeat_interval` (default 30s, at most half of
   `runtime.timeouts.proxy_idle`). A kick, drain or move control action seen at
   a heartbeat, a failed heartbeat, `nauthilus-directorctl users kick`,
   `sessions kill`, a backend drain or maintenance that closes existing
-  sessions and a listener hard drain end the stream; the client reconnects and is placed again, possibly on a new
-  backend. Event streams appear in `nauthilus-directorctl sessions list` with
+  sessions and a listener hard drain end the stream; the client reconnects
+  and is placed again, possibly on a new backend. Event streams appear in `nauthilus-directorctl sessions list` with
   `protocol=jmap`.
 
 A request that cannot be placed (no healthy backend, hold timeout, Redis
 failure) is answered 503 with `Retry-After`.
+
+### Operating Costs
+
+Every proxied request, including each `GET /.well-known/jmap`, costs about
+three Redis round trips for its hold (placement reads, open, close) plus the
+user-hold check, and one more per half TTL for long requests. Event streams
+add one heartbeat per `heartbeat_interval`. Nauthilus is contacted only on a
+cache miss: once per credential and client address per `auth.cache.ttl`, twice
+(introspection and lookup) for Bearer.
 
 ## Backend Connections
 
@@ -346,10 +363,10 @@ TLS, with director-owned backend credentials or with `deep_check`.
 
 ## Limitations
 
-- JMAP over WebSocket (RFC 8887) is not proxied; the upgrade path is not in the
-  allowlist.
-- No CORS handling: preflight requests carry no credentials and are answered
-  401, so browser clients on another origin are not supported.
+- JMAP over WebSocket (RFC 8887) is not proxied; requests carrying an
+  `Upgrade` header are refused with 400.
+- No CORS handling: preflight `OPTIONS` requests are answered 405, so browser
+  clients on another origin are not supported.
 - No session resource rewriting; backends must advertise the public URL.
 - Route lookup (`nauthilus-directorctl route lookup --protocol jmap`) uses the
   shared resolver and shows a hash fallback for attributes without a shard,

@@ -201,10 +201,19 @@ func parseBasicCredential(payload string) (credential, authOutcome) {
 	return credential{scheme: schemeBasic, username: username, secret: nauthilus.NewSecret(password)}, ""
 }
 
-// printableToken accepts RFC 6750 b64token characters only.
+// printableToken accepts exactly the RFC 6750 b64token syntax:
+// 1*( ALPHA / DIGIT / "-" / "." / "_" / "~" / "+" / "/" ) *"=".
 func printableToken(token string) bool {
-	for _, char := range token {
-		if char > unicode.MaxASCII || unicode.IsSpace(char) || !unicode.IsPrint(char) {
+	body := strings.TrimRight(token, "=")
+	if body == "" {
+		return false
+	}
+
+	for _, char := range body {
+		switch {
+		case char >= 'a' && char <= 'z', char >= 'A' && char <= 'Z', char >= '0' && char <= '9':
+		case strings.ContainsRune("-._~+/", char):
+		default:
 			return false
 		}
 	}
@@ -308,8 +317,9 @@ func (a *authenticator) requestContext(request *http.Request, method string) nau
 	return tlscontext.Apply(requestContext, true, *request.TLS, true)
 }
 
-// challenges returns the WWW-Authenticate values for one refused request.
-func (a *authenticator) challenges(outcome authOutcome) []string {
+// challenges returns the WWW-Authenticate values for one refused request; invalid_token is added
+// only when the refused credential was a Bearer token.
+func (a *authenticator) challenges(outcome authOutcome, bearerAttempt bool) []string {
 	realm := `realm="` + a.cfg.Settings.Auth.Realm + `"`
 
 	values := make([]string, 0, 2)
@@ -319,7 +329,7 @@ func (a *authenticator) challenges(outcome authOutcome) []string {
 
 	if a.bearerEnabled {
 		bearer := `Bearer ` + realm
-		if outcome == authOutcomeRejected || outcome == authOutcomeMalformed {
+		if bearerAttempt && (outcome == authOutcomeRejected || outcome == authOutcomeMalformed) {
 			bearer += bearerInvalidTokenPostfix
 		}
 
@@ -327,6 +337,13 @@ func (a *authenticator) challenges(outcome authOutcome) []string {
 	}
 
 	return values
+}
+
+// bearerAttempt reports whether the request presented a Bearer credential.
+func bearerAttempt(request *http.Request) bool {
+	scheme, _, _ := strings.Cut(strings.TrimSpace(request.Header.Get(authorizationHeader)), " ")
+
+	return strings.EqualFold(scheme, schemeBearer)
 }
 
 // requestClientIP returns the frontend client address after trusted PROXY handling.

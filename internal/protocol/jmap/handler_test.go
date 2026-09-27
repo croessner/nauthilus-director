@@ -23,6 +23,8 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/httptest"
+	"net/http/httputil"
 	"strings"
 	"testing"
 	"time"
@@ -579,5 +581,102 @@ func TestEventStreamOutlivesReadTimeout(t *testing.T) {
 
 	if h.backendA.OpenStreams() != 1 {
 		t.Fatalf("backend open streams = %d, want the stream still open", h.backendA.OpenStreams())
+	}
+}
+
+// TestUpgradeRequestsAreRefused keeps protocol upgrades away from the backend.
+func TestUpgradeRequestsAreRefused(t *testing.T) {
+	h := startHarness(t, harnessOptions{})
+	client, _ := h.client()
+
+	request := newRequest(t, http.MethodGet, h.url("/jmap/eventsource/?types=*"), nil, true)
+	request.Header.Set("Connection", "Upgrade")
+	request.Header.Set("Upgrade", "websocket")
+
+	if status, _, _ := do(t, client, request); status != http.StatusBadRequest {
+		t.Fatalf("upgrade status = %d, want 400", status)
+	}
+
+	if len(h.backendA.Requests()) != 0 {
+		t.Fatal("upgrade request reached the backend")
+	}
+}
+
+// TestRewriteRequestStripsUpgradeHeaders defends against upgrades re-added by the reverse proxy.
+func TestRewriteRequestStripsUpgradeHeaders(t *testing.T) {
+	in := httptest.NewRequest(http.MethodGet, "https://mail.example.test/jmap/download/a/b%2Fc/n?accept=x", nil)
+	in = in.WithContext(withProxyTarget(in.Context(), proxyTarget{backend: harnessBackend("a", testShardA, "10.0.0.1:9443", "")}))
+	out := in.Clone(in.Context())
+	out.Header.Set("Connection", "Upgrade")
+	out.Header.Set("Upgrade", "websocket")
+	out.Header.Set("X-Forwarded-For", "198.51.100.1")
+
+	rewriteRequest(&httputil.ProxyRequest{In: in, Out: out})
+
+	for _, name := range []string{"Connection", "Upgrade", "X-Forwarded-For"} {
+		if out.Header.Get(name) != "" {
+			t.Fatalf("outbound request kept %s", name)
+		}
+	}
+
+	if out.URL.Host != "10.0.0.1:9443" || out.Host != "mail.example.test" || out.URL.EscapedPath() != "/jmap/download/a/b%2Fc/n" || out.URL.RawQuery != "accept=x" {
+		t.Fatalf("outbound URL = %s host = %s", out.URL.String(), out.Host)
+	}
+}
+
+// TestLongRequestHeartbeatsRequestHold keeps the hold alive while a slow request runs.
+func TestLongRequestHeartbeatsRequestHold(t *testing.T) {
+	h := startHarness(t, harnessOptions{
+		apiDelay: 400 * time.Millisecond,
+		settings: func(settings *config.JMAPListenerConfig) {
+			settings.Placement.RequestLeaseTTL = config.NewDuration(100 * time.Millisecond)
+		},
+	})
+	client, _ := h.client()
+
+	if status, _, _ := do(t, client, newRequest(t, http.MethodPost, h.url("/jmap/api/"), strings.NewReader("{}"), true)); status != http.StatusOK {
+		t.Fatalf("status = %d", status)
+	}
+
+	if h.placer.heartbeats.Load() < 2 {
+		t.Fatalf("request hold heartbeats = %d, want the hold refreshed during the slow request", h.placer.heartbeats.Load())
+	}
+
+	waitForOpenLeases(t, h.placer, 0)
+}
+
+// TestHandlerCloseStopsServerAndRestarts releases the HTTP server on listener stop.
+func TestHandlerCloseStopsServerAndRestarts(t *testing.T) {
+	h := startHarness(t, harnessOptions{})
+	client, _ := h.client()
+
+	if status, _, _ := do(t, client, newRequest(t, http.MethodGet, h.url("/.well-known/jmap"), nil, true)); status != http.StatusOK {
+		t.Fatalf("status = %d", status)
+	}
+
+	client.Transport.(*http.Transport).CloseIdleConnections()
+
+	if err := h.handler.Close(context.Background()); err != nil {
+		t.Fatalf("Close returned error: %v", err)
+	}
+
+	stopped := make(chan struct{})
+	go func() {
+		h.handler.serving.Wait()
+		close(stopped)
+	}()
+
+	select {
+	case <-stopped:
+	case <-time.After(2 * time.Second):
+		t.Fatal("HTTP server accept loop still running after Close")
+	}
+
+	if h.handler.running() {
+		t.Fatal("handler reports a running server after Close")
+	}
+
+	if status, _, _ := do(t, client, newRequest(t, http.MethodGet, h.url("/.well-known/jmap"), nil, true)); status != http.StatusOK {
+		t.Fatalf("status after restart = %d", status)
 	}
 }

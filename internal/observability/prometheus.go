@@ -679,7 +679,7 @@ func newPrometheusInstruments() (prometheusInstruments, error) {
 		backendRuntime:           builders.counterVec(metricNameBackendRuntime, "Total backend runtime override operations.", operationResultReasonLabels...),
 		events:                   builders.counterVec(metricNameEventsTotal, "Total normalized observability events recorded by the director.", metricLabelOperation, metricLabelResult),
 		jmapRequests:             builders.counterVec(metricNameJMAPRequests, "Total JMAP HTTP requests by bounded endpoint, status class and authentication result.", jmapRequestLabels...),
-		jmapRequestSeconds:       builders.histogramVec(metricNameJMAPRequestSeconds, "JMAP HTTP request duration in seconds, including event-stream lifetimes.", mailSessionBuckets(), jmapRequestLabels...),
+		jmapRequestSeconds:       builders.histogramVec(metricNameJMAPRequestSeconds, "JMAP HTTP request duration in seconds, including event-stream lifetimes.", jmapRequestBuckets(), jmapRequestLabels...),
 		listenerLifecycle:        builders.counterVec(metricNameListenerLifecycle, "Total listener lifecycle outcomes.", listenerLifecycleLabels...),
 		lmtpBackendStatus:        builders.counterVec(metricNameLMTPBackendStatus, "Total LMTP backend status classes by bounded backend dimensions.", lmtpBackendStatusLabels...),
 		lmtpBDATSeconds:          builders.histogramVec(metricNameLMTPBDATSeconds, "LMTP BDAT forwarding duration in seconds.", mailSessionBuckets(), lmtpStatusLabels...),
@@ -990,6 +990,11 @@ func cloneLabelNames(labels []string) []string {
 // mailSessionBuckets returns reviewed buckets for long-lived mail sessions.
 func mailSessionBuckets() []float64 {
 	return []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 300, 900, 1800}
+}
+
+// jmapRequestBuckets resolves sub-second API latency and still covers long event streams.
+func jmapRequestBuckets() []float64 {
+	return []float64{0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.15, 0.25, 0.35, 0.5, 0.75, 1, 2.5, 5, 10, 30, 60, 300, 1800}
 }
 
 // restBuckets returns reviewed buckets for HTTP and Nauthilus request latency.

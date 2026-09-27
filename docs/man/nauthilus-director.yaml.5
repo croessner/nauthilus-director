@@ -846,6 +846,8 @@ There is no write timeout, so event streams stay open.
 .TP
 .B placement.request_lease_ttl
 TTL of the short placement hold every proxied request keeps while it runs.
+Requests that run longer than half the TTL refresh the hold every half TTL until
+they end.
 Request holds keep the account's backend-node binding like other holders but
 reserve no backend capacity and are not listed as sessions.
 Default:
@@ -867,8 +869,20 @@ Only these paths are proxied:
 .B /jmap/download/...
 and
 .BR /jmap/eventsource/ .
+Upload and download paths need a segment after the prefix.
 Every other path, including a non-canonical spelling of an allowed one, is
 answered 404 without authentication.
+A method an endpoint does not accept, including
+.BR OPTIONS ,
+is answered 405 with an
+.B Allow
+header; a request carrying an
+.B Upgrade
+header is answered 400, and
+.B Connection
+and
+.B Upgrade
+are removed from every forwarded request.
 Requests are routed strictly by the authenticated account, never by account
 identifiers in the request path.
 Client-supplied

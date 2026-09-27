@@ -215,6 +215,8 @@ func (l *managedListener) start(ctx context.Context) error {
 
 // stop closes the listener and waits for active sessions or the shutdown context.
 func (l *managedListener) stop(ctx context.Context) error {
+	defer l.closeHandler(ctx)
+
 	l.closeAcceptSocket("")
 	l.acceptWG.Wait()
 
@@ -238,6 +240,24 @@ func (l *managedListener) stop(ctx context.Context) error {
 	l.recordListenerEvent(ctx, observability.EventListenerStop, "failure", "shutdown_timeout")
 
 	return ctx.Err()
+}
+
+// closeHandler releases background resources of handlers that own them after a stop.
+func (l *managedListener) closeHandler(ctx context.Context) {
+	closer, ok := l.handler.(ClosingHandler)
+	if !ok {
+		return
+	}
+
+	closeCtx := context.WithoutCancel(ctx)
+	if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) > 0 {
+		var cancel context.CancelFunc
+
+		closeCtx, cancel = context.WithDeadline(closeCtx, deadline)
+		defer cancel()
+	}
+
+	_ = closer.Close(closeCtx)
 }
 
 // snapshot returns secret-safe listener state for tests and manager diagnostics.

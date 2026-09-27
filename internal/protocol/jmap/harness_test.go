@@ -330,6 +330,7 @@ type harness struct {
 type harnessOptions struct {
 	settings   func(*config.JMAPListenerConfig)
 	attributes map[string][]string
+	apiDelay   time.Duration
 }
 
 // startHarness starts two fake backends and a JMAP handler behind a loopback TLS listener.
@@ -338,7 +339,7 @@ func startHarness(t *testing.T, options harnessOptions) *harness {
 
 	certificate := newTestCertificate(t)
 	backendTLS := &tls.Config{Certificates: []tls.Certificate{certificate.certificate}, MinVersion: tls.VersionTLS12}
-	backendA := jmapbackend.Start(t, jmapbackend.Options{Name: "a", TLSConfig: backendTLS, RequireProxyProtocol: true, PublicBaseURL: testPublicBaseURL})
+	backendA := jmapbackend.Start(t, jmapbackend.Options{Name: "a", TLSConfig: backendTLS, RequireProxyProtocol: true, PublicBaseURL: testPublicBaseURL, APIDelay: options.apiDelay})
 	backendB := jmapbackend.Start(t, jmapbackend.Options{Name: "b", TLSConfig: backendTLS, RequireProxyProtocol: true, PublicBaseURL: "https://other.example.test"})
 
 	attributes := options.attributes

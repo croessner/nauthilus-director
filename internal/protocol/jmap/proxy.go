@@ -37,6 +37,8 @@ const (
 	headerXClientIP      = "X-Client-Ip"
 	headerTrueClientIP   = "True-Client-Ip"
 	headerContentType    = "Content-Type"
+	headerUpgrade        = "Upgrade"
+	headerConnection     = "Connection"
 )
 
 // errDownstreamClosed reports a proxied request whose frontend connection already ended.
@@ -86,9 +88,16 @@ func rewriteRequest(proxyRequest *httputil.ProxyRequest) {
 		return
 	}
 
+	// Path, RawPath and RawQuery stay exactly as the client sent them: encoded blob names and
+	// download query parameters must reach the backend byte for byte.
 	proxyRequest.Out.URL.Scheme = schemeHTTPS
 	proxyRequest.Out.URL.Host = target.backend.Address
 	proxyRequest.Out.Host = proxyRequest.In.Host
+
+	// ReverseProxy re-adds Connection/Upgrade for upgrade requests before Rewrite; admission
+	// already refuses them, and removing them here keeps the backend request a plain one.
+	proxyRequest.Out.Header.Del(headerUpgrade)
+	proxyRequest.Out.Header.Del(headerConnection)
 
 	stripClientAddressHeaders(proxyRequest.Out.Header)
 }

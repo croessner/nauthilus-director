@@ -105,6 +105,46 @@ func (h *Handler) heartbeatOnce(ctx context.Context, lease placement.LeaseHandle
 	}
 }
 
+// keepRequestHold refreshes a request hold every half TTL while a long request runs, so uploads,
+// downloads and slow API calls keep the account's backend binding until they finish. Short
+// requests end before the first tick and cost no extra Redis call. Control actions are not
+// enforced here: an ordinary request finishes by itself and the next one is placed again.
+func (h *Handler) keepRequestHold(ctx context.Context, lease placement.LeaseHandle) func() {
+	ttl := h.config.Settings.Placement.RequestLeaseTTL.Std()
+
+	interval := ttl / 2
+	if interval <= 0 {
+		return func() {}
+	}
+
+	holdCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-holdCtx.Done():
+				return
+			case <-ticker.C:
+				heartbeatCtx, cancelHeartbeat := context.WithTimeout(context.WithoutCancel(holdCtx), heartbeatCallTimeout)
+				_, _ = lease.Heartbeat(heartbeatCtx, ttl)
+
+				cancelHeartbeat()
+			}
+		}
+	}()
+
+	return func() {
+		cancel()
+		<-done
+	}
+}
+
 // registerLocalStream exposes the stream to runtime kick, backend drain and listener hard drain.
 func (h *Handler) registerLocalStream(lease placement.LeaseHandle, stop func(string)) func() {
 	if h.config.LocalSessions == nil {

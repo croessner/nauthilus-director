@@ -45,6 +45,7 @@ func TestClassifyEndpointAllowlist(t *testing.T) {
 		"/director/healthz":                  endpointHealth,
 		"/jmap/healthz":                      endpointUnknown,
 		"/jmap/download/":                    endpointUnknown,
+		"/jmap/upload/":                      endpointUnknown,
 		"/jmap/api/../healthz":               endpointUnknown,
 		"/jmap/./api/":                       endpointUnknown,
 		"//jmap/api/":                        endpointUnknown,
@@ -137,11 +138,17 @@ func TestParseCredentialBounds(t *testing.T) {
 		"empty password":   {"Basic " + base64.StdEncoding.EncodeToString([]byte(testAccount+":"))},
 		"long bearer":      {"Bearer " + strings.Repeat("a", 17)},
 		"bearer with ctrl": {"Bearer abc\x01"},
+		"bearer non b64":   {"Bearer abc!def"},
+		"bearer only pad":  {"Bearer =="},
 		"unknown scheme":   {"Negotiate abc"},
 	} {
 		if _, outcome := auth.parseCredential(values); outcome == "" {
 			t.Fatalf("%s: credential accepted", name)
 		}
+	}
+
+	if _, outcome := auth.parseCredential([]string{"Bearer aB3-._~+/=="}); outcome != "" {
+		t.Fatalf("b64token rejected: %q", outcome)
 	}
 
 	auth.bearerEnabled = false
@@ -197,5 +204,20 @@ func TestHealthCheckerProbesWithProxyHeader(t *testing.T) {
 	untrusted := harnessBackend("untrusted", testShardA, healthy.Address(), "")
 	if result = checker.CheckBackend(context.Background(), untrusted, request); result.Healthy || result.ReasonClass != healthReasonTLS {
 		t.Fatalf("untrusted certificate result = %+v, want tls failure", result)
+	}
+}
+
+// TestChallengesMarkInvalidTokenOnlyForBearer keeps Basic failures free of token error codes.
+func TestChallengesMarkInvalidTokenOnlyForBearer(t *testing.T) {
+	auth := &authenticator{basicEnabled: true, bearerEnabled: true, cfg: Config{Settings: config.JMAPListenerConfig{Auth: config.JMAPAuthConfig{Realm: "jmap"}}}}
+
+	for _, value := range auth.challenges(authOutcomeMalformed, false) {
+		if strings.Contains(value, "invalid_token") {
+			t.Fatalf("basic failure challenge = %q", value)
+		}
+	}
+
+	if got := strings.Join(auth.challenges(authOutcomeRejected, true), ";"); !strings.Contains(got, `error="invalid_token"`) {
+		t.Fatalf("bearer failure challenges = %q", got)
 	}
 }

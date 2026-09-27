@@ -62,6 +62,8 @@ type Options struct {
 	RequireProxyProtocol bool
 	PublicBaseURL        string
 	HealthStatus         int
+	// APIDelay holds every API response back, for tests of long-running requests.
+	APIDelay time.Duration
 }
 
 // Request is one recorded backend request.
@@ -240,6 +242,15 @@ func (s *Server) handleSession(writer http.ResponseWriter, _ *http.Request) {
 // handleAPI answers a fixed method response naming the backend and the received body size.
 func (s *Server) handleAPI(writer http.ResponseWriter, request *http.Request) {
 	body, _ := io.ReadAll(request.Body)
+
+	if s.options.APIDelay > 0 {
+		select {
+		case <-time.After(s.options.APIDelay):
+		case <-request.Context().Done():
+			return
+		}
+	}
+
 	writer.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(writer).Encode(map[string]any{
 		"methodResponses": []any{},

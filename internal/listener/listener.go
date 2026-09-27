@@ -98,6 +98,12 @@ type AcceptStateObserver interface {
 	AcceptStateChanged(accepting bool)
 }
 
+// ClosingHandler is implemented by handlers that own background servers and must release them
+// once their listener stopped and every tracked stream ended or was closed.
+type ClosingHandler interface {
+	Close(ctx context.Context) error
+}
+
 // SessionHandlerFactory builds a protocol handler for one configured listener.
 type SessionHandlerFactory func(options SessionOptions) SessionHandler
 

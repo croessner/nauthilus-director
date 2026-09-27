@@ -100,6 +100,14 @@ func (h *Handler) admit(writer *statusWriter, request *http.Request, record *req
 		return target, false
 	}
 
+	if request.Header.Get(headerUpgrade) != "" {
+		// JMAP over WebSocket (RFC 8887) is not proxied; no request may switch protocols.
+		record.setReason(reasonUnsupported)
+		h.writeProblem(writer, http.StatusBadRequest, "protocol upgrade not supported")
+
+		return target, false
+	}
+
 	if target == endpointHealth {
 		writer.Header().Set(headerContentType, healthContentType)
 		writer.Header().Set(headerCacheControl, headerNoStore)
@@ -140,7 +148,7 @@ func (h *Handler) authenticateRequest(writer *statusWriter, request *http.Reques
 	default:
 		record.setReason(reasonAuth)
 
-		for _, challenge := range h.auth.challenges(outcome) {
+		for _, challenge := range h.auth.challenges(outcome, bearerAttempt(request)) {
 			writer.Header().Add(authenticateHeader, challenge)
 		}
 
@@ -220,6 +228,8 @@ func (h *Handler) forward(
 		defer stop()
 
 		ctx = streamCtx
+	} else {
+		defer h.keepRequestHold(ctx, lease)()
 	}
 
 	h.proxy.ServeHTTP(writer, request.WithContext(ctx))

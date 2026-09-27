@@ -37,6 +37,25 @@ const testJMAPListener = "jmap"
 type acceptStateHandler struct {
 	mu     sync.Mutex
 	states []bool
+	closed int
+}
+
+// Close records one release of the handler's background resources.
+func (h *acceptStateHandler) Close(context.Context) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	h.closed++
+
+	return nil
+}
+
+// closeCount returns how often the listener released the handler.
+func (h *acceptStateHandler) closeCount() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	return h.closed
 }
 
 // Serve closes every stream immediately.
@@ -149,6 +168,10 @@ func TestJMAPListenerUsesListenerBearerPolicyAndHTTP11(t *testing.T) {
 		t.Fatalf("Stop returned error: %v", err)
 	}
 
+	if handler.closeCount() != 1 {
+		t.Fatalf("handler closed %d times on stop, want 1", handler.closeCount())
+	}
+
 	if got := handler.snapshot(); len(got) != 4 || !got[0] || got[1] || !got[2] || got[3] {
 		t.Fatalf("accept state notifications = %v, want start, drain, resume, stop", got)
 	}
@@ -187,5 +210,40 @@ func TestJMAPListenerBoundsTLSHandshake(t *testing.T) {
 		t.Fatal("silent client was not disconnected")
 	} else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 		t.Fatal("listener kept the silent TLS client open past the handshake bound")
+	}
+}
+
+// TestReloadRemovingJMAPListenerClosesHandler proves reload releases the removed listener's server.
+func TestReloadRemovingJMAPListenerClosesHandler(t *testing.T) {
+	cfg := jmapListenerConfig(t)
+	imap := singleListenerConfig(t, testIMAPListener, tlsModeStartTLS).Director.Listeners[testIMAPListener]
+	cfg.Director.Listeners[testIMAPListener] = imap
+	handler := &acceptStateHandler{}
+
+	manager, err := newTestManagerWithConfig(cfg, WithSessionHandlerFactory(func(options SessionOptions) SessionHandler {
+		if options.ListenerName == testJMAPListener {
+			return handler
+		}
+
+		return newRecordingHandler()
+	}))
+	if err != nil {
+		t.Fatalf("NewManagerWithConfig returned error: %v", err)
+	}
+
+	if err := manager.Start(context.Background()); err != nil {
+		t.Fatalf("Start returned error: %v", err)
+	}
+	defer func() { _ = manager.Stop(context.Background()) }()
+
+	next := cfg
+	next.Director.Listeners = map[string]config.ListenerConfig{testIMAPListener: imap}
+
+	if err := manager.Reload(context.Background(), next); err != nil {
+		t.Fatalf("Reload returned error: %v", err)
+	}
+
+	if handler.closeCount() != 1 {
+		t.Fatalf("removed JMAP handler closed %d times, want 1", handler.closeCount())
 	}
 }

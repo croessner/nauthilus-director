@@ -87,11 +87,11 @@ type Handler struct {
 	proxy      *httputil.ReverseProxy
 	recorder   observability.Recorder
 
-	startOnce sync.Once
-	mu        sync.Mutex
-	server    *http.Server
-	listener  *connListener
-	conns     map[net.Conn]*downstreamConn
+	serving  sync.WaitGroup
+	mu       sync.Mutex
+	server   *http.Server
+	listener *connListener
+	conns    map[net.Conn]*downstreamConn
 }
 
 // NewHandler creates a JMAP handler from typed listener configuration.
@@ -118,10 +118,10 @@ func NewHandler(cfg Config) (*Handler, error) {
 // Serve hands one accepted, TLS-terminated frontend connection to the HTTP server and blocks
 // until the server has finished with it, so listener drain and shutdown accounting stay exact.
 func (h *Handler) Serve(ctx context.Context, conn net.Conn) error {
-	h.startOnce.Do(h.startServer)
+	listener := h.ensureServer()
 
 	downstream := h.trackDownstream(conn)
-	if err := h.listener.deliver(conn); err != nil {
+	if err := listener.deliver(conn); err != nil {
 		h.releaseDownstream(conn)
 
 		return err
@@ -137,6 +137,41 @@ func (h *Handler) Serve(ctx context.Context, conn net.Conn) error {
 
 		return ctx.Err()
 	}
+}
+
+// Close stops the HTTP server and its accept loop after the listener stopped; connections that
+// are still open are closed. A later Serve starts a fresh server, so a resumed listener works.
+func (h *Handler) Close(ctx context.Context) error {
+	h.mu.Lock()
+	server := h.server
+	listener := h.listener
+	h.server = nil
+	h.listener = nil
+	h.mu.Unlock()
+
+	if server == nil {
+		return nil
+	}
+
+	_ = listener.Close()
+
+	if err := server.Shutdown(ctx); err != nil {
+		return server.Close()
+	}
+
+	return nil
+}
+
+// ensureServer returns the in-process listener of the running HTTP server, starting one if needed.
+func (h *Handler) ensureServer() *connListener {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if h.listener == nil {
+		h.startServerLocked()
+	}
+
+	return h.listener
 }
 
 // AcceptStateChanged disables keep-alive and closes idle connections while the listener drains,
@@ -156,8 +191,8 @@ func (h *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	h.serveRequest(writer, request)
 }
 
-// startServer creates the HTTP server that owns every connection of this listener.
-func (h *Handler) startServer() {
+// startServerLocked creates the HTTP server that owns every connection of this listener; h.mu is held.
+func (h *Handler) startServerLocked() {
 	limits := h.config.Settings.Limits
 	timeouts := h.config.Settings.Timeouts
 	server := &http.Server{
@@ -175,15 +210,23 @@ func (h *Handler) startServer() {
 	server.SetKeepAlivesEnabled(true)
 
 	listener := newConnListener()
-
-	h.mu.Lock()
 	h.server = server
 	h.listener = listener
-	h.mu.Unlock()
+	h.serving.Add(1)
 
 	go func() {
+		defer h.serving.Done()
+
 		_ = server.Serve(listener)
 	}()
+}
+
+// running reports whether an HTTP server accept loop is active.
+func (h *Handler) running() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	return h.server != nil
 }
 
 // trackDownstream registers one frontend connection before the HTTP server sees it.

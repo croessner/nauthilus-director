@@ -63,7 +63,7 @@ func classifyEndpoint(requestPath string, healthPath string) endpoint {
 		return endpointSession
 	case requestPath == pathAPI || requestPath == pathAPI+pathTrailingSlash:
 		return endpointAPI
-	case strings.HasPrefix(requestPath, pathUploadPrefix):
+	case strings.HasPrefix(requestPath, pathUploadPrefix) && len(requestPath) > len(pathUploadPrefix):
 		return endpointUpload
 	case strings.HasPrefix(requestPath, pathDownloadPrefix) && len(requestPath) > len(pathDownloadPrefix):
 		return endpointDownload

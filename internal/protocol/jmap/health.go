@@ -43,7 +43,6 @@ const (
 	healthReasonProxyFam   = "proxy_unsupported_family"
 	healthReasonProxyCfg   = "proxy_config"
 	healthReasonUnknown    = "unknown"
-	headerConnection       = "Connection"
 	connectionClose        = "close"
 )
 
