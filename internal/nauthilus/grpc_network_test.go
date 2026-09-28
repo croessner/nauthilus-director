@@ -24,6 +24,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/croessner/nauthilus-director/internal/config"
 	authv1 "github.com/croessner/nauthilus-director/internal/nauthilus/grpcapi/auth/v1"
@@ -501,14 +502,38 @@ func TestGRPCNetworkClientSpreadsCallsOverResolvedAuthorities(t *testing.T) {
 	}
 
 	client := newTestGRPCClient(t, service)
+	authenticate := func() {
+		t.Helper()
 
-	for range 20 {
 		if _, err := client.Authenticate(context.Background(), AuthRequest{
 			Context:    RequestContext{Username: "alice@example.test", Protocol: "imap", Method: "plain"},
 			Credential: NewSecret("secret-password"),
 		}); err != nil {
 			t.Fatalf("Authenticate returned error: %v", err)
 		}
+	}
+
+	// round_robin only picks subconnections that are READY. On a slow runner
+	// the second one may still be connecting when the first calls go out, so
+	// wait until both authorities have answered once. A pick_first client
+	// never reaches the second authority and still fails here.
+	deadline := time.Now().Add(10 * time.Second)
+	for servers[0].calls.Load() == 0 || servers[1].calls.Load() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("authorities received %d and %d calls within 10s, want both reached",
+				servers[0].calls.Load(), servers[1].calls.Load())
+		}
+
+		authenticate()
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	for _, server := range servers {
+		server.calls.Store(0)
+	}
+
+	for range 20 {
+		authenticate()
 	}
 
 	for index, server := range servers {
