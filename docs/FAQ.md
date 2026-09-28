@@ -792,7 +792,8 @@ translates JMAP into IMAP or interprets JMAP method calls.
 Every request is authenticated through Nauthilus: Basic with protocol `jmap`
 and method `plain`, or Bearer through token introspection with the listener's
 own resource/scope policy (optionally with a dedicated introspection client),
-followed by a `recipient_lookup` identity lookup. Routing uses the `mailShard`
+followed by a `recipient_lookup` identity lookup that must confirm the token's
+account (another account is refused with 401). Routing uses the `mailShard`
 attribute of that authenticated account, never account identifiers in the URL.
 A missing shard attribute is refused with 403 by default instead of falling
 back to the rendezvous hash, because a hashed JMAP account would silently

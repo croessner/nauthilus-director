@@ -145,14 +145,19 @@ director.
   the path or content) and read again for every introspection, so rotation
   needs no restart. The token's account is then looked up without
   a credential (protocol `jmap`, method `recipient_lookup`), and the lookup
-  result supplies the canonical account and the routing attributes, including
-  the shard attribute that a token alone does not carry.
+  result supplies the routing attributes, including the shard attribute that a
+  token alone does not carry. The token account stays authoritative: the
+  lookup must return the same canonical account (compared case-insensitively),
+  otherwise the request is refused with 401 and reason class
+  `bearer_account_mismatch` (since `v1.1.2`; earlier releases adopted the
+  lookup's account).
 
 | Situation | Answer |
 | --- | --- |
 | No `Authorization` header | 401 with `WWW-Authenticate: Basic realm="…", charset="UTF-8"` and/or `Bearer realm="…"` |
 | Unsupported scheme, malformed or oversized credential | 401 with the challenges, `error="invalid_token"` on Bearer |
 | Rejected password, inactive token, wrong audience/resource/scope, unknown account | 401 with the challenges |
+| Token whose identity lookup names another account | 401 with the challenges, `error="invalid_token"` on Bearer, reason class `bearer_account_mismatch` |
 | Authority unreachable or temporary failure | 503 with `Retry-After` |
 
 The `Authorization` header is forwarded to the backend unchanged; the backend

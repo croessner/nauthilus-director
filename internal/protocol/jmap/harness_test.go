@@ -116,9 +116,15 @@ func newTestCertificate(t *testing.T) testCertificate {
 
 // fakeAuthority implements the Nauthilus password and identity-lookup boundaries.
 type fakeAuthority struct {
-	mu           sync.Mutex
-	attributes   map[string][]string
-	tempfail     bool
+	mu         sync.Mutex
+	attributes map[string][]string
+	tempfail   bool
+	// lookupAccount overrides the canonical account the identity lookup returns.
+	lookupAccount string
+	// lookupTempfail makes the identity lookup fail temporarily.
+	lookupTempfail bool
+	// lookupReject makes the identity lookup report an unknown account.
+	lookupReject bool
 	authCalls    int
 	lookupCalls  int
 	lastRequests []nauthilus.RequestContext
@@ -151,11 +157,20 @@ func (f *fakeAuthority) LookupIdentity(_ context.Context, request nauthilus.Iden
 	f.lookupCalls++
 	f.lastRequests = append(f.lastRequests, request.Context)
 
-	if request.Context.Username != testAccount {
+	if f.lookupTempfail {
+		return nauthilus.AuthResult{Decision: nauthilus.DecisionTemporaryFailure}, errors.New("authority down")
+	}
+
+	if f.lookupReject || request.Context.Username != testAccount {
 		return nauthilus.AuthResult{Decision: nauthilus.DecisionRejected}, nil
 	}
 
-	return nauthilus.AuthResult{Decision: nauthilus.DecisionAuthenticated, Account: testAccount, Attributes: f.attributes}, nil
+	account := testAccount
+	if f.lookupAccount != "" {
+		account = f.lookupAccount
+	}
+
+	return nauthilus.AuthResult{Decision: nauthilus.DecisionAuthenticated, Account: account, Attributes: f.attributes}, nil
 }
 
 // calls returns authentication and lookup counts.

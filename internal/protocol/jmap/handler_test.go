@@ -202,6 +202,62 @@ func TestBearerAuthIntrospectsAndLooksUpIdentity(t *testing.T) {
 	h.assertEventsRedacted()
 }
 
+// TestBearerLookupMustConfirmTokenAccount refuses a lookup naming another account and keeps the
+// 401/503 mapping for unknown accounts and lookup failures.
+func TestBearerLookupMustConfirmTokenAccount(t *testing.T) {
+	for _, testCase := range []struct {
+		name       string
+		configure  func(*fakeAuthority)
+		wantStatus int
+		wantReason string
+	}{
+		{name: "same account other case", configure: func(f *fakeAuthority) { f.lookupAccount = strings.ToUpper(testAccount) }, wantStatus: http.StatusOK, wantReason: reasonOK},
+		{name: "other account", configure: func(f *fakeAuthority) { f.lookupAccount = "someone-else@example.test" }, wantStatus: http.StatusUnauthorized, wantReason: reasonBearerAccountMismatch},
+		{name: "unknown account", configure: func(f *fakeAuthority) { f.lookupReject = true }, wantStatus: http.StatusUnauthorized, wantReason: reasonAuth},
+		{name: "lookup tempfail", configure: func(f *fakeAuthority) { f.lookupTempfail = true }, wantStatus: http.StatusServiceUnavailable, wantReason: reasonTemporaryFailure},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			h := startHarness(t, harnessOptions{attributes: map[string][]string{testShardAttribute: {testShardB}}})
+			h.authority.mu.Lock()
+			testCase.configure(h.authority)
+			h.authority.mu.Unlock()
+
+			client, _ := h.client()
+			request := newRequest(t, http.MethodGet, h.url("/.well-known/jmap"), nil, false)
+			request.Header.Set("Authorization", "Bearer "+testToken)
+
+			status, header, _ := do(t, client, request)
+			if status != testCase.wantStatus {
+				t.Fatalf("status = %d, want %d", status, testCase.wantStatus)
+			}
+
+			if testCase.wantStatus == http.StatusUnauthorized &&
+				!strings.Contains(strings.Join(header.Values(authenticateHeader), ";"), `error="invalid_token"`) {
+				t.Fatalf("challenges = %q, want invalid_token", header.Values(authenticateHeader))
+			}
+
+			if testCase.wantStatus != http.StatusOK && len(h.backendA.Requests())+len(h.backendB.Requests()) != 0 {
+				t.Fatal("refused request reached a backend")
+			}
+
+			assertRequestReason(t, h.events.snapshot(), testCase.wantReason)
+		})
+	}
+}
+
+// assertRequestReason finds one JMAP request event with the expected bounded reason class.
+func assertRequestReason(t *testing.T, events []observability.Event, want string) {
+	t.Helper()
+
+	for _, event := range events {
+		if event.Name == observability.EventJMAPRequest && event.MetricLabels[fieldReasonClass] == want {
+			return
+		}
+	}
+
+	t.Fatalf("no jmap.request event with reason_class %q", want)
+}
+
 // TestMissingShardFailsClosedByDefault refuses accounts without a shard attribute.
 func TestMissingShardFailsClosedByDefault(t *testing.T) {
 	for _, testCase := range []struct {

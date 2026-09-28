@@ -51,6 +51,8 @@ const (
 	e2eJMAPPassword        = "jmap-e2e-password-sentinel"
 	e2eJMAPToken           = "jmap-e2e-bearer-token-sentinel"
 	e2eJMAPForeignToken    = "jmap-e2e-foreign-resource-token-sentinel"
+	e2eJMAPAliasToken      = "jmap-e2e-alias-account-token-sentinel"
+	e2eJMAPAliasAccount    = "jmap-bob-alias@example.test"
 	e2eJMAPResource        = "https://mail.example.test/"
 	e2eJMAPPublicBaseURL   = "https://mail.example.test"
 	e2eJMAPScope           = "mail:account:read"
@@ -133,7 +135,8 @@ func (f *jmapFakeAuthority) handleAuth(writer http.ResponseWriter, request *http
 
 	username, _ := body["username"].(string)
 	password, _ := body["password"].(string)
-	known := username == e2eJMAPAccount || username == e2eJMAPBearerAccount || username == e2eJMAPUnroutedAccount
+	known := username == e2eJMAPAccount || username == e2eJMAPBearerAccount || username == e2eJMAPUnroutedAccount ||
+		(lookup && username == e2eJMAPAliasAccount)
 
 	writer.Header().Set("Content-Type", "application/json")
 	if !known || (!lookup && password != e2eJMAPPassword) {
@@ -143,6 +146,11 @@ func (f *jmapFakeAuthority) handleAuth(writer http.ResponseWriter, request *http
 	}
 
 	attributes := map[string][]string{"account": {username}}
+	if username == e2eJMAPAliasAccount {
+		// The directory resolves the alias to another canonical account than the token names.
+		attributes["account"] = []string{e2eJMAPBearerAccount}
+	}
+
 	if shard := jmapShardFor(username); shard != nil {
 		attributes["mailShard"] = shard
 	}
@@ -197,6 +205,8 @@ func (f *jmapFakeAuthority) handleIntrospection(writer http.ResponseWriter, requ
 	switch request.Form.Get("token") {
 	case e2eJMAPToken:
 		claims = map[string]any{"active": true, "sub": "bob", "scope": "openid " + e2eJMAPScope, "resource": e2eJMAPResource, "dovecot_account": e2eJMAPBearerAccount}
+	case e2eJMAPAliasToken:
+		claims = map[string]any{"active": true, "sub": "bob", "scope": "openid " + e2eJMAPScope, "resource": e2eJMAPResource, "dovecot_account": e2eJMAPAliasAccount}
 	case e2eJMAPForeignToken:
 		claims = map[string]any{"active": true, "sub": "bob", "scope": "openid " + e2eJMAPScope, "resource": "https://other.example.test/", "dovecot_account": e2eJMAPBearerAccount}
 	}
@@ -238,7 +248,7 @@ func TestServerBinaryPublicJMAPProxyFlow(t *testing.T) {
 	exerciseJMAPBackendHealthAndMetrics(t, fixture)
 
 	stopDirectorProcess(t, fixture.process)
-	assertOutputOmits(t, fixture.process.output.String(), e2eJMAPPassword, e2eJMAPToken, e2eJMAPForeignToken, e2eSASLClientSecret, e2eJMAPIntrospectionPW)
+	assertOutputOmits(t, fixture.process.output.String(), e2eJMAPPassword, e2eJMAPToken, e2eJMAPForeignToken, e2eJMAPAliasToken, e2eSASLClientSecret, e2eJMAPIntrospectionPW)
 }
 
 // startJMAPProcess starts Valkey, the fake authority, two JMAP backends and the director.
@@ -663,6 +673,17 @@ func exerciseJMAPBearerRouting(t *testing.T, f jmapProcessFixture) {
 	status, header, _ = jmapDo(t, client, http.MethodGet, f.url("/.well-known/jmap"), "", bearerAuth(e2eJMAPForeignToken))
 	if status != http.StatusUnauthorized || !strings.Contains(strings.Join(header.Values("WWW-Authenticate"), ";"), `error="invalid_token"`) {
 		t.Fatalf("foreign resource token status=%d challenges=%q", status, header.Values("WWW-Authenticate"))
+	}
+
+	before := len(f.backendA.Requests()) + len(f.backendB.Requests())
+
+	status, header, _ = jmapDo(t, client, http.MethodGet, f.url("/.well-known/jmap"), "", bearerAuth(e2eJMAPAliasToken))
+	if status != http.StatusUnauthorized || !strings.Contains(strings.Join(header.Values("WWW-Authenticate"), ";"), `error="invalid_token"`) {
+		t.Fatalf("token whose lookup names another account status=%d challenges=%q", status, header.Values("WWW-Authenticate"))
+	}
+
+	if len(f.backendA.Requests())+len(f.backendB.Requests()) != before {
+		t.Fatal("token whose lookup names another account reached a backend")
 	}
 }
 

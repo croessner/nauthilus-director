@@ -444,7 +444,9 @@ authoritative, so a lookup naming another account refuses the login, and a
 lookup failure is a temporary failure that never reaches the hash fallback.
 A successful lookup without a shard attribute routes exactly like a password
 login without one and is reported with reason class `bearer_shard_missing`.
-JMAP performs the same lookup in its request authenticator; LMTP peer bearer
+JMAP performs the same lookup in its request authenticator and, since
+`v1.1.2`, likewise refuses a lookup naming another account (401,
+`bearer_account_mismatch`); LMTP peer bearer
 auth does not route on the submitter and sends no lookup. Details and evidence:
 `docs/specs/implementation/M8_SASL_BEARER_IDENTITY_ROUTING_FOLLOWUP.md`.
 
@@ -1774,9 +1776,6 @@ Known future decisions:
   non-default mode.
 - Whether future fine-grained REST authorization should extend M8's configured
   bearer, mTLS and Nauthilus-backed OIDC scope model.
-- Whether the JMAP bearer path should refuse a lookup that names another
-  account, as IMAP, POP3 and ManageSieve do since `v1.1.2`, instead of taking
-  the canonical account from the lookup.
 - Whether JMAP route lookup should apply the listener's `missing_shard` policy
   instead of showing the shared hash fallback.
 

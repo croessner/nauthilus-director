@@ -169,8 +169,12 @@ Exactly one `Authorization` header with scheme Basic or Bearer is accepted.
 Basic credentials go to `Authenticate` with protocol `jmap`, method `plain`.
 Bearer tokens must match the RFC 6750 b64token syntax and the authority token
 size bound; they are introspected with the listener policy and then resolved
-with `LookupIdentity` (protocol `jmap`, method `recipient_lookup`). The
-canonical account and routing attributes come from the authority result.
+with `LookupIdentity` (protocol `jmap`, method `recipient_lookup`). For Basic
+the canonical account and routing attributes come from the authority result.
+For Bearer the lookup supplies the routing attributes and must confirm the
+token account case-insensitively; a lookup naming another account is refused
+with 401 and reason class `bearer_account_mismatch` (`v1.1.2`, aligned with
+`M8_SASL_BEARER_IDENTITY_ROUTING_FOLLOWUP.md`).
 Missing, malformed or rejected credentials get 401 with Basic and/or Bearer
 challenges (`error="invalid_token"` only for a refused Bearer token);
 authority failures get 503 with `Retry-After`. Successful principals are cached

@@ -146,7 +146,11 @@ func (h *Handler) authenticateRequest(writer *statusWriter, request *http.Reques
 		writer.Header().Set(retryAfterHeader, retryAfterSeconds)
 		h.writeProblem(writer, http.StatusServiceUnavailable, "authentication temporarily unavailable")
 	default:
-		record.setReason(reasonAuth)
+		if outcome == authOutcomeAccountMismatch {
+			record.setReason(reasonBearerAccountMismatch)
+		} else {
+			record.setReason(reasonAuth)
+		}
 
 		for _, challenge := range h.auth.challenges(outcome, bearerAttempt(request)) {
 			writer.Header().Add(authenticateHeader, challenge)

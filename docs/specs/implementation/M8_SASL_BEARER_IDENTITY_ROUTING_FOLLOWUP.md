@@ -123,11 +123,15 @@ pass the directory's shard attribute to see the route a bearer login takes.
 
 ## Differences to JMAP
 
-JMAP performs the same lookup inside its request authenticator but takes the
-canonical account from the lookup result instead of refusing a different
-account, and refuses a missing shard attribute with 403 by default
-(`jmap.routing.missing_shard`). Both differences are deliberate for this
-release; aligning JMAP's account handling is a separate decision.
+JMAP performs the same lookup inside its request authenticator. The account
+rule is aligned in `v1.1.2`: a lookup naming another canonical account than the
+token (case-insensitive) refuses the request with 401 and reason class
+`bearer_account_mismatch`, an unknown account answers 401 and a lookup failure
+503; JMAP never adopts the lookup's account. The remaining difference is
+deliberate: JMAP refuses a missing shard attribute with 403 by default
+(`jmap.routing.missing_shard`) instead of hashing. Evidence:
+`TestBearerLookupMustConfirmTokenAccount` and the alias-token step of
+`TestServerBinaryPublicJMAPProxyFlow`.
 
 ## Evidence
 

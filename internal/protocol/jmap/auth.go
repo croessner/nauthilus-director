@@ -58,8 +58,10 @@ const (
 	authOutcomeMissing       authOutcome = "missing"
 	authOutcomeMalformed     authOutcome = "malformed"
 	authOutcomeRejected      authOutcome = "rejected"
-	authOutcomeTempfail      authOutcome = "tempfail"
-	authOutcomeNone          authOutcome = "none"
+	// authOutcomeAccountMismatch refuses a valid token whose identity lookup names another account.
+	authOutcomeAccountMismatch authOutcome = "account_mismatch"
+	authOutcomeTempfail        authOutcome = "tempfail"
+	authOutcomeNone            authOutcome = "none"
 )
 
 // credential is one parsed Authorization header; its secret parts are never logged.
@@ -267,7 +269,18 @@ func (a *authenticator) authenticateBearer(ctx context.Context, request *http.Re
 
 	lookup, err := a.cfg.IdentityLookuper.LookupIdentity(ctx, nauthilus.IdentityLookupRequest{Context: lookupContext})
 
-	return principalFromResult(lookup, err, schemeBearer)
+	identity, outcome := principalFromResult(lookup, err, schemeBearer)
+	if outcome != authOutcomeAuthenticated {
+		return principal{}, outcome
+	}
+
+	// The token account is authoritative for identity: the lookup only contributes routing
+	// attributes and must confirm the same canonical account, never replace it.
+	if identity.account != tokenPrincipal.account {
+		return principal{}, authOutcomeAccountMismatch
+	}
+
+	return identity, authOutcomeAuthenticated
 }
 
 // principalFromResult maps one authority result into a principal or a bounded outcome.
@@ -329,7 +342,7 @@ func (a *authenticator) challenges(outcome authOutcome, bearerAttempt bool) []st
 
 	if a.bearerEnabled {
 		bearer := `Bearer ` + realm
-		if bearerAttempt && (outcome == authOutcomeRejected || outcome == authOutcomeMalformed) {
+		if bearerAttempt && (outcome == authOutcomeRejected || outcome == authOutcomeMalformed || outcome == authOutcomeAccountMismatch) {
 			bearer += bearerInvalidTokenPostfix
 		}
 
