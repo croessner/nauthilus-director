@@ -421,7 +421,9 @@ For bearer mechanisms:
   `token_binding: introspection_allowlist`, which additionally accepts plain
   user tokens that Nauthilus reports active for that dedicated client under its
   `token_introspection` allowlist, for example natively registered mail
-  clients. The mode requires the dedicated client and keeps the scope check;
+  clients. The mode requires a dedicated client distinct from the authority
+  client and keeps the scope check. `required_resource` matches an RFC 8707
+  resource in `aud` (the Nauthilus layout) or in a `resource` claim;
   see `docs/specs/implementation/M8_SASL_BEARER_TOKEN_BINDING_FOLLOWUP.md`.
 - An optional `account_claim` names the introspection response claim that
   provides the account key used by routing, affinity and placement.
@@ -439,7 +441,8 @@ and ManageSieve listeners therefore follow every successful introspection with
 one no-credential identity lookup for the token account over the authority
 transport (listener protocol, method `recipient_lookup`, the frontend client
 and TLS context and the listener `authority_context`). Lookup attributes are
-merged over the token claims and drive routing; the token account stays
+merged over the token claims and drive routing; the shard and tenant routing
+attributes come only from the lookup; the token account stays
 authoritative, so a lookup naming another account refuses the login, and a
 lookup failure is a temporary failure that never reaches the hash fallback.
 A successful lookup without a shard attribute routes exactly like a password

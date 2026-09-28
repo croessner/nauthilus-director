@@ -65,7 +65,7 @@ logins for that protocol serves the lookup as well.
 
 | Lookup outcome | Login outcome |
 | --- | --- |
-| Authenticated, same account (case-insensitive) | Success. Lookup attributes replace token claims of the same name; token-only claims stay. Account and session ID stay those of the token. |
+| Authenticated, same account (both sides normalized with `authbinding.CanonicalAccount`) | Success. Lookup attributes replace token claims of the same name; the shard and tenant routing attributes (`director.routing.auth_attributes`) come only from the lookup, token claims of those names are dropped; other token-only claims stay. Account and session ID stay those of the token. |
 | Authenticated, different account | Refused as an authentication failure (reason `bearer_account_mismatch`). The token account is authoritative for identity. |
 | Authenticated without account | Temporary failure (`malformed_response`). |
 | Rejected (account unknown to the directory) | Refused as an authentication failure (reason `bearer_identity_rejected`). |
@@ -78,8 +78,8 @@ POP3 `-ERR Authentication service temporarily unavailable`, ManageSieve
 `NO (TRYLATER)`. No failure path reaches the routing resolver, so a lookup
 failure can never fall back to the hash.
 
-When the lookup succeeds but neither the directory nor the token supplies the
-shard attribute, routing is unchanged: the resolver chain hashes exactly as it
+When the lookup succeeds without the shard attribute, routing is unchanged,
+even if the token carries a claim of that name: the resolver chain hashes exactly as it
 does for a password login whose `Authenticate` response lacks the attribute.
 The lookup observation reports this case with reason class
 `bearer_shard_missing` so operators can find accounts that are routed by hash.

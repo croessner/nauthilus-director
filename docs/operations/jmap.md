@@ -126,7 +126,8 @@ director.
   credentials of the listener authority
   (`auth.authorities.<name>.mechanisms.bearer.introspection`), but with the
   listener's own token policy: `required_audience` and/or `required_resource`
-  (for example the RFC 8707 resource `https://mail.example.org/`),
+  (for example the RFC 8707 resource `https://mail.example.org/`, matched in
+  the token audience as Nauthilus issues it or in a `resource` claim),
   `required_scope` and `account_claim`. The mail SASL bearer policy of the
   authority is never inherited. `jmap.auth.bearer.introspection_client`
   optionally gives the listener its own introspection client (`client_id`,

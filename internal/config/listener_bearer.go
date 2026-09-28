@@ -149,7 +149,18 @@ func normalizedTokenBinding(value string) string {
 // The introspection-allowlist binding hands the audience decision to the identity provider's
 // allowlist of the introspecting client. That is only sound when the client is dedicated to this
 // listener, so the binding requires introspection_client.client_id.
-func validateListenerIntrospectionClient(path string, tokenBinding string, client ListenerIntrospectionClientConfig, effective BearerIntrospectionConfig, problems *[]string) {
+//
+// A dedicated client must differ from the authority's mail SASL introspection client: otherwise the
+// listener would share the provider allowlist of every other listener using the authority client.
+// authorityClientID is empty when the authority is unknown.
+func validateListenerIntrospectionClient(
+	path string,
+	tokenBinding string,
+	client ListenerIntrospectionClientConfig,
+	effective BearerIntrospectionConfig,
+	authorityClientID string,
+	problems *[]string,
+) {
 	switch tokenBinding {
 	case BearerTokenBindingAudienceResource:
 	case BearerTokenBindingIntrospectionAllowlist:
@@ -161,6 +172,10 @@ func validateListenerIntrospectionClient(path string, tokenBinding string, clien
 	}
 
 	if client.Dedicated() {
+		if authorityClientID = strings.TrimSpace(authorityClientID); authorityClientID != "" && strings.TrimSpace(client.ClientID) == authorityClientID {
+			addProblem(problems, path+".introspection_client.client_id must differ from the authority bearer introspection client_id")
+		}
+
 		validateBearerIntrospectionClientAuth(path+".introspection_client", effective, problems)
 	} else if client.hasMaterialWithoutClient() {
 		addProblem(problems, path+".introspection_client.client_id is required when client credentials are set")
@@ -176,5 +191,14 @@ func validateListenerBearer(path string, bearer ListenerBearerConfig, authority 
 		addProblem(problems, path+".introspection_client requires the authority bearer introspection endpoint")
 	}
 
-	validateListenerIntrospectionClient(path, bearer.TokenBinding, bearer.IntrospectionClient, effective, problems)
+	validateListenerIntrospectionClient(path, bearer.TokenBinding, bearer.IntrospectionClient, effective, knownAuthorityClientID(authority, authorityKnown), problems)
+}
+
+// knownAuthorityClientID returns the authority's mail SASL introspection client id when the authority exists.
+func knownAuthorityClientID(authority AuthorityConfig, authorityKnown bool) string {
+	if !authorityKnown {
+		return ""
+	}
+
+	return authority.Mechanisms.Bearer.Introspection.ClientID
 }

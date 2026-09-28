@@ -91,7 +91,12 @@ func (s *Session) authenticateWithAuthority(
 			s.context.AuthorityName,
 		)
 
-		return s.bearerIntrospector.Introspect(authCtx, request)
+		result, err := s.bearerIntrospector.Introspect(authCtx, request)
+		// Introspection refusal reasons describe token policy; unauthenticated clients get only the
+		// generic failure text, unlike authority status text from password authentication.
+		result.StatusMessage = ""
+
+		return result, err
 	}
 
 	if s.authenticator == nil {

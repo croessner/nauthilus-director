@@ -52,7 +52,15 @@ With `introspection_allowlist` an active token is accepted when either
   one), no `resource` claim, a non-empty audience, and every audience value
   equals the issuing client, which is `azp` or, without `azp`, the single
   audience value. This mirrors how Nauthilus classifies plain tokens for its
-  allowlist.
+  allowlist. The `client_id` claim as service-token discriminator is a
+  Nauthilus-specific provider assumption.
+
+`required_resource` matches an RFC 8707 resource in the audience list
+(section 2 of RFC 8707; Nauthilus issues `aud` = issuing client plus resources
+and no `resource` claim) or in a `resource` claim sent by other providers. A
+Nauthilus resource token (`aud` = [azp, resource]) is never a plain token, so a
+token for a resource other than `required_resource` is refused in both modes.
+Audience arrays are compared value by value without splitting on whitespace.
 
 A token bound to any other resource is refused locally even when the provider
 reports it active. The scope check, the account claim and the identity lookup
@@ -89,7 +97,12 @@ Operators must
 
 - register a confidential introspection client used only by the director mail
   listeners and never reuse a webmail, JMAP backend or other resource-server
-  client;
+  client; validation refuses a dedicated `client_id` equal to the authority's
+  mail SASL introspection client;
+- keep that client unable to obtain user tokens (introspection and at most
+  `client_credentials`, no redirect URIs, no interactive grants), because
+  Nauthilus reports tokens issued to the introspecting client itself as active
+  without consulting the allowlist;
 - keep its allowlist to mail clients, including the webmail client if webmail
   logs in through the same listener (every token of the listener is
   introspected with this client);
@@ -115,5 +128,7 @@ Listeners that do not serve native clients keep `audience_resource`.
   `TestServerBinaryBearerIntrospectionAllowlistBinding` proves a DCR-style token
   with a foreign audience, visible only to the dedicated client, logs in only on
   the listener with the allowlist binding, is refused with
-  `audience or resource mismatch` under the default binding, and that a token
-  without the required scope is refused.
+  the generic `Authentication failed` under the default binding (IMAP no longer
+  echoes introspection refusal reasons to unauthenticated clients), and that a
+  token without the required scope is refused. The JMAP lane uses the
+  Nauthilus token layout (resource in `aud`, no `resource` claim).

@@ -130,11 +130,11 @@ func TestServerBinaryBearerIntrospectionAllowlistBinding(t *testing.T) {
 	imapBearerAuth(t, allowlistAddress, "D001", "XOAUTH2", e2eBindingAccount, e2eBindingDCRToken)
 	imapBearerAuth(t, allowlistAddress, "W001", "OAUTHBEARER", e2eBindingAccount, e2eBindingWebmailToken)
 	imapBearerAuthFailure(t, allowlistAddress, "S001", "XOAUTH2", e2eBindingAccount, e2eBindingNoScopeToken,
-		"S001 NO [AUTHENTICATIONFAILED] required bearer scope missing\r\n")
+		"S001 NO [AUTHENTICATIONFAILED] Authentication failed\r\n")
 
 	defaultAddress, defaultProcess := startBindingIMAPDirector(t, authority, config.BearerTokenBindingAudienceResource)
 	imapBearerAuthFailure(t, defaultAddress, "N001", "XOAUTH2", e2eBindingAccount, e2eBindingDCRToken,
-		"N001 NO [AUTHENTICATIONFAILED] bearer token audience or resource mismatch\r\n")
+		"N001 NO [AUTHENTICATIONFAILED] Authentication failed\r\n")
 	imapBearerAuth(t, defaultAddress, "V001", "XOAUTH2", e2eBindingAccount, e2eBindingWebmailToken)
 
 	for _, process := range []*directorProcess{allowlistProcess, defaultProcess} {

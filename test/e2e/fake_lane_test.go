@@ -542,19 +542,19 @@ func TestServerBinarySASLBearerIntrospectionFailuresPublicIMAPFlow(t *testing.T)
 			tag:       "I001",
 			mechanism: "XOAUTH2",
 			token:     e2eSASLInactiveToken,
-			want:      "I001 NO [AUTHENTICATIONFAILED] bearer token inactive\r\n",
+			want:      "I001 NO [AUTHENTICATIONFAILED] Authentication failed\r\n",
 		},
 		{
 			tag:       "S001",
 			mechanism: "OAUTHBEARER",
 			token:     e2eSASLMissingScopeToken,
-			want:      "S001 NO [AUTHENTICATIONFAILED] required bearer scope missing\r\n",
+			want:      "S001 NO [AUTHENTICATIONFAILED] Authentication failed\r\n",
 		},
 		{
 			tag:       "A001",
 			mechanism: "XOAUTH2",
 			token:     e2eSASLMissingAccountToken,
-			want:      "A001 NO [AUTHENTICATIONFAILED] bearer account claim missing\r\n",
+			want:      "A001 NO [AUTHENTICATIONFAILED] Authentication failed\r\n",
 		},
 		{
 			tag:       "M001",

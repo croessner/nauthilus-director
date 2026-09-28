@@ -216,7 +216,9 @@ authority transport: HTTP `POST /api/v1/auth/json?mode=no-auth` or gRPC
 and the listener's `authority_context`. Nauthilus must answer that lookup with
 the same attributes it returns for a password login on the protocol; the
 director client needs the `nauthilus:lookup_identity` scope when OIDC caller
-auth is enabled.
+auth is enabled. The routing attributes (`director.routing.auth_attributes`
+shard tag and tenant) come only from the lookup: token claims with those names
+are dropped, so a token cannot choose its own shard.
 
 | Lookup outcome | Client sees |
 | --- | --- |
@@ -288,8 +290,17 @@ using an allowlist instead of a single audience. The director keeps a local
 guard on top: in this mode it accepts a token when it matches a configured
 audience or resource, or when it is a plain user token, meaning its only
 audience is its issuing client (`azp`, or the single `aud` without `azp`), it
-has no `resource` claim and no `client_id` service discriminator. Tokens bound
-to another resource are refused even if the provider reports them active.
+has no `resource` claim and no `client_id` service discriminator. The
+`client_id` claim as service-token discriminator is a Nauthilus convention
+(service tokens carry it, user tokens do not); other providers need not follow
+it. Tokens bound to another resource are refused even if the provider reports
+them active.
+
+`required_resource` matches an RFC 8707 resource in the token audience, which
+is how Nauthilus encodes resources (`aud` = issuing client plus resources, no
+`resource` claim), or in a `resource` claim for providers that send one. Before
+`v1.1.2` only the `resource` claim was checked, so Nauthilus resource tokens
+were refused.
 `required_scope` and `account_claim` are enforced exactly as before, and the
 identity lookup still binds the token account to the directory.
 
@@ -298,7 +309,14 @@ Requirements and risks:
 - Register a confidential introspection client used only by the director mail
   listeners and give it its own secret or key; never reuse a webmail, JMAP
   backend or other resource-server client, because every token that client may
-  introspect becomes a valid mail login.
+  introspect becomes a valid mail login. The director refuses an
+  `introspection_client.client_id` equal to the authority's
+  `mechanisms.bearer.introspection.client_id`.
+- Nauthilus reports tokens issued to the introspecting client itself as active
+  without consulting the allowlist. The dedicated client must therefore never
+  obtain user tokens: confidential, used only for introspection (at most the
+  `client_credentials` grant), no redirect URIs and no interactive grants
+  (authorization code, device code, refresh tokens).
 - Its allowlist must name only mail clients: the dynamic-client profile of
   native mail clients and, when webmail logs in through the same listener, the
   webmail client. Every token of the listener is introspected with this client,

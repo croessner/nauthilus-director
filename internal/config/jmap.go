@@ -338,7 +338,14 @@ func validateJMAPBearer(path string, bearer JMAPBearerAuthConfig, authority Auth
 	}
 
 	validateBearerAccountClaim(path+".account_claim", bearer.AccountClaim, problems)
-	validateListenerIntrospectionClient(path, tokenBinding, bearer.IntrospectionClient, bearer.BearerIntrospectionPolicy(authority.Mechanisms.Bearer.Introspection), problems)
+	validateListenerIntrospectionClient(
+		path,
+		tokenBinding,
+		bearer.IntrospectionClient,
+		bearer.BearerIntrospectionPolicy(authority.Mechanisms.Bearer.Introspection),
+		knownAuthorityClientID(authority, authorityKnown),
+		problems,
+	)
 }
 
 // validateJMAPRouting accepts the documented missing-shard policies.

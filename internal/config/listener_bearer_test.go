@@ -124,6 +124,15 @@ func TestMailboxListenerBearerValidation(t *testing.T) {
 			})
 			expectValidationError(t, incomplete.Normalize(), protocolPath+".introspection_client must configure exactly one of client_secret or client_secret_file")
 
+			shared := updateMailboxBearer(DefaultConfig(), name, ListenerBearerConfig{
+				TokenBinding: BearerTokenBindingIntrospectionAllowlist,
+				IntrospectionClient: ListenerIntrospectionClientConfig{
+					ClientID:         DefaultConfig().Auth.Authorities["default"].Mechanisms.Bearer.Introspection.ClientID,
+					ClientSecretFile: Secret(testMailIntrospectionSecret),
+				},
+			})
+			expectValidationError(t, shared.Normalize(), protocolPath+".introspection_client.client_id must differ from the authority bearer introspection client_id")
+
 			valid := updateMailboxBearer(DefaultConfig(), name, ListenerBearerConfig{
 				TokenBinding:        BearerTokenBindingIntrospectionAllowlist,
 				IntrospectionClient: dedicatedMailClient(),
@@ -203,6 +212,19 @@ func TestJMAPBearerTokenBinding(t *testing.T) {
 		}
 	})
 	expectValidationError(t, withoutScope.Normalize(), "director.listeners.jmap.jmap.auth.bearer.required_scope is required")
+
+	sharedClient := updateJMAPListener(jmapTestConfig(), func(entry *ListenerConfig) {
+		entry.JMAP.Auth.Bearer = JMAPBearerAuthConfig{
+			Enabled:          true,
+			RequiredResource: testJMAPResource,
+			RequiredScope:    testRequiredScope,
+			IntrospectionClient: ListenerIntrospectionClientConfig{
+				ClientID:         DefaultConfig().Auth.Authorities["default"].Mechanisms.Bearer.Introspection.ClientID,
+				ClientSecretFile: Secret(testMailIntrospectionSecret),
+			},
+		}
+	})
+	expectValidationError(t, sharedClient.Normalize(), "director.listeners.jmap.jmap.auth.bearer.introspection_client.client_id must differ from the authority bearer introspection client_id")
 
 	policy := JMAPBearerAuthConfig{
 		RequiredResource:    testJMAPResource,

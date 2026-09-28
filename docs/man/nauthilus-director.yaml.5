@@ -317,6 +317,10 @@ required scope is still enforced.
 This binding requires
 .BR bearer.introspection_client.client_id ;
 configure the allowlist of that client with mail clients only.
+The dedicated client must differ from the authority introspection client and
+must not be able to obtain user tokens (no redirect URIs, no interactive
+grants), because Nauthilus reports tokens issued to the introspecting client
+itself as active without consulting the allowlist.
 .TP
 .B bearer.introspection_client
 Dedicated introspection client for this listener with the same fields and
@@ -887,7 +891,10 @@ Default:
 .TP
 .BR auth.bearer.required_audience ,\  auth.bearer.required_resource
 Token binding owned by this listener, typically the RFC 8707 resource
-.BR https://mail.example.org/ .
+.BR https://mail.example.org/ ;
+a resource matches an audience value (RFC 8707, the Nauthilus layout) or a
+.B resource
+claim.
 At least one is required when bearer is enabled, unless
 .B auth.bearer.token_binding
 is
