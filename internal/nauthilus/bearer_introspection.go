@@ -294,7 +294,7 @@ func plainUserToken(claims map[string]any) bool {
 		return false
 	}
 
-	audiences := fieldsWithoutEmpty(audienceClaim(claims[jwtClaimAudience]))
+	audiences := audienceValues(claims[jwtClaimAudience])
 	if len(audiences) == 0 {
 		return false
 	}

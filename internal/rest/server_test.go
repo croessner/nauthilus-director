@@ -674,10 +674,11 @@ func mtlsControlConfig() config.ControlServerConfig {
 // oidcResult returns one active fake Nauthilus introspection result.
 func oidcResult(subject string, scopes []string) nauthilus.OIDCIntrospectionResult {
 	return nauthilus.OIDCIntrospectionResult{
-		Active:   true,
-		Subject:  subject,
-		Audience: "nauthilus-director",
-		Scopes:   scopes,
+		Active:    true,
+		Subject:   subject,
+		Audience:  "nauthilus-director",
+		Audiences: []string{"nauthilus-director"},
+		Scopes:    scopes,
 	}
 }
 

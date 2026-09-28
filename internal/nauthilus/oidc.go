@@ -79,10 +79,12 @@ type callerTokenSource interface {
 
 // OIDCIntrospectionResult contains secret-safe token introspection claims.
 type OIDCIntrospectionResult struct {
-	Active    bool
-	Subject   string
-	ClientID  string
-	Audience  string
+	Active   bool
+	Subject  string
+	ClientID string
+	Audience string
+	// Audiences keeps every audience value as issued, without splitting on whitespace.
+	Audiences []string
 	Resources []string
 	Scopes    []string
 	Claims    map[string]any
@@ -1130,6 +1132,7 @@ func introspectionFromClaimsForOperation(claims map[string]any, operation authOp
 		Subject:   stringClaim(claims, jwtClaimSubject),
 		ClientID:  firstNonEmptyClaim(claims, oidcFormClientID, oidcClaimAuthorizedParty),
 		Audience:  audienceClaim(claims[jwtClaimAudience]),
+		Audiences: audienceValues(claims[jwtClaimAudience]),
 		Resources: resourceClaim(claims[oidcClaimResource]),
 		Scopes:    scopesClaim(claims[oidcClaimScope]),
 		Claims:    cloneClaims(claims),
@@ -1145,11 +1148,38 @@ func (r OIDCIntrospectionResult) MatchesAudienceOrResource(requiredAudience stri
 		return false
 	}
 
-	if requiredAudience != "" && containsClaimValue(fieldsWithoutEmpty(r.Audience), requiredAudience) {
+	if requiredAudience != "" && containsClaimValue(r.Audiences, requiredAudience) {
 		return true
 	}
 
-	return requiredResource != "" && containsClaimValue(r.Resources, requiredResource)
+	if requiredResource == "" {
+		return false
+	}
+
+	// RFC 8707 section 2: an access token issued for a resource carries it as audience, which is
+	// how Nauthilus encodes resources; a separate resource claim is accepted for other providers.
+	return containsClaimValue(r.Audiences, requiredResource) || containsClaimValue(r.Resources, requiredResource)
+}
+
+// audienceValues returns the trimmed, non-empty audience values of a string or array claim.
+func audienceValues(value any) []string {
+	switch typed := value.(type) {
+	case string:
+		if audience := strings.TrimSpace(typed); audience != "" {
+			return []string{audience}
+		}
+	case []any:
+		values := make([]string, 0, len(typed))
+		for _, entry := range typed {
+			if text, ok := entry.(string); ok && strings.TrimSpace(text) != "" {
+				values = append(values, strings.TrimSpace(text))
+			}
+		}
+
+		return values
+	}
+
+	return nil
 }
 
 // stringClaim returns one trimmed string claim.

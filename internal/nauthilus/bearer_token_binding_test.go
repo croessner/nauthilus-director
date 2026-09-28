@@ -87,7 +87,40 @@ type bindingModeCase struct {
 
 // bindingModeCases lists the token shapes that separate the default and allowlist bindings.
 func bindingModeCases() []bindingModeCase {
-	return append(bindingAcceptedCases(), bindingRefusedCases()...)
+	return append(append(bindingAcceptedCases(), bindingRefusedCases()...), bindingResourceCases()...)
+}
+
+// requireMailResource binds the default policy to the mail resource instead of an audience.
+func requireMailResource(cfg *config.BearerIntrospectionConfig) {
+	cfg.RequiredAudience = ""
+	cfg.RequiredResource = bindingMailResource
+}
+
+// bindingResourceCases covers RFC 8707 resource tokens in the Nauthilus layout (resource in aud,
+// no resource claim) and the resource-claim layout of other providers.
+func bindingResourceCases() []bindingModeCase {
+	nauthilusResourceToken := bindingPayload([]any{bindingDCRClient, bindingMailResource}, map[string]any{oidcClaimAuthorizedParty: bindingDCRClient})
+	otherResourceToken := bindingPayload([]any{bindingDCRClient, bindingOtherResource}, map[string]any{oidcClaimAuthorizedParty: bindingDCRClient})
+
+	return []bindingModeCase{
+		{name: "resource in aud accepted by default binding", payload: nauthilusResourceToken, configure: requireMailResource, want: DecisionAuthenticated},
+		{name: "other resource in aud refused by default binding", payload: otherResourceToken, configure: requireMailResource, want: DecisionRejected},
+		{
+			name:    "other resource in aud refused by allowlist binding",
+			payload: otherResourceToken,
+			configure: func(cfg *config.BearerIntrospectionConfig) {
+				requireMailResource(cfg)
+				withAllowlist(cfg)
+			},
+			want: DecisionRejected,
+		},
+		{
+			name:      "resource claim of other providers still accepted",
+			payload:   bindingPayload(bindingDCRClient, map[string]any{oidcClaimResource: bindingMailResource}),
+			configure: requireMailResource,
+			want:      DecisionAuthenticated,
+		},
+	}
 }
 
 // bindingAcceptedCases lists token shapes whose outcome depends on the binding mode.
@@ -130,7 +163,7 @@ func bindingAcceptedCases() []bindingModeCase {
 		},
 		{
 			name:    "configured resource accepted with allowlist binding",
-			payload: bindingPayload([]any{bindingDCRClient, bindingMailResource}, map[string]any{oidcClaimAuthorizedParty: bindingDCRClient, oidcClaimResource: bindingMailResource}),
+			payload: bindingPayload([]any{bindingDCRClient, bindingMailResource}, map[string]any{oidcClaimAuthorizedParty: bindingDCRClient}),
 			configure: func(cfg *config.BearerIntrospectionConfig) {
 				withAllowlist(cfg)
 				cfg.RequiredResource = bindingMailResource

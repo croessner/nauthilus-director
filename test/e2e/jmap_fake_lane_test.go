@@ -52,6 +52,9 @@ const (
 	e2eJMAPToken           = "jmap-e2e-bearer-token-sentinel"
 	e2eJMAPForeignToken    = "jmap-e2e-foreign-resource-token-sentinel"
 	e2eJMAPAliasToken      = "jmap-e2e-alias-account-token-sentinel"
+	// e2eJMAPNativeClient issued the fixture tokens; Nauthilus encodes RFC 8707 resources in aud
+	// next to the issuing client and sends no resource claim.
+	e2eJMAPNativeClient    = "jmap-native-client"
 	e2eJMAPAliasAccount    = "jmap-bob-alias@example.test"
 	e2eJMAPResource        = "https://mail.example.test/"
 	e2eJMAPPublicBaseURL   = "https://mail.example.test"
@@ -204,11 +207,11 @@ func (f *jmapFakeAuthority) handleIntrospection(writer http.ResponseWriter, requ
 
 	switch request.Form.Get("token") {
 	case e2eJMAPToken:
-		claims = map[string]any{"active": true, "sub": "bob", "scope": "openid " + e2eJMAPScope, "resource": e2eJMAPResource, "dovecot_account": e2eJMAPBearerAccount}
+		claims = map[string]any{"active": true, "sub": "bob", "scope": "openid " + e2eJMAPScope, "azp": e2eJMAPNativeClient, "aud": []string{e2eJMAPNativeClient, e2eJMAPResource}, "dovecot_account": e2eJMAPBearerAccount}
 	case e2eJMAPAliasToken:
-		claims = map[string]any{"active": true, "sub": "bob", "scope": "openid " + e2eJMAPScope, "resource": e2eJMAPResource, "dovecot_account": e2eJMAPAliasAccount}
+		claims = map[string]any{"active": true, "sub": "bob", "scope": "openid " + e2eJMAPScope, "azp": e2eJMAPNativeClient, "aud": []string{e2eJMAPNativeClient, e2eJMAPResource}, "dovecot_account": e2eJMAPAliasAccount}
 	case e2eJMAPForeignToken:
-		claims = map[string]any{"active": true, "sub": "bob", "scope": "openid " + e2eJMAPScope, "resource": "https://other.example.test/", "dovecot_account": e2eJMAPBearerAccount}
+		claims = map[string]any{"active": true, "sub": "bob", "scope": "openid " + e2eJMAPScope, "azp": e2eJMAPNativeClient, "aud": []string{e2eJMAPNativeClient, "https://other.example.test/"}, "dovecot_account": e2eJMAPBearerAccount}
 	}
 
 	writer.Header().Set("Content-Type", "application/json")
