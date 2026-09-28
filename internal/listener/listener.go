@@ -251,7 +251,7 @@ func managedListenersFromConfig(cfg config.Config, options managerOptions) ([]*m
 			cfg.Director.Security,
 			cfg.Director.Affinity.ActiveUserPinning.Key.Tenant,
 			cfg.Director.Routing.EffectiveDefaultShard(),
-			cfg.Director.Routing.AuthAttributes.ShardTag,
+			cfg.Director.Routing.AuthAttributes.Normalize(),
 			cfg.Director.Affinity.ActiveUserPinning.IdleGrace.Std(),
 			options,
 		)
@@ -699,7 +699,7 @@ func bindListenerBearerIdentity(
 	name string,
 	entry config.ListenerConfig,
 	authority config.AuthorityConfig,
-	shardTagAttribute string,
+	routingAttributes config.RoutingAuthAttributesConfig,
 	options managerOptions,
 ) (nauthilus.BearerIntrospector, error) {
 	if introspector == nil || !listenerRoutesBearerPrincipal(entry) {
@@ -712,7 +712,8 @@ func bindListenerBearerIdentity(
 
 	return nauthilus.BindBearerIdentity(introspector, nauthilus.BearerIdentityConfig{
 		Lookuper:          lookuper,
-		ShardTagAttribute: shardTagAttribute,
+		ShardTagAttribute: routingAttributes.ShardTag,
+		TenantAttribute:   routingAttributes.Tenant,
 		Observation: nauthilus.ObservationConfig{
 			AuthorityName: entry.Authority,
 			BackendPool:   entry.BackendPool,

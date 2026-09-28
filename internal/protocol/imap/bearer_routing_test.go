@@ -134,12 +134,25 @@ func hashRoutedAccount(t *testing.T, hash *routing.HashResolver) string {
 func bearerRouteSession(t *testing.T, account string, lookuper *bearerRouteLookuper) (*sessionHarness, *bearerRouteRecorder) {
 	t.Helper()
 
+	return bearerRouteSessionWithClaims(t, account, nil, lookuper)
+}
+
+// bearerRouteSessionWithClaims starts the session with token claims on the introspection result.
+func bearerRouteSessionWithClaims(
+	t *testing.T,
+	account string,
+	claims map[string][]string,
+	lookuper *bearerRouteLookuper,
+) (*sessionHarness, *bearerRouteRecorder) {
+	t.Helper()
+
 	chain, _ := bearerRouteChain(t)
 	router := &bearerRouteRecorder{next: chain}
 
 	binder, err := nauthilus.BindBearerIdentity(&recordingBearerIntrospector{result: nauthilus.AuthResult{
-		Decision: nauthilus.DecisionAuthenticated,
-		Account:  account,
+		Decision:   nauthilus.DecisionAuthenticated,
+		Account:    account,
+		Attributes: claims,
 	}}, nauthilus.BearerIdentityConfig{Lookuper: lookuper, ShardTagAttribute: bearerRouteShardAttr})
 	if err != nil {
 		t.Fatalf("BindBearerIdentity: %v", err)
@@ -225,5 +238,21 @@ func TestBearerLoginIdentityFailuresNeverReachRouting(t *testing.T) {
 				t.Fatalf("routing calls = %d, want none after a failed identity lookup", calls)
 			}
 		})
+	}
+}
+
+// TestBearerTokenShardClaimNeverRoutes proves a token claim named like the shard attribute is
+// ignored: without a directory shard the login keeps the hash semantics of a password login.
+func TestBearerTokenShardClaimNeverRoutes(t *testing.T) {
+	_, hash := bearerRouteChain(t)
+	account := hashRoutedAccount(t, hash)
+	lookuper := &bearerRouteLookuper{result: nauthilus.AuthResult{Decision: nauthilus.DecisionAuthenticated, Account: account}}
+
+	harness, router := bearerRouteSessionWithClaims(t, account, map[string][]string{bearerRouteShardAttr: {bearerRouteDirShard}}, lookuper)
+	_ = harness.readLine(t)
+
+	results := router.resolved()
+	if len(results) != 1 || results[0].ShardTag != bearerRouteHashShard || results[0].RoutingSource != routing.SourceHash {
+		t.Fatalf("routes = %+v, want the hash shard via hash fallback", results)
 	}
 }

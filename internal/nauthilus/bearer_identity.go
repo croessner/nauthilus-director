@@ -18,10 +18,12 @@ package nauthilus
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/croessner/nauthilus-director/internal/observability"
+	"github.com/croessner/nauthilus-director/internal/protocol/authbinding"
 )
 
 // IdentityLookupMethod is the method value the director sends with every no-auth identity lookup
@@ -41,6 +43,9 @@ type BearerIdentityConfig struct {
 	Lookuper IdentityLookuper
 	// ShardTagAttribute names the routing attribute whose absence is reported distinctly.
 	ShardTagAttribute string
+	// TenantAttribute names the tenant routing attribute. Routing attributes are taken only from
+	// the lookup result, never from token claims of the same name.
+	TenantAttribute string
 	// Observation carries static listener facts; Transport names the authority transport.
 	Observation ObservationConfig
 }
@@ -50,6 +55,7 @@ type bearerIdentityBinder struct {
 	next              BearerIntrospector
 	lookuper          IdentityLookuper
 	shardTagAttribute string
+	routingAttributes []string
 	config            ObservationConfig
 }
 
@@ -75,6 +81,7 @@ func BindBearerIdentity(next BearerIntrospector, config BearerIdentityConfig) (B
 		next:              next,
 		lookuper:          config.Lookuper,
 		shardTagAttribute: strings.TrimSpace(config.ShardTagAttribute),
+		routingAttributes: nonEmptyNames(config.ShardTagAttribute, config.TenantAttribute),
 		config:            config.Observation.normalize(),
 	}, nil
 }
@@ -92,13 +99,13 @@ func (b *bearerIdentityBinder) Introspect(ctx context.Context, request BearerInt
 
 	request = request.normalized()
 
-	account := strings.TrimSpace(token.Account)
-	if account == "" {
+	account, accountErr := authbinding.CanonicalAccount(token.Account)
+	if accountErr != nil {
 		return resultWithDecision(DecisionTemporaryFailure, "", "", "", nil),
 			malformedResponseError(operationLookupIdentity, "bearer account unavailable", nil)
 	}
 
-	lookupRequest := IdentityLookupRequest{Context: b.lookupContext(request, account)}
+	lookupRequest := IdentityLookupRequest{Context: b.lookupContext(request, strings.TrimSpace(token.Account))}
 
 	started := time.Now()
 	identity, err := b.lookuper.LookupIdentity(ctx, lookupRequest)
@@ -143,13 +150,13 @@ func (b *bearerIdentityBinder) bind(
 			tempfailError(operationLookupIdentity, 0, "bearer identity lookup unavailable")
 	}
 
-	lookupAccount := strings.TrimSpace(identity.Account)
-	if lookupAccount == "" {
+	lookupAccount, lookupErr := authbinding.CanonicalAccount(identity.Account)
+	if lookupErr != nil {
 		return resultWithDecision(DecisionTemporaryFailure, "", "", "", nil), string(ErrorKindMalformedResponse),
 			malformedResponseError(operationLookupIdentity, "bearer identity lookup returned no account", nil)
 	}
 
-	if !strings.EqualFold(lookupAccount, account) {
+	if lookupAccount != account {
 		return resultWithDecision(DecisionRejected, "", "", "", nil), bearerIdentityReasonAccountMismatch, nil
 	}
 
@@ -158,7 +165,7 @@ func (b *bearerIdentityBinder) bind(
 		token.Account,
 		token.SessionID,
 		"",
-		mergeBearerIdentityAttributes(token.Attributes, identity.Attributes),
+		mergeBearerIdentityAttributes(token.Attributes, identity.Attributes, b.routingAttributes),
 	)
 
 	if !b.shardTagPresent(bound.Attributes) {
@@ -183,11 +190,17 @@ func (b *bearerIdentityBinder) shardTagPresent(attributes map[string][]string) b
 	return false
 }
 
-// mergeBearerIdentityAttributes overlays authority attributes on token claims; the directory wins
-// for every attribute it returns, token-only claims are kept.
-func mergeBearerIdentityAttributes(token map[string][]string, identity map[string][]string) map[string][]string {
+// mergeBearerIdentityAttributes overlays authority attributes on token claims. The directory wins
+// for every attribute it returns; routing attributes come only from the directory, so a token
+// claim named like the shard or tenant attribute can never steer placement. Other token-only
+// claims are kept.
+func mergeBearerIdentityAttributes(token map[string][]string, identity map[string][]string, routing []string) map[string][]string {
 	merged := make(map[string][]string, len(token)+len(identity))
 	for name, values := range token {
+		if slices.Contains(routing, name) {
+			continue
+		}
+
 		merged[name] = append([]string(nil), values...)
 	}
 
@@ -232,4 +245,16 @@ func (b *bearerIdentityBinder) record(
 		observability.MetricMeasurementDurationSeconds: duration.Seconds(),
 	})
 	b.config.Recorder.Record(ctx, event)
+}
+
+// nonEmptyNames returns the trimmed, non-empty attribute names.
+func nonEmptyNames(names ...string) []string {
+	result := make([]string, 0, len(names))
+	for _, name := range names {
+		if name = strings.TrimSpace(name); name != "" {
+			result = append(result, name)
+		}
+	}
+
+	return result
 }

@@ -87,6 +87,7 @@ func bindForTest(t *testing.T, token AuthResult, tokenErr error, lookuper *recor
 	binder, err := BindBearerIdentity(fakeBearerIntrospector{result: token, err: tokenErr}, BearerIdentityConfig{
 		Lookuper:          lookuper,
 		ShardTagAttribute: bindingShardAttr,
+		TenantAttribute:   observationClaimTenant,
 		Observation: ObservationConfig{
 			AuthorityName: observationAuthorityDefault,
 			BackendPool:   observationBackendPool,
@@ -262,18 +263,22 @@ func TestBindBearerIdentityRefusesOrTempfails(t *testing.T) {
 	}
 }
 
-// TestBindBearerIdentityReportsMissingShardDistinctly keeps unchanged routing semantics with a distinct signal.
+// TestBindBearerIdentityReportsMissingShardDistinctly drops token claims named like routing
+// attributes, keeps unchanged routing semantics and reports the missing shard distinctly.
 func TestBindBearerIdentityReportsMissingShardDistinctly(t *testing.T) {
 	lookuper := &recordingIdentityLookuper{result: AuthResult{Decision: DecisionAuthenticated, Account: bindingAccount}}
-	binder, recorder := bindForTest(t, bindingTokenResult(nil), nil, lookuper)
+	binder, recorder := bindForTest(t, bindingTokenResult(map[string][]string{
+		bindingShardAttr:       {bindingTokenShard},
+		observationClaimTenant: {observationTenantBlue},
+	}), nil, lookuper)
 
 	result, err := binder.Introspect(context.Background(), bindingRequest())
 	if err != nil || result.Decision != DecisionAuthenticated {
 		t.Fatalf("Introspect = %+v, %v; want authenticated principal", result, err)
 	}
 
-	if len(result.Attributes[bindingShardAttr]) != 0 {
-		t.Fatal("binder invented a shard attribute")
+	if len(result.Attributes[bindingShardAttr]) != 0 || len(result.Attributes[observationClaimTenant]) != 0 {
+		t.Fatalf("routing attributes = %v, want token claims of routing names dropped", result.Attributes)
 	}
 
 	event := requireAuthObservation(t, recorder)
