@@ -414,6 +414,15 @@ For bearer mechanisms:
   `introspection_endpoint` as audience.
 - The required end-user token scope belongs only to the introspection config and
   defaults to `email`.
+- The token binding defaults to `audience_resource`: an active token must match
+  `required_audience` or `required_resource`. IMAP, POP3 and ManageSieve
+  listeners may replace the introspection client
+  (`<protocol>.bearer.introspection_client`, as JMAP does) and opt into
+  `token_binding: introspection_allowlist`, which additionally accepts plain
+  user tokens that Nauthilus reports active for that dedicated client under its
+  `token_introspection` allowlist, for example natively registered mail
+  clients. The mode requires the dedicated client and keeps the scope check;
+  see `docs/specs/implementation/M8_SASL_BEARER_TOKEN_BINDING_FOLLOWUP.md`.
 - An optional `account_claim` names the introspection response claim that
   provides the account key used by routing, affinity and placement.
 - End-user bearer tokens are held only in short-lived credential state through
@@ -939,7 +948,9 @@ introspected at the authority's introspection endpoint with a token binding
 owned by the listener (`required_audience` and/or RFC 8707
 `required_resource`, `required_scope`, `account_claim`) and, optionally, a
 dedicated introspection client that replaces the authority client credentials
-for that listener only; the token account is then resolved with an identity
+for that listener only; with `token_binding: introspection_allowlist` and that
+dedicated client, plain user tokens the provider allowlists for the client are
+accepted as well (section 7.2); the token account is then resolved with an identity
 lookup whose attributes carry the routing facts a token alone does not.
 Successful results are cached per process for a short TTL (default 30s, at most
 10m) under an HMAC, keyed by a random per-process secret, of scheme, credential
@@ -1311,7 +1322,8 @@ Not safely reloadable without restart, at least initially:
 JMAP listeners follow the same listener rules: adding or removing one is
 reloadable, and a removed JMAP listener also closes its in-process HTTP server;
 changing an existing JMAP listener, including its `jmap` subtree, requires a
-restart. The JMAP bearer introspection client is bound at listener start.
+restart. The bearer introspection client and token binding of a JMAP, IMAP,
+POP3 or ManageSieve listener are bound at listener start.
 
 On reload:
 
@@ -1715,6 +1727,10 @@ control listener, Valkey, fake Nauthilus and public IMAP backend sockets.
 - mail SASL bearer introspection through Nauthilus without local token
   validation or bearer-token caching, followed by policy-gated backend replay of
   the original end-user bearer token where backend auth requires it
+- opt-in bearer token binding `introspection_allowlist` with per-listener
+  introspection clients for IMAP, POP3, ManageSieve and JMAP (`v1.1.2`), so
+  natively registered mail clients can log in; see
+  `docs/specs/implementation/M8_SASL_BEARER_TOKEN_BINDING_FOLLOWUP.md`
 - bearer identity routing (`v1.1.2`): IMAP, POP3 and ManageSieve bearer logins
   resolve the token account through a Nauthilus identity lookup and route on
   its shard attribute instead of hashing; see

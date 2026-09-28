@@ -18,6 +18,8 @@ package listener
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -33,6 +35,8 @@ const (
 	testBearerShard     = "shard-lookup"
 	testBearerClientIP  = "192.0.2.10"
 	testBearerMechanism = "xoauth2"
+
+	testMailIntrospectionID = "mail-introspection"
 )
 
 // identityRecordingAuthority records no-auth lookups and returns one fixed identity.
@@ -220,4 +224,88 @@ func assertBoundBearerLookup(t *testing.T, lookups []nauthilus.IdentityLookupReq
 	if got := result.Attributes[testBearerShardAttr]; len(got) != 1 || got[0] != testBearerShard {
 		t.Fatalf("bound shard attribute = %v, want lookup shard", got)
 	}
+}
+
+// TestMailboxListenerUsesDedicatedIntrospectionClientAndBinding applies the IMAP, POP3 and
+// ManageSieve bearer override to the listener's introspector and fails closed on missing secrets.
+func TestMailboxListenerUsesDedicatedIntrospectionClientAndBinding(t *testing.T) {
+	secretFile := filepath.Join(t.TempDir(), "mail-introspection-secret")
+	if err := os.WriteFile(secretFile, []byte("mail-secret\n"), 0o600); err != nil {
+		t.Fatalf("write secret: %v", err)
+	}
+
+	for _, name := range []string{testIMAPListener, testPOP3Listener, testSieveListener} {
+		t.Run(name, func(t *testing.T) {
+			bearer := config.ListenerBearerConfig{
+				TokenBinding:        config.BearerTokenBindingIntrospectionAllowlist,
+				IntrospectionClient: config.ListenerIntrospectionClientConfig{ClientID: testMailIntrospectionID, ClientSecretFile: config.Secret(secretFile)},
+			}
+			cfg := withMailboxBearer(singleListenerConfig(t, name, tlsModeStartTLS), name, bearer)
+			seen := make(chan config.BearerIntrospectionConfig, 1)
+
+			_, err := NewManagerWithConfig(cfg,
+				WithBearerIntrospectorFactory(func(_ context.Context, authority config.AuthorityConfig) (nauthilus.BearerIntrospector, error) {
+					seen <- authority.Mechanisms.Bearer.Introspection
+
+					return noopBearerIntrospector{}, nil
+				}),
+				WithNauthilusClientFactory(func(config.AuthorityConfig, nauthilus.ClientOptions) (nauthilus.Authenticator, error) {
+					return noopIdentityAuthority{}, nil
+				}),
+				WithSessionHandlerFactory(func(SessionOptions) SessionHandler { return &acceptStateHandler{} }),
+			)
+			if err != nil {
+				t.Fatalf("NewManagerWithConfig returned error: %v", err)
+			}
+
+			introspection := <-seen
+			authority := cfg.Auth.Authorities["default"].Mechanisms.Bearer.Introspection
+
+			if introspection.ClientID != testMailIntrospectionID || introspection.ClientSecretFile.Value() != secretFile ||
+				introspection.TokenBinding != config.BearerTokenBindingIntrospectionAllowlist {
+				t.Fatalf("introspection client %q binding %q, want the dedicated client with the allowlist binding", introspection.ClientID, introspection.TokenBinding)
+			}
+
+			if introspection.RequiredScope != authority.RequiredScope || introspection.RequiredAudience != authority.RequiredAudience {
+				t.Fatal("mailbox listener must keep the authority scope and audience policy")
+			}
+
+			missing := filepath.Join(t.TempDir(), "missing-secret")
+			bearer.IntrospectionClient.ClientSecretFile = config.Secret(missing)
+
+			_, err = newTestManagerWithConfig(withMailboxBearer(cfg, name, bearer),
+				WithNauthilusClientFactory(func(config.AuthorityConfig, nauthilus.ClientOptions) (nauthilus.Authenticator, error) {
+					return noopIdentityAuthority{}, nil
+				}),
+				WithSessionHandlerFactory(func(SessionOptions) SessionHandler { return &acceptStateHandler{} }),
+			)
+			if err == nil || strings.Contains(err.Error(), missing) {
+				t.Fatalf("error = %v, want a path-free startup failure", err)
+			}
+		})
+	}
+}
+
+// withMailboxBearer replaces the bearer override of one mailbox listener in a copied config.
+func withMailboxBearer(cfg config.Config, name string, bearer config.ListenerBearerConfig) config.Config {
+	entry := cfg.Director.Listeners[name]
+
+	switch entry.Protocol {
+	case protocolIMAP:
+		imap := *entry.IMAP
+		imap.Bearer = bearer
+		entry.IMAP = &imap
+	case protocolPOP3:
+		pop3 := *entry.POP3
+		pop3.Bearer = bearer
+		entry.POP3 = &pop3
+	case protocolSIEVE:
+		sieve := *entry.Sieve
+		sieve.Bearer = bearer
+		entry.Sieve = &sieve
+	}
+
+	cfg.Director.Listeners[name] = entry
+
+	return cfg
 }

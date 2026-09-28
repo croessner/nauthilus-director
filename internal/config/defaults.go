@@ -455,8 +455,14 @@ func defaultIMAPListener(serviceName string, address string, tlsMode string, cer
 			Capabilities:        defaultIMAPCapabilities(tlsMode),
 			AuthMechanisms:      []string{"plain", "xoauth2", "oauthbearer"},
 			RequireIDBeforeAuth: false,
+			Bearer:              defaultListenerBearer(),
 		},
 	}
+}
+
+// defaultListenerBearer keeps the authority's audience/resource token binding and client.
+func defaultListenerBearer() ListenerBearerConfig {
+	return ListenerBearerConfig{TokenBinding: BearerTokenBindingAudienceResource}
 }
 
 // defaultListenerGreeting returns the compatible public greeting disclosure policy.
@@ -574,6 +580,7 @@ func defaultSieveListener(serviceName string, address string, tlsMode string, ce
 				ScriptExtensions: []string{},
 				Language:         "en",
 			},
+			Bearer: defaultListenerBearer(),
 		},
 	}
 }
@@ -601,6 +608,7 @@ func defaultPOP3Listener(serviceName string, address string, tlsMode string, cer
 			Greeting:       defaultListenerGreeting(),
 			AuthMechanisms: []string{"userpass", "xoauth2", "oauthbearer"},
 			Capabilities:   defaultPOP3Capabilities(tlsMode),
+			Bearer:         defaultListenerBearer(),
 		},
 	}
 }

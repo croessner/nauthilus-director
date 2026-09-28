@@ -559,6 +559,16 @@ func validateOIDCTokenBinding(path string, requiredAudience string, requiredReso
 	}
 }
 
+// validateOptionalOIDCTokenBinding checks audience and resource values that may both be empty.
+func validateOptionalOIDCTokenBinding(path string, requiredAudience string, requiredResource string, problems *[]string) {
+	if invalidTokenBindingValue(requiredAudience) {
+		addProblem(problems, path+".required_audience must be a single printable value")
+	}
+	if invalidTokenBindingValue(requiredResource) {
+		addProblem(problems, path+".required_resource must be a single printable value")
+	}
+}
+
 // invalidTokenBindingValue rejects ambiguous token binding configuration.
 func invalidTokenBindingValue(value string) bool {
 	value = strings.TrimSpace(value)
@@ -820,6 +830,7 @@ func validateDirector(director DirectorConfig, authorities map[string]AuthorityC
 				addProblem(problems, path+".imap is required for imap listeners")
 			} else {
 				validateIMAPListener(path+".imap", listener, *listener.IMAP, problems)
+				validateListenerBearer(path+".imap.bearer", listener.IMAP.Bearer, authority, authorityOK, problems)
 			}
 		case protocolLMTP:
 			if listener.LMTP == nil {
@@ -832,12 +843,14 @@ func validateDirector(director DirectorConfig, authorities map[string]AuthorityC
 				addProblem(problems, path+".sieve is required for sieve listeners")
 			} else {
 				validateSieveListener(path+".sieve", listener, authority, authorityOK, problems)
+				validateListenerBearer(path+".sieve.bearer", listener.Sieve.Bearer, authority, authorityOK, problems)
 			}
 		case protocolPOP3:
 			if listener.POP3 == nil {
 				addProblem(problems, path+".pop3 is required for pop3 listeners")
 			} else {
 				validatePOP3Listener(path+".pop3", listener, authority, authorityOK, problems)
+				validateListenerBearer(path+".pop3.bearer", listener.POP3.Bearer, authority, authorityOK, problems)
 			}
 		case protocolJMAP:
 			validateJMAPListener(path+".jmap", listener, authority, authorityOK, problems)

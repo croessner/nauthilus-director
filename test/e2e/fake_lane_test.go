@@ -1996,10 +1996,12 @@ type processConfigOptions struct {
 	BackendAuth            backend.AuthConfig
 	IMAPAuthMechanisms     []string
 	IMAPCapabilities       []string
-	IMAPGreeting           greetingPolicyFixture
-	ReaperInterval         time.Duration
-	UserHoldMaxWait        time.Duration
-	UserHoldPollInterval   time.Duration
+	// IMAPBearerYAML is appended to the imap listener block, for example a bearer override.
+	IMAPBearerYAML       string
+	IMAPGreeting         greetingPolicyFixture
+	ReaperInterval       time.Duration
+	UserHoldMaxWait      time.Duration
+	UserHoldPollInterval time.Duration
 }
 
 type greetingPolicyFixture struct {
@@ -2450,7 +2452,7 @@ director:
 		listenerKeyPath,
 		quotedYAMLStrings(imapCapabilities),
 		quotedYAMLStrings(imapAuthMechanisms),
-		greetingPolicyYAML("        ", options.IMAPGreeting),
+		greetingPolicyYAML("        ", options.IMAPGreeting)+options.IMAPBearerYAML,
 		options.BackendAddress,
 		e2eShardTag,
 		options.BackendHAProxy,
@@ -5458,6 +5460,7 @@ type fakeOIDCAuthority struct {
 	clientSecret           string
 	introspectionClientID  string
 	introspectionSecret    string
+	extraIntrospection     map[string]string
 	requiredScopes         []string
 	issuedTokens           map[string][]string
 	saslTokens             map[string]fakeSASLBearerToken
@@ -5475,9 +5478,11 @@ type fakeOIDCAuthorityOptions struct {
 	ClientSecret          string
 	IntrospectionClientID string
 	IntrospectionSecret   string
-	RequiredScopes        []string
-	SASLBearerTokens      map[string]fakeSASLBearerToken
-	SkipBackchannelAuth   bool
+	// ExtraIntrospectionClients registers listener-dedicated introspection clients by id and secret.
+	ExtraIntrospectionClients map[string]string
+	RequiredScopes            []string
+	SASLBearerTokens          map[string]fakeSASLBearerToken
+	SkipBackchannelAuth       bool
 }
 
 type fakeSASLBearerToken struct {
@@ -5488,6 +5493,13 @@ type fakeSASLBearerToken struct {
 	Scopes    []string
 	SessionID string
 	Malformed bool
+	// Audience and AuthorizedParty describe a token issued to another client, such as a
+	// dynamically registered mail client; empty keeps the introspection client as audience.
+	Audience        []string
+	AuthorizedParty string
+	// VisibleTo models the provider's introspection allowlist: when set, only that
+	// introspection client receives active:true.
+	VisibleTo string
 }
 
 // startFakeHTTPAuthority starts a public HTTP auth socket.
@@ -5594,6 +5606,7 @@ func newFakeOIDCAuthority(options fakeOIDCAuthorityOptions) *fakeOIDCAuthority {
 		clientSecret:          clientSecret,
 		introspectionClientID: introspectionClientID,
 		introspectionSecret:   introspectionSecret,
+		extraIntrospection:    maps.Clone(options.ExtraIntrospectionClients),
 		requiredScopes:        append([]string(nil), requiredScopes...),
 		issuedTokens:          map[string][]string{},
 		saslTokens:            cloneFakeSASLBearerTokens(options.SASLBearerTokens),
@@ -6094,7 +6107,7 @@ func (f *fakeHTTPAuthority) handleOIDCIntrospection(writer http.ResponseWriter, 
 		f.oidc.introspectionCalls++
 		f.oidc.saslIntrospectionCalls++
 		f.requestsLock.Unlock()
-		f.writeSASLBearerIntrospection(writer, fixture)
+		f.writeSASLBearerIntrospection(writer, clientID, fixture)
 
 		return
 	}
@@ -6122,6 +6135,10 @@ func (f *fakeHTTPAuthority) oidcValidIntrospectionClient(clientID string, secret
 		return false
 	}
 
+	if extra, ok := f.oidc.extraIntrospection[clientID]; ok && secret == extra {
+		return true
+	}
+
 	return (clientID == f.oidc.clientID && secret == f.oidc.clientSecret) ||
 		(clientID == f.oidc.introspectionClientID && secret == f.oidc.introspectionSecret)
 }
@@ -6141,10 +6158,16 @@ func (f *fakeHTTPAuthority) oidcSASLBearerToken(token string) (fakeSASLBearerTok
 }
 
 // writeSASLBearerIntrospection writes the configured end-user token response.
-func (f *fakeHTTPAuthority) writeSASLBearerIntrospection(writer http.ResponseWriter, fixture fakeSASLBearerToken) {
+func (f *fakeHTTPAuthority) writeSASLBearerIntrospection(writer http.ResponseWriter, clientID string, fixture fakeSASLBearerToken) {
 	writer.Header().Set("Content-Type", "application/json")
 	if fixture.Malformed {
 		_, _ = writer.Write([]byte(`{"active":"yes","access_token":"redacted-secret-sentinel"}`))
+
+		return
+	}
+
+	if fixture.VisibleTo != "" && fixture.VisibleTo != clientID {
+		_ = json.NewEncoder(writer).Encode(map[string]any{"active": false})
 
 		return
 	}
@@ -6168,6 +6191,12 @@ func (f *fakeHTTPAuthority) writeSASLBearerIntrospection(writer http.ResponseWri
 	}
 	if fixture.Account == "" {
 		delete(response, "account")
+	}
+	if len(fixture.Audience) > 0 {
+		response["aud"] = fixture.Audience
+	}
+	if fixture.AuthorizedParty != "" {
+		response["azp"] = fixture.AuthorizedParty
 	}
 	_ = json.NewEncoder(writer).Encode(response)
 }

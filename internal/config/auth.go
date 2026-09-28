@@ -71,6 +71,9 @@ type BearerIntrospectionConfig struct {
 	RequiredResource     string       `mapstructure:"required_resource" yaml:"required_resource"`
 	RequiredScope        string       `mapstructure:"required_scope" yaml:"required_scope"`
 	AccountClaim         string       `mapstructure:"account_claim" yaml:"account_claim"`
+	// TokenBinding is not configurable on the authority: a listener sets it through its own bearer
+	// override, because the introspection-allowlist binding requires a listener-dedicated client.
+	TokenBinding string `mapstructure:"-" yaml:"-"`
 }
 
 type AuthorityOIDCConfig struct {

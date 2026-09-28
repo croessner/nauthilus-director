@@ -224,6 +224,15 @@ tokens, token hashes, account keys, configured claim values and raw
 introspection errors must not appear in logs, traces, metrics, CLI output or
 test failure output.
 
+The token binding defaults to the authority `required_audience` or
+`required_resource`. A listener may opt into
+`token_binding: introspection_allowlist` only together with a dedicated
+`introspection_client`; the audience decision then moves to the Nauthilus
+`token_introspection` allowlist of that client, which must contain only mail
+clients. The director still refuses tokens bound to another resource and
+service tokens, and keeps the scope, account-claim and identity-lookup checks.
+See `docs/operations/oidc-nauthilus.md` for the reasoning and the risks.
+
 ## Mail SASL EXTERNAL
 
 `EXTERNAL` authenticates IMAP, POP3 or ManageSieve clients from a verified TLS

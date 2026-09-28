@@ -287,6 +287,56 @@ lookup; startup fails otherwise.
 Operational setup and migration guidance for Nauthilus OIDC caller auth lives
 in
 .BR docs/operations/oidc-nauthilus.md .
+.SH MAIL LISTENER BEARER OVERRIDE
+IMAP, POP3 and ManageSieve listeners use the mail SASL bearer policy of their
+authority.
+.BR director.listeners.<name>.imap.bearer ,
+.B pop3.bearer
+and
+.B sieve.bearer
+may replace the introspection client and choose the token binding for one
+listener; audience, resource, scope and account claim stay the authority's.
+.TP
+.B bearer.token_binding
+.B audience_resource
+(default) accepts an active token only when its audience or resource matches
+the authority
+.B required_audience
+or
+.BR required_resource .
+.B introspection_allowlist
+also accepts plain user tokens, meaning tokens whose only audience is their
+issuing client and that carry no resource binding, as long as Nauthilus reports
+them active for this listener's dedicated introspection client.
+Nauthilus does that only for tokens issued to that client or to a client or
+dynamic-client profile on its
+.B token_introspection
+allowlist, so the audience decision moves to that allowlist.
+Tokens bound to another resource and service tokens stay refused, and the
+required scope is still enforced.
+This binding requires
+.BR bearer.introspection_client.client_id ;
+configure the allowlist of that client with mail clients only.
+.TP
+.B bearer.introspection_client
+Dedicated introspection client for this listener with the same fields and
+rules as the JMAP
+.BR auth.bearer.introspection_client :
+.BR client_id ,
+.BR auth_method ,
+.B client_secret_file
+or
+.B client_private_key_file
+with
+.B client_key_id
+and
+.BR client_assertion_alg .
+An empty
+.B client_id
+inherits the authority client.
+Every token of the listener is introspected with this client, so its allowlist
+must also cover clients whose tokens match the authority audience, such as a
+webmail client.
 .SH LISTENER AUTHORITY CONTEXT
 Protocol listeners may define
 .B director.listeners.<name>.authority_context.http_headers
@@ -838,8 +888,22 @@ Default:
 .BR auth.bearer.required_audience ,\  auth.bearer.required_resource
 Token binding owned by this listener, typically the RFC 8707 resource
 .BR https://mail.example.org/ .
-At least one is required when bearer is enabled.
+At least one is required when bearer is enabled, unless
+.B auth.bearer.token_binding
+is
+.BR introspection_allowlist .
 The mail SASL bearer binding of the authority is never inherited.
+.TP
+.B auth.bearer.token_binding
+.B audience_resource
+(default) or
+.BR introspection_allowlist ,
+with the meaning described in
+.BR "MAIL LISTENER BEARER OVERRIDE" .
+The allowlist binding requires
+.B auth.bearer.introspection_client.client_id
+and accepts tokens matching a configured audience or resource in addition to
+allowlisted plain tokens.
 .TP
 .B auth.bearer.required_scope
 Scope the token must carry; required when bearer is enabled.
@@ -865,8 +929,9 @@ and
 for
 .BR private_key_jwt .
 It replaces the authority's introspection client credentials for this listener
-only; the endpoint stays the authority's, and IMAP, POP3 and ManageSieve keep
-the authority client.
+only; the endpoint stays the authority's.
+IMAP, POP3 and ManageSieve listeners have their own override in
+.BR "MAIL LISTENER BEARER OVERRIDE" .
 An empty
 .B client_id
 inherits the authority client.

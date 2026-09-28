@@ -474,6 +474,7 @@ type IMAPListenerConfig struct {
 	Capabilities        []string               `mapstructure:"capabilities" yaml:"capabilities"`
 	AuthMechanisms      []string               `mapstructure:"auth_mechanisms" yaml:"auth_mechanisms"`
 	RequireIDBeforeAuth bool                   `mapstructure:"require_id_before_auth" yaml:"require_id_before_auth"`
+	Bearer              ListenerBearerConfig   `mapstructure:"bearer" yaml:"bearer"`
 }
 
 type LMTPListenerConfig struct {
@@ -509,6 +510,7 @@ type SieveListenerConfig struct {
 	Greeting       ListenerGreetingConfig  `mapstructure:"greeting" yaml:"greeting" validate:"required"`
 	AuthMechanisms []string                `mapstructure:"auth_mechanisms" yaml:"auth_mechanisms"`
 	Capabilities   SieveCapabilitiesConfig `mapstructure:"capabilities" yaml:"capabilities" validate:"required"`
+	Bearer         ListenerBearerConfig    `mapstructure:"bearer" yaml:"bearer"`
 }
 
 type SieveCapabilitiesConfig struct {
@@ -520,6 +522,7 @@ type POP3ListenerConfig struct {
 	Greeting       ListenerGreetingConfig `mapstructure:"greeting" yaml:"greeting" validate:"required"`
 	AuthMechanisms []string               `mapstructure:"auth_mechanisms" yaml:"auth_mechanisms"`
 	Capabilities   []string               `mapstructure:"capabilities" yaml:"capabilities"`
+	Bearer         ListenerBearerConfig   `mapstructure:"bearer" yaml:"bearer"`
 }
 
 type RoutingConfig struct {

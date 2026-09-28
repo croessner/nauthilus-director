@@ -91,6 +91,7 @@ func (b BearerIntrospectionConfig) Normalize() BearerIntrospectionConfig {
 	b.RequiredResource = strings.TrimSpace(b.RequiredResource)
 	b.RequiredScope = strings.TrimSpace(b.RequiredScope)
 	b.AccountClaim = strings.TrimSpace(b.AccountClaim)
+	b.TokenBinding = normalizedTokenBinding(b.TokenBinding)
 
 	return b
 }
@@ -125,6 +126,7 @@ func (d DirectorConfig) Normalize() DirectorConfig {
 				imap := *listener.IMAP
 				imap.Greeting = imap.Greeting.Normalize()
 				imap.AuthMechanisms = normalizeLowerList(imap.AuthMechanisms)
+				imap.Bearer = imap.Bearer.Normalize()
 				listener.IMAP = &imap
 			}
 
@@ -145,6 +147,7 @@ func (d DirectorConfig) Normalize() DirectorConfig {
 				sieve.AuthMechanisms = normalizeLowerList(sieve.AuthMechanisms)
 				sieve.Capabilities.ScriptExtensions = normalizeLowerList(sieve.Capabilities.ScriptExtensions)
 				sieve.Capabilities.Language = strings.ToLower(strings.TrimSpace(sieve.Capabilities.Language))
+				sieve.Bearer = sieve.Bearer.Normalize()
 				listener.Sieve = &sieve
 			}
 
@@ -153,6 +156,7 @@ func (d DirectorConfig) Normalize() DirectorConfig {
 				pop3.Greeting = pop3.Greeting.Normalize()
 				pop3.AuthMechanisms = normalizeLowerList(pop3.AuthMechanisms)
 				pop3.Capabilities = normalizeUpperList(pop3.Capabilities)
+				pop3.Bearer = pop3.Bearer.Normalize()
 				listener.POP3 = &pop3
 			}
 

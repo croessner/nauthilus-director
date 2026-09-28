@@ -381,6 +381,25 @@ director:
           - xoauth2
           - oauthbearer
         require_id_before_auth: false
+        # Optional per-listener override of the authority's mail SASL bearer
+        # client (pop3.bearer and sieve.bearer work the same way). Audience,
+        # resource, scope and account claim stay the authority's policy.
+        bearer:
+          # audience_resource (default) accepts only tokens matching the
+          # authority required_audience/required_resource.
+          # introspection_allowlist additionally accepts plain user tokens that
+          # the identity provider reports active for this listener's dedicated
+          # introspection client (its token_introspection allowlist, for
+          # example dynamically registered mail clients); it requires
+          # introspection_client.client_id.
+          token_binding: audience_resource
+          introspection_client:
+            client_id: ""
+            auth_method: ""
+            client_secret_file: ""
+            client_private_key_file: ""
+            client_key_id: ""
+            client_assertion_alg: ""
 
     imaps:
       protocol: imap
@@ -756,6 +775,10 @@ director:
             required_resource: https://mail.example.org/
             required_scope: email
             account_claim: ""
+            # audience_resource (default) or introspection_allowlist; the
+            # allowlist binding requires introspection_client.client_id and
+            # makes required_audience/required_resource optional.
+            token_binding: audience_resource
             # Optional dedicated introspection client for this listener only;
             # an empty client_id inherits the authority's client. Secrets are
             # file paths, checked for readability at listener start.

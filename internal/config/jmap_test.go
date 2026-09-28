@@ -383,7 +383,7 @@ func TestJMAPIntrospectionClientOverridesAuthorityCredentials(t *testing.T) {
 	dedicated := JMAPBearerAuthConfig{
 		RequiredResource: "https://mail.example.org/",
 		RequiredScope:    "mail",
-		IntrospectionClient: JMAPIntrospectionClientConfig{
+		IntrospectionClient: ListenerIntrospectionClientConfig{
 			ClientID:         " jmap-introspection ",
 			ClientSecretFile: Secret("/run/secrets/jmap-introspection"),
 		},
@@ -402,19 +402,19 @@ func TestJMAPIntrospectionClientOverridesAuthorityCredentials(t *testing.T) {
 // TestJMAPIntrospectionClientValidation rejects incomplete dedicated clients.
 func TestJMAPIntrospectionClientValidation(t *testing.T) {
 	for name, testCase := range map[string]struct {
-		client JMAPIntrospectionClientConfig
+		client ListenerIntrospectionClientConfig
 		want   string
 	}{
 		"secret method without file": {
-			client: JMAPIntrospectionClientConfig{ClientID: "jmap"},
+			client: ListenerIntrospectionClientConfig{ClientID: "jmap"},
 			want:   "introspection_client must configure exactly one of client_secret or client_secret_file",
 		},
 		"private key without file": {
-			client: JMAPIntrospectionClientConfig{ClientID: "jmap", AuthMethod: "private_key_jwt"},
+			client: ListenerIntrospectionClientConfig{ClientID: "jmap", AuthMethod: "private_key_jwt"},
 			want:   "introspection_client.client_private_key_file is required",
 		},
 		"credentials without client id": {
-			client: JMAPIntrospectionClientConfig{ClientSecretFile: Secret("/run/secrets/x")},
+			client: ListenerIntrospectionClientConfig{ClientSecretFile: Secret("/run/secrets/x")},
 			want:   "introspection_client.client_id is required when client credentials are set",
 		},
 	} {
@@ -435,7 +435,7 @@ func TestJMAPIntrospectionClientValidation(t *testing.T) {
 // TestJMAPIntrospectionClientCheckMaterial reports unreadable files without their path.
 func TestJMAPIntrospectionClientCheckMaterial(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "missing-secret")
-	err := JMAPIntrospectionClientConfig{ClientID: "jmap", AuthMethod: "client_secret_basic", ClientSecretFile: Secret(missing)}.CheckMaterial()
+	err := ListenerIntrospectionClientConfig{ClientID: "jmap", AuthMethod: "client_secret_basic", ClientSecretFile: Secret(missing)}.CheckMaterial()
 	if err == nil || strings.Contains(err.Error(), missing) {
 		t.Fatalf("CheckMaterial error = %v, want a path-free failure", err)
 	}
@@ -445,11 +445,11 @@ func TestJMAPIntrospectionClientCheckMaterial(t *testing.T) {
 		t.Fatalf("write secret: %v", err)
 	}
 
-	if err := (JMAPIntrospectionClientConfig{ClientID: "jmap", AuthMethod: "client_secret_basic", ClientSecretFile: Secret(present)}).CheckMaterial(); err != nil {
+	if err := (ListenerIntrospectionClientConfig{ClientID: "jmap", AuthMethod: "client_secret_basic", ClientSecretFile: Secret(present)}).CheckMaterial(); err != nil {
 		t.Fatalf("CheckMaterial returned error: %v", err)
 	}
 
-	if err := (JMAPIntrospectionClientConfig{}).CheckMaterial(); err != nil {
+	if err := (ListenerIntrospectionClientConfig{}).CheckMaterial(); err != nil {
 		t.Fatalf("inherited client check returned error: %v", err)
 	}
 }

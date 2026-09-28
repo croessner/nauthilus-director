@@ -766,6 +766,21 @@ metric reports that case as `reason_class=bearer_shard_missing`. Earlier
 releases routed on token claims alone and could place bearer users on a store
 that does not hold their mailbox. See `docs/operations/oidc-nauthilus.md`.
 
+## Why are OAuth logins from Thunderbird refused while webmail works?
+
+By default a bearer token must match the listener's `required_audience` or
+`required_resource`. Natively registered mail clients receive tokens whose
+audience is their own dynamically registered client id and that carry no
+resource, so the default binding refuses them. Set
+`token_binding: introspection_allowlist` on the listener (`imap.bearer`,
+`pop3.bearer`, `sieve.bearer` or `jmap.auth.bearer`) together with a dedicated
+`introspection_client`, and put the mail-client registration profile (and the
+webmail client) on that client's Nauthilus `token_introspection` allowlist. The
+provider then only reports allowlisted tokens as active for that client, and the
+director accepts those plain user tokens while still refusing tokens bound to
+another resource and still requiring the mail scope. See
+`docs/operations/oidc-nauthilus.md` for the reasoning and the risks.
+
 ## How does JMAP proxying work, and why is there no default JMAP listener?
 
 A `protocol: jmap` listener is an HTTPS reverse proxy for JMAP backends. It

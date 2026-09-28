@@ -132,9 +132,15 @@ director.
   optionally gives the listener its own introspection client (`client_id`,
   `auth_method`, and `client_secret_file` or `client_private_key_file` with
   `client_key_id`/`client_assertion_alg` for `private_key_jwt`), replacing the
-  authority's client credentials for this listener only; IMAP, POP3 and
-  ManageSieve keep the authority client. Without `client_id` the authority
-  client is inherited. Secrets are accepted only as files; the file is checked
+  authority's client credentials for this listener only (IMAP, POP3 and
+  ManageSieve have the same option under `imap.bearer`, `pop3.bearer` and
+  `sieve.bearer`). Without `client_id` the authority client is inherited.
+  `jmap.auth.bearer.token_binding: introspection_allowlist` (default
+  `audience_resource`) additionally accepts plain user tokens of natively
+  registered clients that Nauthilus reports active for that dedicated client;
+  it requires `introspection_client.client_id`, makes `required_audience` and
+  `required_resource` optional and is explained in
+  `docs/operations/oidc-nauthilus.md`. Secrets are accepted only as files; the file is checked
   for readability when the listener starts (a failure names the setting, never
   the path or content) and read again for every introspection, so rotation
   needs no restart. The token's account is then looked up without
@@ -312,6 +318,9 @@ director:
             required_resource: https://mail.example.org/
             required_scope: mail:account:read
             account_claim: mail_account
+            # audience_resource (default) or introspection_allowlist, which
+            # requires the dedicated client below.
+            token_binding: audience_resource
             # Optional: a dedicated introspection client for this listener.
             introspection_client:
               client_id: director-jmap-introspection
@@ -373,7 +382,9 @@ block (Basic only, fail-closed routing). The full option reference is in
 reserve no backend capacity.
 
 Validation refuses a JMAP listener without implicit TLS, without any enabled
-scheme, with Bearer but without a token binding or scope, with an
+scheme, with Bearer but without a token binding or scope (an audience or
+resource is optional only with `token_binding: introspection_allowlist`), with
+`introspection_allowlist` but without `introspection_client.client_id`, with an
 `introspection_client` whose credentials do not match its `auth_method` or
 that sets credentials without `client_id`, with Basic on an
 authority without the password mechanism, and JMAP backends without implicit

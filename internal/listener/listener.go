@@ -655,9 +655,37 @@ func bearerIntrospectorForListener(
 		}
 
 		authority.Mechanisms.Bearer.Introspection = entry.JMAP.Auth.Bearer.BearerIntrospectionPolicy(authority.Mechanisms.Bearer.Introspection)
+	} else if bearer, ok := mailboxListenerBearer(entry); ok {
+		// Mailbox listeners keep the authority's mail SASL token policy; they may only replace the
+		// introspection client and opt into the introspection-allowlist token binding.
+		if err := bearer.IntrospectionClient.CheckMaterial(); err != nil {
+			return nil, err
+		}
+
+		authority.Mechanisms.Bearer.Introspection = bearer.IntrospectionPolicy(authority.Mechanisms.Bearer.Introspection)
 	}
 
 	return options.bearerIntrospectorFactory(ctx, authority)
+}
+
+// mailboxListenerBearer returns the bearer override of an IMAP, POP3 or ManageSieve listener.
+func mailboxListenerBearer(entry config.ListenerConfig) (config.ListenerBearerConfig, bool) {
+	switch strings.ToLower(strings.TrimSpace(entry.Protocol)) {
+	case protocolIMAP:
+		if entry.IMAP != nil {
+			return entry.IMAP.Bearer, true
+		}
+	case protocolPOP3:
+		if entry.POP3 != nil {
+			return entry.POP3.Bearer, true
+		}
+	case protocolSIEVE:
+		if entry.Sieve != nil {
+			return entry.Sieve.Bearer, true
+		}
+	}
+
+	return config.ListenerBearerConfig{}, false
 }
 
 // bindListenerBearerIdentity makes mailbox bearer logins resolve their routing identity through the

@@ -244,6 +244,74 @@ The Director does not locally validate JWTs, cache introspection responses,
 persist end-user bearer tokens, log bearer material or expose account keys,
 token hashes or claim values as metric labels.
 
+### Native Mail Clients And The Introspection Allowlist
+
+The default token binding, `audience_resource`, accepts a token only when its
+audience matches `required_audience` or its RFC 8707 resource matches
+`required_resource`. That fits a webmail client whose client id is the required
+audience, or clients that request the mail resource. Native mail clients such as
+Thunderbird register themselves through dynamic client registration (for
+example the Nauthilus profile `mail-client-v1`) and receive tokens whose
+audience is their own, random client id; autoconfiguration cannot make them
+request a resource. The default binding therefore refuses them on IMAP, POP3,
+ManageSieve and JMAP.
+
+For these deployments a listener can opt into
+`token_binding: introspection_allowlist`:
+
+```yaml
+director:
+  listeners:
+    imaps:
+      imap:
+        bearer:
+          token_binding: introspection_allowlist
+          introspection_client:
+            client_id: director-mail-introspection
+            auth_method: client_secret_basic
+            client_secret_file: /etc/nauthilus-director/mail-introspection-secret
+```
+
+The same keys exist under `pop3.bearer` and `sieve.bearer`; JMAP uses
+`jmap.auth.bearer.token_binding` next to its existing
+`jmap.auth.bearer.introspection_client`. The mode is rejected at startup
+without `introspection_client.client_id`.
+
+Why this is an equivalent binding: Nauthilus answers `active: true` to an
+introspecting client only for tokens issued to that client itself, for tokens
+bound to a resource that client owns, and for plain user tokens whose issuing
+client or dynamic-client profile is on that client's `token_introspection`
+allowlist (`clients`, `dynamic_client_profiles`); service tokens are never
+active for it. With a client dedicated to the mail listener, the provider
+therefore performs the audience check that the director would otherwise do,
+using an allowlist instead of a single audience. The director keeps a local
+guard on top: in this mode it accepts a token when it matches a configured
+audience or resource, or when it is a plain user token, meaning its only
+audience is its issuing client (`azp`, or the single `aud` without `azp`), it
+has no `resource` claim and no `client_id` service discriminator. Tokens bound
+to another resource are refused even if the provider reports them active.
+`required_scope` and `account_claim` are enforced exactly as before, and the
+identity lookup still binds the token account to the directory.
+
+Requirements and risks:
+
+- Register a confidential introspection client used only by the director mail
+  listeners and give it its own secret or key; never reuse a webmail, JMAP
+  backend or other resource-server client, because every token that client may
+  introspect becomes a valid mail login.
+- Its allowlist must name only mail clients: the dynamic-client profile of
+  native mail clients and, when webmail logs in through the same listener, the
+  webmail client. Every token of the listener is introspected with this client,
+  so a webmail client missing from the allowlist is refused even though its
+  audience matches `required_audience`.
+- The binding is only as narrow as the allowlist and the dynamic registration
+  policy behind it. Anyone who can register a client under an allowlisted
+  profile can obtain tokens that the listener accepts for the user who
+  consented; keep registration limited to that profile's redirect and scope
+  rules and require the mail scope.
+- Keep the default `audience_resource` on listeners that do not need native
+  clients.
+
 ## Proof Commands
 
 | Command | Behavior proved |
@@ -307,4 +375,5 @@ then rotate any failed OIDC secret material.
 | Control token missing protected scope | Normal control commands work; protected config or pprof returns `403`. | Use a short-lived token with the protected scope only for the protected operation. |
 | Control introspection inactive or denied | Control requests return `401` or `403` without revealing token detail. | Check token lifetime, audience, client registration, `oidc.client_credentials.introspection_endpoint_auth_method` and Nauthilus logs. |
 | Mail SASL bearer identity lookup failed | Active tokens fail with a temporary error, or with an authentication failure when the lookup names another or no account. | Check that Nauthilus answers `mode=no-auth` / `LookupIdentity` for the listener protocol with the token account (the `account_claim` value), that the lookup returns the same canonical account, the caller scope `nauthilus:lookup_identity`, and the `reason_class` of the `recipient_lookup` Nauthilus auth metric. |
+| Native mail client token refused | `XOAUTH2`/`OAUTHBEARER` from Thunderbird or another dynamically registered client fails with an audience or resource mismatch while webmail works. | The listener uses the default `audience_resource` binding; set `token_binding: introspection_allowlist` with a dedicated `introspection_client` whose Nauthilus `token_introspection` allowlist contains the mail-client profile (and the webmail client). |
 | Mail SASL bearer introspection denied | `XOAUTH2` or `OAUTHBEARER` auth is rejected or temporarily fails without token detail. | Check `mechanisms.bearer.introspection.required_audience` or `required_resource`, `required_scope`, `account_claim`, endpoint client-auth method, Nauthilus introspection logs and backend replay policy. |

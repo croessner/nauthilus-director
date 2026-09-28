@@ -526,6 +526,15 @@ director:
                     - plain
                     - xoauth2
                     - oauthbearer
+                bearer:
+                    introspection_client:
+                        auth_method: ""
+                        client_assertion_alg: ""
+                        client_id: ""
+                        client_key_id: ""
+                        client_private_key_file: ""
+                        client_secret_file: ""
+                    token_binding: audience_resource
                 capabilities:
                     - IMAP4rev1
                     - ID
@@ -564,6 +573,15 @@ director:
                     - plain
                     - xoauth2
                     - oauthbearer
+                bearer:
+                    introspection_client:
+                        auth_method: ""
+                        client_assertion_alg: ""
+                        client_id: ""
+                        client_key_id: ""
+                        client_private_key_file: ""
+                        client_secret_file: ""
+                    token_binding: audience_resource
                 capabilities:
                     - IMAP4rev1
                     - ID
@@ -701,6 +719,15 @@ director:
                     - userpass
                     - xoauth2
                     - oauthbearer
+                bearer:
+                    introspection_client:
+                        auth_method: ""
+                        client_assertion_alg: ""
+                        client_id: ""
+                        client_key_id: ""
+                        client_private_key_file: ""
+                        client_secret_file: ""
+                    token_binding: audience_resource
                 capabilities:
                     - STLS
                     - USER
@@ -734,6 +761,15 @@ director:
                     - userpass
                     - xoauth2
                     - oauthbearer
+                bearer:
+                    introspection_client:
+                        auth_method: ""
+                        client_assertion_alg: ""
+                        client_id: ""
+                        client_key_id: ""
+                        client_private_key_file: ""
+                        client_secret_file: ""
+                    token_binding: audience_resource
                 capabilities:
                     - USER
                     - SASL
@@ -772,6 +808,15 @@ director:
                     - plain
                     - xoauth2
                     - oauthbearer
+                bearer:
+                    introspection_client:
+                        auth_method: ""
+                        client_assertion_alg: ""
+                        client_id: ""
+                        client_key_id: ""
+                        client_private_key_file: ""
+                        client_secret_file: ""
+                    token_binding: audience_resource
                 capabilities:
                     language: en
                     script_extensions: []
@@ -804,6 +849,15 @@ director:
                     - plain
                     - xoauth2
                     - oauthbearer
+                bearer:
+                    introspection_client:
+                        auth_method: ""
+                        client_assertion_alg: ""
+                        client_id: ""
+                        client_key_id: ""
+                        client_private_key_file: ""
+                        client_secret_file: ""
+                    token_binding: audience_resource
                 capabilities:
                     language: en
                     script_extensions: []

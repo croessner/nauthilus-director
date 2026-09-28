@@ -239,7 +239,7 @@ func (i *SASLBearerIntrospector) mapIntrospectionResult(result OIDCIntrospection
 		return resultWithDecision(DecisionRejected, "", "", "bearer token inactive", nil), nil
 	}
 
-	if !result.MatchesAudienceOrResource(i.config.RequiredAudience, i.config.RequiredResource) {
+	if !i.tokenBindingAccepts(result) {
 		return resultWithDecision(DecisionRejected, "", "", "bearer token audience or resource mismatch", nil), nil
 	}
 
@@ -266,6 +266,61 @@ func (i *SASLBearerIntrospector) mapIntrospectionResult(result OIDCIntrospection
 	), nil
 }
 
+// tokenBindingAccepts applies the listener's token binding to an active introspection response.
+//
+// The default binding accepts only tokens whose audience or resource matches the configured
+// value. The introspection-allowlist binding also accepts plain user tokens: the provider reported
+// them active for this listener's dedicated introspection client, which it does only for tokens
+// issued to that client or to a client or registration profile on its introspection allowlist.
+// Tokens bound to another resource are still refused locally.
+func (i *SASLBearerIntrospector) tokenBindingAccepts(result OIDCIntrospectionResult) bool {
+	if result.MatchesAudienceOrResource(i.config.RequiredAudience, i.config.RequiredResource) {
+		return true
+	}
+
+	return i.config.TokenBinding == config.BearerTokenBindingIntrospectionAllowlist && plainUserToken(result.Claims)
+}
+
+// plainUserToken reports whether an active response describes a user access token without any
+// resource binding: no client_id service discriminator, no resource claim, and no audience other
+// than the issuing client (azp, or the single audience when azp is absent). This mirrors how the
+// provider classifies plain tokens for its introspection allowlist.
+func plainUserToken(claims map[string]any) bool {
+	if _, service := claims[oidcFormClientID]; service {
+		return false
+	}
+
+	if len(resourceClaim(claims[oidcClaimResource])) > 0 {
+		return false
+	}
+
+	audiences := fieldsWithoutEmpty(audienceClaim(claims[jwtClaimAudience]))
+	if len(audiences) == 0 {
+		return false
+	}
+
+	issuingClient := stringClaim(claims, oidcClaimAuthorizedParty)
+	if _, present := claims[oidcClaimAuthorizedParty]; !present {
+		if len(audiences) != 1 {
+			return false
+		}
+
+		issuingClient = audiences[0]
+	}
+
+	if issuingClient == "" {
+		return false
+	}
+
+	for _, audience := range audiences {
+		if audience != issuingClient {
+			return false
+		}
+	}
+
+	return true
+}
+
 // validateSASLBearerIntrospectionConfig checks local endpoint auth inputs.
 func validateSASLBearerIntrospectionConfig(introspection config.BearerIntrospectionConfig) error {
 	if !introspection.Enabled {
@@ -284,8 +339,14 @@ func validateSASLBearerIntrospectionConfig(introspection config.BearerIntrospect
 		return configError("oidc required_scope is required")
 	}
 
-	if strings.TrimSpace(introspection.RequiredAudience) == "" && strings.TrimSpace(introspection.RequiredResource) == "" {
+	if strings.TrimSpace(introspection.RequiredAudience) == "" && strings.TrimSpace(introspection.RequiredResource) == "" &&
+		introspection.TokenBinding != config.BearerTokenBindingIntrospectionAllowlist {
 		return configError("oidc required_audience or required_resource is required")
+	}
+
+	if introspection.TokenBinding != config.BearerTokenBindingAudienceResource &&
+		introspection.TokenBinding != config.BearerTokenBindingIntrospectionAllowlist {
+		return configError("oidc token binding is not supported")
 	}
 
 	if secretBearingBearerClaimName(introspection.AccountClaim) {

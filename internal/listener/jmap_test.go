@@ -260,7 +260,7 @@ func TestJMAPListenerUsesDedicatedIntrospectionClient(t *testing.T) {
 	cfg := jmapListenerConfig(t)
 	entry := cfg.Director.Listeners[testJMAPListener]
 	jmap := *entry.JMAP
-	jmap.Auth.Bearer.IntrospectionClient = config.JMAPIntrospectionClientConfig{ClientID: "jmap-introspection", ClientSecretFile: config.Secret(secretFile)}
+	jmap.Auth.Bearer.IntrospectionClient = config.ListenerIntrospectionClientConfig{ClientID: "jmap-introspection", ClientSecretFile: config.Secret(secretFile)}
 	entry.JMAP = &jmap
 	cfg.Director.Listeners[testJMAPListener] = entry
 	cfg.Director.Listeners[testIMAPListener] = singleListenerConfig(t, testIMAPListener, tlsModeStartTLS).Director.Listeners[testIMAPListener]
@@ -301,7 +301,7 @@ func TestJMAPListenerRejectsUnreadableIntrospectionSecret(t *testing.T) {
 	cfg := jmapListenerConfig(t)
 	entry := cfg.Director.Listeners[testJMAPListener]
 	jmap := *entry.JMAP
-	jmap.Auth.Bearer.IntrospectionClient = config.JMAPIntrospectionClientConfig{ClientID: "jmap-introspection", ClientSecretFile: config.Secret(missing)}
+	jmap.Auth.Bearer.IntrospectionClient = config.ListenerIntrospectionClientConfig{ClientID: "jmap-introspection", ClientSecretFile: config.Secret(missing)}
 	entry.JMAP = &jmap
 	cfg.Director.Listeners[testJMAPListener] = entry
 
