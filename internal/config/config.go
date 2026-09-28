@@ -449,6 +449,9 @@ type AuthorityContextValue string
 type ProxyProtocolConfig struct {
 	Enabled      bool     `mapstructure:"enabled" yaml:"enabled"`
 	TrustedCIDRs []string `mapstructure:"trusted_cidrs" yaml:"trusted_cidrs"`
+	// AcceptLocal accepts PROXY v2 LOCAL and v1 UNKNOWN headers from trusted peers, such as
+	// load-balancer health checks, and keeps the real TCP endpoints for those connections.
+	AcceptLocal bool `mapstructure:"accept_local" yaml:"accept_local"`
 }
 
 type ListenerTLSConfig struct {

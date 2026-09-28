@@ -41,6 +41,7 @@ var (
 type proxyProtocolPolicy struct {
 	trustedCIDRs  []*net.IPNet
 	headerTimeout time.Duration
+	acceptLocal   bool
 }
 
 // proxyProtocolConn keeps bytes buffered by header parsing visible to later TLS or IMAP reads.
@@ -83,33 +84,47 @@ func newProxyProtocolPolicy(proxyConfig config.ProxyProtocolConfig, headerTimeou
 	return &proxyProtocolPolicy{
 		trustedCIDRs:  trustedCIDRs,
 		headerTimeout: headerTimeout,
+		acceptLocal:   proxyConfig.AcceptLocal,
 	}, nil
 }
 
 // apply consumes a trusted PROXY v1/v2 preface before TLS or IMAP greeting.
-func (p *proxyProtocolPolicy) apply(conn net.Conn) (net.Conn, error) {
+//
+// The boolean result reports a LOCAL connection: a PROXY v2 LOCAL or v1 UNKNOWN header, accepted
+// only when the listener allows it. Such a connection relays no client, so it keeps its real TCP
+// endpoints as the PROXY protocol requires of receivers.
+func (p *proxyProtocolPolicy) apply(conn net.Conn) (net.Conn, bool, error) {
 	if !p.trustsPeer(conn.RemoteAddr()) {
-		return nil, ErrProxyProtocolUntrustedPeer
+		return nil, false, ErrProxyProtocolUntrustedPeer
 	}
 
 	reader := bufio.NewReader(conn)
 	if err := setTemporaryReadDeadline(conn, p.headerTimeout); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
 	header, err := proxyproto.Read(reader)
 	clearErr := conn.SetReadDeadline(time.Time{})
 
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
 	if clearErr != nil {
-		return nil, clearErr
+		return nil, false, clearErr
+	}
+
+	if header != nil && header.Command.IsLocal() && p.acceptLocal {
+		return &proxyProtocolConn{
+			Conn:       conn,
+			reader:     reader,
+			remoteAddr: conn.RemoteAddr(),
+			localAddr:  conn.LocalAddr(),
+		}, true, nil
 	}
 
 	if err := validateProxyHeader(header); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
 	return &proxyProtocolConn{
@@ -117,7 +132,7 @@ func (p *proxyProtocolPolicy) apply(conn net.Conn) (net.Conn, error) {
 		reader:     reader,
 		remoteAddr: header.SourceAddr,
 		localAddr:  header.DestinationAddr,
-	}, nil
+	}, false, nil
 }
 
 // Read drains parser-buffered bytes before reading from the underlying connection.

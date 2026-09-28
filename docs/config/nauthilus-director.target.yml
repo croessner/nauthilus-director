@@ -723,6 +723,10 @@ director:
       proxy_protocol:
         enabled: false
         trusted_cidrs: []
+        # With enabled: true, accept PROXY v2 LOCAL / v1 UNKNOWN headers from
+        # trusted peers (HAProxy check-send-proxy health checks); they keep
+        # their real TCP endpoints.
+        accept_local: false
 
       tls:
         # JMAP listeners require implicit TLS and serve HTTP/1.1 only.

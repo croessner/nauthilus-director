@@ -233,6 +233,7 @@ func TestServerBinaryPublicJMAPProxyFlow(t *testing.T) {
 	exerciseJMAPClientsNeverShareBackendConnections(t, fixture)
 	exerciseJMAPBearerRouting(t, fixture)
 	exerciseJMAPRefusals(t, fixture)
+	exerciseJMAPLocalHealthProbe(t, fixture)
 	exerciseJMAPEventStreamKick(t, fixture)
 	exerciseJMAPBackendHealthAndMetrics(t, fixture)
 
@@ -373,6 +374,7 @@ director:
       proxy_protocol:
         enabled: true
         trusted_cidrs: ["127.0.0.0/8"]
+        accept_local: true
       tls:
         mode: implicit
         cert: %q
@@ -699,6 +701,38 @@ func exerciseJMAPRefusals(t *testing.T, f jmapProcessFixture) {
 	}
 }
 
+// exerciseJMAPLocalHealthProbe proves a load-balancer check with a PROXY v2 LOCAL header reaches
+// the local health path, as HAProxy sends with check-send-proxy.
+func exerciseJMAPLocalHealthProbe(t *testing.T, f jmapProcessFixture) {
+	t.Helper()
+
+	dialer := &net.Dialer{Timeout: 2 * time.Second}
+	transport := &http.Transport{
+		TLSClientConfig: &tls.Config{RootCAs: f.rootCAs, ServerName: "127.0.0.1", MinVersion: tls.VersionTLS12},
+		DialContext: func(ctx context.Context, network string, address string) (net.Conn, error) {
+			conn, err := dialer.DialContext(ctx, network, address)
+			if err != nil {
+				return nil, err
+			}
+
+			local := &proxyproto.Header{Version: 2, Command: proxyproto.LOCAL, TransportProtocol: proxyproto.UNSPEC}
+			if _, err := local.WriteTo(conn); err != nil {
+				_ = conn.Close()
+
+				return nil, err
+			}
+
+			return conn, nil
+		},
+	}
+	t.Cleanup(transport.CloseIdleConnections)
+
+	client := &http.Client{Transport: transport, Timeout: 5 * time.Second}
+	if status, _, body := jmapDo(t, client, http.MethodGet, f.url(e2eJMAPHealthPath), "", nil); status != http.StatusOK || body != "ok\n" {
+		t.Fatalf("LOCAL health probe status=%d body=%q\n%s", status, body, f.process.output.String())
+	}
+}
+
 // exerciseJMAPEventStreamKick proves streaming, the session lease and a kick through directorctl.
 func exerciseJMAPEventStreamKick(t *testing.T, f jmapProcessFixture) {
 	t.Helper()
@@ -776,6 +810,7 @@ func exerciseJMAPBackendHealthAndMetrics(t *testing.T, f jmapProcessFixture) {
 		`nauthilus_director_jmap_requests_total{backend_pool="jmap-default",listener="jmap",operation="session",protocol="jmap",reason_class="ok",result="authenticated",status_class="2xx"}`,
 		`operation="session",protocol="jmap",reason_class="routing",result="authenticated",status_class="4xx"`,
 		`reason_class="control_action"`,
+		`result="local"`,
 	} {
 		if !strings.Contains(metrics, want) {
 			t.Fatalf("metrics missing %q", want)

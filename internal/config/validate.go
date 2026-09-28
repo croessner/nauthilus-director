@@ -850,6 +850,9 @@ func validateDirector(director DirectorConfig, authorities map[string]AuthorityC
 		if listener.TLS.RequireClientCert && strings.TrimSpace(listener.TLS.ClientCA) == "" {
 			addProblem(problems, path+".tls.client_ca is required when require_client_cert is true")
 		}
+		if listener.ProxyProtocol.AcceptLocal && !listener.ProxyProtocol.Enabled {
+			addProblem(problems, path+".proxy_protocol.accept_local requires proxy_protocol.enabled")
+		}
 		if listener.ProxyProtocol.Enabled {
 			if len(listener.ProxyProtocol.TrustedCIDRs) == 0 {
 				addProblem(problems, path+".proxy_protocol.trusted_cidrs is required when proxy protocol is enabled")

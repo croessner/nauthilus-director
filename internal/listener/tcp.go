@@ -344,14 +344,20 @@ func (l *managedListener) serveConnection(conn net.Conn) {
 func (l *managedListener) prepareConnection(conn net.Conn) (net.Conn, error) {
 	prepared := conn
 	if l.proxyProtocol != nil {
-		proxyConn, err := l.proxyProtocol.apply(conn)
+		proxyConn, local, err := l.proxyProtocol.apply(conn)
 		if err != nil {
 			l.recordProxyProtocol(listenerResultRejected, proxyProtocolReasonClass(err))
 
 			return nil, err
 		}
 
-		l.recordProxyProtocol(listenerResultAccepted, "ok")
+		result := listenerResultAccepted
+		if local {
+			result = listenerResultLocal
+		}
+
+		l.recordProxyProtocol(result, "ok")
+
 		prepared = proxyConn
 	}
 

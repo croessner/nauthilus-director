@@ -453,3 +453,12 @@ func TestJMAPIntrospectionClientCheckMaterial(t *testing.T) {
 		t.Fatalf("inherited client check returned error: %v", err)
 	}
 }
+
+// TestProxyProtocolAcceptLocalRequiresEnabled keeps LOCAL acceptance tied to trusted PROXY handling.
+func TestProxyProtocolAcceptLocalRequiresEnabled(t *testing.T) {
+	cfg := updateJMAPListener(jmapTestConfig(), func(entry *ListenerConfig) {
+		entry.ProxyProtocol = ProxyProtocolConfig{AcceptLocal: true}
+	})
+
+	expectValidationError(t, cfg, "director.listeners.jmap.proxy_protocol.accept_local requires proxy_protocol.enabled")
+}

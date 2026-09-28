@@ -30,6 +30,7 @@ const (
 	listenerOperationAcceptLoop = "accept_loop"
 	listenerOperationProxyProto = "proxy_protocol"
 	listenerResultAccepted      = "accepted"
+	listenerResultLocal         = "local"
 	listenerResultOK            = "ok"
 	listenerResultRejected      = "rejected"
 	listenerReasonMalformed     = "malformed"

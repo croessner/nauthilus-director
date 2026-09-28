@@ -309,6 +309,9 @@ listener start and re-read per introspection.
   the director and serve an unauthenticated `/jmap/healthz`.
 - The TCP proxy in front sends PROXY to the director and must not terminate
   TLS, or the director loses the client identity it needs.
+- HAProxy `check-send-proxy` health checks send PROXY v2 `LOCAL`; the JMAP
+  listener needs `proxy_protocol.accept_local: true` (added after `v1.1.0`)
+  or those checks fail during the TLS handshake.
 - Keep director body limits at or above the backend's.
 - Nauthilus must accept protocol `jmap` and return the shard attribute from the
   no-auth identity lookup; tokens meant for JMAP carry the configured resource

@@ -348,6 +348,36 @@ remains the RFC 5804 protocol version and is still advertised as protocol
 capability information. It is not the Director software version and is not
 controlled by
 .BR software_version .
+.SH LISTENER PROXY PROTOCOL
+.B director.listeners.<name>.proxy_protocol.enabled
+requires one PROXY v1 or v2 header, before TLS or any protocol byte, from a
+peer inside
+.BR trusted_cidrs ;
+the header's source address becomes the client address.
+Peers outside
+.B trusted_cidrs
+are refused before anything is read.
+.PP
+.B proxy_protocol.accept_local
+(default
+.BR false )
+additionally accepts a PROXY v2
+.B LOCAL
+header and the equivalent v1
+.B PROXY UNKNOWN
+header from trusted peers.
+Such a connection relays no client, for example a load-balancer health check
+with HAProxy
+.BR check-send-proxy ,
+so it keeps its real TCP source and destination addresses, as the PROXY
+protocol requires of receivers.
+It requires
+.BR proxy_protocol.enabled: true .
+Without it, LOCAL and UNKNOWN headers are refused, which was the only behavior
+before this option.
+Accepted LOCAL connections are observed with the listener PROXY protocol
+result
+.BR local .
 .SH BACKEND OUTBOUND PROXY PROTOCOL
 Backend entries may enable backend-side HAProxy PROXY protocol with
 .B director.backends.<name>.haproxy.enabled: true.

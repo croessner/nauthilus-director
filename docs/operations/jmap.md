@@ -42,6 +42,15 @@ upgrade never opens a new port by itself.
 - `proxy_protocol` works exactly as for the mail listeners: a peer inside
   `trusted_cidrs` sends one PROXY v1 or v2 header before TLS, and its source
   address becomes the client address for Nauthilus, logs and the backend.
+- HAProxy health checks with `check-send-proxy` send a PROXY v2 `LOCAL` header
+  (v1: `PROXY UNKNOWN`), which a listener refuses by default. Set
+  `proxy_protocol.accept_local: true` on a listener that HAProxy checks: a
+  trusted peer's `LOCAL`/`UNKNOWN` connection is then accepted and keeps its
+  real TCP endpoints, while untrusted peers are still refused before anything
+  is read. Point the check at `jmap.health_path`, for example
+  `option httpchk GET /director/healthz` with `check check-ssl
+  check-send-proxy`. Accepted LOCAL connections are counted with
+  `result="local"` in `nauthilus_director_listener_lifecycle_total`.
 - The TLS handshake and the request header are bounded by
   `jmap.timeouts.read_header`. The whole request, including an upload body, is
   bounded by `jmap.timeouts.read`. Idle keep-alive connections close after
@@ -281,6 +290,8 @@ director:
       proxy_protocol:
         enabled: true
         trusted_cidrs: ["10.0.0.0/8"]
+        # HAProxy check-send-proxy health checks send PROXY v2 LOCAL.
+        accept_local: true
       tls:
         mode: implicit
         cert: /etc/nauthilus-director/tls/tls.crt
