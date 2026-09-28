@@ -26,6 +26,7 @@ unless the text explicitly calls out an external system.
 - [How do I inspect configuration without leaking secrets?](#how-do-i-inspect-configuration-without-leaking-secrets)
 - [How do I clean up stale runtime state after a shard-tag rename or controlled migration?](#how-do-i-clean-up-stale-runtime-state-after-a-shard-tag-rename-or-controlled-migration)
 - [How do I clean up after an interrupted operator workflow?](#how-do-i-clean-up-after-an-interrupted-operator-workflow)
+- [How does JMAP proxying work, and why is there no default JMAP listener?](#how-does-jmap-proxying-work-and-why-is-there-no-default-jmap-listener)
 
 ## What should I check first when a Director instance looks wrong?
 
@@ -748,3 +749,28 @@ If the interrupted workflow left expired leases or aggregate-only summary drift,
 use `runtime reap` and `runtime reconcile aggregates` with bounded limits and
 auditable reasons. If authoritative state is corrupt, stop and investigate
 instead of treating repair commands as a broad cleanup.
+
+## How does JMAP proxying work, and why is there no default JMAP listener?
+
+A `protocol: jmap` listener is an HTTPS reverse proxy for JMAP backends. It
+forwards only `/.well-known/jmap`, `/jmap/api/`, `/jmap/upload/…`,
+`/jmap/download/…` and `/jmap/eventsource/`; every other path is answered 404
+and protocol upgrades (JMAP over WebSocket) are refused. The Director never
+translates JMAP into IMAP or interprets JMAP method calls.
+
+Every request is authenticated through Nauthilus: Basic with protocol `jmap`
+and method `plain`, or Bearer through token introspection with the listener's
+own resource/scope policy (optionally with a dedicated introspection client),
+followed by a `recipient_lookup` identity lookup. Routing uses the `mailShard`
+attribute of that authenticated account, never account identifiers in the URL.
+A missing shard attribute is refused with 403 by default instead of falling
+back to the rendezvous hash, because a hashed JMAP account would silently
+synchronise an empty mailbox on the wrong shard. Placement, holds, pins,
+maintenance and `users kick` apply as for IMAP; event streams are listed as
+sessions with `protocol=jmap`.
+
+There is no default JMAP listener because default listeners merge into every
+deployment's configuration: a default would open a new port on upgrade and
+require a certificate that existing deployments do not have. Add the listener,
+pool and backends explicitly; see `docs/operations/jmap.md` and
+`nauthilus-director.yaml(5)`.

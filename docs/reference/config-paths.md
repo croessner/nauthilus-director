@@ -2,6 +2,10 @@
 
 Generated from the typed config model, `DefaultConfig()` and `docs/config/metadata.yml`.
 
+Only paths present in `DefaultConfig()` are listed. Protocol subtrees without a default listener,
+such as `director.listeners.<name>.jmap`, are documented in `docs/man/nauthilus-director.yaml.5`
+(section "JMAP LISTENERS AND BACKENDS") and `docs/operations/jmap.md`.
+
 | Path | Type | Default | Stability | Protected | Environment | Description |
 | --- | --- | --- | --- | --- | --- | --- |
 | `auth.authorities.default.grpc.address` | string | `127.0.0.1:50051` | stable | no | `NAUTHILUS_DIRECTOR_AUTH_AUTHORITIES_DEFAULT_GRPC_ADDRESS` | Nauthilus authentication authority transport and mechanism configuration. |

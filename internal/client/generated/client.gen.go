@@ -605,7 +605,9 @@ type RouteLookupRequest struct {
 	ClientIP        *string              `json:"client_ip,omitempty"`
 	IncludeAffinity *bool                `json:"include_affinity,omitempty"`
 	Listener        *string              `json:"listener,omitempty"`
-	Protocol        string               `json:"protocol"`
+
+	// Protocol Canonical director protocol value such as imap, pop3, sieve, lmtp or jmap.
+	Protocol string `json:"protocol"`
 
 	// Recipient LMTP-only recipient identity used only with director-owned runtime state; unresolved accounts return a bounded fail-closed diagnostic without Nauthilus lookup.
 	Recipient   *string `json:"recipient,omitempty"`

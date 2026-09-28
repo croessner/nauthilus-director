@@ -352,6 +352,9 @@ func renderPathReference(entries []pathEntry) []byte {
 	var buffer bytes.Buffer
 	buffer.WriteString("# Config Path Reference\n\n")
 	buffer.WriteString("Generated from the typed config model, `DefaultConfig()` and `docs/config/metadata.yml`.\n\n")
+	buffer.WriteString("Only paths present in `DefaultConfig()` are listed. Protocol subtrees without a default listener,\n")
+	buffer.WriteString("such as `director.listeners.<name>.jmap`, are documented in `docs/man/nauthilus-director.yaml.5`\n")
+	buffer.WriteString("(section \"JMAP LISTENERS AND BACKENDS\") and `docs/operations/jmap.md`.\n\n")
 	buffer.WriteString("| Path | Type | Default | Stability | Protected | Environment | Description |\n")
 	buffer.WriteString("| --- | --- | --- | --- | --- | --- | --- |\n")
 

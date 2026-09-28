@@ -887,9 +887,13 @@ paths:
       description: >
         This diagnostic endpoint is side-effect-free. It must not authenticate
         credentials, call Nauthilus, create sessions, refresh leases or mutate
-        Redis state. User-stateful protocol lookups such as IMAP, ManageSieve
-        and POP3 use caller-supplied user facts; LMTP alone may use the
-        recipient lookup field.
+        Redis state. User-stateful protocol lookups such as IMAP, ManageSieve,
+        POP3 and JMAP use caller-supplied user facts standing for the
+        authenticated principal; LMTP alone may use the recipient lookup
+        field. The lookup runs the shared resolver chain, so a JMAP lookup
+        whose attributes lack the shard attribute shows the rendezvous hash
+        fallback although live JMAP traffic refuses such accounts unless the
+        listener sets missing_shard to hash_fallback.
       requestBody:
         required: true
         content:
@@ -1261,6 +1265,7 @@ components:
         protocol:
           type: string
           minLength: 1
+          description: Canonical director protocol value such as imap, pop3, sieve, lmtp or jmap.
         user_key:
           type: string
           minLength: 1

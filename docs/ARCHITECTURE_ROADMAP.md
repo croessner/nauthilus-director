@@ -131,6 +131,16 @@ internal/protocol/sieve/
   auth.go
   proxy.go
 
+internal/protocol/jmap/
+  handler.go      HTTP/1.1 server fed by the generic listener
+  auth.go         per-request Basic/Bearer authentication
+  cache.go        HMAC-keyed success cache
+  route.go        fail-closed routing and placement leases
+  proxy.go        reverse proxy and header policy
+  transport.go    per-client-connection backend transports
+  eventsource.go  event-stream and request-hold heartbeats
+  health.go       HTTPS backend health probe
+
 internal/nauthilus/
   client.go
   request.go
@@ -175,6 +185,13 @@ internal/proxy/
 ```
 
 The important point is separation of concerns: protocol handling must not become mixed with routing fact resolution, backend registry, Nauthilus client code, REST management or observability plumbing.
+
+The JMAP package is the only HTTP protocol family. It still owns only the
+frontend protocol boundary: listener lifecycle, TLS and inbound PROXY handling
+stay in `internal/listener`, placement stays in `internal/placement`, backend
+TLS and the outbound PROXY preface stay in `internal/backend`. `internal/proxy`
+(the raw byte pipe) is not used for JMAP; `httputil.ReverseProxy` streams the
+HTTP messages instead.
 
 ### 5.1 Technical foundation
 
@@ -855,6 +872,97 @@ backend node is known, ManageSieve resolves the protocol-specific backend entry.
 
 Sieve script contents, script names and command bodies should not be logged or used as high-cardinality metrics labels.
 
+## 13a. JMAP design
+
+JMAP support is JMAP-to-JMAP routing only. The director never translates
+between JMAP and IMAP, POP3, LMTP or ManageSieve, never interprets JMAP method
+calls, never rewrites the JMAP session resource and never aggregates accounts
+across backends. Operator documentation lives in `docs/operations/jmap.md`;
+the implementation specification is
+`docs/specs/implementation/M9_JMAP_PROXY_SPEC.md`.
+
+```text
+JMAP client
+  -> JMAP listener (implicit TLS, HTTP/1.1, optional inbound PROXY)
+  -> path/method allowlist, header/body limits, Upgrade refused
+  -> Basic: Nauthilus password path (protocol jmap, method plain)
+     Bearer: introspection with the listener token policy and optional
+             dedicated introspection client, then identity lookup
+             (protocol jmap, method recipient_lookup)
+  -> fail-closed routing by the authenticated account
+  -> user hold gate, pins, maintenance, active affinity
+  -> request hold (heartbeated while long) or event-stream session lease
+  -> backend transport owned by the frontend connection
+     (PROXY v2 with the client address, verified TLS)
+  -> JMAP backend, which re-verifies the Authorization header
+```
+
+Listener. A `protocol: jmap` listener requires implicit TLS and offers only
+`http/1.1` through ALPN, so one frontend connection always belongs to one
+client. The generic listener accepts, applies inbound PROXY and TLS, and hands
+each connection to an in-process `http.Server`; drain and shutdown disable
+keep-alive and close idle connections, and a stopped or reload-removed listener
+closes that server. The TLS handshake and request header are bounded by
+`read_header`, the whole request by `read`, idle keep-alive by `idle`; there is
+no write timeout so event streams stay open. The default configuration defines
+no JMAP listener, because default listeners merge into every deployment.
+
+Proxied surface. Only `/.well-known/jmap`, `/jmap/api/`, `/jmap/upload/…`,
+`/jmap/download/…` and `/jmap/eventsource/` are forwarded, in canonical path
+form and with endpoint-specific methods; everything else is answered 404 or 405
+before authentication, requests carrying `Upgrade` are answered 400, and
+`Connection`/`Upgrade` are removed from forwarded requests. Bodies are bounded
+(10 MiB requests, 50 MiB uploads by default) and streamed. Client-supplied
+`Forwarded`, `X-Forwarded-*`, `X-Real-IP`, `X-Client-IP` and `True-Client-IP`
+are removed; `Authorization`, `Host`, path, query, ranges and download security
+headers pass through unchanged. The session resource is passed through; with
+`public_base_url` the director only logs session URLs outside that origin.
+
+Authentication. Every request is authenticated; the director keeps no HTTP
+sessions or cookies. Basic uses the authority password path. Bearer is
+introspected at the authority's introspection endpoint with a token binding
+owned by the listener (`required_audience` and/or RFC 8707
+`required_resource`, `required_scope`, `account_claim`) and, optionally, a
+dedicated introspection client that replaces the authority client credentials
+for that listener only; the token account is then resolved with an identity
+lookup whose attributes carry the routing facts a token alone does not.
+Successful results are cached per process for a short TTL (default 30s, at most
+10m) under an HMAC, keyed by a random per-process secret, of scheme, credential
+and client address; failures are never cached. The cache affects only routing:
+the backend verifies every request itself, which is why JMAP backends use
+`auth.mode: none` and the original `Authorization` header is forwarded.
+
+Routing. JMAP routes strictly by the authenticated account, never by account
+identifiers in request paths. A missing shard attribute fails closed with 403
+by default (`missing_shard: unavailable` gives 503, `hash_fallback` restores
+the mail-protocol behavior), because a hashed JMAP account would silently
+synchronise an empty mailbox on the wrong shard.
+
+Placement. JMAP uses the shared placement service with the canonical tenant
+and account key, so holds, protocol-scoped pins, maintenance, health and
+backend-node affinity with IMAP, POP3, ManageSieve and LMTP apply. Ordinary
+requests open a request hold (non-session holder kind, no capacity
+reservation, default TTL 2m) that is refreshed every half TTL while a long
+upload, download or API call runs. Event streams hold a counted session lease
+for their lifetime, heartbeat it and end on kick, drain, move, heartbeat
+failure, `sessions kill`, backend drain or listener hard drain.
+
+Backend connections. Each frontend connection owns its own backend transports;
+every backend connection starts with a PROXY v2 header naming that frontend
+client (when `haproxy.enabled` is true) followed by verified TLS, HTTP/2 is not
+used and responses are not decompressed. Pooled keep-alive therefore never
+mixes clients, and all backend connections close with the frontend connection.
+
+Health and observability. JMAP backends are probed with an unauthenticated
+HTTPS `GET /jmap/healthz`, with the PROXY header when enabled; deep checks are
+not supported. Each request emits one `jmap.request` event and the bounded
+`nauthilus_director_jmap_requests_total` and
+`nauthilus_director_jmap_request_duration_seconds` metrics.
+
+Non-goals: JMAP over WebSocket (RFC 8887), CORS handling for cross-origin
+browser clients, session resource URL rewriting, JMAP push subscription
+delivery by the director and a JMAP-specific trace span.
+
 ## 14. REST control API
 
 The director should expose an administrative REST API for introspection, controlled automation and eventually a CLI/client.
@@ -909,6 +1017,14 @@ GET  /metrics
 Route lookup is a director-owned routing diagnostic. It does not authenticate credentials. For protocols where the caller supplies an already known identity key, protocol, listener context and optional attributes, the director explains how its configured resolver inputs, Redis affinity, runtime overrides, health and maintenance state would select a backend. For LMTP recipient diagnostics without a caller-supplied user key, the director may use only existing director-owned runtime state such as active or retained affinity. If that state cannot resolve the account, the response must return bounded diagnostic uncertainty instead of consulting Nauthilus.
 
 The endpoint must be side-effect free. It may read Redis-backed affinity and runtime state, but it must not call Nauthilus, authenticate credentials, create sessions, refresh leases, open delivery holds, mutate affinity, perform backend auth, connect to backends or trigger Nauthilus credential-authentication calls. Responses must state whether identity input was caller-supplied, read from existing director state or unresolved locally.
+
+JMAP needs no new REST endpoints. Event streams appear in the session inventory
+with `protocol=jmap` and `holder_kind=session`; request holds are not listed.
+User kick, session kill, backend drain and listener drain close event streams
+through the local session registry and lease heartbeats. A JMAP route lookup
+uses caller-supplied facts for the authenticated principal and the shared
+resolver chain; without a shard attribute it reports the hash fallback, although
+live JMAP traffic refuses such accounts under the default `missing_shard`.
 
 Example request:
 
@@ -1109,6 +1225,15 @@ message sizes, message contents, post-auth command bodies, client IPs, session
 IDs, SASL blobs, bearer tokens and passwords out of logs, traces, metric labels
 and test failure output. The observable protocol value is `pop3`; `pop` and
 `pop3s` are not second config, runtime or metric protocol values.
+JMAP requests are counted in `nauthilus_director_jmap_requests_total` and timed
+in `nauthilus_director_jmap_request_duration_seconds` (sub-second buckets up to
+event-stream lifetimes) with the labels `protocol`, `listener`, `backend_pool`,
+`operation` (the bounded endpoint class), `status_class`, `result` (the
+authentication outcome) and `reason_class`. Request paths, account names,
+client addresses, `Authorization` headers and backend identifiers are never
+labels; successful requests log at debug level, refusals and backend failures
+at info, and a session URL outside `public_base_url` at warn
+(`jmap.session_url`). JMAP has no protocol-specific trace span.
 
 ## 18. Health checks and maintenance
 
@@ -1127,6 +1252,8 @@ Deep check:
 - POP3: authenticate test user and quit
 - LMTP: LHLO and optional NOOP/RSET
 - ManageSieve: greeting/capability and optional auth test
+- JMAP: HTTPS `GET /jmap/healthz` without credentials, preceded by the
+  outbound PROXY v2 header when enabled; no deep check
 
 Maintenance mode should prevent new sessions from being assigned to a backend while optionally allowing existing sessions to drain.
 
@@ -1166,6 +1293,11 @@ Not safely reloadable without restart, at least initially:
 - changing existing listener socket, TLS, authority, protocol or backend-pool
   semantics
 
+JMAP listeners follow the same listener rules: adding or removing one is
+reloadable, and a removed JMAP listener also closes its in-process HTTP server;
+changing an existing JMAP listener, including its `jmap` subtree, requires a
+restart. The JMAP bearer introspection client is bound at listener start.
+
 On reload:
 
 1. Parse new config.
@@ -1194,6 +1326,12 @@ Rules:
 - Avoid `skip_verify` in production examples.
 - Explicitly document trusted backend network assumptions.
 - Fail closed on ambiguous authentication, routing, Redis or backend-selection state.
+- JMAP: authenticate every HTTP request, forward `Authorization` only to the
+  verified backend, cache only successes under an HMAC with a per-process key,
+  refuse accounts without a shard attribute by default, strip client-supplied
+  address headers and protocol upgrades, bound headers, bodies and the TLS
+  handshake, keep backend connections per client connection, and accept
+  introspection client secrets only as files checked at listener start.
 
 ## 21. Testing strategy
 
@@ -1567,6 +1705,28 @@ control listener, Valkey, fake Nauthilus and public IMAP backend sockets.
   backend pins and active-affinity draining without rewriting YAML runtime
   configuration
 
+### M9: JMAP proxy
+
+Status: completed and released in `v1.1.0`. The JMAP-to-JMAP HTTPS reverse
+proxy is implemented with per-request Basic and Bearer authentication
+(listener-owned token policy, optional dedicated introspection client, identity
+lookup), the HMAC-keyed success cache, fail-closed routing, request holds with
+heartbeat and event-stream session leases, per-client-connection backend
+transports with PROXY v2, the path/method/Upgrade policy, HTTPS backend health
+and bounded metrics. Implementation commits: `bbd56bc` (proxy), `e28fb64`
+(operator docs), `5d56189` (review fixes: Upgrade refusal, listener server
+shutdown, request-hold heartbeat, b64token and challenge nits) and `c1e0a98`
+(dedicated introspection client). Detailed scope, decisions and evidence live
+in `docs/specs/implementation/M9_JMAP_PROXY_SPEC.md`.
+
+- `protocol: jmap` listeners, pools and backends with fail-closed validation
+- per-request Nauthilus authentication and bounded success cache
+- routing by the authenticated account; 403 for a missing shard by default
+- shared placement: holds, pins, maintenance, backend-node affinity
+- event streams as kickable session leases
+- one backend transport set per frontend connection with PROXY v2
+- unit, race and real-binary E2E proof (`TestServerBinaryPublicJMAPProxyFlow`)
+
 ## 23. Open decisions
 
 All M0/M1 foundation decisions tracked in this document are settled enough to start implementation. New open decisions should be added here only when they are not already governed by the architecture, policy or target configuration above.
@@ -1579,6 +1739,18 @@ Known future decisions:
   non-default mode.
 - Whether future fine-grained REST authorization should extend M8's configured
   bearer, mTLS and Nauthilus-backed OIDC scope model.
+- IMAP, POP3 and ManageSieve bearer logins (XOAUTH2, OAUTHBEARER) route with
+  the attributes of the introspection result only. When the token carries no
+  shard attribute, the shared resolver falls back to the rendezvous hash, so a
+  bearer login can land on a shard that does not hold the mailbox unless active
+  or retained affinity already exists. Proposed: after successful
+  introspection, perform a no-credential `LookupIdentity` (as JMAP does) when
+  the shard attribute is missing and route with its attributes, or refuse
+  bearer logins whose routing source is the hash fallback. Either choice
+  changes established login behavior and adds a Nauthilus round trip, so it
+  needs an explicit decision.
+- Whether JMAP route lookup should apply the listener's `missing_shard` policy
+  instead of showing the shared hash fallback.
 
 ## 24. Immediate next steps
 
@@ -1594,5 +1766,9 @@ Known future decisions:
 4. Keep production Docker and systemd proof as additive environment-capable
    checks outside default Docker-independent guardrails.
 5. Start later milestones only from the completed M8 production baseline.
+6. Decide the bearer-routing question in section 23 before more deployments
+   rely on IMAP, POP3 or ManageSieve bearer logins without a shard claim.
+7. JMAP follow-ups only on demand: WebSocket (RFC 8887) with its own admission
+   and lease design, CORS policy for browser clients, and a JMAP trace span.
 
 The project should evolve as a small, sharp director: protocol-aware only where necessary, authenticated through Nauthilus, routed through director-owned facts and selectors, observable by default, and operationally safe enough to sit in front of real mail backends.
