@@ -38,7 +38,7 @@ const (
 	schemeBearer              = "bearer"
 	methodPlain               = "plain"
 	methodBearer              = "bearer"
-	methodIdentityLookup      = "recipient_lookup"
+	methodIdentityLookup      = nauthilus.IdentityLookupMethod
 	maxBasicUsernameBytes     = 512
 	maxBasicPasswordBytes     = 4096
 	defaultMaxBearerBytes     = 16384

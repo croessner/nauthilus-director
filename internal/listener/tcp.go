@@ -69,6 +69,7 @@ func newManagedListener(
 	security config.DirectorSecurityConfig,
 	defaultTenant string,
 	defaultShard string,
+	shardTagAttribute string,
 	sessionIdleGrace time.Duration,
 	options managerOptions,
 ) (*managedListener, error) {
@@ -135,6 +136,11 @@ func newManagedListener(
 		Recorder:      options.observability,
 		ServiceName:   entry.ServiceName,
 	})
+
+	bearerIntrospector, err = bindListenerBearerIdentity(bearerIntrospector, identityLookuper, name, entry, authority, shardTagAttribute, options)
+	if err != nil {
+		return nil, fmt.Errorf("listener %s: %w", name, err)
+	}
 
 	return &managedListener{
 		name:   name,

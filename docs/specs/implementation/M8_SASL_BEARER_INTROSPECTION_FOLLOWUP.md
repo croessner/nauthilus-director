@@ -1,6 +1,8 @@
 # M8 SASL Bearer Introspection Follow-up
 
-Status: completed.
+Status: completed. Routing of IMAP, POP3 and ManageSieve bearer logins on the
+authority's identity lookup instead of token claims alone is specified in
+`M8_SASL_BEARER_IDENTITY_ROUTING_FOLLOWUP.md` (`v1.1.2`).
 
 This document defines a focused post-M8 repair and follow-up for
 `XOAUTH2` and `OAUTHBEARER` handling in `nauthilus-director`.

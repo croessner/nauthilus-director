@@ -608,6 +608,11 @@ type pop3ProductionProcessConfigOptions struct {
 	SieveBackends        map[string]string
 	UserHoldMaxWait      time.Duration
 	UserHoldPollInterval time.Duration
+	// IMAPBearer and SieveBearer additionally enable XOAUTH2 and OAUTHBEARER on those listeners.
+	IMAPBearer  bool
+	SieveBearer bool
+	// BearerBackendTLSCAFile verifies the STARTTLS IMAP and Sieve backends of bearer listeners.
+	BearerBackendTLSCAFile string
 }
 
 // writePOP3ProductionProcessConfig writes a production-style multiprotocol POP3 fixture.
@@ -694,8 +699,7 @@ director:
         require_client_cert: false
         min_tls_version: TLS1.2
       imap:
-        capabilities: [IMAP4rev1, ID, SASL-IR, STARTTLS, AUTH=PLAIN]
-        auth_mechanisms: [plain]
+%s
 %s
     lmtp:
       protocol: lmtp
@@ -734,7 +738,7 @@ director:
         key: %q
         min_tls_version: TLS1.2
       sieve:
-        auth_mechanisms: [plain]
+%s
         capabilities:
           script_extensions: [fileinto, reject]
           language: en
@@ -802,6 +806,7 @@ director:
 		options.IMAPAddress,
 		certPath,
 		keyPath,
+		pop3ProductionIMAPAuthYAML(options.IMAPBearer),
 		greetingPolicyYAML("        ", options.IMAPGreeting),
 		options.LMTPAddress,
 		certPath,
@@ -810,6 +815,7 @@ director:
 		options.SieveAddress,
 		certPath,
 		keyPath,
+		pop3ProductionSieveAuthYAML(options.SieveBearer),
 		greetingPolicyYAML("        ", options.SieveGreeting),
 		options.POP3Address,
 		certPath,
@@ -831,12 +837,64 @@ director:
 	return path
 }
 
+// productionBackendSecurityYAML renders the master-user TLS and auth block of one IMAP or Sieve
+// backend; bearer listeners additionally need verified backend TLS and a bearer replay allowlist.
+func productionBackendSecurityYAML(bearer bool, caFile string, passwordPath string) string {
+	masterUser := fmt.Sprintf(`      auth:
+        mode: master_user
+        master_user:
+          username: director-master
+          password_file: %q
+          user_format: "{user}*{master_user}"
+          mechanism: plain`, passwordPath)
+	if !bearer {
+		return `      tls:
+        mode: plaintext
+        min_tls_version: TLS1.2
+` + masterUser
+	}
+
+	return fmt.Sprintf(`      tls:
+        mode: starttls
+        ca_file: %q
+        server_name: "127.0.0.1"
+        min_tls_version: TLS1.2
+`, caFile) + masterUser + `
+        credential_replay:
+          require_backend_tls: true
+          preserve_mechanism: true
+          allowed_mechanisms: [xoauth2, oauthbearer]`
+}
+
+// pop3ProductionIMAPAuthYAML renders the IMAP capability and mechanism lines of the multiprotocol fixture.
+func pop3ProductionIMAPAuthYAML(bearer bool) string {
+	if bearer {
+		return "        capabilities: [IMAP4rev1, ID, SASL-IR, STARTTLS, AUTH=PLAIN, AUTH=XOAUTH2, AUTH=OAUTHBEARER]\n" +
+			"        auth_mechanisms: [plain, xoauth2, oauthbearer]"
+	}
+
+	return "        capabilities: [IMAP4rev1, ID, SASL-IR, STARTTLS, AUTH=PLAIN]\n" +
+		"        auth_mechanisms: [plain]"
+}
+
+// pop3ProductionSieveAuthYAML renders the ManageSieve mechanism line of the multiprotocol fixture.
+func pop3ProductionSieveAuthYAML(bearer bool) string {
+	if bearer {
+		return "        auth_mechanisms: [plain, xoauth2, oauthbearer]"
+	}
+
+	return "        auth_mechanisms: [plain]"
+}
+
 // pop3ProductionBackendsYAML renders matching backend-node entries across protocols.
 func pop3ProductionBackendsYAML(options pop3ProductionProcessConfigOptions, backendPasswordPath string) string {
 	pop3BackendTLSMode := strings.TrimSpace(options.POP3BackendTLSMode)
 	if pop3BackendTLSMode == "" {
 		pop3BackendTLSMode = "plaintext"
 	}
+
+	imapSecurity := productionBackendSecurityYAML(options.IMAPBearer, options.BearerBackendTLSCAFile, backendPasswordPath)
+	sieveSecurity := productionBackendSecurityYAML(options.SieveBearer, options.BearerBackendTLSCAFile, backendPasswordPath)
 
 	return fmt.Sprintf(`    mailstore-a-imap:
       protocol: imap
@@ -846,16 +904,7 @@ func pop3ProductionBackendsYAML(options pop3ProductionProcessConfigOptions, back
       weight: 100
       max_connections: 100
       maintenance: disabled
-      tls:
-        mode: plaintext
-        min_tls_version: TLS1.2
-      auth:
-        mode: master_user
-        master_user:
-          username: director-master
-          password_file: %q
-          user_format: "{user}*{master_user}"
-          mechanism: plain
+%s
       health_check:
         enabled: false
     mailstore-b-imap:
@@ -866,16 +915,7 @@ func pop3ProductionBackendsYAML(options pop3ProductionProcessConfigOptions, back
       weight: 100
       max_connections: 100
       maintenance: disabled
-      tls:
-        mode: plaintext
-        min_tls_version: TLS1.2
-      auth:
-        mode: master_user
-        master_user:
-          username: director-master
-          password_file: %q
-          user_format: "{user}*{master_user}"
-          mechanism: plain
+%s
       health_check:
         enabled: false
     mailstore-a-lmtp:
@@ -916,16 +956,7 @@ func pop3ProductionBackendsYAML(options pop3ProductionProcessConfigOptions, back
       weight: 100
       max_connections: 100
       maintenance: disabled
-      tls:
-        mode: plaintext
-        min_tls_version: TLS1.2
-      auth:
-        mode: master_user
-        master_user:
-          username: director-master
-          password_file: %q
-          user_format: "{user}*{master_user}"
-          mechanism: plain
+%s
       health_check:
         enabled: false
     mailstore-b-sieve:
@@ -936,16 +967,7 @@ func pop3ProductionBackendsYAML(options pop3ProductionProcessConfigOptions, back
       weight: 100
       max_connections: 100
       maintenance: disabled
-      tls:
-        mode: plaintext
-        min_tls_version: TLS1.2
-      auth:
-        mode: master_user
-        master_user:
-          username: director-master
-          password_file: %q
-          user_format: "{user}*{master_user}"
-          mechanism: plain
+%s
       health_check:
         enabled: false
     mailstore-a-pop3:
@@ -1008,20 +1030,20 @@ func pop3ProductionBackendsYAML(options pop3ProductionProcessConfigOptions, back
         enabled: false
 `, e2eShardTag,
 		options.IMAPBackends[e2eBackendAID],
-		backendPasswordPath,
+		imapSecurity,
 		e2eShardTagB,
 		options.IMAPBackends[e2eBackendBID],
-		backendPasswordPath,
+		imapSecurity,
 		e2eShardTag,
 		options.LMTPBackends[e2eLMTPBackendAID],
 		e2eShardTagB,
 		options.LMTPBackends[e2eLMTPBackendBID],
 		e2eShardTag,
 		options.SieveBackends[e2eSieveBackendAID],
-		backendPasswordPath,
+		sieveSecurity,
 		e2eShardTagB,
 		options.SieveBackends[e2eSieveBackendBID],
-		backendPasswordPath,
+		sieveSecurity,
 		e2eShardTag,
 		options.POP3Backends[e2ePOP3BackendAID],
 		pop3BackendTLSMode,

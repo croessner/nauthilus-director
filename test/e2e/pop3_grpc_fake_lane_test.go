@@ -29,6 +29,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/croessner/nauthilus-director/internal/nauthilus"
 	authv1 "github.com/croessner/nauthilus-director/internal/nauthilus/grpcapi/auth/v1"
 	commonv1 "github.com/croessner/nauthilus-director/internal/nauthilus/grpcapi/common/v1"
 	pop3backend "github.com/croessner/nauthilus-director/test/e2e/fakes/pop3_backend"
@@ -104,6 +105,7 @@ func TestServerBinaryPublicPOP3GRPCAuthorityFlow(t *testing.T) {
 	if authority.RequestCount() != grpcRequestCount {
 		t.Fatal("POP3 bearer auth reached the gRPC password authority")
 	}
+	authority.ExpectLookup(t, e2ePOP3BearerAccount, e2ePOP3Protocol, e2eContextMetadata, e2eContextGRPCValue)
 	assertPOP3Observation(t, fakePOP3.ExpectObservation(t), "xoauth2", false)
 	assertOutputOmits(t, process.output.String(), e2ePassword, e2eToken, e2ePOP3GRPCXOAuth2Token)
 	assertOutputOmitsAuthorityContext(t, process.output.String(), e2eContextGRPCValue)
@@ -286,6 +288,8 @@ type fakePOP3GRPCAuthority struct {
 	identities        map[string]map[string][]string
 	mu                sync.Mutex
 	requests          []*authv1.AuthRequest
+	lookups           []*authv1.LookupIdentityRequest
+	lookupMetadata    []map[string]string
 	contextMetadata   []map[string]string
 	callerAuthPresent []bool
 }
@@ -347,6 +351,47 @@ func (a *fakePOP3GRPCAuthority) Authenticate(ctx context.Context, request *authv
 		AccountField: "account",
 		Attributes:   attributes,
 	}, nil
+}
+
+// LookupIdentity records a no-auth identity lookup and returns the configured account facts.
+func (a *fakePOP3GRPCAuthority) LookupIdentity(ctx context.Context, request *authv1.LookupIdentityRequest) (*authv1.AuthResponse, error) {
+	a.mu.Lock()
+	a.lookups = append(a.lookups, request)
+	a.lookupMetadata = append(a.lookupMetadata, safeGRPCAuthorityContextMetadata(ctx))
+	a.mu.Unlock()
+
+	return &authv1.AuthResponse{
+		Ok:           true,
+		Decision:     authv1.AuthDecision_AUTH_DECISION_OK,
+		AccountField: "account",
+		Attributes:   a.attributesForUsername(request.GetUsername()),
+	}, nil
+}
+
+// ExpectLookup verifies one no-auth lookup for username carried the listener protocol and context metadata.
+func (a *fakePOP3GRPCAuthority) ExpectLookup(t *testing.T, username string, protocol string, metadataKey string, metadataValue string) {
+	t.Helper()
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	for index, lookup := range a.lookups {
+		if lookup.GetUsername() != username {
+			continue
+		}
+
+		if lookup.GetProtocol() != protocol || lookup.GetMethod() != nauthilus.IdentityLookupMethod {
+			t.Fatalf("gRPC identity lookup protocol/method = %q/%q, want %s/%s", lookup.GetProtocol(), lookup.GetMethod(), protocol, nauthilus.IdentityLookupMethod)
+		}
+
+		if a.lookupMetadata[index][metadataKey] != metadataValue {
+			t.Fatalf("gRPC identity lookup lacked listener context metadata %q", metadataKey)
+		}
+
+		return
+	}
+
+	t.Fatal("fake POP3 gRPC authority did not receive the bearer identity lookup")
 }
 
 // ExpectRequest waits until a matching gRPC auth request reaches the fixture.

@@ -31,6 +31,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"io"
+	"maps"
 	"math/big"
 	"net"
 	"net/http"
@@ -405,7 +406,7 @@ func TestServerBinarySASLBearerIntrospectionPublicIMAPFlow(t *testing.T) {
 	binary := e2eServerBinary(t)
 	ctl := buildDirectorctl(t)
 	redisFixture := startValkeySessionStore(t)
-	authority := startFakeOIDCHTTPAuthority(t, nil, fakeOIDCAuthorityOptions{
+	authority := startMappedFakeOIDCHTTPAuthority(t, bearerAuthorityIdentities(e2eShardTag, e2eAccount, e2eProxyLogin), nil, fakeOIDCAuthorityOptions{
 		SASLBearerTokens: map[string]fakeSASLBearerToken{
 			e2eIMAPXOAuth2Token:     activeFakeSASLBearerToken(e2eAccount, e2eShardTag),
 			e2eIMAPOAuthBearerToken: activeFakeSASLBearerToken(e2eProxyLogin, e2eShardTag),
@@ -478,9 +479,10 @@ func TestServerBinarySASLBearerIntrospectionPublicIMAPFlow(t *testing.T) {
 	authority.ExpectSASLBearerIntrospection(t, beforeAuth, 1)
 	fakeBackend.ExpectProxyLineWithAuth(t, "B002 NOOP", "AUTHENTICATE OAUTHBEARER")
 
-	if authority.RequestCount() != 0 {
-		t.Fatalf("bearer IMAP auth used password backchannel requests = %d, want none", authority.RequestCount())
+	if authority.PasswordRequestCount() != 0 {
+		t.Fatalf("bearer IMAP auth used password backchannel requests = %d, want none", authority.PasswordRequestCount())
 	}
+	expectBearerIdentityLookups(t, authority, "imap", e2eAccount, e2eProxyLogin)
 	assertOutputOmits(t, process.output.String(), e2eIMAPXOAuth2Token, e2eIMAPOAuthBearerToken)
 }
 
@@ -577,7 +579,7 @@ func TestServerBinarySASLBearerIntrospectionFailuresPublicIMAPFlow(t *testing.T)
 func TestServerBinarySASLBearerReplayPolicyPublicIMAPFlow(t *testing.T) {
 	binary := e2eServerBinary(t)
 	redisFixture := startValkeySessionStore(t)
-	authority := startFakeOIDCHTTPAuthority(t, nil, fakeOIDCAuthorityOptions{
+	authority := startMappedFakeOIDCHTTPAuthority(t, bearerAuthorityIdentities(e2eShardTag, e2eAccount), nil, fakeOIDCAuthorityOptions{
 		SASLBearerTokens: map[string]fakeSASLBearerToken{
 			e2eSASLPolicyToken: activeFakeSASLBearerToken(e2eAccount, e2eShardTag),
 		},
@@ -616,9 +618,10 @@ func TestServerBinarySASLBearerReplayPolicyPublicIMAPFlow(t *testing.T) {
 		"P001 NO [UNAVAILABLE] Authentication service temporarily unavailable\r\n",
 	)
 	authority.ExpectSASLBearerIntrospection(t, beforeAuth, 1)
-	if authority.RequestCount() != 0 {
-		t.Fatalf("bearer replay fallback used password backchannel requests = %d, want none", authority.RequestCount())
+	if authority.PasswordRequestCount() != 0 {
+		t.Fatalf("bearer replay fallback used password backchannel requests = %d, want none", authority.PasswordRequestCount())
 	}
+	expectBearerIdentityLookups(t, authority, "imap", e2eAccount)
 	assertOutputOmits(t, process.output.String(), e2eSASLPolicyToken)
 }
 
@@ -5433,9 +5436,21 @@ type fakeHTTPAuthority struct {
 	identities     map[string]map[string][]string
 	oidc           *fakeOIDCAuthority
 	requests       []map[string]any
+	requestModes   []string
+	lookupFailures map[string]bool
 	contextHeaders []map[string]string
 	authSchemes    []string
 	requestsLock   sync.Mutex
+}
+
+// fakeAuthorityModeLookup is the query mode Nauthilus uses for no-auth identity lookups.
+const fakeAuthorityModeLookup = "no-auth"
+
+// fakeIdentityLookup is one observed no-auth lookup without credential material.
+type fakeIdentityLookup struct {
+	Username string
+	Protocol string
+	Method   string
 }
 
 type fakeOIDCAuthority struct {
@@ -5809,6 +5824,54 @@ func matchesOptionalString(value any, want string) bool {
 	return value == want
 }
 
+// PasswordRequestCount returns how often the fake authority received credential-bearing auth requests.
+func (f *fakeHTTPAuthority) PasswordRequestCount() int {
+	f.requestsLock.Lock()
+	defer f.requestsLock.Unlock()
+
+	count := 0
+	for _, mode := range f.requestModes {
+		if mode == "" {
+			count++
+		}
+	}
+
+	return count
+}
+
+// IdentityLookups returns the secret-free protocol context of every no-auth identity lookup.
+func (f *fakeHTTPAuthority) IdentityLookups() []fakeIdentityLookup {
+	f.requestsLock.Lock()
+	defer f.requestsLock.Unlock()
+
+	lookups := make([]fakeIdentityLookup, 0, len(f.requests))
+	for index, mode := range f.requestModes {
+		if mode != fakeAuthorityModeLookup {
+			continue
+		}
+
+		body := f.requests[index]
+		username, _ := body["username"].(string)
+		protocol, _ := body["protocol"].(string)
+		method, _ := body["method"].(string)
+		lookups = append(lookups, fakeIdentityLookup{Username: username, Protocol: protocol, Method: method})
+	}
+
+	return lookups
+}
+
+// FailIdentityLookup makes every later no-auth lookup for username answer with a temporary failure.
+func (f *fakeHTTPAuthority) FailIdentityLookup(username string) {
+	f.requestsLock.Lock()
+	defer f.requestsLock.Unlock()
+
+	if f.lookupFailures == nil {
+		f.lookupFailures = map[string]bool{}
+	}
+
+	f.lookupFailures[username] = true
+}
+
 // RequestCount returns how often the fake authority was called.
 func (f *fakeHTTPAuthority) RequestCount() int {
 	f.requestsLock.Lock()
@@ -5830,10 +5893,21 @@ func (f *fakeHTTPAuthority) handle(writer http.ResponseWriter, request *http.Req
 		return
 	}
 
+	mode := request.URL.Query().Get("mode")
+	username, _ := body["username"].(string)
+
 	f.requestsLock.Lock()
 	f.requests = append(f.requests, body)
+	f.requestModes = append(f.requestModes, mode)
 	f.contextHeaders = append(f.contextHeaders, safeHTTPAuthorityContextHeaders(request))
+	failLookup := mode == fakeAuthorityModeLookup && f.lookupFailures[username]
 	f.requestsLock.Unlock()
+
+	if failLookup {
+		http.Error(writer, "temporarily unavailable", http.StatusServiceUnavailable)
+
+		return
+	}
 
 	writer.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(writer).Encode(map[string]any{
@@ -6138,8 +6212,31 @@ func hasAllStrings(values []string, required []string) bool {
 	return true
 }
 
+// AddIdentities registers per-login attributes after start, for accounts chosen through public diagnostics.
+func (f *fakeHTTPAuthority) AddIdentities(identities map[string]map[string][]string) {
+	f.requestsLock.Lock()
+	defer f.requestsLock.Unlock()
+
+	if f.identities == nil {
+		f.identities = map[string]map[string][]string{}
+	}
+
+	maps.Copy(f.identities, identities)
+}
+
+// AddSASLBearerToken registers one mail SASL token fixture after start.
+func (f *fakeHTTPAuthority) AddSASLBearerToken(token string, fixture fakeSASLBearerToken) {
+	f.requestsLock.Lock()
+	defer f.requestsLock.Unlock()
+
+	f.oidc.saslTokens[token] = fixture
+}
+
 // attributesForRequest returns fixed or per-login Nauthilus attributes.
 func (f *fakeHTTPAuthority) attributesForRequest(body map[string]any) map[string][]string {
+	f.requestsLock.Lock()
+	defer f.requestsLock.Unlock()
+
 	username, _ := body["username"].(string)
 	if f.identities != nil {
 		if attributes, ok := f.identities[username]; ok {
@@ -6775,6 +6872,11 @@ type unavailableAuthenticator struct{}
 
 // Authenticate returns a temporary failure for TLS-only E2E sessions.
 func (unavailableAuthenticator) Authenticate(context.Context, nauthilus.AuthRequest) (nauthilus.AuthResult, error) {
+	return nauthilus.AuthResult{Decision: nauthilus.DecisionTemporaryFailure}, nil
+}
+
+// LookupIdentity returns a temporary failure so bearer identity binding stays fail-closed.
+func (unavailableAuthenticator) LookupIdentity(context.Context, nauthilus.IdentityLookupRequest) (nauthilus.AuthResult, error) {
 	return nauthilus.AuthResult{Decision: nauthilus.DecisionTemporaryFailure}, nil
 }
 

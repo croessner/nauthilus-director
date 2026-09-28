@@ -185,8 +185,11 @@ is missing, JMAP fails closed by default:
 | `unavailable` | 503 with `Retry-After` |
 | `hash_fallback` | route by the rendezvous hash over the configured shards, like the mail protocols |
 
-The mail protocols fall back to hashing because an IMAP session that lands on
-the wrong shard at least shows the wrong mailbox visibly; a JMAP client would
+The mail protocols fall back to hashing when the directory has no shard
+attribute for an account, whether the login used a password or a bearer token
+(IMAP, POP3 and ManageSieve bearer logins resolve the token account through the
+same identity lookup since `v1.1.2`), because an IMAP session that lands on the
+wrong shard at least shows the wrong mailbox visibly; a JMAP client would
 silently synchronise an empty account and write into the wrong store. A
 multi-valued shard attribute is always an error (503).
 

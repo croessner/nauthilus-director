@@ -227,7 +227,7 @@ func TestManagerSelectsConfiguredListenerAuthorityTransport(t *testing.T) {
 		) (nauthilus.Authenticator, error) {
 			captured <- authority
 
-			return noopAuthenticator{}, nil
+			return noopIdentityAuthority{}, nil
 		}),
 		WithSessionHandlerFactory(func(options SessionOptions) SessionHandler {
 			optionsSeen <- options
@@ -286,7 +286,7 @@ func TestManagerPassesListenerAuthorityContextToClientFactory(t *testing.T) {
 		) (nauthilus.Authenticator, error) {
 			captured <- options
 
-			return noopAuthenticator{}, nil
+			return noopIdentityAuthority{}, nil
 		}),
 	)
 	if err != nil {
@@ -350,7 +350,7 @@ func TestManagerKeepsAuthorityContextListenerScopedForSharedAuthority(t *testing
 		) (nauthilus.Authenticator, error) {
 			captured = append(captured, options.AuthorityContext)
 
-			return noopAuthenticator{}, nil
+			return noopIdentityAuthority{}, nil
 		}),
 	)
 	if err != nil {
@@ -1171,6 +1171,11 @@ type recordingListenerObservability struct {
 
 type noopAuthenticator struct{}
 
+// noopIdentityAuthority is an authority client that also offers the no-auth identity lookup.
+type noopIdentityAuthority struct {
+	noopAuthenticator
+}
+
 type noopBearerIntrospector struct{}
 
 // newTestManagerWithConfig installs a deterministic bearer introspector for listener tests.
@@ -1241,6 +1246,11 @@ func (r *recordingListenerObservability) snapshot() []observability.Event {
 
 // Authenticate returns a temporary failure without contacting an authority.
 func (noopAuthenticator) Authenticate(context.Context, nauthilus.AuthRequest) (nauthilus.AuthResult, error) {
+	return nauthilus.AuthResult{Decision: nauthilus.DecisionTemporaryFailure}, nil
+}
+
+// LookupIdentity returns a deterministic temporary failure without contacting an authority.
+func (noopIdentityAuthority) LookupIdentity(context.Context, nauthilus.IdentityLookupRequest) (nauthilus.AuthResult, error) {
 	return nauthilus.AuthResult{Decision: nauthilus.DecisionTemporaryFailure}, nil
 }
 

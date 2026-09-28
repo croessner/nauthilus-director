@@ -750,6 +750,22 @@ use `runtime reap` and `runtime reconcile aggregates` with bounded limits and
 auditable reasons. If authoritative state is corrupt, stop and investigate
 instead of treating repair commands as a broad cleanup.
 
+## How are IMAP, POP3 and ManageSieve bearer logins routed?
+
+An `XOAUTH2` or `OAUTHBEARER` token is validated by Nauthilus introspection,
+which names the account (`account_claim`) but not the directory routing facts
+such as `mailShard`. Since `v1.1.2` the Director therefore sends one additional
+no-credential identity lookup for the token account (listener protocol, method
+`recipient_lookup`) and routes on the attributes Nauthilus returns, exactly as
+for a password login. The token account stays authoritative: a lookup that
+names another account or no known account fails authentication, and an
+unreachable or failing lookup is a temporary failure, never a silent hash
+placement. Only when the directory itself has no shard attribute does the
+login fall back to the rendezvous hash, as a password login would; the lookup
+metric reports that case as `reason_class=bearer_shard_missing`. Earlier
+releases routed on token claims alone and could place bearer users on a store
+that does not hold their mailbox. See `docs/operations/oidc-nauthilus.md`.
+
 ## How does JMAP proxying work, and why is there no default JMAP listener?
 
 A `protocol: jmap` listener is an HTTPS reverse proxy for JMAP backends. It

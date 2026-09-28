@@ -42,7 +42,7 @@ const (
 	deliveryHoldIDBytes     = 16
 	deliveryStatusCreated   = "created"
 	recipientDefaultTenant  = "default"
-	recipientLookupMethod   = "recipient_lookup"
+	recipientLookupMethod   = nauthilus.IdentityLookupMethod
 )
 
 var errDifferentBackendRecipient = errors.New("lmtp: recipient routes to different backend")

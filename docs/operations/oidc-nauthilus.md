@@ -203,6 +203,36 @@ the non-secret response claim used as the Director account key for routing,
 affinity and placement; when empty, the Director uses its conservative
 account-claim chain.
 
+### Routing Bearer Logins
+
+A token names the account but does not carry the directory routing facts a
+password login receives, above all the shard attribute
+(`director.routing.auth_attributes.shard_tag`, `mailShard` by default). IMAP,
+POP3 and ManageSieve listeners therefore follow every successful introspection
+with one no-credential identity lookup for the token account over the
+authority transport: HTTP `POST /api/v1/auth/json?mode=no-auth` or gRPC
+`AuthService.LookupIdentity`, with the listener protocol (`imap`, `pop3`,
+`sieve`), method `recipient_lookup`, the client and TLS facts of the session
+and the listener's `authority_context`. Nauthilus must answer that lookup with
+the same attributes it returns for a password login on the protocol; the
+director client needs the `nauthilus:lookup_identity` scope when OIDC caller
+auth is enabled.
+
+| Lookup outcome | Client sees |
+| --- | --- |
+| Same account with shard attribute | Login succeeds and is routed to that shard. |
+| Same account without shard attribute | Login succeeds and is hashed like a password login without the attribute; the lookup metric carries `reason_class=bearer_shard_missing`. |
+| Different account | Authentication failure (`reason_class=bearer_account_mismatch`). |
+| Account unknown | Authentication failure (`reason_class=bearer_identity_rejected`). |
+| Timeout, transport error, temporary failure | Temporary failure; the login is never routed by hash instead. |
+
+Each bearer login costs one extra authority round trip; introspection and
+lookup share `runtime.timeouts.auth`. Before `v1.1.2` these listeners routed on
+token claims alone and hashed accounts whose token carried no shard attribute,
+which could place a user on a mail store that does not hold the mailbox.
+Password logins still hash when Nauthilus omits the shard attribute, so keep
+the attribute populated for every mailbox account.
+
 The original end-user bearer token may be retained only in short-lived
 credential state after successful introspection and only long enough for
 policy-gated backend replay. Backend replay is allowed only when backend auth
@@ -276,4 +306,5 @@ then rotate any failed OIDC secret material.
 | Control token unbound locally | Control requests return `403` even though the token is active and scoped. | Set `runtime.servers.control.auth.oidc.required_audience` or `required_resource` to the local token binding and issue tokens with a matching `aud` or `resource` claim. |
 | Control token missing protected scope | Normal control commands work; protected config or pprof returns `403`. | Use a short-lived token with the protected scope only for the protected operation. |
 | Control introspection inactive or denied | Control requests return `401` or `403` without revealing token detail. | Check token lifetime, audience, client registration, `oidc.client_credentials.introspection_endpoint_auth_method` and Nauthilus logs. |
+| Mail SASL bearer identity lookup failed | Active tokens fail with a temporary error, or with an authentication failure when the lookup names another or no account. | Check that Nauthilus answers `mode=no-auth` / `LookupIdentity` for the listener protocol with the token account (the `account_claim` value), that the lookup returns the same canonical account, the caller scope `nauthilus:lookup_identity`, and the `reason_class` of the `recipient_lookup` Nauthilus auth metric. |
 | Mail SASL bearer introspection denied | `XOAUTH2` or `OAUTHBEARER` auth is rejected or temporarily fails without token detail. | Check `mechanisms.bearer.introspection.required_audience` or `required_resource`, `required_scope`, `account_claim`, endpoint client-auth method, Nauthilus introspection logs and backend replay policy. |

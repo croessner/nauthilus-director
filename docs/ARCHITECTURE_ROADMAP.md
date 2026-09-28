@@ -424,6 +424,21 @@ HTTP authorities use `/api/v1/auth/json`, and gRPC authorities use
 `nauthilus.auth.v1.AuthService`. Bearer introspection uses the discovered HTTP
 OIDC endpoint even when the password authority transport is gRPC.
 
+Introspection proves the token's account but carries none of the directory
+routing facts that a password login receives from `Authenticate`. IMAP, POP3
+and ManageSieve listeners therefore follow every successful introspection with
+one no-credential identity lookup for the token account over the authority
+transport (listener protocol, method `recipient_lookup`, the frontend client
+and TLS context and the listener `authority_context`). Lookup attributes are
+merged over the token claims and drive routing; the token account stays
+authoritative, so a lookup naming another account refuses the login, and a
+lookup failure is a temporary failure that never reaches the hash fallback.
+A successful lookup without a shard attribute routes exactly like a password
+login without one and is reported with reason class `bearer_shard_missing`.
+JMAP performs the same lookup in its request authenticator; LMTP peer bearer
+auth does not route on the submitter and sends no lookup. Details and evidence:
+`docs/specs/implementation/M8_SASL_BEARER_IDENTITY_ROUTING_FOLLOWUP.md`.
+
 ### 7.3 HTTP JSON authentication request
 
 The director uses only the HTTP JSON endpoint when `auth.authorities.<name>.transport` is `http`. The request body is the real structured Nauthilus auth DTO encoded as `application/json`. JSON is strict: unknown top-level fields are rejected.
@@ -1700,6 +1715,10 @@ control listener, Valkey, fake Nauthilus and public IMAP backend sockets.
 - mail SASL bearer introspection through Nauthilus without local token
   validation or bearer-token caching, followed by policy-gated backend replay of
   the original end-user bearer token where backend auth requires it
+- bearer identity routing (`v1.1.2`): IMAP, POP3 and ManageSieve bearer logins
+  resolve the token account through a Nauthilus identity lookup and route on
+  its shard attribute instead of hashing; see
+  `docs/specs/implementation/M8_SASL_BEARER_IDENTITY_ROUTING_FOLLOWUP.md`
 - operational deployment, failure-mode, reload/upgrade, OIDC and migration docs
 - operator migration workflows that combine user placement holds, user moves,
   backend pins and active-affinity draining without rewriting YAML runtime
@@ -1739,16 +1758,9 @@ Known future decisions:
   non-default mode.
 - Whether future fine-grained REST authorization should extend M8's configured
   bearer, mTLS and Nauthilus-backed OIDC scope model.
-- IMAP, POP3 and ManageSieve bearer logins (XOAUTH2, OAUTHBEARER) route with
-  the attributes of the introspection result only. When the token carries no
-  shard attribute, the shared resolver falls back to the rendezvous hash, so a
-  bearer login can land on a shard that does not hold the mailbox unless active
-  or retained affinity already exists. Proposed: after successful
-  introspection, perform a no-credential `LookupIdentity` (as JMAP does) when
-  the shard attribute is missing and route with its attributes, or refuse
-  bearer logins whose routing source is the hash fallback. Either choice
-  changes established login behavior and adds a Nauthilus round trip, so it
-  needs an explicit decision.
+- Whether the JMAP bearer path should refuse a lookup that names another
+  account, as IMAP, POP3 and ManageSieve do since `v1.1.2`, instead of taking
+  the canonical account from the lookup.
 - Whether JMAP route lookup should apply the listener's `missing_shard` policy
   instead of showing the shared hash fallback.
 
@@ -1766,9 +1778,7 @@ Known future decisions:
 4. Keep production Docker and systemd proof as additive environment-capable
    checks outside default Docker-independent guardrails.
 5. Start later milestones only from the completed M8 production baseline.
-6. Decide the bearer-routing question in section 23 before more deployments
-   rely on IMAP, POP3 or ManageSieve bearer logins without a shard claim.
-7. JMAP follow-ups only on demand: WebSocket (RFC 8887) with its own admission
+6. JMAP follow-ups only on demand: WebSocket (RFC 8887) with its own admission
    and lease design, CORS policy for browser clients, and a JMAP trace span.
 
 The project should evolve as a small, sharp director: protocol-aware only where necessary, authenticated through Nauthilus, routed through director-owned facts and selectors, observable by default, and operationally safe enough to sit in front of real mail backends.

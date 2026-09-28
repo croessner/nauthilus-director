@@ -251,6 +251,7 @@ func managedListenersFromConfig(cfg config.Config, options managerOptions) ([]*m
 			cfg.Director.Security,
 			cfg.Director.Affinity.ActiveUserPinning.Key.Tenant,
 			cfg.Director.Routing.EffectiveDefaultShard(),
+			cfg.Director.Routing.AuthAttributes.ShardTag,
 			cfg.Director.Affinity.ActiveUserPinning.IdleGrace.Std(),
 			options,
 		)
@@ -657,6 +658,52 @@ func bearerIntrospectorForListener(
 	}
 
 	return options.bearerIntrospectorFactory(ctx, authority)
+}
+
+// bindListenerBearerIdentity makes mailbox bearer logins resolve their routing identity through the
+// authority. IMAP, POP3 and ManageSieve route on the principal the introspector returns, and a token
+// carries the account but not the directory routing facts, so every successful introspection is
+// followed by one no-auth identity lookup. LMTP peer auth does not route on the submitter and JMAP
+// performs the same lookup in its own request authenticator; both keep the plain introspector.
+func bindListenerBearerIdentity(
+	introspector nauthilus.BearerIntrospector,
+	lookuper nauthilus.IdentityLookuper,
+	name string,
+	entry config.ListenerConfig,
+	authority config.AuthorityConfig,
+	shardTagAttribute string,
+	options managerOptions,
+) (nauthilus.BearerIntrospector, error) {
+	if introspector == nil || !listenerRoutesBearerPrincipal(entry) {
+		return introspector, nil
+	}
+
+	if lookuper == nil {
+		return nil, errors.New("sasl bearer identity lookup unavailable")
+	}
+
+	return nauthilus.BindBearerIdentity(introspector, nauthilus.BearerIdentityConfig{
+		Lookuper:          lookuper,
+		ShardTagAttribute: shardTagAttribute,
+		Observation: nauthilus.ObservationConfig{
+			AuthorityName: entry.Authority,
+			BackendPool:   entry.BackendPool,
+			ListenerName:  name,
+			Recorder:      options.observability,
+			ServiceName:   entry.ServiceName,
+			Transport:     authority.Transport,
+		},
+	})
+}
+
+// listenerRoutesBearerPrincipal reports whether a bearer login on this listener is placed on a mailbox shard.
+func listenerRoutesBearerPrincipal(entry config.ListenerConfig) bool {
+	switch strings.ToLower(strings.TrimSpace(entry.Protocol)) {
+	case protocolIMAP, protocolSIEVE, protocolPOP3:
+		return listenerNeedsBearerIntrospection(entry)
+	default:
+		return false
+	}
 }
 
 // listenerNeedsBearerIntrospection reports whether a listener can accept mail bearer SASL.

@@ -272,6 +272,18 @@ and
 .BR private_key_jwt .
 Director does not locally validate, log or cache end-user mail bearer tokens.
 .PP
+On IMAP, POP3 and ManageSieve listeners every successful introspection is
+followed by one credential-free identity lookup for the token account through
+the authority transport, with the listener protocol and method
+.BR recipient_lookup .
+Routing uses the attributes of that lookup, so a token without a shard claim
+still reaches the shard named by
+.BR director.routing.auth_attributes.shard_tag .
+A lookup that names another account or rejects the account fails
+authentication; a failed lookup is a temporary failure and never falls back to
+the rendezvous hash. Such listeners require an authority client with identity
+lookup; startup fails otherwise.
+.PP
 Operational setup and migration guidance for Nauthilus OIDC caller auth lives
 in
 .BR docs/operations/oidc-nauthilus.md .
