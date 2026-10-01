@@ -692,8 +692,8 @@ func TestNauthilusContextReportsFrontendTLS(t *testing.T) {
 	)
 
 	clearContext := cleartext.session.NauthilusRequestContext("plain")
-	if clearContext.TLS != "false" {
-		t.Fatalf("cleartext TLS = %q, want false", clearContext.TLS)
+	if clearContext.TLS != "" {
+		t.Fatalf("cleartext TLS = %q, want empty", clearContext.TLS)
 	}
 
 	authenticator := &recordingAuthenticator{
@@ -716,7 +716,7 @@ func TestNauthilusContextReportsFrontendTLS(t *testing.T) {
 	implicit.expectDone(t)
 
 	request := authenticator.singleRequest(t)
-	if request.Context.TLS != "true" || request.Context.TLSProtocol != "TLS1.3" ||
+	if request.Context.TLS != "on" || request.Context.TLSProtocol != "TLS1.3" ||
 		request.Context.TLSCipher != "TLS_AES_128_GCM_SHA256" || request.Context.TLSClientVerify != "NONE" {
 		t.Fatal("TLS context did not include the expected active TLS1.3 fields")
 	}

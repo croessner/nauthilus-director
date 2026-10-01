@@ -461,21 +461,21 @@ func TestUnsupportedPreauthCommandsFailSafely(t *testing.T) {
 func TestNauthilusSSLContextFields(t *testing.T) {
 	plain := newTestSession(t, testPOP3Config(TLSModeStartTLS, nil), nopConn{})
 	plainContext := plain.NauthilusRequestContext("xoauth2")
-	if plainContext.TLS != "false" {
-		t.Fatalf("plaintext TLS = %q, want false", plainContext.TLS)
+	if plainContext.TLS != "" {
+		t.Fatalf("plaintext TLS = %q, want empty", plainContext.TLS)
 	}
 
 	stls := newTestSession(t, testPOP3Config(TLSModeStartTLS, nil), nopConn{})
 	stls.resetAfterSTLS()
 	stlsContext := stls.NauthilusRequestContext("xoauth2")
-	if stlsContext.TLS != "true" || stlsContext.TLSClientVerify != "NONE" {
+	if stlsContext.TLS != "on" || stlsContext.TLSClientVerify != "NONE" {
 		t.Fatalf("STLS context = TLS %q verify %q, want active synthetic TLS", stlsContext.TLS, stlsContext.TLSClientVerify)
 	}
 
 	implicitState := tls.ConnectionState{Version: tls.VersionTLS13, CipherSuite: tls.TLS_AES_128_GCM_SHA256}
 	implicit := newTestSession(t, testPOP3Config(TLSModeImplicit, nil), stateConn{Conn: nopConn{}, state: implicitState})
 	implicitContext := implicit.NauthilusRequestContext("oauthbearer")
-	if implicitContext.TLS != "true" || implicitContext.TLSProtocol != "TLS1.3" || implicitContext.TLSCipher == "" {
+	if implicitContext.TLS != "on" || implicitContext.TLSProtocol != "TLS1.3" || implicitContext.TLSCipher == "" {
 		t.Fatalf("implicit context = TLS %q protocol %q cipher %q, want active TLS metadata", implicitContext.TLS, implicitContext.TLSProtocol, implicitContext.TLSCipher)
 	}
 }

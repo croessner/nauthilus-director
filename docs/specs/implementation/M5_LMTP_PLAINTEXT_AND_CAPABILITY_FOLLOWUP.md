@@ -78,8 +78,8 @@ Frontend listener rules:
 - Extend listener TLS mode validation and listener startup to accept
   `plaintext`, `disabled` and `none` as non-TLS frontend modes.
 - Normalize those aliases to one runtime meaning: no implicit TLS wrapping, no
-  STARTTLS command, and `ssl=false` in the Nauthilus context if a request is
-  ever made.
+  STARTTLS command, and an empty `ssl` value in the Nauthilus context if a
+  request is ever made.
 - For plaintext LMTP listeners, validation must reject `STARTTLS` in
   `director.listeners.<name>.lmtp.capabilities`.
 - For plaintext LMTP listeners, validation must reject `AUTH ...` capability

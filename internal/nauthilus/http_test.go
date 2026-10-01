@@ -54,7 +54,7 @@ func TestHTTPAuthenticateSendsStrictNauthilusJSON(t *testing.T) {
 		})
 		assertForbiddenDirectorFieldsAbsent(t, captured)
 		assertField(t, captured, "protocol", "imap")
-		assertField(t, captured, "ssl", "true")
+		assertField(t, captured, "ssl", "on")
 		assertField(t, captured, "ssl_client_verify", "SUCCESS")
 		assertField(t, captured, "ssl_client_cn", "client.example.test")
 		assertFieldAbsent(t, captured, "service")
@@ -72,7 +72,7 @@ func TestHTTPAuthenticateSendsStrictNauthilusJSON(t *testing.T) {
 			ClientPort:      "12345",
 			Protocol:        "imap",
 			Method:          "plain",
-			TLS:             "true",
+			TLS:             "on",
 			TLSClientVerify: "SUCCESS",
 			TLSClientCN:     "client.example.test",
 		},

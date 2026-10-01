@@ -221,3 +221,26 @@ func TestChallengesMarkInvalidTokenOnlyForBearer(t *testing.T) {
 		t.Fatalf("bearer failure challenges = %q", got)
 	}
 }
+
+// TestRequestContextReportsFrontendTLS pins the Nauthilus ssl value for JMAP requests: empty for
+// cleartext HTTP (the only value Nauthilus treats as unencrypted) and "on" behind TLS.
+func TestRequestContextReportsFrontendTLS(t *testing.T) {
+	auth := &authenticator{}
+
+	cleartext, err := http.NewRequestWithContext(context.Background(), http.MethodPost, "http://jmap.example.test/jmap/api/", nil)
+	if err != nil {
+		t.Fatalf("build cleartext request: %v", err)
+	}
+
+	if got := auth.requestContext(cleartext, "plain").TLS; got != "" {
+		t.Fatalf("cleartext TLS = %q, want empty", got)
+	}
+
+	encrypted := cleartext.Clone(cleartext.Context())
+	encrypted.TLS = &tls.ConnectionState{Version: tls.VersionTLS13, CipherSuite: tls.TLS_AES_128_GCM_SHA256}
+
+	requestContext := auth.requestContext(encrypted, "plain")
+	if requestContext.TLS != "on" || requestContext.TLSProtocol != "TLS1.3" {
+		t.Fatalf("TLS context = %q/%q, want on/TLS1.3", requestContext.TLS, requestContext.TLSProtocol)
+	}
+}

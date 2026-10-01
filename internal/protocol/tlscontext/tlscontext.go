@@ -29,8 +29,12 @@ import (
 )
 
 const (
-	tlsBoolTrue         = "true"
-	tlsBoolFalse        = "false"
+	// tlsActiveValue follows the Dovecot/nginx auth convention Nauthilus implements: any
+	// non-empty ssl value marks the frontend connection as encrypted.
+	tlsActiveValue = "on"
+	// tlsInactiveValue is the only ssl value Nauthilus reads as a cleartext connection, so
+	// cleartext attempts must send it instead of a "false" string that would count as TLS.
+	tlsInactiveValue    = ""
 	tlsClientVerifyNone = "NONE"
 	tlsClientVerifyOK   = "SUCCESS"
 	tlsClientVerifyFail = "FAILED"
@@ -57,7 +61,7 @@ func ConnectionState(conn any) (tls.ConnectionState, bool) {
 
 // Apply copies frontend TLS facts into the Nauthilus request context.
 func Apply(requestContext nauthilus.RequestContext, active bool, state tls.ConnectionState, stateAvailable bool) nauthilus.RequestContext {
-	requestContext.TLS = boolString(active)
+	requestContext.TLS = tlsFlag(active)
 	if !active {
 		return requestContext
 	}
@@ -101,13 +105,15 @@ func applyPeerCertificate(requestContext *nauthilus.RequestContext, certificate 
 	requestContext.TLSFingerprint = fingerprint(certificate.Raw)
 }
 
-// boolString returns Nauthilus-compatible string booleans for TLS state.
-func boolString(value bool) string {
-	if value {
-		return tlsBoolTrue
+// tlsFlag returns the Nauthilus ssl value for the frontend TLS state: "on" when the
+// connection is encrypted and empty for cleartext, because Nauthilus treats every non-empty
+// value as TLS and would otherwise exempt cleartext logins from its TLS enforcement.
+func tlsFlag(active bool) string {
+	if active {
+		return tlsActiveValue
 	}
 
-	return tlsBoolFalse
+	return tlsInactiveValue
 }
 
 // clientVerifyState maps Go TLS verification facts to stable request metadata.

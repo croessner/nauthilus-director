@@ -69,8 +69,8 @@ const (
 	testTenantAttribute     = "tenant"
 	testTemporaryDelivery   = "451 4.3.0 Message delivery temporarily failed\r\n"
 	testSubmitterIdentity   = "technical-submit@example.test"
-	testTLSActive           = "true"
-	testTLSInactive         = "false"
+	testTLSActive           = "on"
+	testTLSInactive         = ""
 	testTLSClientVerifyNone = "NONE"
 	testTLSClientVerifyOK   = "SUCCESS"
 	testUnicodeRecipient    = "M\xc3\xbcller@example.test"
@@ -1346,7 +1346,7 @@ func TestPlaintextLMTPRecipientLookupReportsInactiveTLS(t *testing.T) {
 
 	lookup := identity.singleLookup(t)
 	if lookup.Context.TLS != testTLSInactive {
-		t.Fatalf("lookup TLS = %q, want plaintext ssl=false", lookup.Context.TLS)
+		t.Fatalf("lookup TLS = %q, want empty ssl for plaintext", lookup.Context.TLS)
 	}
 
 	if lookup.Context.TLSProtocol != "" || lookup.Context.TLSCipher != "" || lookup.Context.TLSClientVerify != "" {

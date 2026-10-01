@@ -1073,8 +1073,8 @@ func assertAuthRequest(t *testing.T, authenticator *recordingAuthenticator) {
 		t.Fatalf("auth client ID = %q, want desktop-client", got)
 	}
 
-	if got := authenticator.requests[0].Context.TLS; got != "true" {
-		t.Fatalf("auth TLS = %q, want true", got)
+	if got := authenticator.requests[0].Context.TLS; got != "on" {
+		t.Fatalf("auth TLS = %q, want on", got)
 	}
 }
 

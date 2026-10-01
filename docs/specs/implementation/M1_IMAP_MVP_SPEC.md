@@ -319,8 +319,9 @@ internal/protocol/imap/*_test.go
   `AUTH=<mechanism>` capabilities and advertise `LOGINDISABLED` when password
   auth is otherwise configured.
 - Populate the flat Nauthilus SSL request fields from the frontend TLS state.
-  `ssl` must be `"true"` after implicit TLS or successful STARTTLS and
-  `"false"` before STARTTLS; available protocol, cipher and client-certificate
+  `ssl` must be `"on"` after implicit TLS or successful STARTTLS and empty
+  before STARTTLS, because Nauthilus treats every non-empty `ssl` value as an
+  encrypted connection; available protocol, cipher and client-certificate
   facts must be copied without inventing missing metadata.
 
 ### IMAP ID Rules

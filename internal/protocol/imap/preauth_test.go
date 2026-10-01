@@ -160,15 +160,15 @@ func TestNauthilusContextReportsFrontendTLS(t *testing.T) {
 	cleartext := startTestSession(t, testPreauthConfig(TLSModeStartTLS, false))
 	cleartext.expectLine(t, greetingLine)
 	clearContext := cleartext.session.NauthilusRequestContext(mechanismPlain)
-	if clearContext.TLS != "false" {
-		t.Fatalf("cleartext TLS = %q, want false", clearContext.TLS)
+	if clearContext.TLS != "" {
+		t.Fatalf("cleartext TLS = %q, want empty", clearContext.TLS)
 	}
 
 	implicit := startTestSession(t, testPreauthConfig(TLSModeImplicit, false))
 	implicit.expectLine(t, greetingLine)
 	implicitContext := implicit.session.NauthilusRequestContext(mechanismPlain)
-	if implicitContext.TLS != "true" || implicitContext.TLSClientVerify != "NONE" {
-		t.Fatalf("implicit TLS context = %#v, want TLS true and no client cert", implicitContext)
+	if implicitContext.TLS != "on" || implicitContext.TLSClientVerify != "NONE" {
+		t.Fatalf("implicit TLS context = %#v, want TLS on and no client cert", implicitContext)
 	}
 }
 

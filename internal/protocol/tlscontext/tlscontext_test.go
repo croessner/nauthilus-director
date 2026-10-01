@@ -32,13 +32,19 @@ const (
 	testProtocolLMTP = "lmtp"
 	testPeerCN       = "submitter.example.test"
 	testIssuerCN     = "issuer.example.test"
+
+	// wireTLSActive and wireTLSInactive pin the literal Nauthilus ssl values: Nauthilus treats
+	// every non-empty ssl value as an encrypted connection, so only the empty string means cleartext.
+	wireTLSActive   = "on"
+	wireTLSInactive = ""
 )
 
-// TestApplyReportsInactiveTLS verifies plaintext auth attempts remain explicit.
+// TestApplyReportsInactiveTLS verifies cleartext auth attempts send an empty ssl value, the
+// only value Nauthilus reads as an unencrypted connection.
 func TestApplyReportsInactiveTLS(t *testing.T) {
 	requestContext := Apply(nauthilus.RequestContext{Protocol: testProtocolIMAP}, false, tls.ConnectionState{}, false)
-	if requestContext.TLS != tlsBoolFalse {
-		t.Fatalf("TLS = %q, want false", requestContext.TLS)
+	if requestContext.TLS != wireTLSInactive {
+		t.Fatalf("TLS = %q, want empty for cleartext", requestContext.TLS)
 	}
 
 	if requestContext.TLSClientVerify != "" {
@@ -49,8 +55,8 @@ func TestApplyReportsInactiveTLS(t *testing.T) {
 // TestApplyReportsActiveTLSWithoutState verifies tests and synthetic streams still mark TLS truthfully.
 func TestApplyReportsActiveTLSWithoutState(t *testing.T) {
 	requestContext := Apply(nauthilus.RequestContext{Protocol: testProtocolIMAP}, true, tls.ConnectionState{}, false)
-	if requestContext.TLS != tlsBoolTrue {
-		t.Fatalf("TLS = %q, want true", requestContext.TLS)
+	if requestContext.TLS != wireTLSActive {
+		t.Fatalf("TLS = %q, want on", requestContext.TLS)
 	}
 
 	if requestContext.TLSClientVerify != tlsClientVerifyNone {
@@ -83,8 +89,8 @@ func TestApplyCopiesPeerCertificateMetadata(t *testing.T) {
 		true,
 	)
 
-	if requestContext.TLS != tlsBoolTrue || requestContext.TLSClientVerify != tlsClientVerifyOK {
-		t.Fatalf("TLS fields = %q/%q, want true/SUCCESS", requestContext.TLS, requestContext.TLSClientVerify)
+	if requestContext.TLS != wireTLSActive || requestContext.TLSClientVerify != tlsClientVerifyOK {
+		t.Fatalf("TLS fields = %q/%q, want on/SUCCESS", requestContext.TLS, requestContext.TLSClientVerify)
 	}
 
 	if requestContext.TLSProtocol != tlsVersion13Name || requestContext.TLSCipher != "TLS_AES_128_GCM_SHA256" {

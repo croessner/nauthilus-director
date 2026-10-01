@@ -46,7 +46,7 @@ func TestGRPCNetworkClientAuthenticatesAgainstProtoService(t *testing.T) {
 			ClientPort:      "12345",
 			Protocol:        "imap",
 			Method:          "plain",
-			TLS:             "true",
+			TLS:             "on",
 			TLSClientVerify: "SUCCESS",
 			TLSClientCN:     "client.example.test",
 		},
@@ -71,7 +71,7 @@ func TestGRPCNetworkClientAuthenticatesAgainstProtoService(t *testing.T) {
 	if server.authRequest.GetProtocol() != "imap" || server.authRequest.GetMethod() != "plain" {
 		t.Fatal("protobuf auth request did not carry expected protocol and method")
 	}
-	if server.authRequest.GetSsl() != "true" || server.authRequest.GetSslClientVerify() != "SUCCESS" ||
+	if server.authRequest.GetSsl() != "on" || server.authRequest.GetSslClientVerify() != "SUCCESS" ||
 		server.authRequest.GetSslClientCn() != "client.example.test" {
 		t.Fatalf("protobuf TLS context = %#v", server.authRequest)
 	}

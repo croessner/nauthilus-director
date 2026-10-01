@@ -385,7 +385,7 @@ Mechanism handling rules:
   auth DTO; bearer introspection keeps it as the director-side mechanism
   context around the OIDC introspection result.
 - The director owns the transport privacy gate. Credential-bearing frontend mechanisms, including password and bearer mechanisms, must be rejected before Nauthilus is called unless the client has already crossed an implicit TLS or STARTTLS boundary with the director.
-- When frontend TLS is active, every protocol handler must populate the flat Nauthilus SSL DTO fields it can derive from the connection state, including `ssl`, TLS protocol, cipher, client-certificate verification status and bounded peer-certificate metadata. Missing TLS metadata must not be invented, but `ssl` must still truthfully report whether the frontend connection was encrypted.
+- When frontend TLS is active, every protocol handler must populate the flat Nauthilus SSL DTO fields it can derive from the connection state, including `ssl`, TLS protocol, cipher, client-certificate verification status and bounded peer-certificate metadata. Missing TLS metadata must not be invented, but `ssl` must still truthfully report whether the frontend connection was encrypted: `"on"` for TLS and an empty value for cleartext, because Nauthilus treats every non-empty `ssl` value as TLS.
 - SASL-IR is allowed where the frontend protocol supports it, but size limits and pre-auth timeouts still apply.
 - `EXTERNAL` is advertised only for the live TLS session when a client
   certificate chain is verified. A distinct authorization identity is denied

@@ -160,7 +160,7 @@ func (a *externalE2EAuthority) AssertLookup(t *testing.T) {
 	}
 
 	request := a.requests[0].Context
-	if request.Username != e2eExternalIdentity || request.Method != e2eExternalMethod || request.TLS != "true" || request.TLSClientVerify != "SUCCESS" {
+	if request.Username != e2eExternalIdentity || request.Method != e2eExternalMethod || request.TLS != "on" || request.TLSClientVerify != "SUCCESS" {
 		t.Fatalf("identity lookup context = %#v, want verified EXTERNAL identity", request)
 	}
 }
