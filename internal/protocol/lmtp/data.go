@@ -172,7 +172,7 @@ func (s *Session) handleBackendBDAT(ctx context.Context, chunk bdatCommand) erro
 		return s.finishUnknownDelivery(ctx)
 	}
 
-	result, err := s.transaction.backend.sendBDATChunk(s.reader, chunk, s.transaction.recipientCount)
+	result, err := s.transaction.backend.sendBDATChunk(s.progressReader(), chunk, s.transaction.recipientCount)
 	if err != nil {
 		s.recordBDATStream(ctx, operation, lmtpObservationResultFailure, lmtpReasonBDAT, lmtpStatusClassUnknown, time.Since(started))
 
@@ -215,6 +215,7 @@ func (s *Session) handleBackendBDAT(ctx context.Context, chunk bdatCommand) erro
 
 // finishKnownDelivery writes final statuses and clears transaction state.
 func (s *Session) finishKnownDelivery(ctx context.Context, result MessageResult) error {
+	s.endDataPhase()
 	s.recordDeliveryStatuses(ctx, result)
 	err := s.writeMessageResult(result)
 	s.closeBackendTransaction(backendCloseDeliveryComplete)
@@ -227,6 +228,7 @@ func (s *Session) finishKnownDelivery(ctx context.Context, result MessageResult)
 
 // finishUnknownDelivery writes director temporary failures and clears transaction state.
 func (s *Session) finishUnknownDelivery(ctx context.Context) error {
+	s.endDataPhase()
 	result := MessageResult{Statuses: unknownDeliveryStatuses(s.transaction.recipientCount)}
 	s.recordDeliveryStatuses(ctx, result)
 	err := s.writeMessageResult(result)
@@ -237,6 +239,7 @@ func (s *Session) finishUnknownDelivery(ctx context.Context) error {
 
 // finishSizeExceededDelivery writes permanent size failures and clears transaction state.
 func (s *Session) finishSizeExceededDelivery(ctx context.Context) error {
+	s.endDataPhase()
 	result := MessageResult{Statuses: sizeExceededDeliveryStatuses(s.transaction.recipientCount)}
 	s.recordDeliveryStatuses(ctx, result)
 	err := s.writeMessageResult(result)

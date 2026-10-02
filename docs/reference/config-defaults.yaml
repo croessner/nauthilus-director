@@ -995,6 +995,8 @@ runtime:
     timeouts:
         auth: 10s
         backend_connect: 5s
+        lmtp_data: 15m0s
+        lmtp_idle: 5m0s
         nauthilus: 5s
         preauth: 30s
         proxy_idle: 30m0s

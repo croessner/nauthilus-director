@@ -779,6 +779,8 @@ func lmtpSessionHandler(
 		CapabilityFilterDeny:           capabilityFilterDeny,
 		MaxMessageBytes:                maxMessageBytes,
 		PreauthTimeout:                 options.Timeouts.Preauth.Std(),
+		CommandIdleTimeout:             options.Timeouts.LMTPIdle.Std(),
+		DataTimeout:                    options.Timeouts.LMTPData.Std(),
 		AuthTimeout:                    options.Timeouts.Auth.Std(),
 		BackendConnectTimeout:          options.Timeouts.BackendConnect.Std(),
 		SessionLeaseTTL:                options.SessionLeaseTTL,

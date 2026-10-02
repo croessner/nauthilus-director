@@ -206,6 +206,8 @@ type RuntimeTimeouts struct {
 	Nauthilus      Duration `mapstructure:"nauthilus" yaml:"nauthilus"`
 	BackendConnect Duration `mapstructure:"backend_connect" yaml:"backend_connect"`
 	ProxyIdle      Duration `mapstructure:"proxy_idle" yaml:"proxy_idle"`
+	LMTPIdle       Duration `mapstructure:"lmtp_idle" yaml:"lmtp_idle"`
+	LMTPData       Duration `mapstructure:"lmtp_data" yaml:"lmtp_data"`
 	Shutdown       Duration `mapstructure:"shutdown" yaml:"shutdown"`
 }
 

@@ -44,6 +44,7 @@ type backendTransaction struct {
 	target                         backend.Backend
 	capabilityPolicy               CapabilityPolicy
 	preserveBackendDeliveryReceipt bool
+	enterFinalReplies              func() error
 }
 
 // backendForwardingEnabled reports whether this session should deliver to real LMTP backends.
@@ -90,6 +91,11 @@ func (s *Session) ensureBackendTransaction(ctx context.Context, target backend.B
 	connection, err := s.backendConnector.Connect(connectCtx, s.sessionBackendConnectRequest(target))
 
 	connectDuration := time.Since(connectStarted)
+
+	if err == nil {
+		err = s.inheritSessionDeadline(connection)
+	}
+
 	if err != nil {
 		connectReason := lmtpReasonClass(err)
 		s.recordBackendConnect(connectCtx, lmtpObservationResultFailure, connectReason, target.Identifier, target.BackendNode, target.ShardTag, connectDuration)
@@ -117,6 +123,7 @@ func (s *Session) ensureBackendTransaction(ctx context.Context, target backend.B
 		target:                         target,
 		capabilityPolicy:               s.capabilityPolicy,
 		preserveBackendDeliveryReceipt: s.preserveBackendDeliveryReceipt,
+		enterFinalReplies:              s.enterFinalReplyPhase,
 	}
 
 	sizeDeclared := s.sizeAdvertised && s.transaction.declaredSizePresent
@@ -127,6 +134,25 @@ func (s *Session) ensureBackendTransaction(ctx context.Context, target backend.B
 	}
 
 	s.transaction.backend = transaction
+
+	return nil
+}
+
+// inheritSessionDeadline replaces the backend setup deadline with the session phase deadline.
+//
+// Backend authentication, envelope replies and end-of-data replies then share the
+// frontend phase bounds, so a silent backend cannot hold the session open longer
+// than a silent frontend could.
+func (s *Session) inheritSessionDeadline(connection *BackendConnection) error {
+	if connection == nil || connection.Conn() == nil {
+		return nil
+	}
+
+	if err := connection.Conn().SetDeadline(s.currentDeadline()); err != nil {
+		_ = connection.Conn().Close()
+
+		return fmt.Errorf("%w: backend deadline", ErrBackendConnect)
+	}
 
 	return nil
 }
@@ -378,6 +404,12 @@ func formatBDATCommand(size int64, last bool) string {
 
 // readFinalStatuses reads backend final replies without desynchronizing recipient order.
 func (t *backendTransaction) readFinalStatuses(recipientCount int) MessageResult {
+	if t.enterFinalReplies != nil {
+		if err := t.enterFinalReplies(); err != nil {
+			return MessageResult{Statuses: unknownDeliveryStatuses(recipientCount)}
+		}
+	}
+
 	statuses := make([]DeliveryStatus, 0, recipientCount)
 	for len(statuses) < recipientCount {
 		response, err := t.connection.readResponse()

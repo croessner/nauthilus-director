@@ -256,10 +256,10 @@ func (c *TCPBackendConnector) Connect(
 		return nil, fmt.Errorf("%w: tcp dial", ErrBackendConnect)
 	}
 
-	if err := backend.SetHealthCheckDeadline(dialCtx, raw, request); err != nil {
+	if err := setBackendSetupDeadline(dialCtx, raw, request); err != nil {
 		_ = raw.Close()
 
-		return nil, fmt.Errorf("%w: health deadline", ErrBackendConnect)
+		return nil, fmt.Errorf("%w: setup deadline", ErrBackendConnect)
 	}
 
 	if _, err := backend.NewTransport().WriteProxyProtocolPreface(ctx, raw, request); err != nil {
@@ -278,6 +278,23 @@ func (c *TCPBackendConnector) Connect(
 	}
 
 	return connection, nil
+}
+
+// setBackendSetupDeadline bounds greeting, TLS and LHLO discovery by the connect timeout.
+//
+// Health connections keep that bound for their whole check. Session connections
+// get the session phase deadline from the caller once setup has finished.
+func setBackendSetupDeadline(ctx context.Context, conn net.Conn, request backend.ConnectRequest) error {
+	if request.Purpose == backend.ConnectPurposeHealth {
+		return backend.SetHealthCheckDeadline(ctx, conn, request)
+	}
+
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return nil
+	}
+
+	return conn.SetDeadline(deadline)
 }
 
 // newBackendConnection creates buffered protocol state around a backend stream.

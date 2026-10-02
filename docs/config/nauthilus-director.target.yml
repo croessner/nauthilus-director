@@ -87,6 +87,8 @@ runtime:
     nauthilus: 5s
     backend_connect: 5s
     proxy_idle: 30m
+    lmtp_idle: 5m
+    lmtp_data: 15m
     shutdown: 30s
 
   clients:

@@ -1,7 +1,7 @@
 .\" Copyright (C) 2026 Christian Rößner
 .\"
 .\" SPDX-License-Identifier: AGPL-3.0-only
-.TH NAUTHILUS-DIRECTOR.YAML 5 "2026-09-27" "nauthilus-director" "File Formats"
+.TH NAUTHILUS-DIRECTOR.YAML 5 "2026-10-02" "nauthilus-director" "File Formats"
 .SH NAME
 nauthilus-director.yaml \- Nauthilus Director YAML configuration format
 .SH DESCRIPTION
@@ -501,6 +501,61 @@ environments only.
 Do not silently delete active production sessions and do not claim production
 compatibility for old v1 key layouts without a separate breaking-change or
 migration decision.
+.SH SESSION TIMEOUTS
+Protocol sessions use the shared timeouts under
+.BR runtime.timeouts .
+Every value must be positive.
+.TP
+.B runtime.timeouts.preauth
+Absolute bound from accept until a session leaves its unauthenticated phase.
+IMAP, POP3 and ManageSieve sessions must authenticate and be handed to the
+backend within this time; LMTP sessions must have their first recipient
+accepted within it.
+After that point the bound no longer applies.
+Default:
+.BR 30s .
+.TP
+.B runtime.timeouts.proxy_idle
+Idle bound of an authenticated IMAP, POP3 or ManageSieve session in proxy mode.
+Any byte in either direction extends it.
+Default:
+.BR 30m .
+.TP
+.B runtime.timeouts.lmtp_idle
+Idle bound of an LMTP session after its first recipient was accepted.
+It limits the wait for the next frontend command, the gap between two reads of
+a DATA or BDAT body, and the wait for each backend envelope or chunk reply.
+Body progress extends it, so a large message is not limited by this value as a
+whole; a peer that stops sending is cut after it.
+Default:
+.BR 5m .
+.TP
+.B runtime.timeouts.lmtp_data
+Absolute bound of one LMTP message transfer, from
+.B DATA
+or the first
+.B BDAT
+chunk until the backend final replies.
+It covers the body transfer and the backend end-of-data processing, for example
+Sieve filtering of a large message, and stops a peer that keeps a transfer alive
+by trickling bytes.
+When it expires while the backend still owes final replies, every accepted
+recipient receives a temporary
+.B 451 4.3.0
+reply, so the sending MTA retries later.
+Size it for the largest accepted message over the slowest LMTP client link plus
+backend delivery time, and keep it at least as long as the client's own
+end-of-data wait (600 seconds for a common MTA default).
+Default:
+.BR 15m .
+.PP
+A peer that sends nothing for
+.B lmtp_idle
+during a placed LMTP session is disconnected, and a peer that sends nothing for
+.B preauth
+before its first accepted recipient is disconnected as well.
+Backend LMTP greetings, TLS and capability discovery are bounded by
+.BR runtime.timeouts.backend_connect .
 .SH LMTP LISTENERS AND BACKENDS
 LMTP listener entries use
 .B director.listeners.<name>.protocol: lmtp

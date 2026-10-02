@@ -211,6 +211,7 @@ func (s *Session) handleRCPT(ctx context.Context, command frontendCommand) error
 
 	s.transaction.recipientCount++
 	s.transaction.recipients = append(s.transaction.recipients, placement)
+	s.deadlines.markPlaced()
 	s.recordRecipientRoute(ctx, lmtpObservationResultAccepted, lmtpReasonOK, placement.SelectedShardTag)
 
 	return s.writeEnhanced(responseStatusOK, enhancedOK, "Recipient accepted")
@@ -228,6 +229,12 @@ func (s *Session) handleDATA(ctx context.Context, command frontendCommand) error
 	}
 
 	s.recordCommand(ctx, lmtpObservationOperationDATA, lmtpObservationResultStart, lmtpReasonOK, nil)
+
+	if err := s.beginDataPhase(); err != nil {
+		s.resetTransaction(ctx, "deadline")
+
+		return err
+	}
 
 	if s.backendForwardingEnabled() {
 		return s.handleBackendDATA(ctx)
@@ -275,6 +282,13 @@ func (s *Session) handleDATA(ctx context.Context, command frontendCommand) error
 		return s.finishUnknownDelivery(ctx)
 	}
 
+	if err := s.enterFinalReplyPhase(); err != nil {
+		_ = body.Abort(ctx, "deadline")
+		s.resetTransaction(ctx, "deadline")
+
+		return err
+	}
+
 	result, err := body.Finish(ctx)
 	if err != nil {
 		s.recordDATAStream(ctx, lmtpObservationResultFailure, lmtpReasonDATA, statusClass(responseStatusTemporary), time.Since(started))
@@ -308,6 +322,12 @@ func (s *Session) handleBDAT(ctx context.Context, command frontendCommand) error
 		}
 
 		s.recordBDATStream(ctx, bdatObservationOperation(bdat), lmtpObservationResultFailure, lmtpReasonProtocol, lmtpStatusClassUnknown, time.Since(started))
+
+		return err
+	}
+
+	if err := s.beginDataPhase(); err != nil {
+		s.resetTransaction(ctx, "deadline")
 
 		return err
 	}
@@ -355,6 +375,13 @@ func (s *Session) handleBDAT(ctx context.Context, command frontendCommand) error
 
 	body := s.transaction.body
 	s.transaction.body = nil
+
+	if err := s.enterFinalReplyPhase(); err != nil {
+		_ = body.Abort(ctx, "deadline")
+		s.resetTransaction(ctx, "deadline")
+
+		return err
+	}
 
 	result, err := body.Finish(ctx)
 	if err != nil {
@@ -561,6 +588,10 @@ func (s *Session) streamDATA(ctx context.Context, body MessageBody) (bool, error
 			return false, err
 		}
 
+		if err := s.refreshProgressDeadlines(); err != nil {
+			return false, err
+		}
+
 		if isDataTerminator(line) {
 			return writeFailed, writeErr
 		}
@@ -585,7 +616,7 @@ func (s *Session) copyBDATChunk(body MessageBody, size int64) error {
 		return nil
 	}
 
-	written, err := io.CopyN(body, s.reader, size)
+	written, err := io.CopyN(body, s.progressReader(), size)
 	if err != nil {
 		return err
 	}
@@ -603,7 +634,7 @@ func (s *Session) discardBDATChunk(size int64) error {
 		return nil
 	}
 
-	written, err := io.CopyN(io.Discard, s.reader, size)
+	written, err := io.CopyN(io.Discard, s.progressReader(), size)
 	if err != nil {
 		return err
 	}

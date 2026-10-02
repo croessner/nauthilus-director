@@ -242,6 +242,8 @@ func validateRuntime(runtime RuntimeConfig, authorities map[string]AuthorityConf
 	requirePositiveDuration("runtime.timeouts.nauthilus", runtime.Timeouts.Nauthilus, problems)
 	requirePositiveDuration("runtime.timeouts.backend_connect", runtime.Timeouts.BackendConnect, problems)
 	requirePositiveDuration("runtime.timeouts.proxy_idle", runtime.Timeouts.ProxyIdle, problems)
+	requirePositiveDuration("runtime.timeouts.lmtp_idle", runtime.Timeouts.LMTPIdle, problems)
+	requirePositiveDuration("runtime.timeouts.lmtp_data", runtime.Timeouts.LMTPData, problems)
 	requirePositiveDuration("runtime.timeouts.shutdown", runtime.Timeouts.Shutdown, problems)
 	requirePositiveDuration("runtime.clients.http.idle_connection_timeout", runtime.Clients.HTTP.IdleConnectionTimeout, problems)
 	requirePositiveInt("runtime.clients.http.max_connections_per_host", runtime.Clients.HTTP.MaxConnectionsPerHost, problems)

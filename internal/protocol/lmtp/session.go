@@ -85,7 +85,7 @@ type Session struct {
 	peerAuthMechanisms             []string
 	mtlsPeerAuth                   MTLSPeerAuthConfig
 
-	preauthTimeout             time.Duration
+	deadlines                  sessionDeadlines
 	authTimeout                time.Duration
 	backendConnectTimeout      time.Duration
 	sessionLeaseTTL            time.Duration
@@ -187,7 +187,7 @@ func NewSession(config SessionConfig, conn net.Conn) (*Session, error) {
 		preserveBackendDeliveryReceipt: config.PreserveBackendDeliveryReceipt,
 		peerAuthMechanisms:             append([]string(nil), config.PeerAuthMechanisms...),
 		mtlsPeerAuth:                   config.MTLSPeerAuth,
-		preauthTimeout:                 config.PreauthTimeout,
+		deadlines:                      newSessionDeadlines(config.PreauthTimeout, config.CommandIdleTimeout, config.DataTimeout),
 		authTimeout:                    config.AuthTimeout,
 		backendConnectTimeout:          config.BackendConnectTimeout,
 		sessionLeaseTTL:                defaultDeliveryLease(config.SessionLeaseTTL),
@@ -241,7 +241,9 @@ func (s *Session) Serve(ctx context.Context) (err error) {
 
 // startSession applies initial deadlines, sends the greeting and evaluates implicit mTLS state.
 func (s *Session) startSession() error {
-	if err := s.applyPreauthDeadline(); err != nil {
+	s.deadlines.start(time.Now())
+
+	if err := s.applyDeadlines(); err != nil {
 		return err
 	}
 
@@ -261,6 +263,10 @@ func (s *Session) serveNextCommand(ctx context.Context) (bool, error) {
 	if err := s.contextError(ctx); err != nil {
 		return false, err
 	}
+
+	// A failed refresh means the frontend stream is already closed; the read
+	// below reports that as EOF or a read error and keeps the earlier bound.
+	_ = s.applyDeadlines()
 
 	line, err := s.readLine()
 	if err != nil {
@@ -320,15 +326,6 @@ func (s *Session) PeerAuthenticated() bool {
 // PeerIdentity returns the bounded submitter identity recorded for peer auth.
 func (s *Session) PeerIdentity() string {
 	return s.peerIdentity
-}
-
-// applyPreauthDeadline sets the initial session read/write deadline.
-func (s *Session) applyPreauthDeadline() error {
-	if s.preauthTimeout <= 0 {
-		return nil
-	}
-
-	return s.conn.SetDeadline(time.Now().Add(s.preauthTimeout))
 }
 
 // processLine parses and dispatches one command line.
@@ -651,6 +648,7 @@ func (s *Session) abortActiveBody(ctx context.Context, reasonClass string) error
 func (s *Session) resetTransaction(ctx context.Context, reasonClass string) {
 	shouldRecord := s.transaction.active() || s.transaction.observed
 	_ = s.abortActiveBody(ctx, reasonClass)
+	s.deadlines.endData()
 	s.closeBackendTransaction(reasonClass)
 	s.closeTransactionHolds(ctx)
 

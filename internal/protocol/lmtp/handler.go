@@ -66,6 +66,8 @@ type SessionConfig struct {
 	CapabilityFilterDeny           []string
 	MaxMessageBytes                int64
 	PreauthTimeout                 time.Duration
+	CommandIdleTimeout             time.Duration
+	DataTimeout                    time.Duration
 	AuthTimeout                    time.Duration
 	BackendConnectTimeout          time.Duration
 	SessionLeaseTTL                time.Duration

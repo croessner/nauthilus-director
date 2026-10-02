@@ -681,6 +681,55 @@ func TestRuntimeStateDefaultsValidate(t *testing.T) {
 	}
 }
 
+// TestLMTPTimeoutDefaultsCarryLargeMessages keeps LMTP phase bounds sized for large deliveries.
+func TestLMTPTimeoutDefaultsCarryLargeMessages(t *testing.T) {
+	cfg := DefaultConfig()
+
+	if cfg.Runtime.Timeouts.LMTPIdle != NewDuration(5*time.Minute) {
+		t.Fatalf("runtime.timeouts.lmtp_idle = %s, want 5m0s", cfg.Runtime.Timeouts.LMTPIdle.String())
+	}
+
+	if cfg.Runtime.Timeouts.LMTPData != NewDuration(15*time.Minute) {
+		t.Fatalf("runtime.timeouts.lmtp_data = %s, want 15m0s", cfg.Runtime.Timeouts.LMTPData.String())
+	}
+
+	if cfg.Runtime.Timeouts.LMTPData.Std() <= cfg.Runtime.Timeouts.Preauth.Std() {
+		t.Fatal("runtime.timeouts.lmtp_data must exceed runtime.timeouts.preauth by default")
+	}
+}
+
+// TestLMTPTimeoutValidationRejectsUnboundedValues keeps LMTP sessions fail-closed and bounded.
+func TestLMTPTimeoutValidationRejectsUnboundedValues(t *testing.T) {
+	for name, item := range map[string]struct {
+		mutate func(*Config)
+		want   string
+	}{
+		"idle_zero": {
+			mutate: func(cfg *Config) { cfg.Runtime.Timeouts.LMTPIdle = 0 },
+			want:   "runtime.timeouts.lmtp_idle",
+		},
+		"idle_negative": {
+			mutate: func(cfg *Config) { cfg.Runtime.Timeouts.LMTPIdle = NewDuration(-time.Second) },
+			want:   "runtime.timeouts.lmtp_idle",
+		},
+		"data_zero": {
+			mutate: func(cfg *Config) { cfg.Runtime.Timeouts.LMTPData = 0 },
+			want:   "runtime.timeouts.lmtp_data",
+		},
+		"data_negative": {
+			mutate: func(cfg *Config) { cfg.Runtime.Timeouts.LMTPData = NewDuration(-time.Second) },
+			want:   "runtime.timeouts.lmtp_data",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			item.mutate(&cfg)
+
+			expectValidationError(t, cfg, item.want)
+		})
+	}
+}
+
 // TestUserHoldDefaultsValidate verifies placement-hold defaults are safe and documented.
 func TestUserHoldDefaultsValidate(t *testing.T) {
 	cfg := DefaultConfig()

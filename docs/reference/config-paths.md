@@ -692,6 +692,8 @@ such as `director.listeners.<name>.jmap`, are documented in `docs/man/nauthilus-
 | `runtime.state.reaper.max_pass_duration` | string | `2s` | stable | no | `NAUTHILUS_DIRECTOR_RUNTIME_STATE_REAPER_MAX_PASS_DURATION` | Bounded Redis runtime-state indexes, pagination limits, and due-time reaper behavior. |
 | `runtime.timeouts.auth` | string | `10s` | stable | no | `NAUTHILUS_DIRECTOR_RUNTIME_TIMEOUTS_AUTH` | Runtime process identity, control listener, timeout, and client behavior. |
 | `runtime.timeouts.backend_connect` | string | `5s` | stable | no | `NAUTHILUS_DIRECTOR_RUNTIME_TIMEOUTS_BACKEND_CONNECT` | Runtime process identity, control listener, timeout, and client behavior. |
+| `runtime.timeouts.lmtp_data` | string | `15m0s` | stable | no | `NAUTHILUS_DIRECTOR_RUNTIME_TIMEOUTS_LMTP_DATA` | Runtime process identity, control listener, timeout, and client behavior. |
+| `runtime.timeouts.lmtp_idle` | string | `5m0s` | stable | no | `NAUTHILUS_DIRECTOR_RUNTIME_TIMEOUTS_LMTP_IDLE` | Runtime process identity, control listener, timeout, and client behavior. |
 | `runtime.timeouts.nauthilus` | string | `5s` | stable | no | `NAUTHILUS_DIRECTOR_RUNTIME_TIMEOUTS_NAUTHILUS` | Runtime process identity, control listener, timeout, and client behavior. |
 | `runtime.timeouts.preauth` | string | `30s` | stable | no | `NAUTHILUS_DIRECTOR_RUNTIME_TIMEOUTS_PREAUTH` | Runtime process identity, control listener, timeout, and client behavior. |
 | `runtime.timeouts.proxy_idle` | string | `30m0s` | stable | no | `NAUTHILUS_DIRECTOR_RUNTIME_TIMEOUTS_PROXY_IDLE` | Runtime process identity, control listener, timeout, and client behavior. |

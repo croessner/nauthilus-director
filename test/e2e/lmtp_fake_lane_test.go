@@ -599,6 +599,74 @@ func TestServerBinaryPublicPlaintextLMTPNoAuthFlow(t *testing.T) {
 	assertLMTPProcessOutputSafe(t, process.output.String())
 }
 
+// TestServerBinaryPublicLMTPDeliveryOutlastsPreauthTimeout proves placed deliveries are not cut by runtime.timeouts.preauth.
+func TestServerBinaryPublicLMTPDeliveryOutlastsPreauthTimeout(t *testing.T) {
+	const preauth = 2 * time.Second
+
+	binary := e2eServerBinary(t)
+	redisFixture := startValkeySessionStore(t)
+	authority := startLMTPAuthority(t, lmtpAuthorityIdentities())
+	tlsBundle := writeLMTPPeerTLSBundle(t)
+	holdFinal := make(chan struct{})
+	fakeLMTPA := lmtpbackend.Start(t, lmtpbackend.Options{HoldFinal: holdFinal})
+	fakeLMTPB := lmtpbackend.Start(t, lmtpbackend.Options{})
+	fakeIMAPA := startFakeIMAPBackend(t, fakeBackendOptions{})
+	fakeIMAPB := startFakeIMAPBackend(t, fakeBackendOptions{})
+	lmtpAddress := loopbackAddress(t)
+	publishHealthyLMTPBackends(t, redisFixture, []string{e2eLMTPBackendAID, e2eLMTPBackendBID})
+	configPath := writeLMTPProcessConfig(t, lmtpProcessConfigOptions{
+		RedisAddress:        redisFixture.addr,
+		AuthorityURL:        authority.URL(),
+		LMTPAddress:         lmtpAddress,
+		LMTPSAddress:        loopbackAddress(t),
+		IMAPAddress:         loopbackAddress(t),
+		ControlAddress:      loopbackAddress(t),
+		LMTPListenerTLSMode: "plaintext",
+		DisableLMTPPeerAuth: true,
+		LMTPDisableChunking: true,
+		LMTPBackends: map[string]string{
+			e2eLMTPBackendAID: fakeLMTPA.Address(),
+			e2eLMTPBackendBID: fakeLMTPB.Address(),
+		},
+		IMAPBackends: map[string]string{
+			e2eBackendAID: fakeIMAPA.Address(),
+			e2eBackendBID: fakeIMAPB.Address(),
+		},
+		TLS: tlsBundle,
+	})
+	process := startDirectorProcess(t, binary, configPath)
+
+	waitForLMTPGreeting(t, lmtpAddress, process)
+	client := dialLMTP(t, lmtpAddress)
+	defer client.Close()
+	connected := time.Now()
+	client.ExpectLine("220 2.0.0 nauthilus-director LMTP ready\r\n")
+	client.WriteLine("LHLO slow-delivery.example")
+	client.ReadResponse()
+	client.WriteLine("MAIL FROM:<sender@example.test>")
+	client.ExpectLine("250 2.0.0 Sender accepted\r\n")
+	client.WriteLine("RCPT TO:<" + e2eLMTPRecipientA + ">")
+	client.ExpectLine("250 2.0.0 Recipient accepted\r\n")
+	time.Sleep(preauth / 2)
+	client.WriteLine("DATA")
+	client.ExpectLine("354 2.0.0 End data with <CR><LF>.<CR><LF>\r\n")
+	client.WriteRaw("slow-body-one\r\n")
+	time.Sleep(preauth / 2)
+	client.WriteRaw("slow-body-two\r\n.\r\n")
+	time.Sleep(preauth / 2)
+	close(holdFinal)
+	client.ExpectLine("250 2.1.5 Message accepted\r\n")
+
+	if elapsed := time.Since(connected); elapsed <= preauth {
+		t.Fatalf("delivery took %s, want longer than the preauth timeout %s", elapsed, preauth)
+	}
+
+	client.WriteLine("QUIT")
+	client.ExpectLine("221 2.0.0 Bye\r\n")
+	assertLMTPBackendObservation(t, fakeLMTPA.ExpectObservation(t), []string{lmtpPath(e2eLMTPRecipientA)}, false)
+	assertLMTPProcessOutputSafe(t, process.output.String())
+}
+
 // TestServerBinaryPublicLMTP8BITMIMEFlow proves BODY=8BITMIME through public and backend sockets.
 func TestServerBinaryPublicLMTP8BITMIMEFlow(t *testing.T) {
 	binary := e2eServerBinary(t)
@@ -1261,6 +1329,8 @@ runtime:
     nauthilus: 2s
     backend_connect: 2s
     proxy_idle: 2s
+    lmtp_idle: 30s
+    lmtp_data: 1m
 storage:
   redis:
     protocol: 2

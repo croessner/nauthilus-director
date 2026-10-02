@@ -104,6 +104,8 @@ func DefaultConfig() Config {
 				Nauthilus:      NewDuration(5 * time.Second),
 				BackendConnect: NewDuration(5 * time.Second),
 				ProxyIdle:      NewDuration(30 * time.Minute),
+				LMTPIdle:       NewDuration(5 * time.Minute),
+				LMTPData:       NewDuration(15 * time.Minute),
 				Shutdown:       NewDuration(30 * time.Second),
 			},
 			Clients: RuntimeClients{
