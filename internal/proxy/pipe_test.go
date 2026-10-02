@@ -309,3 +309,38 @@ func (l *recordingLeaseLifecycle) Close(context.Context) error {
 
 	return nil
 }
+
+// TestPipeReplacesInheritedPreauthDeadline keeps proxied sessions alive past an earlier absolute deadline.
+func TestPipeReplacesInheritedPreauthDeadline(t *testing.T) {
+	const preauth = 50 * time.Millisecond
+
+	frontendClient, frontendProxy := net.Pipe()
+	backendProxy, backendServer := net.Pipe()
+
+	defer func() { _ = frontendClient.Close() }()
+	defer func() { _ = backendServer.Close() }()
+
+	if err := frontendProxy.SetDeadline(time.Now().Add(preauth)); err != nil {
+		t.Fatalf("set inherited preauth deadline: %v", err)
+	}
+
+	resultCh := runTestPipe(t, PipeConfig{
+		Frontend:    frontendProxy,
+		Backend:     backendProxy,
+		IdleTimeout: time.Second,
+	})
+
+	time.Sleep(3 * preauth)
+
+	if _, err := io.WriteString(frontendClient, "after-preauth"); err != nil {
+		t.Fatalf("write frontend bytes after preauth: %v", err)
+	}
+
+	assertReadExact(t, backendServer, "after-preauth")
+
+	_ = frontendClient.Close()
+
+	if result := waitPipeResult(t, resultCh); result.Class == ResultTimeout {
+		t.Fatalf("result class = %q, inherited preauth deadline cut the proxied session", result.Class)
+	}
+}

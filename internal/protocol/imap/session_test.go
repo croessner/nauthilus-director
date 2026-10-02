@@ -86,6 +86,26 @@ func TestSessionContextUsesStableOpaqueID(t *testing.T) {
 	}
 }
 
+// TestSessionDefaultsProxyIdleTimeout keeps proxied sessions from inheriting the preauth deadline.
+func TestSessionDefaultsProxyIdleTimeout(t *testing.T) {
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	config := testSessionConfig()
+	config.ProxyIdleTimeout = 0
+	config.SessionLeaseTTL = 0
+
+	session, err := NewSession(config, server)
+	if err != nil {
+		t.Fatalf("NewSession returned error: %v", err)
+	}
+
+	if got := session.Context().ProxyIdleTimeout; got <= 0 {
+		t.Fatalf("proxy idle timeout = %s, want a positive default so proxy mode replaces the preauth deadline", got)
+	}
+}
+
 // TestSessionRejectsOversizedPreauthLine verifies line limits are enforced before parsing.
 func TestSessionRejectsOversizedPreauthLine(t *testing.T) {
 	err := runSessionInput(t, SessionConfig{

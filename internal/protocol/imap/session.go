@@ -147,7 +147,7 @@ func NewSession(config SessionConfig, conn net.Conn) (*Session, error) {
 			PreauthTimeout:         config.PreauthTimeout,
 			AuthTimeout:            config.AuthTimeout,
 			BackendConnectTimeout:  config.BackendConnectTimeout,
-			ProxyIdleTimeout:       config.ProxyIdleTimeout,
+			ProxyIdleTimeout:       defaultProxyIdleTimeout(config.ProxyIdleTimeout, leaseTTL),
 			MaxPreauthLineBytes:    config.MaxPreauthLineBytes,
 			MaxPreauthLiteralBytes: config.MaxPreauthLiteralBytes,
 			Capabilities:           append([]string(nil), config.Capabilities...),
@@ -477,6 +477,19 @@ func defaultSessionLeaseTTL(configured time.Duration, proxyIdle time.Duration) t
 	}
 
 	return time.Minute
+}
+
+// defaultProxyIdleTimeout keeps proxy mode on a positive idle bound.
+//
+// Proxy mode refreshes both stream deadlines only for a positive idle timeout;
+// without one the absolute preauth deadline set at session start would still cut
+// the authenticated session.
+func defaultProxyIdleTimeout(configured time.Duration, leaseTTL time.Duration) time.Duration {
+	if configured > 0 {
+		return configured
+	}
+
+	return leaseTTL
 }
 
 // defaultSessionIdleGrace returns the affinity retention grace after the final session closes.
