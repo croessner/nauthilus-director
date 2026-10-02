@@ -205,10 +205,10 @@ func (c *TCPBackendConnector) Connect(
 		return nil, fmt.Errorf("%w: tcp dial", ErrBackendConnect)
 	}
 
-	if err := backend.SetHealthCheckDeadline(dialCtx, raw, request); err != nil {
+	if err := backend.SetSetupDeadline(dialCtx, raw, request); err != nil {
 		_ = raw.Close()
 
-		return nil, fmt.Errorf("%w: health deadline", ErrBackendConnect)
+		return nil, fmt.Errorf("%w: setup deadline", ErrBackendConnect)
 	}
 
 	if _, err := backend.NewTransport().WriteProxyProtocolPreface(ctx, raw, request); err != nil {
@@ -226,12 +226,6 @@ func (c *TCPBackendConnector) Connect(
 		return nil, err
 	}
 
-	if err := backend.SetHealthCheckDeadline(dialCtx, raw, request); err != nil {
-		_ = raw.Close()
-
-		return nil, fmt.Errorf("%w: health deadline", ErrBackendConnect)
-	}
-
 	return connection, nil
 }
 
@@ -246,9 +240,6 @@ func newBackendConnection(conn net.Conn) *BackendConnection {
 
 // prepare performs greeting, configured TLS, and post-TLS capability discovery.
 func (c *BackendConnection) prepare(ctx context.Context, target backend.Backend) error {
-	clearDeadline := c.applyContextDeadline(ctx)
-	defer clearDeadline()
-
 	switch strings.ToLower(strings.TrimSpace(target.TLS.Mode)) {
 	case backendTLSDisabled, backendTLSNone, backendTLSPlaintext:
 		if err := c.readGreeting(); err != nil {
@@ -278,26 +269,6 @@ func (c *BackendConnection) prepare(ctx context.Context, target backend.Backend)
 		return c.queryCapabilities()
 	default:
 		return fmt.Errorf("%w: unsupported backend tls mode", ErrBackendTLS)
-	}
-}
-
-// applyContextDeadline bounds backend setup I/O with the caller's deadline.
-func (c *BackendConnection) applyContextDeadline(ctx context.Context) func() {
-	if c == nil || c.conn == nil || ctx == nil {
-		return func() {}
-	}
-
-	deadline, ok := ctx.Deadline()
-	if !ok {
-		return func() {}
-	}
-
-	_ = c.conn.SetDeadline(deadline)
-
-	return func() {
-		if c.conn != nil {
-			_ = c.conn.SetDeadline(time.Time{})
-		}
 	}
 }
 

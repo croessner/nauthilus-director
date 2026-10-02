@@ -109,7 +109,33 @@ type TransportError struct {
 
 // SetHealthCheckDeadline bounds all protocol I/O for health-only connections.
 func SetHealthCheckDeadline(ctx context.Context, conn net.Conn, request ConnectRequest) error {
-	if conn == nil || request.Purpose != ConnectPurposeHealth {
+	if request.Purpose != ConnectPurposeHealth {
+		return nil
+	}
+
+	return SetSetupDeadline(ctx, conn, request)
+}
+
+// SetHandshakeStepDeadline bounds one post-connect handshake step such as the backend login.
+//
+// Session callers apply it before every pre-proxy exchange; proxy mode then
+// replaces it with the proxy idle deadline.
+func SetHandshakeStepDeadline(conn net.Conn, timeout time.Duration) error {
+	if conn == nil || timeout <= 0 {
+		return nil
+	}
+
+	return conn.SetDeadline(time.Now().Add(timeout))
+}
+
+// SetSetupDeadline bounds backend greeting, TLS and capability discovery for every purpose.
+//
+// The deadline comes from the connect context or, without one, from the
+// request timeout. It stays on the stream until the caller replaces it, so a
+// backend that accepts TCP but never answers cannot hold a frontend session.
+// Health connections keep it for their whole check.
+func SetSetupDeadline(ctx context.Context, conn net.Conn, request ConnectRequest) error {
+	if conn == nil {
 		return nil
 	}
 

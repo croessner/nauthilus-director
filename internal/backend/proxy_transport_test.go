@@ -103,6 +103,57 @@ func TestSetHealthCheckDeadlinePreservesSessionStreamsAndBoundsHealthIO(t *testi
 	}
 }
 
+// TestSetSetupDeadlineBoundsSessionHandshakes keeps silent backends from holding session setup.
+func TestSetSetupDeadlineBoundsSessionHandshakes(t *testing.T) {
+	deadline := time.Now().Add(time.Minute).Round(time.Millisecond)
+
+	ctx, cancel := context.WithDeadline(context.Background(), deadline)
+	defer cancel()
+
+	sessionConn := newRecordingTransportConn(nil, nil)
+	if err := SetSetupDeadline(ctx, sessionConn, ConnectRequest{Purpose: ConnectPurposeSession, Timeout: time.Second}); err != nil {
+		t.Fatalf("SetSetupDeadline session returned error: %v", err)
+	}
+
+	if !sessionConn.deadline.Equal(deadline) {
+		t.Fatalf("session setup deadline = %s, want context deadline %s", sessionConn.deadline, deadline)
+	}
+
+	fallbackConn := newRecordingTransportConn(nil, nil)
+	before := time.Now()
+
+	if err := SetSetupDeadline(context.Background(), fallbackConn, ConnectRequest{Purpose: ConnectPurposeSession, Timeout: time.Second}); err != nil {
+		t.Fatalf("SetSetupDeadline fallback returned error: %v", err)
+	}
+
+	if fallbackConn.deadline.Before(before.Add(time.Second)) || fallbackConn.deadline.After(time.Now().Add(time.Second)) {
+		t.Fatalf("fallback setup deadline = %s, want request timeout from now", fallbackConn.deadline)
+	}
+}
+
+// TestSetHandshakeStepDeadlineBoundsOneStep starts a fresh bound for each pre-proxy step.
+func TestSetHandshakeStepDeadlineBoundsOneStep(t *testing.T) {
+	conn := newRecordingTransportConn(nil, nil)
+	before := time.Now()
+
+	if err := SetHandshakeStepDeadline(conn, time.Second); err != nil {
+		t.Fatalf("SetHandshakeStepDeadline returned error: %v", err)
+	}
+
+	if conn.deadline.Before(before.Add(time.Second)) || conn.deadline.After(time.Now().Add(time.Second)) {
+		t.Fatalf("handshake step deadline = %s, want one timeout from now", conn.deadline)
+	}
+
+	unbounded := newRecordingTransportConn(nil, nil)
+	if err := SetHandshakeStepDeadline(unbounded, 0); err != nil {
+		t.Fatalf("SetHandshakeStepDeadline zero returned error: %v", err)
+	}
+
+	if !unbounded.deadline.IsZero() {
+		t.Fatalf("zero timeout set deadline %s, want unchanged", unbounded.deadline)
+	}
+}
+
 // TestBackendTransportSessionWritesProxyHeaderBeforeBackendBytes verifies first-byte ordering.
 func TestBackendTransportSessionWritesProxyHeaderBeforeBackendBytes(t *testing.T) {
 	conn := newProxyRecordingTransportConn()

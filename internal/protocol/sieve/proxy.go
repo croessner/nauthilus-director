@@ -26,6 +26,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/croessner/nauthilus-director/internal/backend"
 	"github.com/croessner/nauthilus-director/internal/observability"
 	"github.com/croessner/nauthilus-director/internal/placement"
 	"github.com/croessner/nauthilus-director/internal/proxy"
@@ -90,7 +91,12 @@ func (s *Session) transitionAuthenticatedSession(
 		return commandOutcome{}, s.writeNo(codeTryLater, "Backend service temporarily unavailable")
 	}
 
-	if err := AuthenticateBackend(connection, s.placement.Backend.Backend, backendCredentials); err != nil {
+	err = backend.SetHandshakeStepDeadline(connection.Conn(), s.backendConnectTimeout)
+	if err == nil {
+		err = AuthenticateBackend(connection, s.placement.Backend.Backend, backendCredentials)
+	}
+
+	if err != nil {
 		authReason := sieveReasonClass(err)
 		s.recordBackendAuth(connectCtx, sieveObservationResultFailure, authReason, credentials.Mechanism().Normalized())
 		connectSpan.End(sieveObservationResultFailure, authReason)

@@ -412,7 +412,12 @@ func (s *Session) transitionAuthenticatedSession(
 		return commandOutcome{}, s.writeTagged(tag, responseNo, authUnavailableText)
 	}
 
-	if err := AuthenticateBackend(connection, s.placement.Backend.Backend, backendCredentials); err != nil {
+	err = backend.SetHandshakeStepDeadline(connection.Conn(), s.context.BackendConnectTimeout)
+	if err == nil {
+		err = AuthenticateBackend(connection, s.placement.Backend.Backend, backendCredentials)
+	}
+
+	if err != nil {
 		s.recordBackendAuth(connectCtx, observationResultFailure, reasonClass(err), credentials.Mechanism().Normalized())
 		connectSpan.End(observationResultFailure, reasonClass(err))
 

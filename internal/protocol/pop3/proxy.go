@@ -26,6 +26,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/croessner/nauthilus-director/internal/backend"
 	"github.com/croessner/nauthilus-director/internal/nauthilus"
 	"github.com/croessner/nauthilus-director/internal/observability"
 	"github.com/croessner/nauthilus-director/internal/placement"
@@ -91,7 +92,12 @@ func (s *Session) transitionAuthenticatedSession(
 	s.recordBackendConnect(connectCtx, pop3ObservationResultOK, pop3ReasonOK, connectDuration)
 
 	selectedUser := selectedBackendUsername(result, s.placement.Routing.AccountKey)
-	if err := AuthenticateBackend(connection, s.placement.Backend.Backend, credentials, selectedUser); err != nil {
+	err = backend.SetHandshakeStepDeadline(connection.Conn(), s.backendConnectTimeout)
+	if err == nil {
+		err = AuthenticateBackend(connection, s.placement.Backend.Backend, credentials, selectedUser)
+	}
+
+	if err != nil {
 		authReason := pop3ReasonClass(err)
 		s.recordBackendAuth(connectCtx, pop3ObservationResultFailure, authReason, backendAuthObservationMechanism(s.placement.Backend.Backend.Auth.Mode, credentials))
 		s.recordAuthenticate(ctx, pop3ObservationResultFailure, authReason, frontendMechanism)

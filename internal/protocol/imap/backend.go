@@ -212,10 +212,10 @@ func (c *TCPBackendConnector) Connect(
 		return nil, fmt.Errorf("%w: tcp dial", ErrBackendConnect)
 	}
 
-	if err := backend.SetHealthCheckDeadline(dialCtx, raw, request); err != nil {
+	if err := backend.SetSetupDeadline(dialCtx, raw, request); err != nil {
 		_ = raw.Close()
 
-		return nil, fmt.Errorf("%w: health deadline", ErrBackendConnect)
+		return nil, fmt.Errorf("%w: setup deadline", ErrBackendConnect)
 	}
 
 	if _, err := backend.NewTransport().WriteProxyProtocolPreface(ctx, raw, request); err != nil {

@@ -515,6 +515,19 @@ After that point the bound no longer applies.
 Default:
 .BR 30s .
 .TP
+.B runtime.timeouts.backend_connect
+Bound of every backend handshake step before a session reaches proxy mode.
+The TCP connect, outbound PROXY header, greeting, STARTTLS or implicit TLS and
+capability discovery share one window of this length; the backend login of an
+IMAP, POP3 or ManageSieve session then gets a fresh window of the same length.
+A backend that accepts the connection but never answers fails the login with
+the protocol's temporary failure instead of holding the session open, and
+health checks report it as a timeout.
+Proxy mode replaces the bound with
+.BR runtime.timeouts.proxy_idle .
+Default:
+.BR 5s .
+.TP
 .B runtime.timeouts.proxy_idle
 Idle bound of an authenticated IMAP, POP3 or ManageSieve session in proxy mode.
 Any byte in either direction extends it.
@@ -554,8 +567,9 @@ A peer that sends nothing for
 during a placed LMTP session is disconnected, and a peer that sends nothing for
 .B preauth
 before its first accepted recipient is disconnected as well.
-Backend LMTP greetings, TLS and capability discovery are bounded by
-.BR runtime.timeouts.backend_connect .
+LMTP backend setup is bounded by
+.B runtime.timeouts.backend_connect
+as well; afterwards the backend stream follows the LMTP session bounds above.
 .SH LMTP LISTENERS AND BACKENDS
 LMTP listener entries use
 .B director.listeners.<name>.protocol: lmtp
