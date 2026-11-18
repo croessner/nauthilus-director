@@ -42,6 +42,8 @@ const (
 	e2eMCPScopeUsers      = "nauthilus-director.diagnostics.users"
 	e2eMCPProtocolVersion = "2026-07-28"
 	e2eMCPGroup           = "admin"
+	e2eMCPIntrospectID    = "director-mcp"
+	e2eMCPIntrospectPW    = "director-mcp-introspection-secret-sentinel"
 )
 
 // mcpBearerTransport presents one bearer token on every SDK client request.
@@ -83,7 +85,8 @@ func TestServerBinaryMCPDiagnosticsEndpoint(t *testing.T) {
 		"account":   {e2eAccount},
 		"tenant":    {e2eTenant},
 		"mailShard": {e2eShardTag},
-	}, fakeOIDCAuthorityOptions{SASLBearerTokens: map[string]fakeSASLBearerToken{
+	}, fakeOIDCAuthorityOptions{ExtraIntrospectionClients: map[string]string{e2eMCPIntrospectID: e2eMCPIntrospectPW},
+		SASLBearerTokens: map[string]fakeSASLBearerToken{
 		e2eMCPToken:           mcpUserToken([]string{e2eMCPClient, resource}, e2eMCPScopeRuntime, e2eMCPScopeUsers),
 		e2eMCPRuntimeOnly:     mcpUserToken([]string{resource}, e2eMCPScopeRuntime),
 		e2eMCPForeignAudience: mcpUserToken([]string{e2eMCPClient, "https://other.example.test/"}, e2eMCPScopeRuntime),
@@ -105,9 +108,13 @@ func TestServerBinaryMCPDiagnosticsEndpoint(t *testing.T) {
       authority: default
       allowed_clients: [%q]
       required_groups: [%q]
+      introspection_client:
+        client_id: %q
+        auth_method: client_secret_basic
+        client_secret_file: %q
       limits:
         timeout: 5s
-`, mcpAddress, resource, e2eMCPClient, e2eMCPGroup),
+`, mcpAddress, resource, e2eMCPClient, e2eMCPGroup, e2eMCPIntrospectID, writeProcessSecretFile(t, e2eMCPIntrospectPW)),
 	})
 	process := startDirectorProcess(t, binary, configPath)
 
@@ -132,7 +139,7 @@ func TestServerBinaryMCPDiagnosticsEndpoint(t *testing.T) {
 		t.Fatal("MCP tokens were not introspected at the Nauthilus issuer")
 	}
 
-	assertOutputOmits(t, process.output.String(), e2eMCPToken, e2eMCPRuntimeOnly, e2eMCPForeignAudience)
+	assertOutputOmits(t, process.output.String(), e2eMCPToken, e2eMCPRuntimeOnly, e2eMCPForeignAudience, e2eMCPIntrospectPW)
 	assertNoSecretText(t, process.output.String())
 }
 

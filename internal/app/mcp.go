@@ -66,7 +66,12 @@ func provideMCPHandle(
 		return nil, fmt.Errorf("mcp authority %q is not configured", settings.Authority)
 	}
 
-	introspector, err := nauthilus.NewOIDCIntrospectorFromAuthority(authority, &http.Client{Timeout: cfg.Runtime.Timeouts.Nauthilus.Std()})
+	if err := settings.IntrospectionClient.CheckMaterial(); err != nil {
+		return nil, fmt.Errorf("mcp introspection client: %w", err)
+	}
+
+	introspector, err := nauthilus.NewOIDCIntrospector(settings.IntrospectionOIDC(authority.OIDC),
+		&http.Client{Timeout: cfg.Runtime.Timeouts.Nauthilus.Std()})
 	if err != nil {
 		return nil, fmt.Errorf("mcp token introspection: %w", err)
 	}

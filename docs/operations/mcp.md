@@ -79,22 +79,30 @@ back to accepting a token.
 
 ## Nauthilus configuration
 
-The director introspects with the confidential client it already uses for
-OIDC caller authentication (`auth.authorities.<name>.oidc.client_credentials`).
-Let that client own the MCP resource and admit the MCP client in Nauthilus:
+Prefer a confidential client dedicated to the endpoint that owns the MCP
+resource and admits the MCP client. It needs no usable grant:
 
 ```yaml
 identity:
   oidc:
     clients:
-      - client_id: nauthilus-director
-        # existing client secret, grants and backchannel scopes stay as they are
+      - client_id: director-mcp
+        client_secret: ${OIDC_CLIENT_SECRET_DIRECTOR_MCP}
+        token_endpoint_auth_method: client_secret_post
+        grant_types: [authorization_code]
+        redirect_uris: []
+        scopes: [openid]
         token_introspection:
           resources:
             - https://director.example.org/mcp
           clients:
             - support-cli
 ```
+
+Configure it on the director under `runtime.servers.mcp.introspection_client`
+(`client_id`, `auth_method`, `client_secret_file` or `client_private_key_file`).
+Without it the director introspects with the authority's OIDC client
+credentials, which then must own the resource instead.
 
 The MCP client (`support-cli` in this example) is a static client that may
 request the `nauthilus-director.diagnostics.runtime` and
@@ -118,6 +126,10 @@ runtime:
       authority: default
       allowed_clients: [support-cli]
       required_groups: [admin]
+      introspection_client:
+        client_id: director-mcp
+        auth_method: client_secret_post
+        client_secret_file: /etc/nauthilus-director/mcp/client-secret
       trusted_proxies: [127.0.0.1/32]
       limits:
         timeout: 15s
@@ -130,9 +142,9 @@ runtime:
         enabled: true
 ```
 
-The authority named by `authority` must have `oidc.enabled`,
-`oidc.client_credentials.enabled`, an introspection endpoint client-auth
-method with its secret or key file, and `oidc.issuer`. The issuer is published
+The authority named by `authority` must have `oidc.enabled` and `oidc.issuer`.
+Without `introspection_client` it also needs `oidc.client_credentials.enabled`
+and an introspection endpoint client-auth method with its secret or key file. The issuer is published
 unchanged in the protected resource metadata.
 
 For a local test on one host, a plain http loopback resource needs no proxy:

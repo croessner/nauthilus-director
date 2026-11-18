@@ -20,6 +20,9 @@ paths:
   runtime.servers.mcp.groups_claim:
     stability: stable
     description: Introspection claim that lists the caller's groups, as a JSON array or one space-separated string.
+  runtime.servers.mcp.introspection_client.**:
+    stability: stable
+    description: Optional dedicated Nauthilus client that owns the MCP resource and introspects its tokens instead of the authority's OIDC client credentials. Secrets only as mounted files.
   runtime.servers.mcp.trusted_proxies:
     stability: stable
     description: IP addresses or CIDRs of the TLS-terminating reverse proxies whose X-Forwarded-For, X-Forwarded-Proto and X-Forwarded-Host headers are trusted.

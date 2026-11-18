@@ -195,8 +195,10 @@ The URL path is the endpoint path, and the RFC 9728 metadata is served under
 .BR /.well-known/oauth-protected-resource/<path> .
 Nauthilus is the authorization server: the director introspects every bearer
 token through the OIDC client credentials of the authority named by
-.B runtime.servers.mcp.authority
-and publishes that authority's
+.BR runtime.servers.mcp.authority ,
+or through the dedicated client in
+.B runtime.servers.mcp.introspection_client
+when one is set, and publishes that authority's
 .B oidc.issuer
 as authorization server.
 A token is accepted only when it is active and unexpired, names a subject

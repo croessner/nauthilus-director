@@ -987,6 +987,13 @@ runtime:
             authority: default
             enabled: false
             groups_claim: groups
+            introspection_client:
+                auth_method: ""
+                client_assertion_alg: ""
+                client_id: ""
+                client_key_id: ""
+                client_private_key_file: ""
+                client_secret_file: ""
             limits:
                 failed_auth_per_minute: 30
                 max_concurrent: 8

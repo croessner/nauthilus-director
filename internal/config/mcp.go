@@ -67,6 +67,9 @@ type MCPServerConfig struct {
 	AllowedClients        []string        `mapstructure:"allowed_clients" yaml:"allowed_clients"`
 	RequiredGroups        []string        `mapstructure:"required_groups" yaml:"required_groups"`
 	GroupsClaim           string          `mapstructure:"groups_claim" yaml:"groups_claim"`
+	// IntrospectionClient optionally replaces the authority's client credentials for
+	// introspection, so the resource can be owned by a client dedicated to this endpoint.
+	IntrospectionClient ListenerIntrospectionClientConfig `mapstructure:"introspection_client" yaml:"introspection_client"`
 	TrustedProxies        []string        `mapstructure:"trusted_proxies" yaml:"trusted_proxies"`
 	AllowedHosts          []string        `mapstructure:"allowed_hosts" yaml:"allowed_hosts"`
 	AllowedBrowserOrigins []string        `mapstructure:"allowed_browser_origins" yaml:"allowed_browser_origins"`
@@ -225,10 +228,12 @@ func isMCPBrowserOrigin(value string) bool {
 	return parsed.RawQuery == "" && parsed.Fragment == "" && parsed.User == nil
 }
 
-// validateMCPAuthority requires an introspection-capable authority with a known issuer, which the
-// protected resource metadata names as the authorization server.
+// validateMCPAuthority requires an authority with a known issuer, which the protected resource
+// metadata names as the authorization server, and introspection client material: either a
+// dedicated introspection_client or the authority's OIDC client credentials.
 func validateMCPAuthority(section MCPServerConfig, authorities map[string]AuthorityConfig, problems *[]string) {
 	path := mcpServerPath + ".authority"
+	client := section.IntrospectionClient.normalize()
 
 	name := strings.TrimSpace(section.Authority)
 	if name == "" {
@@ -237,11 +242,77 @@ func validateMCPAuthority(section MCPServerConfig, authorities map[string]Author
 		return
 	}
 
-	validateIntrospectionAuthority(path, name, "the MCP endpoint", authorities, problems)
+	authority, ok := authorities[name]
 
-	if authority, ok := authorities[name]; ok && strings.TrimSpace(authority.OIDC.Issuer) == "" {
+	switch {
+	case client.Dedicated():
+		if !validateMCPDedicatedClient(path, client, authority, ok, problems) {
+			return
+		}
+	case client.hasMaterialWithoutClient():
+		addProblem(problems, mcpServerPath+".introspection_client.client_id is required when client credentials are set")
+	default:
+		validateIntrospectionAuthority(path, name, "the MCP endpoint", authorities, problems)
+	}
+
+	if ok && strings.TrimSpace(authority.OIDC.Issuer) == "" {
 		addProblem(problems, path+" must reference an authority with oidc.issuer set")
 	}
+}
+
+// validateMCPDedicatedClient checks the dedicated client's material and the OIDC authority it
+// introspects at; it reports whether the authority exists.
+func validateMCPDedicatedClient(path string, client ListenerIntrospectionClientConfig, authority AuthorityConfig, known bool, problems *[]string) bool {
+	validateBearerIntrospectionClientAuth(mcpServerPath+".introspection_client", BearerIntrospectionConfig{
+		ClientSecretFile: client.ClientSecretFile, ClientPrivateKeyFile: client.ClientPrivateKeyFile, AuthMethod: client.AuthMethod,
+	}, problems)
+
+	if !known {
+		addProblem(problems, path+" must reference a configured authority")
+
+		return false
+	}
+
+	if !authority.OIDC.Enabled {
+		addProblem(problems, path+" must reference an authority with oidc.enabled")
+	}
+
+	return true
+}
+
+// IntrospectionOIDC returns the OIDC settings the endpoint introspects with: the authority's
+// settings, with the client credentials replaced by the dedicated introspection client when one
+// is configured. Nothing of the authority's own client is merged into a dedicated client.
+func (c MCPServerConfig) IntrospectionOIDC(authority AuthorityOIDCConfig) AuthorityOIDCConfig {
+	client := c.IntrospectionClient.normalize()
+	if !client.Dedicated() {
+		return authority
+	}
+
+	scopes := authority.ClientCredentials.Scopes
+	if len(scopes) == 0 {
+		scopes = []string{"openid"}
+	}
+
+	refresh := authority.ClientCredentials.RefreshBeforeExpiry
+	if refresh <= 0 {
+		refresh = NewDuration(time.Minute)
+	}
+
+	authority.ClientCredentials = AuthorityOIDCClientCredentialsConfig{
+		Enabled:                         true,
+		ClientID:                        client.ClientID,
+		ClientSecretFile:                client.ClientSecretFile,
+		TokenEndpointAuthMethod:         client.AuthMethod,
+		IntrospectionEndpointAuthMethod: client.AuthMethod,
+		ClientPrivateKeyFile:            client.ClientPrivateKeyFile,
+		ClientKeyID:                     client.ClientKeyID,
+		ClientAssertionAlg:              client.ClientAssertionAlg,
+		Scopes:                          scopes,
+		RefreshBeforeExpiry:             refresh,
+	}
+
+	return authority
 }
 
 // validateMCPClients requires at least one admitted OAuth client and rejects ambiguous ids.

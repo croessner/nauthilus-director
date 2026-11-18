@@ -138,6 +138,53 @@ func TestMCPValidationRejectsUnsafeSettings(t *testing.T) {
 	}
 }
 
+// TestMCPDedicatedIntrospectionClient pins that a dedicated client replaces the authority client
+// for introspection, needs only an OIDC authority with issuer, and must carry its own material.
+func TestMCPDedicatedIntrospectionClient(t *testing.T) {
+	cfg := mcpEnabledConfig()
+	cfg.Auth.Authorities = cloneAuthoritiesForMCPTest(cfg.Auth.Authorities)
+	authority := cfg.Auth.Authorities["default"]
+	authority.OIDC.ClientCredentials.Enabled = false
+	cfg.Auth.Authorities["default"] = authority
+	cfg.Runtime.Servers.Control.Auth.OIDC.Enabled = false
+	cfg.Runtime.Servers.MCP.IntrospectionClient = ListenerIntrospectionClientConfig{ClientID: "director-mcp",
+		ClientSecretFile: Secret("/etc/nauthilus-director/mcp/client-secret")}
+
+	if err := NewLoader().Validate(cfg); err != nil {
+		t.Fatalf("dedicated introspection client = %v", err)
+	}
+
+	assertDedicatedIntrospectionOIDC(t, cfg.Runtime.Servers.MCP.IntrospectionOIDC(authority.OIDC), authority.OIDC.Issuer)
+
+	cfg.Runtime.Servers.MCP.IntrospectionClient.ClientSecretFile = SecretString{}
+
+	if err := NewLoader().Validate(cfg); err == nil || !strings.Contains(err.Error(), "runtime.servers.mcp.introspection_client must configure exactly one") {
+		t.Fatalf("dedicated client without secret = %v", err)
+	}
+
+	cfg.Runtime.Servers.MCP.IntrospectionClient = ListenerIntrospectionClientConfig{ClientSecretFile: Secret("/x")}
+
+	if err := NewLoader().Validate(cfg); err == nil || !strings.Contains(err.Error(), "introspection_client.client_id is required") {
+		t.Fatalf("material without client = %v", err)
+	}
+
+	if got := mcpEnabledConfig().Runtime.Servers.MCP.IntrospectionOIDC(authority.OIDC); got.ClientCredentials.Enabled {
+		t.Fatal("without a dedicated client the authority settings must be returned unchanged")
+	}
+}
+
+// assertDedicatedIntrospectionOIDC checks that only the dedicated client authenticates introspection.
+func assertDedicatedIntrospectionOIDC(t *testing.T, oidc AuthorityOIDCConfig, issuer string) {
+	t.Helper()
+
+	credentials := oidc.ClientCredentials
+	if !credentials.Enabled || credentials.ClientID != "director-mcp" || credentials.IntrospectionEndpointAuthMethod != oidcClientSecretBasic ||
+		credentials.ClientSecretFile.Value() != "/etc/nauthilus-director/mcp/client-secret" || !credentials.ClientSecret.IsZero() ||
+		oidc.Issuer != issuer {
+		t.Fatalf("introspection OIDC = %+v", credentials)
+	}
+}
+
 // TestMCPValidationSkipsDisabledEndpoint pins that a disabled endpoint never blocks a config load.
 func TestMCPValidationSkipsDisabledEndpoint(t *testing.T) {
 	cfg := DefaultConfig()
