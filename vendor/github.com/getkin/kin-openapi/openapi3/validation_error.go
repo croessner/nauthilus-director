@@ -160,8 +160,11 @@ type FieldVersionMismatchError struct {
 	// "$defs", "prefixItems", "contains", ...).
 	Field string
 	// MinVersion is the minimum OpenAPI version that allows the field
-	// (e.g. "3.1").
+	// (e.g. "3.1"). Empty when the field is flagged for RemovedIn instead.
 	MinVersion string
+	// RemovedIn is the OpenAPI version that no longer allows the field
+	// (e.g. "3.1" for a boolean exclusiveMinimum). Empty when the field is flagged for MinVersion instead.
+	RemovedIn string
 	// Cause is the underlying leaf error. Walked by errors.Unwrap.
 	Cause error
 	// Origin is the source location of the offending element when the
@@ -175,8 +178,9 @@ func (e *FieldVersionMismatchError) Error() string { return e.Cause.Error() }
 func (e *FieldVersionMismatchError) Unwrap() error { return e.Cause }
 
 // ServerURLTemplateError clusters server URL template failures —
-// mismatched braces and undeclared variables (template variables not
-// matched by Server.Variables, or vice versa).
+// mismatched braces, undeclared variables (template variables not
+// matched by Server.Variables) and unused variables (Server.Variables
+// entries the URL template never references).
 type ServerURLTemplateError struct {
 	// URL is the server URL whose template failed validation.
 	URL string
@@ -418,6 +422,23 @@ func (e *SchemaPatternRegexError) Error() string { return e.Cause.Error() }
 
 func (e *SchemaPatternRegexError) Unwrap() error { return e.Cause }
 
+// SecurityRequirementSchemeUndefinedError reports an implicit security scheme
+// name that is absent from the entry document's components.securitySchemes.
+// It is emitted by T.Validate for OpenAPI 3.0 and 3.1 documents.
+type SecurityRequirementSchemeUndefinedError struct {
+	ValidationError
+	Scheme string
+	// JSONPointer locates the offending name in a Security Requirement Object.
+	// Shared objects are reported at their first location in document order.
+	JSONPointer string
+	// Origin is the containing document or operation's source location.
+	Origin *Origin
+}
+
+func (e *SecurityRequirementSchemeUndefinedError) As(target any) bool {
+	return asValidationError(target, &e.ValidationError)
+}
+
 // InvalidSecuritySchemeTypeError clusters "security scheme 'type' can't
 // be X" failures. The OpenAPI 3.x spec accepts only `apiKey`, `http`,
 // `oauth2`, `openIdConnect`, and `mutualTLS` (3.1+); this fires when a
@@ -435,11 +456,10 @@ func (e *InvalidSecuritySchemeTypeError) Error() string {
 }
 
 // InvalidHTTPSchemeError clusters "security scheme of type 'http' has
-// invalid 'scheme' value X" failures. The OpenAPI/HTTP-auth registry
-// accepts only `bearer`, `basic`, `negotiate`, `digest`; this fires
-// when an http scheme declares anything else.
+// invalid 'scheme' value X" failures. This fires when an http scheme
+// is empty or is not a valid HTTP authentication scheme name.
 type InvalidHTTPSchemeError struct {
-	// Scheme is the rejected scheme value (e.g. "mutual", "oauth").
+	// Scheme is the rejected scheme value (e.g. "", "not valid").
 	Scheme string
 	// Origin is the source location of the offending security scheme
 	// when the document was loaded with Loader.IncludeOrigin = true.
@@ -448,6 +468,40 @@ type InvalidHTTPSchemeError struct {
 
 func (e *InvalidHTTPSchemeError) Error() string {
 	return fmt.Sprintf("security scheme of type 'http' has invalid 'scheme' value %q", e.Scheme)
+}
+
+// ContentKeysOverlapError clusters "content keys X and Y both match Z"
+// failures. Keys of a content map are compared case-insensitively and may
+// each list several media ranges, so two distinct keys (e.g.
+// "application/json" and "Application/JSON") can match the same media type.
+type ContentKeysOverlapError struct {
+	// Key and OtherKey are the overlapping content map keys.
+	Key, OtherKey string
+	// MediaRange is the lowercased media range both keys list.
+	MediaRange string
+	// Origin is the source location of the media type under Key when the
+	// document was loaded with Loader.IncludeOrigin = true.
+	Origin *Origin
+}
+
+func (e *ContentKeysOverlapError) Error() string {
+	return fmt.Sprintf("content keys %q and %q both match %q", e.OtherKey, e.Key, e.MediaRange)
+}
+
+// InvalidEncodingContentTypeError clusters "encoding has invalid
+// 'contentType' value X" failures. An encoding's contentType must be a
+// media type (e.g. "image/png"), a wildcard ("image/*" or "*/*"), or a
+// comma-separated list of those.
+type InvalidEncodingContentTypeError struct {
+	// ContentType is the rejected contentType value (e.g. "png", "*/png").
+	ContentType string
+	// Origin is the source location of the offending encoding when the
+	// document was loaded with Loader.IncludeOrigin = true.
+	Origin *Origin
+}
+
+func (e *InvalidEncodingContentTypeError) Error() string {
+	return fmt.Sprintf("encoding has invalid 'contentType' value %q", e.ContentType)
 }
 
 // UnresolvedRefError clusters "found unresolved ref: X" failures fired
@@ -535,6 +589,55 @@ func (e *DuplicateParameterError) Error() string {
 	return fmt.Sprintf("more than one %q parameter has name %q", e.In, e.Name)
 }
 
+// AdditionalOperationsDuplicateMethodError clusters "additionalOperations
+// key duplicates a fixed field" failures. OpenAPI 3.2's
+// `additionalOperations` map may only carry methods that have no dedicated
+// Path Item Object field.
+type AdditionalOperationsDuplicateMethodError struct {
+	// Method is the offending additionalOperations key.
+	Method string
+	// Origin is the source location of the offending path item when the
+	// document was loaded with Loader.IncludeOrigin = true.
+	Origin *Origin
+}
+
+func (e *AdditionalOperationsDuplicateMethodError) Error() string {
+	return fmt.Sprintf("additionalOperations key %q duplicates a fixed path item field", e.Method)
+}
+
+// AdditionalOperationsFixedMethodCaseError clusters "additionalOperations key
+// differs only by case from a fixed field method" failures. Although HTTP
+// method names are case-sensitive, such a key (e.g. `post`) is easily
+// confused with the method of the matching fixed field (`POST`) and would
+// let operations with different security requirements look alike.
+type AdditionalOperationsFixedMethodCaseError struct {
+	// Method is the offending additionalOperations key.
+	Method string
+	// FixedMethod is the fixed field method Method differs from only by case.
+	FixedMethod string
+	// Origin is the source location of the offending path item when the
+	// document was loaded with Loader.IncludeOrigin = true.
+	Origin *Origin
+}
+
+func (e *AdditionalOperationsFixedMethodCaseError) Error() string {
+	return fmt.Sprintf("additionalOperations key %q differs only by case from fixed path item method %q", e.Method, e.FixedMethod)
+}
+
+// AdditionalOperationsInvalidMethodError clusters "additionalOperations key
+// is not an HTTP method" failures. Keys must be RFC 9110 tokens.
+type AdditionalOperationsInvalidMethodError struct {
+	// Method is the offending additionalOperations key.
+	Method string
+	// Origin is the source location of the offending path item when the
+	// document was loaded with Loader.IncludeOrigin = true.
+	Origin *Origin
+}
+
+func (e *AdditionalOperationsInvalidMethodError) Error() string {
+	return fmt.Sprintf("additionalOperations key %q is not a valid HTTP method token", e.Method)
+}
+
 // DuplicateRequiredFieldError clusters "duplicate field in required" failures.
 // The elements of a schema's `required` array MUST be unique (JSON Schema
 // 2020-12 §6.5.3 for OpenAPI 3.1, draft-04 for OpenAPI 3.0).
@@ -548,6 +651,21 @@ type DuplicateRequiredFieldError struct {
 
 func (e *DuplicateRequiredFieldError) Error() string {
 	return fmt.Sprintf("duplicate field %q in required", e.Field)
+}
+
+// SchemaMultipleOfNotPositiveError clusters "multipleOf must be greater than
+// zero" failures. The value of a schema's `multipleOf` MUST be strictly greater
+// than 0 (JSON Schema 2020-12 §6.2.1 for OpenAPI 3.1, draft-04 for OpenAPI 3.0).
+type SchemaMultipleOfNotPositiveError struct {
+	// MultipleOf is the rejected `multipleOf` value.
+	MultipleOf float64
+	// Origin is the source location of the offending schema when the
+	// document was loaded with Loader.IncludeOrigin = true.
+	Origin *Origin
+}
+
+func (e *SchemaMultipleOfNotPositiveError) Error() string {
+	return fmt.Sprintf("multipleOf must be greater than zero, got %g", e.MultipleOf)
 }
 
 // DuplicateTagError clusters "more than one tag has name X" failures. Each tag
@@ -645,6 +763,12 @@ func (e *ServerURLMismatchedBraces) As(target any) bool {
 type ServerURLUndeclaredVariables struct{ ValidationError }
 
 func (e *ServerURLUndeclaredVariables) As(target any) bool {
+	return asValidationError(target, &e.ValidationError)
+}
+
+type ServerURLUnusedVariables struct{ ValidationError }
+
+func (e *ServerURLUnusedVariables) As(target any) bool {
 	return asValidationError(target, &e.ValidationError)
 }
 
@@ -884,6 +1008,12 @@ func (e *SchemaReadOnlyWriteOnlyExclusive) As(target any) bool {
 	return asValidationError(target, &e.ValidationError)
 }
 
+type SchemaBooleanFieldsExclusive struct{ ValidationError }
+
+func (e *SchemaBooleanFieldsExclusive) As(target any) bool {
+	return asValidationError(target, &e.ValidationError)
+}
+
 // ForbiddenFieldError leaves.
 
 type HeaderNameForbidden struct{ ValidationError }
@@ -942,6 +1072,24 @@ func (e *JSONSchemaDialectFieldFor31Plus) As(target any) bool {
 type ConstFieldFor31Plus struct{ ValidationError }
 
 func (e *ConstFieldFor31Plus) As(target any) bool {
+	return asValidationError(target, &e.ValidationError)
+}
+
+type BooleanSchemaFor31Plus struct{ ValidationError }
+
+func (e *BooleanSchemaFor31Plus) As(target any) bool {
+	return asValidationError(target, &e.ValidationError)
+}
+
+type ExclusiveBoundBooleanBefore31 struct{ ValidationError }
+
+func (e *ExclusiveBoundBooleanBefore31) As(target any) bool {
+	return asValidationError(target, &e.ValidationError)
+}
+
+type ExclusiveBoundNumberFor31Plus struct{ ValidationError }
+
+func (e *ExclusiveBoundNumberFor31Plus) As(target any) bool {
 	return asValidationError(target, &e.ValidationError)
 }
 
@@ -1014,6 +1162,12 @@ func (e *IfFieldFor31Plus) As(target any) bool {
 type ThenFieldFor31Plus struct{ ValidationError }
 
 func (e *ThenFieldFor31Plus) As(target any) bool {
+	return asValidationError(target, &e.ValidationError)
+}
+
+type TypeArrayFor31Plus struct{ ValidationError }
+
+func (e *TypeArrayFor31Plus) As(target any) bool {
 	return asValidationError(target, &e.ValidationError)
 }
 
@@ -1142,6 +1296,12 @@ func newServerURLUndeclaredVariables(serverURL string, origin *Origin) error {
 		&ServerURLUndeclaredVariables{ValidationError{Message: msg}}, origin)
 }
 
+func newServerURLUnusedVariables(serverURL string, variable string, origin *Origin) error {
+	msg := fmt.Sprintf("server has unused variable %s", variable)
+	return newServerURLTemplateError(serverURL,
+		&ServerURLUnusedVariables{ValidationError{Message: msg}}, origin)
+}
+
 func newSchemaItemsRequired(origin *Origin) error {
 	const msg = "when schema type is 'array', schema 'items' must be non-null"
 	return newRequiredField("schema.items",
@@ -1217,11 +1377,8 @@ func newParameterContentSchemaExactlyOne(origin *Origin) error {
 		&ParameterContentSchemaExactlyOne{ValidationError{Message: msg}}, origin)
 }
 
-// newHeaderContentSchemaExactlyOne formats the same way the existing
-// header.go site does, including the historical "%v" dump of the
-// Header struct, so the Error() string remains byte-identical.
-func newHeaderContentSchemaExactlyOne(header any, origin *Origin) error {
-	msg := fmt.Sprintf("parameter must contain exactly one of content and schema: %v", header)
+func newHeaderContentSchemaExactlyOne(origin *Origin) error {
+	const msg = "header must contain exactly one of content and schema"
 	return newExactlyOneField([]string{"content", "schema"},
 		&HeaderContentSchemaExactlyOne{ValidationError{Message: msg}}, origin)
 }
@@ -1329,6 +1486,12 @@ func newSchemaReadOnlyWriteOnlyExclusive(origin *Origin) error {
 		&SchemaReadOnlyWriteOnlyExclusive{ValidationError{Message: msg}}, origin)
 }
 
+func newSchemaBooleanFieldsExclusive(origin *Origin) error {
+	const msg = "a boolean schema carries no other keyword, and the others would be lost on marshal"
+	return newMutuallyExclusiveFields("boolean schema", "schema keywords",
+		&SchemaBooleanFieldsExclusive{ValidationError{Message: msg}}, origin)
+}
+
 // newForbiddenField wraps leaf in a *ForbiddenFieldError carrying the
 // name of the field that the spec forbids in the current context.
 func newForbiddenField(field string, leaf error, origin *Origin) error {
@@ -1424,7 +1587,7 @@ func exampleValueOrigin(ex *Example, fallback *Origin) *Origin {
 	if ex == nil || ex.Origin == nil {
 		return fallback
 	}
-	if loc, ok := ex.Origin.Fields["value"]; ok {
+	if loc, ok := ex.Origin.Fields.Lookup("value"); ok {
 		return &Origin{Key: &loc}
 	}
 	return ex.Origin
@@ -1457,6 +1620,34 @@ func newLicenseIdentifierFieldFor31Plus(origin *Origin) error {
 	const msg = "field identifier is for OpenAPI >=3.1"
 	return newFieldVersionMismatch("identifier",
 		"3.1", &LicenseIdentifierFieldFor31Plus{ValidationError{Message: msg}}, origin)
+}
+
+func newBooleanSchemaFor31Plus(origin *Origin) error {
+	const msg = "a boolean schema is for OpenAPI >=3.1; before that a schema MUST be a Schema Object"
+	return newFieldVersionMismatch("boolean schema",
+		"3.1", &BooleanSchemaFor31Plus{ValidationError{Message: msg}}, origin)
+}
+
+func newTypeArrayFor31Plus(origin *Origin) error {
+	const msg = "an array of types is for OpenAPI >=3.1; before that type MUST be a single string"
+	return newFieldVersionMismatch("type",
+		"3.1", &TypeArrayFor31Plus{ValidationError{Message: msg}}, origin)
+}
+
+func newExclusiveBoundNumberFor31Plus(field string, origin *Origin) error {
+	msg := "a numeric " + field + " is for OpenAPI >=3.1; before that it MUST be a boolean"
+	return newFieldVersionMismatch(field,
+		"3.1", &ExclusiveBoundNumberFor31Plus{ValidationError{Message: msg}}, origin)
+}
+
+func newExclusiveBoundBooleanBefore31(field string, origin *Origin) error {
+	msg := "a boolean " + field + " is for OpenAPI <3.1; since then it MUST be a number"
+	return &FieldVersionMismatchError{
+		Field:     field,
+		RemovedIn: "3.1",
+		Cause:     &ExclusiveBoundBooleanBefore31{ValidationError{Message: msg}},
+		Origin:    origin,
+	}
 }
 
 func newWebhooksFieldFor31Plus(origin *Origin) error {
@@ -1531,8 +1722,24 @@ func (e *ItemSchemaFieldFor32Plus) As(target any) bool {
 	return asValidationError(target, &e.ValidationError)
 }
 
+type QueryFieldFor32Plus struct{ ValidationError }
+
+func (e *QueryFieldFor32Plus) As(target any) bool {
+	return asValidationError(target, &e.ValidationError)
+}
+
+type AdditionalOperationsFieldFor32Plus struct{ ValidationError }
+
+func (e *AdditionalOperationsFieldFor32Plus) As(target any) bool {
+	return asValidationError(target, &e.ValidationError)
+}
+
 var fieldFor32PlusLeaves = map[string]func(msg string) error{
 	"itemSchema": func(m string) error { return &ItemSchemaFieldFor32Plus{ValidationError{Message: m}} },
+	"query":      func(m string) error { return &QueryFieldFor32Plus{ValidationError{Message: m}} },
+	"additionalOperations": func(m string) error {
+		return &AdditionalOperationsFieldFor32Plus{ValidationError{Message: m}}
+	},
 }
 
 func errFieldFor32Plus(field string, origin *Origin) error {
@@ -1544,6 +1751,18 @@ func errFieldFor32Plus(field string, origin *Origin) error {
 		leaf = &ValidationError{Message: msg}
 	}
 	return newFieldVersionMismatch(field, "3.2", leaf, origin)
+}
+
+func newAdditionalOperationsDuplicateMethod(method string, origin *Origin) error {
+	return &AdditionalOperationsDuplicateMethodError{Method: method, Origin: origin}
+}
+
+func newAdditionalOperationsFixedMethodCase(method, fixedMethod string, origin *Origin) error {
+	return &AdditionalOperationsFixedMethodCaseError{Method: method, FixedMethod: fixedMethod, Origin: origin}
+}
+
+func newAdditionalOperationsInvalidMethod(method string, origin *Origin) error {
+	return &AdditionalOperationsInvalidMethodError{Method: method, Origin: origin}
 }
 
 func newPathParameterRequired(param string, origin *Origin) error {
@@ -1581,6 +1800,14 @@ func newInvalidSecuritySchemeType(typ string, origin *Origin) error {
 
 func newInvalidHTTPScheme(scheme string, origin *Origin) error {
 	return &InvalidHTTPSchemeError{Scheme: scheme, Origin: origin}
+}
+
+func newContentKeysOverlap(otherKey, key, mediaRange string, origin *Origin) error {
+	return &ContentKeysOverlapError{Key: key, OtherKey: otherKey, MediaRange: mediaRange, Origin: origin}
+}
+
+func newInvalidEncodingContentType(contentType string, origin *Origin) error {
+	return &InvalidEncodingContentTypeError{ContentType: contentType, Origin: origin}
 }
 
 func newUnresolvedRef(ref string, origin *Origin) error {

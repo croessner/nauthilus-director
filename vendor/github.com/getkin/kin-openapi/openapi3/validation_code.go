@@ -28,13 +28,27 @@ type CodedError interface {
 	Code() string
 }
 
+func (e *AdditionalOperationsDuplicateMethodError) Code() string {
+	return "additional-operations-duplicate-method"
+}
+func (e *AdditionalOperationsFieldFor32Plus) Code() string {
+	return "additional-operations-field-for-3-2-plus"
+}
+func (e *AdditionalOperationsFixedMethodCaseError) Code() string {
+	return "additional-operations-fixed-method-case"
+}
+func (e *AdditionalOperationsInvalidMethodError) Code() string {
+	return "additional-operations-invalid-method"
+}
 func (e *AnchorFieldFor31Plus) Code() string             { return "anchor-field-for-3-1-plus" }
 func (e *APIKeyInInvalidError) Code() string             { return "security-scheme-apikey-in-invalid" }
 func (e *APIKeySecuritySchemeNameRequired) Code() string { return "security-scheme-name-required" }
 func (e *CommentFieldFor31Plus) Code() string            { return "comment-field-for-3-1-plus" }
 func (e *ConflictingPathsError) Code() string            { return "conflicting-paths" }
+func (e *BooleanSchemaFor31Plus) Code() string           { return "boolean-schema-for-3-1-plus" }
 func (e *ConstFieldFor31Plus) Code() string              { return "const-field-for-3-1-plus" }
 func (e *ContainsFieldFor31Plus) Code() string           { return "contains-field-for-3-1-plus" }
+func (e *ContentKeysOverlapError) Code() string          { return "content-keys-overlap" }
 func (e *ContentEncodingFieldFor31Plus) Code() string    { return "content-encoding-field-for-3-1-plus" }
 func (e *ContentMediaTypeFieldFor31Plus) Code() string {
 	return "content-media-type-field-for-3-1-plus"
@@ -53,7 +67,13 @@ func (e *DuplicateTagError) Code() string              { return "duplicate-tag" 
 func (e *DynamicAnchorFieldFor31Plus) Code() string    { return "dynamic-anchor-field-for-3-1-plus" }
 func (e *DynamicRefFieldFor31Plus) Code() string       { return "dynamic-ref-field-for-3-1-plus" }
 func (e *ElseFieldFor31Plus) Code() string             { return "else-field-for-3-1-plus" }
-func (e *ExamplesFieldFor31Plus) Code() string         { return "examples-field-for-3-1-plus" }
+func (e *ExclusiveBoundBooleanBefore31) Code() string {
+	return "exclusive-bound-boolean-before-3-1"
+}
+func (e *ExclusiveBoundNumberFor31Plus) Code() string {
+	return "exclusive-bound-number-for-3-1-plus"
+}
+func (e *ExamplesFieldFor31Plus) Code() string { return "examples-field-for-3-1-plus" }
 func (e *ExampleValueExternalValueExclusive) Code() string {
 	return "value-external-value-mutually-exclusive"
 }
@@ -73,6 +93,7 @@ func (e *InfoRequired) Code() string                         { return "info-requ
 func (e *InfoSummaryFieldFor31Plus) Code() string            { return "summary-field-for-3-1-plus" }
 func (e *InfoTitleRequired) Code() string                    { return "info-title-required" }
 func (e *InfoVersionRequired) Code() string                  { return "info-version-required" }
+func (e *InvalidEncodingContentTypeError) Code() string      { return "encoding-content-type-invalid" }
 func (e *InvalidHTTPSchemeError) Code() string               { return "security-scheme-http-scheme-invalid" }
 func (e *InvalidParameterInError) Code() string              { return "parameter-in-invalid" }
 func (e *InvalidSecuritySchemeTypeError) Code() string       { return "security-scheme-type-invalid" }
@@ -119,6 +140,7 @@ func (e *PatternPropertiesFieldFor31Plus) Code() string {
 }
 func (e *PrefixItemsFieldFor31Plus) Code() string   { return "prefix-items-field-for-3-1-plus" }
 func (e *PropertyNamesFieldFor31Plus) Code() string { return "property-names-field-for-3-1-plus" }
+func (e *QueryFieldFor32Plus) Code() string         { return "query-field-for-3-2-plus" }
 func (e *RequestBodyContentRequired) Code() string  { return "request-body-content-required" }
 func (e *ResponseDescriptionRequired) Code() string { return "response-description-required" }
 func (e *ResponsesNonEmptyRequired) Code() string   { return "responses-required" }
@@ -128,8 +150,14 @@ func (e *SchemaAdditionalPropertiesBothForms) Code() string {
 func (e *SchemaFieldFor31Plus) Code() string    { return "schema-field-for-3-1-plus" }
 func (e *SchemaItemsRequired) Code() string     { return "schema-items-required" }
 func (e *SchemaPatternRegexError) Code() string { return "schema-pattern-regex-invalid" }
+func (e *SchemaMultipleOfNotPositiveError) Code() string {
+	return "schema-multiple-of-not-positive"
+}
 func (e *SchemaReadOnlyWriteOnlyExclusive) Code() string {
 	return "read-only-write-only-mutually-exclusive"
+}
+func (e *SchemaBooleanFieldsExclusive) Code() string {
+	return "boolean-schema-with-other-keywords"
 }
 func (e *SchemaTypeError) Code() string { return "schema-type-unsupported" }
 func (e *SchemaUnevaluatedItemsBothForms) Code() string {
@@ -137,6 +165,9 @@ func (e *SchemaUnevaluatedItemsBothForms) Code() string {
 }
 func (e *SchemaUnevaluatedPropertiesBothForms) Code() string {
 	return "unevaluated-properties-both-forms-exclusive"
+}
+func (e *SecurityRequirementSchemeUndefinedError) Code() string {
+	return "security-requirement-scheme-undefined"
 }
 func (e *SecuritySchemeBearerFormatForbidden) Code() string { return "bearer-format-forbidden" }
 func (e *SecuritySchemeFlowsForbidden) Code() string        { return "flows-forbidden" }
@@ -146,6 +177,7 @@ func (e *SecuritySchemeNameForbidden) Code() string         { return "name-forbi
 func (e *ServerURLRequired) Code() string                   { return "server-url-required" }
 func (e *ServerURLTemplateError) Code() string              { return "server-url-template-invalid" }
 func (e *ServerVariableDefaultRequired) Code() string       { return "default-required" }
+func (e *TypeArrayFor31Plus) Code() string                  { return "type-array-for-3-1-plus" }
 func (e *ThenFieldFor31Plus) Code() string                  { return "then-field-for-3-1-plus" }
 func (e *UnevaluatedItemsFieldFor31Plus) Code() string      { return "unevaluated-items-field-for-3-1-plus" }
 func (e *UnevaluatedPropertiesFieldFor31Plus) Code() string {
@@ -163,15 +195,22 @@ func ValidationErrorCodes() []string {
 }
 
 var validationErrorCodes = []string{
+	"additional-operations-duplicate-method",
+	"additional-operations-field-for-3-2-plus",
+	"additional-operations-fixed-method-case",
+	"additional-operations-invalid-method",
 	"additional-properties-both-forms-exclusive",
 	"anchor-field-for-3-1-plus",
 	"authorization-url-forbidden",
 	"bearer-format-forbidden",
+	"boolean-schema-for-3-1-plus",
+	"boolean-schema-with-other-keywords",
 	"comment-field-for-3-1-plus",
 	"conflicting-paths",
 	"const-field-for-3-1-plus",
 	"contains-field-for-3-1-plus",
 	"content-encoding-field-for-3-1-plus",
+	"content-keys-overlap",
 	"content-media-type-field-for-3-1-plus",
 	"content-or-schema-exactly-one",
 	"content-schema-field-for-3-1-plus",
@@ -187,9 +226,12 @@ var validationErrorCodes = []string{
 	"dynamic-anchor-field-for-3-1-plus",
 	"dynamic-ref-field-for-3-1-plus",
 	"else-field-for-3-1-plus",
+	"encoding-content-type-invalid",
 	"example-examples-mutually-exclusive",
 	"example-violates-schema",
 	"examples-field-for-3-1-plus",
+	"exclusive-bound-boolean-before-3-1",
+	"exclusive-bound-number-for-3-1-plus",
 	"external-docs-url-required",
 	"extra-sibling-fields",
 	"flows-forbidden",
@@ -227,14 +269,17 @@ var validationErrorCodes = []string{
 	"pattern-properties-field-for-3-1-plus",
 	"prefix-items-field-for-3-1-plus",
 	"property-names-field-for-3-1-plus",
+	"query-field-for-3-2-plus",
 	"read-only-write-only-mutually-exclusive",
 	"request-body-content-required",
 	"response-description-required",
 	"responses-required",
 	"schema-field-for-3-1-plus",
 	"schema-items-required",
+	"schema-multiple-of-not-positive",
 	"schema-pattern-regex-invalid",
 	"schema-type-unsupported",
+	"security-requirement-scheme-undefined",
 	"security-scheme-apikey-in-invalid",
 	"security-scheme-http-scheme-invalid",
 	"security-scheme-name-required",
@@ -245,6 +290,7 @@ var validationErrorCodes = []string{
 	"summary-field-for-3-1-plus",
 	"then-field-for-3-1-plus",
 	"token-url-forbidden",
+	"type-array-for-3-1-plus",
 	"unevaluated-items-both-forms-exclusive",
 	"unevaluated-items-field-for-3-1-plus",
 	"unevaluated-properties-both-forms-exclusive",

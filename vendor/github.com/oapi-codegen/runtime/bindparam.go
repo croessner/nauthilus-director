@@ -15,7 +15,6 @@ package runtime
 
 import (
 	"encoding"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -80,9 +79,31 @@ type BindStyledParameterOptions struct {
 	// When set to "byte" and the destination is []byte, the value is
 	// base64-decoded rather than treated as a generic slice.
 	Format string
+	// Types is the OpenAPI 3.1 multi-type union member list of the parameter
+	// (e.g. ["string", "integer"]). It is only consulted when the
+	// destination is an empty interface (`any`): the value binds to the
+	// first member that parses, trying boolean, integer, number, then
+	// string, with numeric detection following the JSON number production.
+	// The bound value's dynamic type is one of exactly bool, int64, float64,
+	// string, or, with Format "byte", []byte (widths narrow only under the
+	// NarrowUnionNumericFormats package variable). Concrete destinations ignore
+	// it and keep the reflection-driven behavior; arrays of unions and
+	// deepObject-style binding are not covered. See
+	// BindStringToObjectOptions.Types for the full semantics and scope.
+	Types []string
 	// AllowReserved, when true, indicates that the parameter value may
 	// contain RFC 3986 reserved characters without percent-encoding.
 	AllowReserved bool
+	// ValueIsUnescaped, when true, indicates that the value has already had
+	// its URL percent-encoding removed (typically by the router) and is
+	// bound verbatim. The default treats the value as still escaped and
+	// unescapes it according to ParamLocation — the historical behavior,
+	// preserved for existing callers. Routers differ in whether they
+	// deliver path parameters raw or already decoded — a mismatch either
+	// double-decodes values containing literal percent signs or leaves
+	// them encoded — so the generated wrapper sets this to match its
+	// framework. See https://github.com/oapi-codegen/runtime/issues/35
+	ValueIsUnescaped bool
 }
 
 // BindStyledParameterWithOptions binds a parameter as described in the Path Parameters
@@ -95,23 +116,26 @@ func BindStyledParameterWithOptions(style string, paramName string, value string
 		}
 	}
 
-	// Based on the location of the parameter, we need to unescape it properly.
-	var err error
-	switch opts.ParamLocation {
-	case ParamLocationQuery, ParamLocationUndefined:
-		// We unescape undefined parameter locations here for older generated code,
-		// since prior to this refactoring, they always query unescaped.
-		value, err = url.QueryUnescape(value)
-		if err != nil {
-			return fmt.Errorf("error unescaping query parameter '%s': %w", paramName, err)
+	// Unless the caller says the router already unescaped the value, it is
+	// unescaped here according to the location of the parameter. Undefined
+	// locations are query-unescaped for older generated code, which always
+	// bound query-unescaped values.
+	if !opts.ValueIsUnescaped {
+		var err error
+		switch opts.ParamLocation {
+		case ParamLocationQuery, ParamLocationUndefined:
+			value, err = url.QueryUnescape(value)
+			if err != nil {
+				return fmt.Errorf("error unescaping query parameter '%s': %w", paramName, err)
+			}
+		case ParamLocationPath:
+			value, err = url.PathUnescape(value)
+			if err != nil {
+				return fmt.Errorf("error unescaping path parameter '%s': %w", paramName, err)
+			}
+		default:
+			// Headers and cookies aren't escaped.
 		}
-	case ParamLocationPath:
-		value, err = url.PathUnescape(value)
-		if err != nil {
-			return fmt.Errorf("error unescaping path parameter '%s': %w", paramName, err)
-		}
-	default:
-		// Headers and cookies aren't escaped.
 	}
 
 	// If the destination implements encoding.TextUnmarshaler we use it for binding
@@ -166,21 +190,42 @@ func BindStyledParameterWithOptions(style string, paramName string, value string
 		return bindSplitPartsToDestinationArray(parts, dest)
 	}
 
-	// For primitive types, only label and matrix styles need prefix stripping
-	// via splitStyledParameter. Simple and form styles can bind the raw value
-	// directly — splitting on commas would incorrectly reject primitive values
-	// that contain commas (see https://github.com/oapi-codegen/runtime/issues/114).
-	if style == "label" || style == "matrix" {
-		parts, err := splitStyledParameter(style, opts.Explode, false, paramName, value)
-		if err != nil {
-			return fmt.Errorf("error splitting parameter '%s': %w", paramName, err)
+	// For primitive types, only label and matrix styles carry a prefix that
+	// has to be stripped. The value is never split: a scalar's value is data,
+	// so a delimiter inside it (which the encoder percent-escapes and the
+	// router decodes before we see it) must survive binding. Splitting here
+	// rejected valid values such as "big,red" or "big.red", see
+	// https://github.com/oapi-codegen/runtime/issues/114 and
+	// https://github.com/oapi-codegen/runtime/issues/175.
+	switch style {
+	case "label":
+		// Both exploded and non-exploded labels are ".value".
+		if !strings.HasPrefix(value, ".") {
+			return fmt.Errorf("error splitting parameter '%s': invalid format for label parameter '%s', should start with '.'", paramName, paramName)
 		}
-		if len(parts) != 1 {
-			return fmt.Errorf("parameter '%s': expected single value, got %d parts", paramName, len(parts))
+		value = value[1:]
+	case "matrix":
+		// Both exploded and non-exploded matrix scalars are ";name=value".
+		prefix := ";" + paramName + "="
+		if opts.Explode {
+			// The exploded splitter has always tolerated a missing "name="
+			// on a value, so only the leading ';' is required here.
+			if !strings.HasPrefix(value, ";") {
+				return fmt.Errorf("error splitting parameter '%s': invalid format for matrix parameter '%s', should start with ';'", paramName, paramName)
+			}
+			value = strings.TrimPrefix(value[1:], paramName+"=")
+		} else {
+			if !strings.HasPrefix(value, prefix) {
+				return fmt.Errorf("error splitting parameter '%s': expected parameter '%s' to start with %s", paramName, paramName, prefix)
+			}
+			value = strings.TrimPrefix(value, prefix)
 		}
-		value = parts[0]
 	}
-	return BindStringToObject(value, dest)
+	return BindStringToObjectWithOptions(value, dest, BindStringToObjectOptions{
+		Type:   opts.Type,
+		Format: opts.Format,
+		Types:  opts.Types,
+	})
 }
 
 // This is a complex set of operations, but each given parameter style can be
@@ -334,7 +379,7 @@ func bindSplitPartsToDestinationStruct(paramName string, parts []string, explode
 		}
 	}
 	jsonParam := "{" + strings.Join(fields, ",") + "}"
-	err := json.Unmarshal([]byte(jsonParam), dest)
+	err := JSONUnmarshal([]byte(jsonParam), dest)
 	if err != nil {
 		return fmt.Errorf("error binding parameter %s fields: %w", paramName, err)
 	}
@@ -373,6 +418,18 @@ type BindQueryParameterOptions struct {
 	// When set to "byte" and the destination is []byte, the value is
 	// base64-decoded rather than treated as a generic slice.
 	Format string
+	// Types is the OpenAPI 3.1 multi-type union member list of the parameter
+	// (e.g. ["string", "integer"]). It is only consulted when the
+	// destination is an empty interface (`any`): the value binds to the
+	// first member that parses, trying boolean, integer, number, then
+	// string, with numeric detection following the JSON number production.
+	// The bound value's dynamic type is one of exactly bool, int64, float64,
+	// string, or, with Format "byte", []byte (widths narrow only under the
+	// NarrowUnionNumericFormats package variable). Concrete destinations ignore
+	// it and keep the reflection-driven behavior; arrays of unions and
+	// deepObject-style binding are not covered. See
+	// BindStringToObjectOptions.Types for the full semantics and scope.
+	Types []string
 	// AllowReserved, when true, indicates that the parameter value may
 	// contain RFC 3986 reserved characters without percent-encoding.
 	AllowReserved bool
@@ -475,8 +532,14 @@ func BindQueryParameterWithOptions(style string, explode bool, required bool, pa
 				var fieldsPresent bool
 				fieldsPresent, err = bindParamsToExplodedObject(paramName, queryParams, output)
 				// If no fields were set, and there is no error, we will not fall
-				// through to assign the destination.
+				// through to assign the destination. An absent required
+				// parameter is an error, matching the slice and primitive cases
+				// above; this also covers scalar struct types such as
+				// types.Date and time.Time.
 				if !fieldsPresent {
+					if required {
+						return &RequiredParameterError{ParamName: paramName}
+					}
 					return nil
 				}
 			default:
@@ -501,7 +564,11 @@ func BindQueryParameterWithOptions(style string, explode bool, required bool, pa
 						return nil
 					}
 				}
-				err = BindStringToObject(values[0], output)
+				err = BindStringToObjectWithOptions(values[0], output, BindStringToObjectOptions{
+					Type:   opts.Type,
+					Format: opts.Format,
+					Types:  opts.Types,
+				})
 			}
 			if err != nil {
 				return err
@@ -533,7 +600,11 @@ func BindQueryParameterWithOptions(style string, explode bool, required bool, pa
 			// is only meaningful for array and object types.
 			// See: https://swagger.io/docs/specification/serialization/
 			if k != reflect.Slice && k != reflect.Struct && k != reflect.Map {
-				err := BindStringToObject(values[0], output)
+				err := BindStringToObjectWithOptions(values[0], output, BindStringToObjectOptions{
+					Type:   opts.Type,
+					Format: opts.Format,
+					Types:  opts.Types,
+				})
 				if err != nil {
 					return err
 				}
@@ -707,7 +778,13 @@ func BindRawQueryParameter(style string, explode bool, required bool, paramName 
 			case reflect.Struct:
 				var fieldsPresent bool
 				fieldsPresent, err = bindParamsToExplodedObject(paramName, queryParams, output)
+				// An absent required parameter is an error, matching the slice
+				// and primitive cases above; this also covers scalar struct
+				// types such as types.Date and time.Time.
 				if !fieldsPresent {
+					if required {
+						return &RequiredParameterError{ParamName: paramName}
+					}
 					return nil
 				}
 			default:
