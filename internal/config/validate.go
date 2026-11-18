@@ -73,6 +73,7 @@ func (l *Loader) Validate(config Config) error {
 
 	var problems []string
 	validateRuntime(config.Runtime, config.Auth.Authorities, &problems)
+	validateMCPServer(config.Runtime, config.Auth.Authorities, &problems)
 	validateObservability(config.Observability, &problems)
 	validateRedis(config.Storage.Redis, &problems)
 	validateAuthorities(config.Auth.Authorities, &problems)
@@ -172,33 +173,13 @@ func validateRuntime(runtime RuntimeConfig, authorities map[string]AuthorityConf
 		if len(runtime.Servers.Control.Auth.OIDC.ProtectedScopes) == 0 {
 			addProblem(problems, "runtime.servers.control.auth.oidc.protected_scopes is required when OIDC auth is enabled")
 		}
-		if authority, ok := authorities[strings.TrimSpace(runtime.Servers.Control.Auth.OIDC.Authority)]; ok {
-			if !authorityOIDCCallerAuthEnabled(authority) {
-				addProblem(problems, "runtime.servers.control.auth.oidc.authority must reference an authority with OIDC client credentials enabled")
-			} else {
-				credentials := authority.OIDC.ClientCredentials
-				method := normalizedOIDCConfigMethod(credentials.IntrospectionEndpointAuthMethod)
-				if method == "" {
-					method = fallbackIntrospectionAuthMethod(credentials.TokenEndpointAuthMethod)
-				}
-				switch method {
-				case oidcClientSecretBasic, oidcClientSecretPost:
-					if enabledSecretCount(credentials.ClientSecret, credentials.ClientSecretFile) != 1 {
-						addProblem(problems, "runtime.servers.control.auth.oidc.authority requires exactly one client_secret or client_secret_file for introspection")
-					}
-				case oidcPrivateKeyJWT:
-					if credentials.ClientPrivateKeyFile.IsZero() {
-						addProblem(problems, "runtime.servers.control.auth.oidc.authority requires client_private_key_file for private_key_jwt introspection")
-					}
-				case "":
-					addProblem(problems, "runtime.servers.control.auth.oidc.authority requires introspection_endpoint_auth_method when OIDC auth is enabled")
-				default:
-					addProblem(problems, "runtime.servers.control.auth.oidc.authority introspection_endpoint_auth_method must be client_secret_basic, client_secret_post or private_key_jwt")
-				}
-			}
-		} else if strings.TrimSpace(runtime.Servers.Control.Auth.OIDC.Authority) != "" {
-			addProblem(problems, "runtime.servers.control.auth.oidc.authority must reference a configured authority")
-		}
+		validateIntrospectionAuthority(
+			"runtime.servers.control.auth.oidc.authority",
+			runtime.Servers.Control.Auth.OIDC.Authority,
+			"OIDC auth",
+			authorities,
+			problems,
+		)
 	}
 	if runtime.Servers.Control.Auth.MTLS.Enabled {
 		if !runtime.Servers.Control.TLS.Enabled {
@@ -730,6 +711,56 @@ func validateAuthorityOIDC(path string, oidc AuthorityOIDCConfig, problems *[]st
 // authorityOIDCCallerAuthEnabled reports whether OIDC caller auth can affect authority calls.
 func authorityOIDCCallerAuthEnabled(authority AuthorityConfig) bool {
 	return authority.OIDC.Enabled && authority.OIDC.ClientCredentials.Enabled
+}
+
+// validateIntrospectionAuthority requires a configured authority whose OIDC client credentials can
+// authenticate the director at the Nauthilus introspection endpoint. The control API and the MCP
+// endpoint both validate incoming user or operator tokens this way.
+func validateIntrospectionAuthority(
+	path string,
+	authorityName string,
+	feature string,
+	authorities map[string]AuthorityConfig,
+	problems *[]string,
+) {
+	authorityName = strings.TrimSpace(authorityName)
+
+	authority, ok := authorities[authorityName]
+	if !ok {
+		if authorityName != "" {
+			addProblem(problems, path+" must reference a configured authority")
+		}
+
+		return
+	}
+
+	if !authorityOIDCCallerAuthEnabled(authority) {
+		addProblem(problems, path+" must reference an authority with OIDC client credentials enabled")
+
+		return
+	}
+
+	credentials := authority.OIDC.ClientCredentials
+
+	method := normalizedOIDCConfigMethod(credentials.IntrospectionEndpointAuthMethod)
+	if method == "" {
+		method = fallbackIntrospectionAuthMethod(credentials.TokenEndpointAuthMethod)
+	}
+
+	switch method {
+	case oidcClientSecretBasic, oidcClientSecretPost:
+		if enabledSecretCount(credentials.ClientSecret, credentials.ClientSecretFile) != 1 {
+			addProblem(problems, path+" requires exactly one client_secret or client_secret_file for introspection")
+		}
+	case oidcPrivateKeyJWT:
+		if credentials.ClientPrivateKeyFile.IsZero() {
+			addProblem(problems, path+" requires client_private_key_file for private_key_jwt introspection")
+		}
+	case "":
+		addProblem(problems, path+" requires introspection_endpoint_auth_method when "+feature+" is enabled")
+	default:
+		addProblem(problems, path+" introspection_endpoint_auth_method must be client_secret_basic, client_secret_post or private_key_jwt")
+	}
 }
 
 // fallbackIntrospectionAuthMethod inherits only Nauthilus-supported secret methods.

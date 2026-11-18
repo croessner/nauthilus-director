@@ -15,6 +15,7 @@ Start here:
 | Failure-mode diagnosis | [`failure-modes.md`](failure-modes.md) |
 | Runtime-only migration workflows | [`migration-workflows.md`](migration-workflows.md) |
 | JMAP reverse proxying | [`jmap.md`](jmap.md) |
+| Read-only MCP diagnostics endpoint | [`mcp.md`](mcp.md) |
 
 Command syntax stays in the manpages under `docs/man/`. These operations docs
 show how to combine those commands safely in production. Runtime commands

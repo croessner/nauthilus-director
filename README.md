@@ -68,6 +68,8 @@ routing facts, but it does not choose concrete director backends.
 - Redis-backed session affinity and active session coordination
 - Runtime control for listeners, backends, sessions, users and route lookups
 - Side-effect-free route diagnostics that do not authenticate or mutate Redis
+- Optional read-only MCP diagnostics endpoint for AI assistants, an OAuth
+  protected resource whose user tokens Nauthilus issues and introspects
 - Safe configuration inspection with redaction by default and explicit
   protected output
 - Control-plane authentication modes for static bearer, mTLS and OIDC bearer
@@ -117,9 +119,11 @@ full target model and milestone history.
 │   ├── backend/                 Backend inventory, health and selection
 │   ├── config/                  Typed config loading, validation and redaction
 │   ├── listener/                Frontend listener lifecycle
+│   ├── mcpserver/               Read-only MCP diagnostics endpoint
 │   ├── nauthilus/               HTTP, gRPC and OIDC authority clients
 │   ├── protocol/                IMAP, JMAP, LMTP, POP3 and Sieve protocol handlers
 │   ├── rest/                    Control API adapters and generated server edge
+│   │   └── diagnostics/         Read-only diagnostics table shared with MCP
 │   ├── routing/                 Director-owned routing resolution
 │   ├── runtime/                 Operator-facing runtime control domain
 │   └── state/                   Redis-backed affinity and session state
@@ -274,6 +278,8 @@ Production deployment and operator workflows start under
   authorization, protected config and diagnostics
 - [`oidc-nauthilus.md`](docs/operations/oidc-nauthilus.md): Nauthilus OIDC
   caller auth, client credentials, scopes and token cache behavior
+- [`mcp.md`](docs/operations/mcp.md): read-only MCP diagnostics endpoint,
+  Nauthilus client setup, reverse proxy, limits and audit
 - [`reload-upgrade.md`](docs/operations/reload-upgrade.md): safe reload,
   restart-required changes, shutdown and rolling upgrades
 - [`failure-modes.md`](docs/operations/failure-modes.md): observable symptoms,

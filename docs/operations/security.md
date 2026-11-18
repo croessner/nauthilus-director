@@ -299,6 +299,22 @@ line detail. Audit events for profile access are bounded and do not record
 profile bodies, tokens, private keys, protected config values or raw
 certificates.
 
+## MCP Diagnostics Endpoint
+
+The optional MCP endpoint (`runtime.servers.mcp`) is disabled by default and
+listens apart from the control listener. It offers read-only diagnostics only:
+every tool is a read operation of the control API, protected config is never
+reachable, and no tool changes runtime state.
+
+It accepts only user access tokens that Nauthilus reports active for the
+configured resource, issued to an admitted client, with a subject other than
+the client and at least one diagnostics scope. Session, user and route lookup
+tools additionally need `nauthilus-director.diagnostics.users`. TLS terminates
+at a trusted reverse proxy; plain http is accepted only for a loopback
+resource. Failed bearer attempts are bounded per client address, concurrency
+is bounded per principal, and every request is audited without tokens,
+arguments or results. See [`mcp.md`](mcp.md).
+
 ## Secret Safety
 
 Use mounted files for secret-bearing paths:

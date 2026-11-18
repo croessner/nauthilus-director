@@ -22,6 +22,11 @@ Process identity, shutdown timing, client timeouts and listener groups.
 .B runtime.servers.control
 The in-process control API listener, control authentication and control TLS.
 .TP
+.B runtime.servers.mcp
+The optional read-only MCP diagnostics endpoint, its protected resource,
+token introspection authority, admitted OAuth clients, transport guards and
+limits.
+.TP
 .B runtime.state
 Bounded Redis runtime-state reaper timing, index sharding, pagination limits
 and backend reservation repair settings.
@@ -169,6 +174,88 @@ Diagnostic access emits a bounded audit event with route class, result,
 auth method and actor context. It does not log profile bodies, bearer tokens,
 private keys, protected config values or raw certificates, and profile route
 metrics use only low-cardinality labels.
+.SH MCP DIAGNOSTICS ENDPOINT
+The director can expose its read-only diagnostics to AI assistants and other
+Model Context Protocol clients on a separate listener.
+The endpoint is disabled by default
+.RB ( runtime.servers.mcp.enabled: false ).
+It runs in the main process next to the control listener, answers through the
+same control API handler and never changes runtime state.
+Every tool maps to one read operation of the control API: runtime summary,
+listeners, backends, non-default configuration (always redacted), sessions,
+users, affinity, backend pins, placement holds and the side-effect-free route
+lookup.
+Moves, kicks, drains, maintenance and reload are never offered as tools.
+.PP
+The endpoint is an OAuth protected resource.
+.B runtime.servers.mcp.resource
+is its absolute URL, for example
+.BR https://director.example.org/mcp .
+The URL path is the endpoint path, and the RFC 9728 metadata is served under
+.BR /.well-known/oauth-protected-resource/<path> .
+Nauthilus is the authorization server: the director introspects every bearer
+token through the OIDC client credentials of the authority named by
+.B runtime.servers.mcp.authority
+and publishes that authority's
+.B oidc.issuer
+as authorization server.
+A token is accepted only when it is active and unexpired, names a subject
+other than its client, was issued to one of
+.BR runtime.servers.mcp.allowed_clients ,
+lists one of
+.B runtime.servers.mcp.required_groups
+in the claim named by
+.B groups_claim
+(default
+.BR groups ),
+and carries the resource as audience, alone or together with the issuing
+client.
+It must hold
+.B nauthilus-director.diagnostics.runtime
+for topology and runtime tools or
+.B nauthilus-director.diagnostics.users
+for session, user and route lookup tools.
+Failures answer
+.B 401
+or
+.B 403
+with an RFC 6750 challenge, and
+.B 503
+when the authority cannot be asked.
+.PP
+TLS is terminated by a trusted reverse proxy
+.RB ( tls_termination: trusted_reverse_proxy ,
+the only mode).
+An https resource requires
+.BR trusted_proxies ;
+the client address is the right-most untrusted
+.B X-Forwarded-For
+hop, and the scheme and host must match the resource.
+A plain http resource is accepted only for a loopback host reached directly
+from loopback.
+.B allowed_hosts
+overrides the accepted Host values, and requests carrying an
+.B Origin
+outside
+.B allowed_browser_origins
+are refused; CORS headers are never sent.
+.PP
+.B runtime.servers.mcp.limits
+bounds each call
+.RB ( timeout ,
+at most 1m), concurrency globally and per principal, request and response
+sizes, and failed bearer attempts per client address and minute.
+Each request is counted in
+.B nauthilus_director_mcp_requests_total
+by tool, status class and result.
+With
+.B runtime.servers.mcp.audit.enabled: true
+(the default) every request is logged at info level with the principal
+(client and subject), tool and outcome; tokens, arguments and results are
+never logged.
+All settings require a restart.
+The Nauthilus client setup and reverse proxy layout are described in
+.BR docs/operations/mcp.md .
 .SH NAUTHILUS AUTHORITY CALLER AUTH
 Director-to-Nauthilus caller authentication is configured under
 .BR auth.authorities.<name> .

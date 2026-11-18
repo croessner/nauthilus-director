@@ -25,10 +25,10 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"slices"
 	"strings"
 
 	"github.com/croessner/nauthilus-director/internal/config"
+	"github.com/croessner/nauthilus-director/internal/rest/diagnostics"
 	"github.com/croessner/nauthilus-director/internal/nauthilus"
 	"github.com/croessner/nauthilus-director/internal/rest/adapters"
 	"github.com/croessner/nauthilus-director/internal/rest/generated"
@@ -47,7 +47,7 @@ const (
 	pathReadyz                    = "/readyz"
 	maxRouteLookupInspectionBytes = 1 << 20
 	maxStaticBearerTokenBytes     = 64 << 10
-	problemCodeForbidden          = "forbidden"
+	problemCodeForbidden          = diagnostics.ProblemCodeForbidden
 	problemCodeUnauthorized       = "unauthorized"
 )
 
@@ -327,7 +327,7 @@ func (a ControlAuthenticator) authenticateMTLS(r *http.Request) (ControlAuthStat
 // writeAuthFailure writes stable auth failure responses without mode-specific details.
 func (a ControlAuthenticator) writeAuthFailure(w http.ResponseWriter, err error) {
 	if errors.Is(err, errControlForbidden) {
-		writeProblem(w, http.StatusForbidden, problemCodeForbidden, "requested operation is not authorized", "")
+		writeProblem(w, http.StatusForbidden, problemCodeForbidden, diagnostics.ProblemMessageForbidden, "")
 		return
 	}
 
@@ -357,8 +357,8 @@ func (a ControlAuthenticator) inspectRouteLookupBody(w http.ResponseWriter, r *h
 		return false
 	}
 
-	if containsForbiddenRouteLookupKey(body) {
-		writeProblem(w, http.StatusBadRequest, "credential_input_rejected", "route lookup does not accept authentication or mailbox material", "LookupRoute")
+	if diagnostics.RouteLookupInputCarriesForbiddenKeys(body) {
+		writeProblem(w, http.StatusBadRequest, diagnostics.ProblemCodeCredentialInput, diagnostics.ProblemMessageCredentialInput, "LookupRoute")
 		return false
 	}
 
@@ -477,82 +477,6 @@ func mtlsActorID(certificate *x509.Certificate) string {
 	}
 
 	return authMethodMTLS
-}
-
-// containsForbiddenRouteLookupKey detects forbidden JSON object keys without reading values.
-func containsForbiddenRouteLookupKey(body []byte) bool {
-	var value any
-	if err := JSON.Unmarshal(body, &value); err != nil {
-		return false
-	}
-
-	return containsForbiddenRouteLookupKeyValue(value)
-}
-
-// containsForbiddenRouteLookupKeyValue walks decoded JSON looking only at object keys.
-func containsForbiddenRouteLookupKeyValue(value any) bool {
-	switch typed := value.(type) {
-	case map[string]any:
-		for key, nested := range typed {
-			if isForbiddenRouteLookupKey(key) || containsForbiddenRouteLookupKeyValue(nested) {
-				return true
-			}
-		}
-	case []any:
-		if slices.ContainsFunc(typed, containsForbiddenRouteLookupKeyValue) {
-			return true
-		}
-	}
-
-	return false
-}
-
-// isForbiddenRouteLookupKey reports whether a JSON key appears to carry forbidden material.
-func isForbiddenRouteLookupKey(key string) bool {
-	fragments := [...]string{
-		"auth",
-		"bearer",
-		"credential",
-		"mailboxcontent",
-		"mailboxdata",
-		"mailboxmessage",
-		"messagecontent",
-		"messagedata",
-		"messagenum",
-		"messagenumber",
-		"messagesize",
-		"msgcontent",
-		"msgnum",
-		"msgsize",
-		"password",
-		"passwd",
-		"sasl",
-		"script",
-		"secret",
-		"token",
-		"uidl",
-	}
-
-	normalized := canonicalRouteLookupKey(key)
-	for _, fragment := range fragments {
-		if strings.Contains(normalized, fragment) {
-			return true
-		}
-	}
-
-	return normalized == "mailbox"
-}
-
-// canonicalRouteLookupKey removes separators before marker matching.
-func canonicalRouteLookupKey(key string) string {
-	var builder strings.Builder
-	for _, r := range strings.ToLower(strings.TrimSpace(key)) {
-		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
-			builder.WriteRune(r)
-		}
-	}
-
-	return builder.String()
 }
 
 // writeProblem writes structured error JSON without echoing request values.

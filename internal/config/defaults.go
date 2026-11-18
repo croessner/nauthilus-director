@@ -78,6 +78,7 @@ func DefaultConfig() Config {
 						MinTLSVersion: "TLS1.2",
 					},
 				},
+				MCP: defaultMCPServerConfig(),
 			},
 			State: RuntimeStateConfig{
 				Reaper: RuntimeStateReaperConfig{

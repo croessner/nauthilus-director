@@ -977,6 +977,27 @@ runtime:
                 key: <redacted>
                 min_tls_version: TLS1.2
                 require_client_cert: false
+        mcp:
+            address: 127.0.0.1:9097
+            allowed_browser_origins: []
+            allowed_clients: []
+            allowed_hosts: []
+            audit:
+                enabled: true
+            authority: default
+            enabled: false
+            groups_claim: groups
+            limits:
+                failed_auth_per_minute: 30
+                max_concurrent: 8
+                max_concurrent_per_principal: 2
+                max_request_bytes: 65536
+                max_response_bytes: 1048576
+                timeout: 15s
+            required_groups: []
+            resource: ""
+            tls_termination: trusted_reverse_proxy
+            trusted_proxies: []
     state:
         backend_reservations:
             repair_interval: 5s

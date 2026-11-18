@@ -366,8 +366,9 @@ func provideListenerRuntimeService(
 	return runtimectl.NewListenerService(manager, runtimectl.WithObservabilityRecorder(recorder))
 }
 
-// provideControlHandle creates the optional in-process REST control listener.
-func provideControlHandle(
+// provideControlHandlerOptions assembles the control API handler collaborators shared by the REST
+// control listener and the MCP diagnostics endpoint. Nothing is built while both are disabled.
+func provideControlHandlerOptions(
 	cfg config.Config,
 	snapshot *config.Snapshot,
 	options runtimeOptions,
@@ -382,14 +383,14 @@ func provideControlHandle(
 	listenerManager *listener.Manager,
 	listenerRuntime *runtimectl.ListenerService,
 	routeLookup *runtimectl.RouteLookupService,
-) (controlHandle, error) {
-	if !cfg.Runtime.Servers.Control.Enabled {
-		return controlHandle{}, nil
+) (adapters.HandlerOptions, error) {
+	if !cfg.Runtime.Servers.Control.Enabled && !cfg.Runtime.Servers.MCP.Enabled {
+		return adapters.HandlerOptions{}, nil
 	}
 
 	backendPinScopes, err := userBackendPinScopesFromDirectorConfig(cfg.Director)
 	if err != nil {
-		return controlHandle{}, err
+		return adapters.HandlerOptions{}, err
 	}
 
 	runtimeReader := runtimectl.NewRedisRuntimeReader(store)
@@ -400,6 +401,42 @@ func provideControlHandle(
 		runtimectl.WithObservabilityRecorder(recorder),
 		runtimectl.WithUserBackendPinRequiredScopes(backendPinScopes),
 	)
+
+	return adapters.HandlerOptions{
+		Version:                    options.Version,
+		ConfigPath:                 options.ConfigPath,
+		Loader:                     loader,
+		Snapshot:                   snapshot,
+		BackendReader:              backendReader,
+		BackendMutator:             runtimectl.NewBackendService(store, localSessions, runtimectl.WithObservabilityRecorder(recorder)),
+		SessionReader:              runtimeReader,
+		SessionMutator:             runtimectl.NewSessionService(store, localSessions, runtimectl.WithObservabilityRecorder(recorder)),
+		UserReader:                 runtimeReader,
+		UserBackendPinReader:       userBackendPinService,
+		UserHoldReader:             userHolds,
+		RuntimeSummaryReader:       runtimeReader,
+		RuntimeAggregateReconciler: runtimeAggregateService,
+		UserMutator:                runtimectl.NewUserService(store, localSessions, runtimectl.WithObservabilityRecorder(recorder)),
+		UserBackendPinMutator:      userBackendPinService,
+		UserHoldMutator:            userHolds,
+		RouteLookup:                routeLookup,
+		ListenerRuntime:            listenerRuntime,
+		Reload:                     safeReloadService(cfg, loader, options.ConfigPath, recorder, registry, listenerManager),
+		Metrics:                    metrics,
+		Observability:              recorder,
+	}, nil
+}
+
+// provideControlHandle creates the optional in-process REST control listener.
+func provideControlHandle(
+	cfg config.Config,
+	options runtimeOptions,
+	handlerOptions adapters.HandlerOptions,
+) (controlHandle, error) {
+	if !cfg.Runtime.Servers.Control.Enabled {
+		return controlHandle{}, nil
+	}
+
 	handler := rest.NewServer(rest.Options{
 		Version:        options.Version,
 		ConfigPath:     options.ConfigPath,
@@ -407,29 +444,7 @@ func provideControlHandle(
 		Authorities:    cfg.Auth.Authorities,
 		Profiles:       cfg.Observability.Profiles,
 		AuthHTTPClient: &http.Client{Timeout: cfg.Runtime.Timeouts.Nauthilus.Std()},
-		HandlerOptions: adapters.HandlerOptions{
-			Version:                    options.Version,
-			ConfigPath:                 options.ConfigPath,
-			Loader:                     loader,
-			Snapshot:                   snapshot,
-			BackendReader:              backendReader,
-			BackendMutator:             runtimectl.NewBackendService(store, localSessions, runtimectl.WithObservabilityRecorder(recorder)),
-			SessionReader:              runtimeReader,
-			SessionMutator:             runtimectl.NewSessionService(store, localSessions, runtimectl.WithObservabilityRecorder(recorder)),
-			UserReader:                 runtimeReader,
-			UserBackendPinReader:       userBackendPinService,
-			UserHoldReader:             userHolds,
-			RuntimeSummaryReader:       runtimeReader,
-			RuntimeAggregateReconciler: runtimeAggregateService,
-			UserMutator:                runtimectl.NewUserService(store, localSessions, runtimectl.WithObservabilityRecorder(recorder)),
-			UserBackendPinMutator:      userBackendPinService,
-			UserHoldMutator:            userHolds,
-			RouteLookup:                routeLookup,
-			ListenerRuntime:            listenerRuntime,
-			Reload:                     safeReloadService(cfg, loader, options.ConfigPath, recorder, registry, listenerManager),
-			Metrics:                    metrics,
-			Observability:              recorder,
-		},
+		HandlerOptions: handlerOptions,
 	})
 
 	server, err := newControlServer(cfg, handler)

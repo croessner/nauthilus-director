@@ -1996,6 +1996,8 @@ type processConfigOptions struct {
 	BackendAuth            backend.AuthConfig
 	IMAPAuthMechanisms     []string
 	IMAPCapabilities       []string
+	// RuntimeServersYAML is appended to runtime.servers after the control block, for example an MCP endpoint.
+	RuntimeServersYAML string
 	// IMAPBearerYAML is appended to the imap listener block, for example a bearer override.
 	IMAPBearerYAML       string
 	IMAPGreeting         greetingPolicyFixture
@@ -2439,7 +2441,7 @@ director:
 	`, options.ControlEnabled,
 		controlAddress,
 		processControlAuthYAML(t),
-		processControlTLSYAML(options.ControlTLS),
+		processControlTLSYAML(options.ControlTLS)+options.RuntimeServersYAML,
 		processRuntimeStateYAML(options),
 		e2eProcessKeyPrefix,
 		options.RedisAddress,
@@ -5500,6 +5502,11 @@ type fakeSASLBearerToken struct {
 	// VisibleTo models the provider's introspection allowlist: when set, only that
 	// introspection client receives active:true.
 	VisibleTo string
+	// Subject and ExpiresAt describe a user access token for a protected resource such as the
+	// MCP endpoint; empty values keep them out of the introspection response.
+	Subject   string
+	ExpiresAt time.Time
+	Groups    []string
 }
 
 // startFakeHTTPAuthority starts a public HTTP auth socket.
@@ -6197,6 +6204,15 @@ func (f *fakeHTTPAuthority) writeSASLBearerIntrospection(writer http.ResponseWri
 	}
 	if fixture.AuthorizedParty != "" {
 		response["azp"] = fixture.AuthorizedParty
+	}
+	if fixture.Subject != "" {
+		response["sub"] = fixture.Subject
+	}
+	if !fixture.ExpiresAt.IsZero() {
+		response["exp"] = fixture.ExpiresAt.Unix()
+	}
+	if len(fixture.Groups) > 0 {
+		response["groups"] = fixture.Groups
 	}
 	_ = json.NewEncoder(writer).Encode(response)
 }

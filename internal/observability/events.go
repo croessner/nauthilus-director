@@ -115,6 +115,8 @@ const (
 	EventRouteLookup = "route.lookup"
 	// EventRESTRequest records one generated REST control API request.
 	EventRESTRequest = "rest.request"
+	// EventMCPRequest records one MCP endpoint request or tool call outcome without tokens, arguments or results.
+	EventMCPRequest = "mcp.request"
 	// EventDiagnosticProfileAccess records protected diagnostic profile reads.
 	EventDiagnosticProfileAccess = "diagnostic.profile"
 	// EventReload records safe reload attempts and outcomes.

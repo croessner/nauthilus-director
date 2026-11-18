@@ -20,6 +20,7 @@ import (
 	"net/http"
 
 	"github.com/croessner/nauthilus-director/internal/config"
+	"github.com/croessner/nauthilus-director/internal/rest/diagnostics"
 	"github.com/croessner/nauthilus-director/internal/rest/adapters"
 	"github.com/croessner/nauthilus-director/internal/rest/generated"
 )
@@ -61,10 +62,10 @@ func NewServer(options Options) *Server {
 		traceRESTRequests(handlerOptions.Observability),
 	}, generated.StrictHTTPServerOptions{
 		RequestErrorHandlerFunc: func(w http.ResponseWriter, _ *http.Request, _ error) {
-			writeProblem(w, http.StatusBadRequest, "bad_request", "request body, path parameter or query parameter is invalid", "")
+			writeProblem(w, http.StatusBadRequest, diagnostics.ProblemCodeBadRequest, diagnostics.ProblemMessageBadRequest, "")
 		},
 		ResponseErrorHandlerFunc: func(w http.ResponseWriter, _ *http.Request, _ error) {
-			writeProblem(w, http.StatusInternalServerError, "internal_error", "control API response failed", "")
+			writeProblem(w, http.StatusInternalServerError, diagnostics.ProblemCodeInternal, diagnostics.ProblemMessageInternal, "")
 		},
 	})
 	registered := generated.Handler(strict)

@@ -4,6 +4,7 @@ generate:
   models: true
   strict-server: true
   std-http-server: true
+  embedded-spec: true
 output-options:
   skip-prune: true
   name-normalizer: ToCamelCaseWithInitialisms

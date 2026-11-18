@@ -119,6 +119,7 @@ type ProcessConfig struct {
 
 type RuntimeServersConfig struct {
 	Control ControlServerConfig `mapstructure:"control" yaml:"control" validate:"required"`
+	MCP     MCPServerConfig     `mapstructure:"mcp" yaml:"mcp" validate:"required"`
 }
 
 // RuntimeStateConfig contains bounded Redis runtime-state scaling controls.

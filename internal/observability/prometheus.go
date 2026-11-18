@@ -76,6 +76,7 @@ const (
 	metricNameReloads                 = "nauthilus_director_reload_total"
 	metricNameRESTRequests            = "nauthilus_director_rest_requests_total"
 	metricNameRESTSeconds             = "nauthilus_director_rest_request_duration_seconds"
+	metricNameMCPRequests             = "nauthilus_director_mcp_requests_total"
 	metricNameRoutingResolver         = "nauthilus_director_routing_resolver_total"
 	metricNameRoutingResolverSeconds  = "nauthilus_director_routing_resolver_duration_seconds"
 	metricNameRuntimeOperations       = "nauthilus_director_runtime_operations_total"
@@ -203,6 +204,11 @@ var (
 		metricLabelStatusClass,
 		metricLabelResult,
 	}
+	mcpLabels = []string{
+		metricLabelOperation,
+		metricLabelStatusClass,
+		metricLabelResult,
+	}
 	serviceProtocolLabels = []string{
 		metricLabelProtocol,
 		metricLabelService,
@@ -267,6 +273,7 @@ type prometheusInstruments struct {
 	reloads                  *prometheus.CounterVec
 	restRequests             *prometheus.CounterVec
 	restSeconds              *prometheus.HistogramVec
+	mcpRequests              *prometheus.CounterVec
 	routingResolver          *prometheus.CounterVec
 	routingResolverSeconds   *prometheus.HistogramVec
 	runtimeOperations        *prometheus.CounterVec
@@ -474,6 +481,8 @@ func (m *prometheusRuntime) recordRuntimeMetric(event Event) {
 		m.recordProxy(event)
 	case EventRESTRequest:
 		m.recordREST(event)
+	case EventMCPRequest:
+		m.instrument.mcpRequests.WithLabelValues(metricValues(event, mcpLabels)...).Inc()
 	case EventReload:
 		m.recordReload(event)
 	case EventRedisOperation:
@@ -703,6 +712,7 @@ func newPrometheusInstruments() (prometheusInstruments, error) {
 		reloads:                  builders.counterVec(metricNameReloads, "Total safe reload outcomes.", operationResultReasonLabels...),
 		restRequests:             builders.counterVec(metricNameRESTRequests, "Total generated REST control API requests.", restLabels...),
 		restSeconds:              builders.histogramVec(metricNameRESTSeconds, "Generated REST control API request duration in seconds.", restBuckets(), restLabels...),
+		mcpRequests:              builders.counterVec(metricNameMCPRequests, "Total MCP diagnostics endpoint requests and tool calls by tool, status class and result.", mcpLabels...),
 		routingResolver:          builders.counterVec(metricNameRoutingResolver, "Total routing resolver outcomes.", protocolBackendLabels...),
 		routingResolverSeconds:   builders.histogramVec(metricNameRoutingResolverSeconds, "Routing resolver duration in seconds.", redisBuckets(), protocolBackendLabels...),
 		runtimeOperations:        builders.counterVec(metricNameRuntimeOperations, "Total runtime control and diagnostic operations.", operationResultReasonLabels...),
@@ -755,6 +765,7 @@ func (i prometheusInstruments) collectors() []prometheus.Collector {
 		i.reloads,
 		i.restRequests,
 		i.restSeconds,
+		i.mcpRequests,
 		i.routingResolver,
 		i.routingResolverSeconds,
 		i.runtimeOperations,

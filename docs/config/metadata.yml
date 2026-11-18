@@ -2,6 +2,30 @@ paths:
   runtime.**:
     stability: stable
     description: Runtime process identity, control listener, timeout, and client behavior.
+  runtime.servers.mcp.**:
+    stability: stable
+    description: Optional read-only MCP diagnostics endpoint. Disabled by default; an OAuth protected resource whose bearer tokens Nauthilus introspects through the named authority, restricted to admitted clients, served behind a trusted TLS-terminating proxy and bounded by explicit limits.
+  runtime.servers.mcp.resource:
+    stability: stable
+    description: Absolute URL of the protected resource; its path is the endpoint path. https requires trusted_proxies; plain http is accepted only for a loopback host reached directly from loopback.
+  runtime.servers.mcp.authority:
+    stability: stable
+    description: auth.authorities entry whose OIDC client credentials introspect incoming bearer tokens at Nauthilus and whose oidc.issuer is published as authorization server.
+  runtime.servers.mcp.allowed_clients:
+    stability: stable
+    description: OAuth client ids whose user access tokens may call the endpoint. Tokens of any other client are rejected even when Nauthilus reports them active.
+  runtime.servers.mcp.required_groups:
+    stability: stable
+    description: Groups that entitle a person; the token's groups claim must name at least one of them. Required when the endpoint is enabled, because Nauthilus does not evaluate group rights for resources it does not host.
+  runtime.servers.mcp.groups_claim:
+    stability: stable
+    description: Introspection claim that lists the caller's groups, as a JSON array or one space-separated string.
+  runtime.servers.mcp.trusted_proxies:
+    stability: stable
+    description: IP addresses or CIDRs of the TLS-terminating reverse proxies whose X-Forwarded-For, X-Forwarded-Proto and X-Forwarded-Host headers are trusted.
+  runtime.servers.mcp.limits.**:
+    stability: stable
+    description: Per-call timeout (at most 1m), global and per-principal concurrency, request and response size bounds and failed bearer attempts per client address and minute.
   runtime.state.**:
     stability: stable
     description: Bounded Redis runtime-state indexes, pagination limits, and due-time reaper behavior.
